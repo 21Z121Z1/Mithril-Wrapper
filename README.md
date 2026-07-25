@@ -17,7 +17,7 @@ GLSL 源码  ──glslang──▶  SPIR-V  ──vkCreateShaderModule──▶
 
 项目结构参考了 [MobileGlues](https://github.com/MobileGL-Dev/MobileGlues) 的
 `MobileGlues-cpp/` 布局，但目标 API 不同：MobileGlues 做的是
-`桌面 GLSL → GLSL ES` 再交给 ANGLE；Mithril-Wrapper 直接落到 **Vulkan 1.2**，
+`桌面 GLSL → GLSL ES` ；Mithril-Wrapper 直接落到 **Vulkan 1.2**，
 通过 MoltenVK 静态链接到 Metal 2，且自带 EGL，不再依赖 ANGLE 的
 `libEGL.framework`。
 
