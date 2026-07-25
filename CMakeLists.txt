@@ -6,15 +6,17 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-# Objective-C++ (.mm) standard for the Metal backend
+# Objective-C++ (.mm) standard for the EGL layer (only .mm files left in the
+# Vulkan/MoltenVK rewrite are egl/egl.mm and MG_Impl/Getter_gpu.mm — both pure
+# Foundation/QuartzCore; no Metal framework is referenced directly).
 if(APPLE)
     enable_language(OBJCXX)
     set(CMAKE_OBJCXX_STANDARD 20)
     set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
 endif()
 
-# GL symbols must be exported (the dylib is a drop-in OpenGL replacement).
-# IMPORTANT: .mm files (EGL-on-Metal, Metal backend) are compiled as OBJCXX;
+# GL/EGL symbols must be exported (the dylib is a drop-in OpenGL/EGL
+# replacement). IMPORTANT: .mm files (EGL, Getter_gpu) are compiled as OBJCXX;
 # leetal/ios-cmake defaults OBJCXX to -fvisibility=hidden, which would hide the
 # egl* entry points and make host dlsym("eglCreateContext") fail. Mirror the
 # CXX visibility on OBJCXX so egl.mm's extern "C" functions are exported. (The
@@ -31,9 +33,57 @@ if(APPLE)
 endif()
 
 # ---------------------------------------------------------------------------
+# MoltenVK: Vulkan 1.2 implementation backed by Metal 2.
+#
+# MoltenVK is consumed as a static .xcframework (MoltenVK.xcframework) plus its
+# bundled Vulkan-Headers include tree. There is no Vulkan loader / ICD file —
+# the static link embeds the MoltenVK ICD, so vkCreateInstance etc. resolve at
+# link time. The xcframework is expected at one of:
+#   - ${MOLTENVK_ROOT}                 (explicit -DMOLTENVK_ROOT=/path)
+#   - ${CMAKE_SOURCE_DIR}/MoltenVK.xcframework
+#   - ${CMAKE_SOURCE_DIR}/3rdparty/MoltenVK/MoltenVK.xcframework
+# The CI workflow (build.yml) downloads it from the KhronosGroup/MoltenVK
+# release tarball before configuring.
+# ---------------------------------------------------------------------------
+if(APPLE)
+    find_path(MOLTENVK_INCLUDE_DIR
+        NAMES vulkan/vulkan.h
+        PATHS
+            "${MOLTENVK_ROOT}/MoltenVK.xcframework/Headers"
+            "${CMAKE_SOURCE_DIR}/MoltenVK.xcframework/Headers"
+            "${CMAKE_SOURCE_DIR}/3rdparty/MoltenVK/MoltenVK.xcframework/Headers"
+            "${CMAKE_SOURCE_DIR}/Mithril-Wrapper-cpp/3rdparty/MoltenVK/MoltenVK.xcframework/Headers"
+        REQUIRED
+    )
+    message(STATUS "MoltenVK headers: ${MOLTENVK_INCLUDE_DIR}")
+
+    # The static framework lives under ios-arm64 (device) or ios-arm64_x86_64-simulator
+    # (simulator) inside the xcframework. CMake's link step just needs the bare
+    # framework path; the linker picks the right slice from the fat binary.
+    find_library(MOLTENVK_LIBRARY
+        NAMES MoltenVK
+        PATHS
+            "${MOLTENVK_ROOT}/MoltenVK.xcframework"
+            "${CMAKE_SOURCE_DIR}/MoltenVK.xcframework"
+            "${CMAKE_SOURCE_DIR}/3rdparty/MoltenVK/MoltenVK.xcframework"
+            "${CMAKE_SOURCE_DIR}/Mithril-Wrapper-cpp/3rdparty/MoltenVK/MoltenVK.xcframework"
+        PATH_SUFFIXES
+            "ios-arm64"
+            "ios-arm64_x86_64-simulator"
+        REQUIRED
+    )
+    message(STATUS "MoltenVK library: ${MOLTENVK_LIBRARY}")
+endif()
+
+# ---------------------------------------------------------------------------
 # glslang: GLSL front-end -> SPIR-V  (submodule under 3rdparty/, mirrors the
 # MobileGlues layout which uses add_subdirectory(3rdparty/glslang) instead of
 # FetchContent so the sources are available for local hacking).
+#
+# SPIRV-Cross is intentionally NOT used in the Vulkan/MoltenVK rewrite:
+# MoltenVK cross-translates Vulkan SPIR-V to MSL internally at
+# vkCreateShaderModule time, so the project no longer needs a separate
+# SPIR-V -> MSL translation stage.
 # ---------------------------------------------------------------------------
 set(ENABLE_RTTI                ON  CACHE BOOL "" FORCE)
 set(ENABLE_HLSL                OFF CACHE BOOL "" FORCE)
@@ -42,57 +92,59 @@ set(ENABLE_GLSLANG_BINARIES    OFF CACHE BOOL "" FORCE)
 set(BUILD_EXTERNAL             OFF CACHE BOOL "" FORCE)
 set(SKIP_GLSLANG_INSTALL       ON  CACHE BOOL "" FORCE)
 set(GLSLANG_TESTS              OFF CACHE BOOL "" FORCE)
-add_subdirectory(Mithril-Wapper-cpp/3rdparty/glslang)
+add_subdirectory(Mithril-Wrapper-cpp/3rdparty/glslang)
 
 # ---------------------------------------------------------------------------
-# SPIRV-Cross: SPIR-V -> MSL (Metal Shading Language)
-# ---------------------------------------------------------------------------
-set(SPIRV_CROSS_ENABLE_C_API   ON  CACHE BOOL "" FORCE)
-set(SPIRV_CROSS_ENABLE_GLSL    ON  CACHE BOOL "" FORCE)
-set(SPIRV_CROSS_ENABLE_MSL     ON  CACHE BOOL "" FORCE)
-set(SPIRV_CROSS_ENABLE_HLSL    OFF CACHE BOOL "" FORCE)
-set(SPIRV_CROSS_ENABLE_REFLECT OFF CACHE BOOL "" FORCE)
-set(SPIRV_CROSS_ENABLE_CPP     OFF CACHE BOOL "" FORCE)
-set(SPIRV_CROSS_CLI            OFF CACHE BOOL "" FORCE)
-set(SPIRV_CROSS_ENABLE_UTIL    OFF CACHE BOOL "" FORCE)
-set(SPIRV_CROSS_STATIC         ON  CACHE BOOL "" FORCE)
-set(SPIRV_CROSS_FORCE_PIC      ON  CACHE BOOL "" FORCE)
-set(SPIRV_CROSS_SKIP_INSTALL   ON  CACHE BOOL "" FORCE)
-add_subdirectory(Mithril-Wapper-cpp/3rdparty/SPIRV-Cross)
-
-# ---------------------------------------------------------------------------
-# Mithril-Wapper shared library (iOS arm64 dylib)
+# Mithril-Wrapper shared library (iOS arm64 dylib)
+#
+# Source layout (Vulkan/MoltenVK rewrite):
+#   Mithril-Wrapper-cpp/
+#     MG_Impl/         — OpenGL 3.3 Core Profile entry points (GL calls into
+#                        the Vulkan backend via the C API in MG_Backend/Backend.h)
+#     MG_State/        — GL state machine (per-EGLContext GLState)
+#     MG_Backend/      — abstract backend C API (Backend.h)
+#       DirectVulkan/  — Vulkan 1.2 + MoltenVK implementation
+#     egl/             — EGL 1.5 (Vulkan-backed; egl.mm is the only .mm here
+#                        that touches CAMetalLayer via VK_EXT_metal_surface)
+#     include/         — public GL/EGL headers
 # ---------------------------------------------------------------------------
 set(MITHRIL_SOURCES
-    Mithril-Wapper-cpp/init.cpp
-    Mithril-Wapper-cpp/gl/log.cpp
-    Mithril-Wapper-cpp/gl/state.cpp
-    Mithril-Wapper-cpp/gl/stubs.cpp
-    Mithril-Wapper-cpp/gl/debug.cpp
-    Mithril-Wapper-cpp/gl/gl.cpp
-    Mithril-Wapper-cpp/gl/getter.cpp
-    Mithril-Wapper-cpp/gl/program.cpp
-    Mithril-Wapper-cpp/gl/shader.cpp
-    Mithril-Wapper-cpp/gl/buffer.cpp
-    Mithril-Wapper-cpp/gl/vertexattrib.cpp
-    Mithril-Wapper-cpp/gl/texture.cpp
-    Mithril-Wapper-cpp/gl/framebuffer.cpp
-    Mithril-Wapper-cpp/gl/drawing.cpp
-    Mithril-Wapper-cpp/glx/lookup.cpp
+    # MG_Impl: OpenGL 3.3 Core Profile entry points
+    Mithril-Wrapper-cpp/MG_Impl/init.cpp
+    Mithril-Wrapper-cpp/MG_Impl/Log.cpp
+    Mithril-Wrapper-cpp/MG_Impl/gl.cpp
+    Mithril-Wrapper-cpp/MG_Impl/Getter.cpp
+    Mithril-Wrapper-cpp/MG_Impl/Program.cpp
+    Mithril-Wrapper-cpp/MG_Impl/Shader.cpp
+    Mithril-Wrapper-cpp/MG_Impl/Buffer.cpp
+    Mithril-Wrapper-cpp/MG_Impl/VertexArray.cpp
+    Mithril-Wrapper-cpp/MG_Impl/Texture.cpp
+    Mithril-Wrapper-cpp/MG_Impl/Framebuffer.cpp
+    Mithril-Wrapper-cpp/MG_Impl/Drawing.cpp
+    Mithril-Wrapper-cpp/MG_Impl/Stubs.cpp
+    Mithril-Wrapper-cpp/MG_Impl/Debug.cpp
+    Mithril-Wrapper-cpp/MG_Impl/lookup.cpp
+
+    # MG_State: GL state machine
+    Mithril-Wrapper-cpp/MG_State/State.cpp
+
+    # MG_Backend: Vulkan 1.2 + MoltenVK direct backend
+    Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Device.cpp
+    Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Resources.cpp
+    Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Pipeline.cpp
+    Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Swapchain.cpp
+    Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/CommandStream.cpp
 )
 
 if(APPLE)
     list(APPEND MITHRIL_SOURCES
-        Mithril-Wapper-cpp/metal/metal_context.mm
-        Mithril-Wapper-cpp/metal/metal_objects.mm
-        Mithril-Wapper-cpp/metal/metal_pipeline.mm
-        # EGL 1.5 surface backed by Metal 2 (CAMetalLayer). On iOS this is
-        # the layer Amethyst-iOS' gl_bridge.m dlsym's eglCreateContext etc.
-        # against. Compiled as Objective-C++ so it can talk to CAMetalLayer
-        # and MTLDevice directly.
-        Mithril-Wapper-cpp/egl/egl.mm
-        # GPU info string builder (queries MTLDevice for GL_RENDERER).
-        Mithril-Wapper-cpp/gl/getter_gpu.mm
+        # EGL 1.5 surface backed by Vulkan 1.2 (CAMetalLayer + VK_EXT_metal_surface).
+        # On iOS this is the layer Amethyst-iOS' gl_bridge.m dlsym's eglCreateContext
+        # etc. against. Compiled as Objective-C++ so it can talk to CAMetalLayer.
+        Mithril-Wrapper-cpp/egl/egl.mm
+        # GPU info string builder (queries VkPhysicalDeviceProperties for
+        # GL_RENDERER; .mm so it can use NSString/NSLog without an #ifdef dance).
+        Mithril-Wrapper-cpp/MG_Impl/Getter_gpu.mm
     )
 endif()
 
@@ -100,40 +152,46 @@ add_library(${PROJECT_NAME} SHARED ${MITHRIL_SOURCES})
 
 target_include_directories(${PROJECT_NAME}
     PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/Mithril-Wapper-cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/Mithril-Wapper-cpp/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/Mithril-Wrapper-cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Mithril-Wrapper-cpp/include
 )
 
-# glslang / SPIRV-Cross.
-# NOTE: glslang-default-resource-limits provides GetDefaultResources() which
-# lives in ResourceLimits/ResourceLimits.cpp. Without it the link fails with
-# "Undefined symbols: GetDefaultResources()" when ENABLE_GLSLANG_BINARIES=OFF
-# (the standalone glslangValidator that used to host it is disabled).
+# glslang (GLSL -> SPIR-V). NOTE: glslang-default-resource-limits provides
+# GetDefaultResources() which lives in ResourceLimits/ResourceLimits.cpp.
+# Without it the link fails with "Undefined symbols: GetDefaultResources()"
+# when ENABLE_GLSLANG_BINARIES=OFF (the standalone glslangValidator that used
+# to host it is disabled).
 target_link_libraries(${PROJECT_NAME} PRIVATE
     glslang::glslang
     glslang::SPIRV
     glslang::glslang-default-resource-limits
-    spirv-cross-c
 )
 
 if(APPLE)
-    # ARC for Objective-C++ Metal + EGL-on-Metal backend
-    set_source_files_properties(
-        Mithril-Wapper-cpp/metal/metal_context.mm
-        Mithril-Wapper-cpp/metal/metal_objects.mm
-        Mithril-Wapper-cpp/metal/metal_pipeline.mm
-        Mithril-Wapper-cpp/egl/egl.mm
-        Mithril-Wapper-cpp/gl/getter_gpu.mm
-        PROPERTIES COMPILE_FLAGS "-fobjc-arc"
-    )
+    # MoltenVK static framework + Vulkan headers. The framework transitively
+    # links Metal.framework / QuartzCore.framework / Foundation.framework, but
+    # we still list them explicitly to satisfy -framework lookup when the
+    # static link strips MoltenVK's lazy references.
+    target_include_directories(${PROJECT_NAME} PRIVATE ${MOLTENVK_INCLUDE_DIR})
     target_link_libraries(${PROJECT_NAME} PRIVATE
+        ${MOLTENVK_LIBRARY}
         "-framework Metal"
         "-framework Foundation"
         "-framework QuartzCore"
+        "-framework CoreGraphics"
     )
-    target_compile_definitions(${PROJECT_NAME} PRIVATE MITHRIL_METAL=1)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE MITHRIL_VULKAN=1)
 else()
     target_link_libraries(${PROJECT_NAME} PRIVATE ${CMAKE_DL_LIBS})
+endif()
+
+# ARC for Objective-C++ EGL + Getter_gpu translation units.
+if(APPLE)
+    set_source_files_properties(
+        Mithril-Wrapper-cpp/egl/egl.mm
+        Mithril-Wrapper-cpp/MG_Impl/Getter_gpu.mm
+        PROPERTIES COMPILE_FLAGS "-fobjc-arc"
+    )
 endif()
 
 # Reasonable warnings, no -Werror (CI must be tolerant during bring-up)
