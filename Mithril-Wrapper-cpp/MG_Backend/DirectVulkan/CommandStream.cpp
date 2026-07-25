@@ -261,10 +261,12 @@ void backend_set_fragment_texture(int slot, VkImageView view, VkSampler sampler)
 }
 
 void backend_set_blend_color(float r, float g, float b, float a) {
-    mithril::vk::Backend* b = mithril::vk::backend();
-    if (!b->commandBuffer) return;
+    // NOTE: parameter `b` is the blue blend constant (float); the backend ptr
+    // is renamed to avoid shadowing it.
+    mithril::vk::Backend* bk = mithril::vk::backend();
+    if (!bk->commandBuffer) return;
     float bc[4] = { r, g, b, a };
-    vkCmdSetBlendConstants(b->commandBuffer, bc);
+    vkCmdSetBlendConstants(bk->commandBuffer, bc);
 }
 
 void backend_set_depth_bias(float slope, float clamp) {
