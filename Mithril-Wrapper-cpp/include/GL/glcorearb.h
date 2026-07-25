@@ -262,6 +262,12 @@ extern "C" {
 #define GL_R11F_G11F_B10F               0x8C3A
 #define GL_RGB10_A2                     0x8059
 #define GL_RGB10_A2UI                   0x906F
+/* Additional sized internal formats used by MC Java (glcorearb.h omits these
+ * legacy/ES-style 16-bit packed formats and the RGBA16 unorm format). */
+#define GL_RGBA4                        0x8056
+#define GL_RGB5_A1                      0x8057
+#define GL_RGB565                       0x8D62
+#define GL_RGBA16                       0x805B
 /* Integer internal formats (sized) */
 #define GL_RG8I                         0x8237
 #define GL_RG8UI                        0x8238
@@ -289,6 +295,16 @@ extern "C" {
 #define GL_UNSIGNED_SHORT_5_5_5_1       0x8034
 #define GL_UNSIGNED_INT_24_8            0x84FA
 #define GL_FLOAT_32_UNSIGNED_INT_24_8_REV 0x8DAD
+/* Packed pixel types used by MC Java's texture upload paths. */
+#define GL_UNSIGNED_INT_8_8_8_8         0x8035
+#define GL_UNSIGNED_INT_8_8_8_8_REV     0x8367
+/* EXT_texture_compression_s3tc — BC1/BC2/BC3 block-compressed formats. MC Java
+ * ships DXT-compressed GUI atlases; these are the GL tokens the loader passes
+ * to glCompressedTexImage2D / glInternalFormat. */
+#define GL_COMPRESSED_RGB_S3TC_DXT1_EXT  0x83F0
+#define GL_COMPRESSED_RGBA_S3TC_DXT1_EXT 0x83F1
+#define GL_COMPRESSED_RGBA_S3TC_DXT3_EXT 0x83F2
+#define GL_COMPRESSED_RGBA_S3TC_DXT5_EXT 0x83F3
 
 /* Pixel transfer / pack */
 #define GL_UNPACK_ALIGNMENT             0x0CF5
