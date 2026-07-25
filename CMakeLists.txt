@@ -242,6 +242,14 @@ if(APPLE)
     )
     target_link_options(${PROJECT_NAME} PRIVATE -ObjC)
     target_compile_definitions(${PROJECT_NAME} PRIVATE MITHRIL_VULKAN=1)
+    # VK_ENABLE_BETA_EXTENSIONS: vulkan_core.h only includes
+    # vulkan_portability_subset.h (which defines
+    # VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME and the portability-subset
+    # feature/property structs) when this macro is defined. MoltenVK always
+    # advertises VK_KHR_portability_subset, and Device.cpp enables it by name,
+    # so the macro MUST be visible across the whole build. (Safe to define
+    # globally — it only gates beta-extension declarations, no codegen effect.)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE VK_ENABLE_BETA_EXTENSIONS=1)
 else()
     target_link_libraries(${PROJECT_NAME} PRIVATE ${CMAKE_DL_LIBS})
 endif()

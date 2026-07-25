@@ -2,6 +2,20 @@
 // Vulkan 1.2 instance / physical-device / device / queue / command pool init.
 // MoltenVK is statically linked, so vkCreateInstance etc. resolve at link time
 // (no loader, no VK_ICD_FILENAMES).
+
+// VK_EXT_metal_surface extension-name macro. The canonical definition lives in
+// vulkan_metal.h, which vulkan.h only pulls in when VK_USE_PLATFORM_METAL_EXT
+// is defined BEFORE the include. We intentionally do NOT define that macro in
+// this .cpp (it drags in <Metal/Metal.h>, Objective-C only — would break the
+// plain-C++ compile). Swapchain.mm is the one TU that defines it. Here we
+// supply the spec-mandated string literal directly so Device.cpp can request
+// the instance extension by name. The value is fixed by the Vulkan spec and
+// will never diverge; guarding with #ifndef keeps this a no-op if a future
+// Vulkan header exposes the macro without the platform define.
+#ifndef VK_EXT_METAL_SURFACE_EXTENSION_NAME
+#define VK_EXT_METAL_SURFACE_EXTENSION_NAME "VK_EXT_metal_surface"
+#endif
+
 #include "Device.h"
 #include "../../MG_Impl/Log.h"
 
