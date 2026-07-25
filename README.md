@@ -233,6 +233,7 @@ GitHub Actions 工作流 [`.github/workflows/build.yml`](.github/workflows/build
 
 - **EternityQwQ**
 - **yitenchen123**
+- **Uniaball**
 
 ## 许可
 
