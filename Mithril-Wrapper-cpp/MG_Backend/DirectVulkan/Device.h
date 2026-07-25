@@ -49,6 +49,13 @@ struct Backend {
     // before reusing the command buffer.
     VkFence frameFences[kMaxFramesInFlight] = {};
     int     currentFrame = 0;
+
+    // Monotonic frame generation counter, bumped once per commit_frame(). Used
+    // by DescriptorSet.cpp to reset each program's descriptor pool exactly once
+    // per frame (currentFrame cycles 0/1, so a program drawn only on every other
+    // frame would never see a reset — the monotonic counter fixes that). The
+    // value seen by every draw within a single frame is constant.
+    uint64_t frameGeneration = 0;
 };
 
 // Access the singleton backend state. Allocated on first call.

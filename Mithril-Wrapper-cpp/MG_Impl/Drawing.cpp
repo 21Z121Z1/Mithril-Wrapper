@@ -108,6 +108,11 @@ static void prepare_draw(GLenum mode) {
 
     // Bind pipeline + set dynamic state via vkCmdSet*.
     backend_bind_pipeline(pipeline);
+    // Bind the program's descriptor set (UBOs + sampled images) immediately
+    // after the pipeline so the shader's uniform/texture bindings are live for
+    // the upcoming draw. The set is built per-draw from Program.uniforms +
+    // g_state->boundTextures by DescriptorSet.cpp.
+    backend_bind_program_descriptors(prog->id);
     backend_set_viewport(g_state->viewportX, g_state->viewportY,
                          g_state->viewportW, g_state->viewportH,
                          g_state->depthNear, g_state->depthFar);
@@ -162,44 +167,14 @@ static void prepare_draw(GLenum mode) {
         }
     }
 
-    // Bind textures bound to the current program (best-effort: bind the first
-    // few texture units to fragment-stage texture/sampler slots).
-    for (int u = 0; u < mithril::kMaxTextureUnits && u < 32; ++u) {
-        GLuint tex_id = g_state->boundTextures[u];
-        if (!tex_id) continue;
-        VkImageView view = backend_get_texture_view(tex_id);
-        VkSampler samp = backend_get_or_create_sampler(
-            tex_id, GL_LINEAR, GL_LINEAR, GL_REPEAT, GL_REPEAT, GL_REPEAT, nullptr);
-        if (view != VK_NULL_HANDLE && samp != VK_NULL_HANDLE) {
-            backend_set_fragment_texture(u, view, samp);
-        }
-    }
-
-    // Bind uniform values. MoltenVK/SPIRV-Cross assigns each GLSL uniform a
-    // buffer slot starting at 30 (SPVC_COMPILER_OPTION_MSL_UNIFORM_BUFFER_BASE,
-    // applied by MoltenVK's SPIRV-Cross). We create/update a small VkBuffer per
-    // uniform and bind it to both vertex and fragment stages. Without this,
-    // ProjMat/ModelViewMat are all zeros and every vertex collapses to the
-    // origin -> black screen.
-    {
-        GLuint base = 30;
-        GLuint idx = 0;
-        for (auto& kv : prog->uniforms) {
-            mithril::Uniform& u = kv.second;
-            if (u.value.empty()) { idx++; continue; }
-            // Create or update a Vulkan buffer for this uniform's data.
-            // Use a stable name derived from the program id + uniform index.
-            GLuint uname = prog->id * 10000 + idx;
-            size_t sz = u.value.size() * sizeof(float);
-            VkBuffer ubuf = backend_get_or_create_buffer(uname, u.value.data(), sz);
-            if (ubuf != VK_NULL_HANDLE) {
-                GLuint slot = base + idx;
-                backend_set_vertex_buffer(slot, ubuf, 0);
-                backend_set_fragment_buffer(slot, ubuf, 0);
-            }
-            idx++;
-        }
-    }
+    // Uniform buffers and sampled-image bindings are now sourced + bound via
+    // the descriptor set in backend_bind_program_descriptors() (called above,
+    // right after backend_bind_pipeline). It reflects the program's SPIR-V,
+    // maps each UBO to Program.uniforms[name].value and each sampler binding B
+    // to g_state->boundTextures[B], and writes + binds a fresh VkDescriptorSet
+    // for this draw. The legacy backend_set_fragment_buffer /
+    // backend_set_fragment_texture stubs are no-ops (kept only for the C API
+    // contract) — descriptor binding is centralised in DescriptorSet.cpp.
 }
 
 static void end_draw(void) {

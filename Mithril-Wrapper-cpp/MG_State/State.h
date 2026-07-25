@@ -187,9 +187,17 @@ struct GLState {
      * installed when the EGLConfig requests one. These are owned by the
      * EGLSurface (swapchain), not by the GL object table, so the GL
      * texture/sampler paths never touch them.
+     *
+     * The underlying VkImage handles are also tracked so that image-level
+     * operations (glBlitFramebuffer / glReadPixels involving FBO 0) can
+     * reference them directly without going through the GL texture table.
      */
     VkImageView eglDefaultColor = VK_NULL_HANDLE;
     VkImageView eglDefaultDepth = VK_NULL_HANDLE;
+    VkImage     eglDefaultColorImage = VK_NULL_HANDLE;
+    VkImage     eglDefaultDepthImage = VK_NULL_HANDLE;
+    VkFormat    eglDefaultColorFormat = VK_FORMAT_UNDEFINED;
+    VkFormat    eglDefaultDepthFormat = VK_FORMAT_UNDEFINED;
     int   eglDefaultWidth  = 0;
     int   eglDefaultHeight = 0;
 

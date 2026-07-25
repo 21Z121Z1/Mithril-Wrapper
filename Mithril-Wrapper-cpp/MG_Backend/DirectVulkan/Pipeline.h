@@ -11,18 +11,34 @@
 
 #include <cstdint>
 #include <unordered_map>
+#include <vector>
+
+#include "DescriptorSet.h"
 
 namespace mithril {
 namespace vk {
 
 // Per-program owned Vulkan resources. Each Program GL object gets one of
-// these; it holds the shader modules built from the linked SPIR-V and the
-// cache of pipelines derived from that program.
+// these; it holds the shader modules built from the linked SPIR-V, the
+// descriptor set layout / pipeline layout / descriptor pool built from
+// SPIRV-Cross reflection (see DescriptorSet.cpp), and the cache of pipelines
+// derived from that program.
 struct ProgramResources {
     VkShaderModule vertexModule = VK_NULL_HANDLE;
     VkShaderModule fragmentModule = VK_NULL_HANDLE;
     // Cached pipelines keyed by a 64-bit signature (see Pipeline.cpp).
     std::unordered_map<uint64_t, VkPipeline> pipelines;
+
+    // ---- Descriptor set management (built once by ensure_program_layouts) ----
+    VkDescriptorSetLayout descriptorSetLayout = VK_NULL_HANDLE;
+    VkPipelineLayout      pipelineLayout = VK_NULL_HANDLE;
+    VkDescriptorPool      descriptorPool = VK_NULL_HANDLE;
+    std::vector<DescriptorBinding> bindings;  // reflected VS+FS binding set
+    bool layoutsBuilt = false;
+    // Monotonic frame-generation value (see advance_frame_generation()) at
+    // which this program's descriptor pool was last reset. bind_program_descriptors()
+    // resets the pool once per frame so sets can be reused across frames.
+    uint64_t lastResetGen = 0;
 };
 
 // Accessor for the per-program resource table (keyed by GL program name).

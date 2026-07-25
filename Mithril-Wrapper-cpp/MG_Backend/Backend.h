@@ -124,6 +124,83 @@ VkImageView backend_get_texture_view(GLuint name);
 VkImage     backend_get_texture_image(GLuint name);
 void        backend_delete_texture(GLuint name);
 
+/*
+ * Transition the named texture's image into `target_layout` if it is not
+ * already in that layout. Records an image-memory barrier on the active
+ * command buffer (caller is responsible for committing). Used by glTexStorage*
+ * to put freshly-allocated immutable storage into SHADER_READ_ONLY_OPTIMAL so
+ * that subsequent sampler bindings / framebuffer attachment uses see a valid
+ * layout instead of UNDEFINED. No-op if the texture doesn't exist or is
+ * already in the target layout.
+ *
+ *   name          : GL texture name
+ *   target_layout : VkImageLayout to transition to (e.g.
+ *                   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+ */
+void        backend_transition_texture_layout(GLuint name, VkImageLayout target_layout);
+
+/*
+ * Generate mipmaps for the named texture via vkCmdBlitImage. Each level L>=1
+ * is blitted from level L-1 (half-sampled, linear filter) and transitioned
+ * to SHADER_READ_ONLY_OPTIMAL. The texture must have been created with
+ * `levels` > 1 (glTexStorage2D / glTexImage2D with levels>1). Records into
+ * the active command buffer; the caller is responsible for committing.
+ */
+void        backend_generate_mipmaps(GLuint name);
+
+/*
+ * Read a rectangular region of pixels back from the bound colour attachment
+ * into `out_pixels`. The (format,type) pair selects the host pixel layout
+ * (only GL_RGBA + GL_UNSIGNED_BYTE is fully implemented; other combos are
+ * best-effort). Implementation: vkCmdCopyImage -> host-visible staging
+ * buffer -> vkQueueSubmit + vkWaitForFences -> memcpy/convert into out.
+ *
+ *   x,y,w,h : source rectangle in the colour attachment (GL bottom-left origin)
+ *   format/type : GL pixel format/type of out_pixels
+ *   out_pixels : caller-allocated buffer of size w*h*bpp(format,type)
+ *
+ * Returns 1 on success, 0 on failure (e.g. no colour attachment bound).
+ */
+int         backend_read_pixels(int x, int y, int w, int h,
+                                GLenum format, GLenum type, void* out_pixels);
+
+/*
+ * Blit a rectangular region from the source texture to the destination
+ * texture, with optional colour/depth/stencil mask and linear/nearest
+ * filtering. Mirrors glBlitFramebuffer's behaviour for the cases MC Java
+ * exercises (resolve downsample, fullscreen post-process copies).
+ *
+ *   src_name / dst_name : GL texture names (must be 2D, same format)
+ *   srcX0..srcY1 / dstX0..dstY1 : source + destination rectangles (GL coords)
+ *   mask   : GLbitfield of GL_COLOR_BUFFER_BIT / GL_DEPTH_BUFFER_BIT / GL_STENCIL_BUFFER_BIT
+ *   filter : GL_NEAREST or GL_LINEAR
+ */
+void        backend_blit_texture(GLuint src_name, GLuint dst_name,
+                                 int srcX0, int srcY0, int srcX1, int srcY1,
+                                 int dstX0, int dstY0, int dstX1, int dstY1,
+                                 GLbitfield mask, GLenum filter);
+
+/*
+ * Blit a rectangular region between two raw VkImage handles (used by
+ * glBlitFramebuffer when one or both sides is the EGL default framebuffer,
+ * whose swapchain image is not in the GL texture table). Handles layout
+ * transitions for both images (assumes both start/end in either
+ * SHADER_READ_ONLY_OPTIMAL or COLOR_ATTACHMENT_OPTIMAL, and transitions to
+ * TRANSFER_SRC/DST_OPTIMAL for the blit, then back to a sampling-friendly
+ * layout). `src_format`/`dst_format` select the aspect mask (color/depth).
+ *
+ *   src_image / dst_image : VkImage handles (must not be VK_NULL_HANDLE)
+ *   src_format / dst_format : VkFormat of each image (for aspect selection)
+ *   srcX0..srcY1 / dstX0..dstY1 : source + destination rectangles (GL coords)
+ *   mask   : GLbitfield of GL_COLOR_BUFFER_BIT (depth/stencil not yet supported)
+ *   filter : GL_NEAREST or GL_LINEAR
+ */
+void        backend_blit_images(VkImage src_image, VkFormat src_format,
+                                VkImage dst_image, VkFormat dst_format,
+                                int srcX0, int srcY0, int srcX1, int srcY1,
+                                int dstX0, int dstY0, int dstX1, int dstY1,
+                                GLbitfield mask, GLenum filter);
+
 /* ---- Samplers ---- */
 VkSampler backend_get_or_create_sampler(GLuint name, GLint min_filter, GLint mag_filter,
                                         GLint wrap_s, GLint wrap_t, GLint wrap_r,
@@ -177,8 +254,33 @@ VkPipeline backend_get_or_create_pipeline(GLuint program,
                                           int blend_enabled, GLenum blend_src, GLenum blend_dst,
                                           GLenum gl_primitive_mode);
 
-/* Release all Vulkan resources owned by a program (shader modules + pipelines). */
+/* Release all Vulkan resources owned by a program (shader modules + pipelines +
+ * descriptor set layout / pipeline layout / descriptor pool). */
 void backend_delete_program_resources(GLuint program);
+
+/*
+ * Reflect the vertex + fragment SPIR-V of `program` (via SPIRV-Cross), merge
+ * the VS/FS binding sets, and build + cache a VkDescriptorSetLayout /
+ * VkPipelineLayout / VkDescriptorPool on the program. Idempotent (runs once
+ * per program, from inside backend_get_or_create_pipeline). On a program with
+ * no reflected bindings the pipeline layout is left null and the pipeline
+ * builder falls back to a process-wide empty layout.
+ *
+ *   vs / vs_words : vertex-stage SPIR-V words (may be NULL/0)
+ *   fs / fs_words : fragment-stage SPIR-V words (may be NULL/0)
+ */
+void backend_ensure_program_layouts(GLuint program,
+                                    const uint32_t* vs, int vs_words,
+                                    const uint32_t* fs, int fs_words);
+
+/*
+ * Allocate a fresh VkDescriptorSet (from the program's pool, reset once per
+ * frame), populate it from the current Program.uniforms + g_state->boundTextures,
+ * and vkCmdBindDescriptorSets it onto the active command buffer. No-op when the
+ * program has no descriptor bindings. Must be called after backend_bind_pipeline()
+ * and before the draw, with a recording command buffer active.
+ */
+void backend_bind_program_descriptors(GLuint program);
 
 /*
  * Present + acquire helpers used by eglSwapBuffers. EGL owns the swapchain;
@@ -206,6 +308,19 @@ VkImageView backend_swapchain_acquire_color(void* swapchain_state);
 VkImageView backend_swapchain_acquire_depth(void* swapchain_state);
 int          backend_swapchain_width(void* swapchain_state);
 int          backend_swapchain_height(void* swapchain_state);
+
+/*
+ * Return the VkImage + VkFormat of the currently-acquired swapchain color
+ * image (the one most recently returned by backend_swapchain_acquire_color).
+ * Used by glBlitFramebuffer / glReadPixels to reference the on-screen
+ * drawable at the image level (vkCmdBlitImage / vkCmdCopyImageToBuffer need
+ * a VkImage, not a VkImageView). Returns VK_NULL_HANDLE if no image is
+ * currently acquired.
+ */
+VkImage     backend_swapchain_current_color_image(void* swapchain_state);
+VkFormat    backend_swapchain_color_format(void* swapchain_state);
+VkImage     backend_swapchain_current_depth_image(void* swapchain_state);
+VkFormat    backend_swapchain_depth_format(void* swapchain_state);
 
 #ifdef __cplusplus
 }

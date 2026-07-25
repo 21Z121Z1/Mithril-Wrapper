@@ -187,11 +187,22 @@ void install_surface_on_state(EglSurface* s) {
         VkImageView depth = backend_swapchain_acquire_depth(s->swapchain_state);
         g_state->eglDefaultColor  = color;
         g_state->eglDefaultDepth  = depth;
+        // Also expose the underlying VkImage handles + formats so image-level
+        // operations (glBlitFramebuffer / glReadPixels involving FBO 0) can
+        // reference the on-screen drawable directly.
+        g_state->eglDefaultColorImage   = backend_swapchain_current_color_image(s->swapchain_state);
+        g_state->eglDefaultColorFormat  = backend_swapchain_color_format(s->swapchain_state);
+        g_state->eglDefaultDepthImage   = backend_swapchain_current_depth_image(s->swapchain_state);
+        g_state->eglDefaultDepthFormat  = backend_swapchain_depth_format(s->swapchain_state);
         g_state->eglDefaultWidth  = s->width;
         g_state->eglDefaultHeight = s->height;
     } else {
         g_state->eglDefaultColor  = VK_NULL_HANDLE;
         g_state->eglDefaultDepth  = VK_NULL_HANDLE;
+        g_state->eglDefaultColorImage  = VK_NULL_HANDLE;
+        g_state->eglDefaultColorFormat = VK_FORMAT_UNDEFINED;
+        g_state->eglDefaultDepthImage  = VK_NULL_HANDLE;
+        g_state->eglDefaultDepthFormat = VK_FORMAT_UNDEFINED;
         g_state->eglDefaultWidth  = 0;
         g_state->eglDefaultHeight = 0;
     }

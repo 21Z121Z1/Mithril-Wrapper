@@ -60,12 +60,11 @@ void begin_render_pass(VkImageView* color_views, int color_count,
     EncoderState& e = encoder();
     if (e.passActive) return;  // coalesce draws into one pass
 
-    // Reset + begin the command buffer (one-shot per frame).
-    vkResetCommandBuffer(b->commandBuffer, 0);
-    VkCommandBufferBeginInfo bi{};
-    bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkBeginCommandBuffer(b->commandBuffer, &bi);
+    // The command buffer is already in the recording state — either begun by
+    // init_device() (first frame) or by commit_frame() (subsequent frames).
+    // Pre-frame commands (layout transitions, texture uploads, etc.) recorded
+    // before this point are preserved and will be submitted with this pass.
+    // Do NOT reset the command buffer here; that would discard those records.
 
     // Record the per-frame attachments so draw commands can reference them.
     e.colorCount = color_count > 8 ? 8 : color_count;
@@ -163,6 +162,10 @@ void commit_frame() {
     // Wait on the frame we just submitted so the command buffer is reusable.
     vkWaitForFences(b->device, 1, &fence, VK_TRUE, UINT64_MAX);
     b->currentFrame = (b->currentFrame + 1) % kMaxFramesInFlight;
+    // Monotonic generation bump: descriptor pools are reset on first draw of
+    // each generation (see DescriptorSet.cpp), so this must advance every frame
+    // regardless of the cycling currentFrame value.
+    b->frameGeneration++;
 
     // Begin a fresh command buffer so subsequent uploads/records have somewhere
     // to go. (Render pass begins will reset + begin again.)
@@ -207,13 +210,15 @@ void backend_bind_pipeline(VkPipeline pipeline) {
 void backend_set_viewport(int x, int y, int w, int h, double znear, double zfar) {
     mithril::vk::Backend* b = mithril::vk::backend();
     if (!b->commandBuffer) return;
+    // Use the GL viewport directly. GL's viewport is bottom-left origin while
+    // Vulkan's is top-left, but MoltenVK flips the Y axis when translating to
+    // Metal, so passing the GL values through unchanged matches the on-screen
+    // behaviour of the previous Metal backend (and what host apps expect).
     VkViewport vp{};
-    vp.x = (float)x;
-    vp.y = (float)(b->props.limits.maxViewportDimensions[1] - y - h); // GL bottom-left -> Vulkan top-left (approx)
-    // Simpler: use the GL viewport directly (MoltenVK handles flip). Match Metal backend behaviour.
-    vp.x = (float)x; vp.y = (float)y;
-    vp.width = (float)w;
-    vp.height = (float)h;
+    vp.x        = (float)x;
+    vp.y        = (float)y;
+    vp.width    = (float)w;
+    vp.height   = (float)h;
     vp.minDepth = (float)znear;
     vp.maxDepth = (float)zfar;
     vkCmdSetViewport(b->commandBuffer, 0, 1, &vp);
@@ -236,18 +241,23 @@ void backend_set_vertex_buffer(int slot, VkBuffer buffer, VkDeviceSize offset) {
 }
 
 void backend_set_fragment_buffer(int slot, VkBuffer buffer, VkDeviceSize offset) {
+    // No-op: fragment-stage UBO binding is handled by descriptor sets built in
+    // DescriptorSet.cpp (backend_bind_program_descriptors). There is no Vulkan
+    // "bind buffer to fragment stage slot" command outside of descriptor sets,
+    // so this entry point exists only to satisfy the C API contract.
     (void)slot; (void)buffer; (void)offset;
-    // Fragment UBO binding requires a descriptor set; deferred (bring-up).
 }
 
 void backend_set_vertex_texture(int slot, VkImageView view, VkSampler sampler) {
+    // No-op: see backend_set_fragment_buffer — descriptor binding is centralised
+    // in DescriptorSet.cpp (backend_bind_program_descriptors).
     (void)slot; (void)view; (void)sampler;
-    // Texture binding requires descriptor sets; deferred (bring-up).
 }
 
 void backend_set_fragment_texture(int slot, VkImageView view, VkSampler sampler) {
+    // No-op: see backend_set_fragment_buffer — descriptor binding is centralised
+    // in DescriptorSet.cpp (backend_bind_program_descriptors).
     (void)slot; (void)view; (void)sampler;
-    // Texture binding requires descriptor sets; deferred (bring-up).
 }
 
 void backend_set_blend_color(float r, float g, float b, float a) {

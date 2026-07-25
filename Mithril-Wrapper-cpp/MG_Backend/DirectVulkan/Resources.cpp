@@ -126,7 +126,7 @@ VkFormat gl_internal_to_vk(GLenum internal) {
 
 // Bytes per pixel for the (format,type) pair as seen on the host side. Used to
 // size the staging buffer for glTexImage* uploads.
-static int host_texel_bytes(GLenum format, GLenum type) {
+int host_texel_bytes(GLenum format, GLenum type) {
     int comp = 4;
     switch (format) {
         case GL_RED:
@@ -164,18 +164,21 @@ static int host_texel_bytes(GLenum format, GLenum type) {
 
 void stage_and_copy_image(TextureEntry& tex, int level, int x, int y, int z,
                           int w, int h, int d, const void* pixels,
-                          int unpack_alignment) {
+                          int unpack_alignment, GLenum format, GLenum type) {
     Backend* b = backend();
-    (void)unpack_alignment;
     if (!b->commandBuffer) return;
-    // Best-effort: copy pixels verbatim into the staging buffer. Row padding
-    // (GL_UNPACK_ALIGNMENT) is treated as 1 for the host->staging copy; for
-    // the common RGBA8/UB case this matches Vulkan's tight packing. A fully
-    // correct path would repack rows to the VkImage's alignment, deferred.
-    // (This is acceptable for bring-up; correctness is iterated post-merge.)
-    size_t row_bytes = (size_t)w * 4;  // assume 4-byte texels for staging sizing
-    (void)row_bytes;
-    size_t staging = (size_t)w * (size_t)h * (size_t)d * 4;
+    if (unpack_alignment <= 0) unpack_alignment = 4;  // GL default UNPACK_ALIGNMENT
+
+    // Compute host-side bytes per pixel for this (format, type) pair and
+    // honour GL_UNPACK_ALIGNMENT when computing the source row stride. The
+    // staging buffer is repacked to be tightly packed, matching
+    // VkBufferImageCopy.bufferRowLength == 0 below.
+    int bpp = host_texel_bytes(format, type);
+    if (bpp <= 0) bpp = 4;  // conservative fallback
+    size_t tight_row = (size_t)w * (size_t)bpp;
+    size_t mask = (size_t)unpack_alignment - 1;
+    size_t src_stride = (tight_row + mask) & ~mask;
+    size_t staging = tight_row * (size_t)h * (size_t)d;
 
     if (tex.stagingSize < staging) {
         if (tex.stagingBuffer) { vkDestroyBuffer(b->device, tex.stagingBuffer, nullptr); tex.stagingBuffer = VK_NULL_HANDLE; }
@@ -192,7 +195,24 @@ void stage_and_copy_image(TextureEntry& tex, int level, int x, int y, int z,
     }
     void* dst = nullptr;
     vkMapMemory(b->device, tex.stagingMemory, 0, staging, 0, &dst);
-    if (dst && pixels) std::memcpy(dst, pixels, staging);
+    if (dst && pixels) {
+        if (src_stride == tight_row) {
+            // Source rows are already tightly packed — single memcpy.
+            std::memcpy(dst, pixels, staging);
+        } else {
+            // Source rows carry GL_UNPACK_ALIGNMENT padding; repack to tight
+            // so VkBufferImageCopy.bufferRowLength == 0 (== w) is valid.
+            char* d8 = (char*)dst;
+            const char* s8 = (const char*)pixels;
+            for (int layer = 0; layer < d; ++layer) {
+                for (int row = 0; row < h; ++row) {
+                    std::memcpy(d8, s8, tight_row);
+                    d8 += tight_row;
+                    s8 += src_stride;
+                }
+            }
+        }
+    }
     if (dst) vkUnmapMemory(b->device, tex.stagingMemory);
 
     VkBufferImageCopy region{};
@@ -245,6 +265,133 @@ void stage_and_copy_image(TextureEntry& tex, int level, int x, int y, int z,
                          VK_PIPELINE_STAGE_TRANSFER_BIT,
                          dstStage, 0,
                          0, nullptr, 0, nullptr, 1, &barrier);
+    tex.currentLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+}
+
+// VkImageAspectFlags for a VkFormat (color / depth / depth+stencil / stencil).
+// Mirrors the aspect-for-format helper in ImageOps.cpp (kept here so callers
+// that only depend on Resources.cpp don't need to link ImageOps).
+VkImageAspectFlags aspect_for_format(VkFormat fmt) {
+    if (fmt == VK_FORMAT_D16_UNORM || fmt == VK_FORMAT_D32_SFLOAT)
+        return VK_IMAGE_ASPECT_DEPTH_BIT;
+    if (fmt == VK_FORMAT_S8_UINT)
+        return VK_IMAGE_ASPECT_STENCIL_BIT;
+    if (fmt == VK_FORMAT_D24_UNORM_S8_UINT || fmt == VK_FORMAT_D32_SFLOAT_S8_UINT)
+        return VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
+    return VK_IMAGE_ASPECT_COLOR_BIT;
+}
+
+// Stage masks for the source side of an image-memory barrier, keyed on the
+// old layout. Returns 0 when the old layout is UNDEFINED or PREINITIALIZED
+// (no prior work needs to be visible).
+static VkAccessFlags src_access_for_layout(VkImageLayout layout) {
+    switch (layout) {
+        case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:
+            return VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        case VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL:
+            return VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        case VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL:
+            return VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
+        case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
+            return VK_ACCESS_SHADER_READ_BIT;
+        case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
+            return VK_ACCESS_TRANSFER_READ_BIT;
+        case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
+            return VK_ACCESS_TRANSFER_WRITE_BIT;
+        case VK_IMAGE_LAYOUT_GENERAL:
+            return VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        default:
+            return 0;  // UNDEFINED / PREINITIALIZED
+    }
+}
+
+// Stage masks for the destination side of an image-memory barrier, keyed on
+// the new layout. Returns 0 when the new layout is PREINITIALIZED (invalid).
+static VkAccessFlags dst_access_for_layout(VkImageLayout layout) {
+    switch (layout) {
+        case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:
+            return VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        case VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL:
+            return VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        case VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL:
+            return VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
+        case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
+            return VK_ACCESS_SHADER_READ_BIT;
+        case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
+            return VK_ACCESS_TRANSFER_READ_BIT;
+        case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
+            return VK_ACCESS_TRANSFER_WRITE_BIT;
+        case VK_IMAGE_LAYOUT_GENERAL:
+            return VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        default:
+            return 0;
+    }
+}
+
+// Source pipeline stage for an image-memory barrier, keyed on the old layout.
+static VkPipelineStageFlags src_stage_for_layout(VkImageLayout layout) {
+    switch (layout) {
+        case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:
+            return VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        case VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL:
+        case VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL:
+            return VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+        case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
+            return VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
+        case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
+            return VK_PIPELINE_STAGE_TRANSFER_BIT;
+        default:
+            return VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+    }
+}
+
+// Destination pipeline stage for an image-memory barrier, keyed on the new layout.
+static VkPipelineStageFlags dst_stage_for_layout(VkImageLayout layout) {
+    switch (layout) {
+        case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:
+            return VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        case VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL:
+        case VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL:
+            return VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+        case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
+            return VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
+        case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
+            return VK_PIPELINE_STAGE_TRANSFER_BIT;
+        default:
+            return VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
+    }
+}
+
+void transition_image_layout(TextureEntry& tex, VkImageLayout newLayout) {
+    Backend* b = backend();
+    if (!b->commandBuffer || tex.image == VK_NULL_HANDLE) return;
+    if (tex.currentLayout == newLayout) return;  // already there
+
+    VkImageAspectFlags aspect = aspect_for_format(tex.format);
+
+    VkImageMemoryBarrier barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    barrier.srcAccessMask = src_access_for_layout(tex.currentLayout);
+    barrier.dstAccessMask = dst_access_for_layout(newLayout);
+    barrier.oldLayout = tex.currentLayout;
+    barrier.newLayout = newLayout;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = tex.image;
+    barrier.subresourceRange.aspectMask = aspect;
+    barrier.subresourceRange.baseMipLevel = 0;
+    barrier.subresourceRange.levelCount = (uint32_t)tex.levels;
+    barrier.subresourceRange.baseArrayLayer = 0;
+    barrier.subresourceRange.layerCount = 1;
+
+    vkCmdPipelineBarrier(b->commandBuffer,
+                         src_stage_for_layout(tex.currentLayout),
+                         dst_stage_for_layout(newLayout),
+                         0,
+                         0, nullptr, 0, nullptr, 1, &barrier);
+    tex.currentLayout = newLayout;
 }
 
 // ---- GL filter/wrap -> VkFilter / VkSamplerAddressMode ----
@@ -419,12 +566,11 @@ VkImage backend_get_or_create_texture(GLuint name, int width, int height, int de
 void backend_texture_upload(GLuint name, int level, int x, int y, int z,
                             int w, int h, int d, GLenum format, GLenum type,
                             const void* pixels, int unpack_alignment) {
-    (void)format; (void)type;
     auto& tbl = mithril::vk::texture_table();
     auto it = tbl.find(name);
     if (it == tbl.end() || !pixels) return;
     mithril::vk::stage_and_copy_image(it->second, level, x, y, z, w, h, d,
-                                      pixels, unpack_alignment);
+                                      pixels, unpack_alignment, format, type);
 }
 
 void backend_texture_set_params(GLuint name, GLint min_filter, GLint mag_filter,
@@ -456,6 +602,15 @@ void backend_delete_texture(GLuint name) {
     if (it == tbl.end()) return;
     mithril::vk::destroy_texture_entry(it->second);
     tbl.erase(it);
+}
+
+void backend_transition_texture_layout(GLuint name, VkImageLayout target_layout) {
+    mithril::vk::Backend* b = mithril::vk::backend();
+    if (!b->initialized) return;
+    auto& tbl = mithril::vk::texture_table();
+    auto it = tbl.find(name);
+    if (it == tbl.end()) return;
+    mithril::vk::transition_image_layout(it->second, target_layout);
 }
 
 VkSampler backend_get_or_create_sampler(GLuint name, GLint min_filter, GLint mag_filter,

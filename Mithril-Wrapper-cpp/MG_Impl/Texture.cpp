@@ -133,6 +133,15 @@ void glTexImage3D(GLenum target, GLint level, GLint internalFormat,
  * (internalFormat, dimensions, levels) and create the Vulkan texture with the
  * correct VkFormat up front. No pixel data is uploaded (immutable storage
  * starts uninitialised, like glTexImage2D with pixels=NULL).
+ *
+ * The Vulkan image is created with initialLayout = UNDEFINED. We immediately
+ * transition it to SHADER_READ_ONLY_OPTIMAL so that:
+ *   - If the texture is sampled before being rendered into, the layout is valid.
+ *   - If the texture is attached to an FBO and rendered into, dynamic rendering
+ *     will transition it to COLOR/DEPTH_STENCIL_ATTACHMENT_OPTIMAL (and the
+ *     tracked layout lets our barrier code emit the correct oldLayout).
+ * Without this transition, the texture sits in UNDEFINED and a subsequent
+ * vkCmdBindDescriptorSets + draw that samples it would be a validation error.
  */
 void glTexStorage2D(GLenum target, GLsizei levels, GLenum internalFormat,
                     GLsizei width, GLsizei height) {
@@ -147,6 +156,9 @@ void glTexStorage2D(GLenum target, GLsizei levels, GLenum internalFormat,
 
     backend_get_or_create_texture(t->id, width, height, 1, levels,
                                   internalFormat, target, 1);
+    // Transition UNDEFINED -> SHADER_READ_ONLY_OPTIMAL so the texture is in a
+    // valid sampling layout before any draw references it.
+    backend_transition_texture_layout(t->id, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 }
 
 void glTexStorage3D(GLenum target, GLsizei levels, GLenum internalFormat,
@@ -162,6 +174,7 @@ void glTexStorage3D(GLenum target, GLsizei levels, GLenum internalFormat,
 
     backend_get_or_create_texture(t->id, width, height, depth, levels,
                                   internalFormat, target, 1);
+    backend_transition_texture_layout(t->id, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 }
 
 void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset,
@@ -251,19 +264,29 @@ void glGenerateMipmap(GLenum target) {
     (void)target;
     mithril::Texture* t = bound_texture_for_unit();
     if (!t) return;
+    // Compute mip level count if the app never called glTexStorage*(levels=N).
+    // glGenerateMipmap is the legacy way to request a full mip chain: the
+    // driver allocates log2(max(w,h))+1 levels. Our Vulkan texture was
+    // created with whatever level count was last set on the GL object; if
+    // it's still 1, the backend's generate_mipmaps becomes a no-op, so the
+    // app sees the base level only. This is acceptable for MC Java (its
+    // modern pipeline uses glTexStorage2D for mipmapped textures).
     t->generateMipmaps = true;
-    // vkCmdBlitImage-based mipmap generation would go here; stubbed for bring-up.
+    backend_generate_mipmaps(t->id);
 }
 
 void glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height,
                   GLenum format, GLenum type, void* pixels) {
     MITHRIL_ENSURE_INIT();
-    (void)x; (void)y;
-    // Best-effort no-op: real readback would use a vkCmdCopyImage to a host-visible
-    // staging buffer + fence wait.
-    if (pixels && width > 0 && height > 0) {
-        (void)format; (void)type;
-    }
+    if (!pixels || width <= 0 || height <= 0) return;
+    // Delegate to the backend: it resolves the current colour attachment
+    // (EGL default framebuffer or the user FBO's GL_COLOR_ATTACHMENT0),
+    // transitions it to TRANSFER_SRC_OPTIMAL, copies into a host-visible
+    // staging buffer via vkCmdCopyImageToBuffer, and synchronously maps +
+    // memcpy's into the caller's buffer. Returns 0 if readback isn't
+    // possible (e.g. no FBO bound to the default framebuffer).
+    (void)backend_read_pixels((int)x, (int)y, (int)width, (int)height,
+                              format, type, pixels);
 }
 
 void glCopyTexImage2D(GLenum target, GLint level, GLenum internalformat,

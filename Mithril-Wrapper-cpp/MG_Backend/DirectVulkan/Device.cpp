@@ -27,7 +27,7 @@ bool has_extension(const std::vector<VkExtensionProperties>& props, const char* 
 
 bool has_layer(const std::vector<VkLayerProperties>& props, const char* name) {
     for (const auto& p : props) {
-        if (std::strcmp(p.layerName, name) == 0) return false;  // unused; return false
+        if (std::strcmp(p.layerName, name) == 0) return true;
     }
     return false;
 }
@@ -239,6 +239,16 @@ bool init_device() {
     for (int i = 0; i < kMaxFramesInFlight; ++i) {
         vkCreateFence(b->device, &fenceCI, nullptr, &b->frameFences[i]);
     }
+
+    // Begin the primary command buffer in the recording state so that
+    // pre-frame commands (e.g. layout transitions from glTexStorage2D, texture
+    // uploads from glTexImage2D outside a render pass) have somewhere to record
+    // before the first begin_render_pass. begin_render_pass does NOT reset the
+    // buffer; only commit_frame resets + re-begins it after submission.
+    VkCommandBufferBeginInfo cbBegin{};
+    cbBegin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    cbBegin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(b->commandBuffer, &cbBegin);
 
     // ---- Pipeline cache ----
     VkPipelineCacheCreateInfo cacheCI{};

@@ -195,11 +195,25 @@ void swapchain_present_and_acquire(Swapchain* sc) {
     Backend* b = backend();
 
     if (sc->currentImage >= 0) {
+        // Copy the index into a real uint32_t before taking its address.
+        // sc->currentImage is int; casting int* to uint32_t* violates strict
+        // aliasing and is UB, even though it works on every ABI we target.
+        uint32_t idx = (uint32_t)sc->currentImage;
         VkPresentInfoKHR pi{};
         pi.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+        // Wait on the acquire semaphore so the present only proceeds once the
+        // image is actually available, and so the semaphore is consumed.
+        // Each vkAcquireNextImageKHR signal MUST be paired with exactly one
+        // wait, otherwise the semaphore accumulates signals and the next
+        // acquire behaves as already-signalled (undefined behaviour).
+        // NOTE: full submit-waits-acquire synchronisation is deferred; the
+        // per-frame vkWaitForFences in commit_frame() currently serialises
+        // CPU against GPU completion, which keeps this correct in practice.
+        pi.waitSemaphoreCount = 1;
+        pi.pWaitSemaphores = &sc->imageAvailable;
         pi.swapchainCount = 1;
         pi.pSwapchains = &sc->swapchain;
-        pi.pImageIndices = (uint32_t*)&sc->currentImage;
+        pi.pImageIndices = &idx;
         VkResult r = vkQueuePresentKHR(b->graphicsQueue, &pi);
         if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) {
             MITHRIL_LOG_WARN("vk", "vkQueuePresentKHR failed (rc=%d)", (int)r);
@@ -248,6 +262,31 @@ int backend_swapchain_height(void* swapchain_state) {
 
 void backend_present_and_acquire(void* swapchain_state) {
     mithril::vk::swapchain_present_and_acquire((mithril::vk::Swapchain*)swapchain_state);
+}
+
+VkImage backend_swapchain_current_color_image(void* swapchain_state) {
+    auto* sc = (mithril::vk::Swapchain*)swapchain_state;
+    if (!sc || sc->currentImage < 0 || sc->currentImage >= (int)sc->images.size())
+        return VK_NULL_HANDLE;
+    return sc->images[sc->currentImage];
+}
+
+VkFormat backend_swapchain_color_format(void* swapchain_state) {
+    auto* sc = (mithril::vk::Swapchain*)swapchain_state;
+    return sc ? sc->format : VK_FORMAT_UNDEFINED;
+}
+
+VkImage backend_swapchain_current_depth_image(void* swapchain_state) {
+    auto* sc = (mithril::vk::Swapchain*)swapchain_state;
+    return sc ? sc->depthImage : VK_NULL_HANDLE;
+}
+
+VkFormat backend_swapchain_depth_format(void* swapchain_state) {
+    auto* sc = (mithril::vk::Swapchain*)swapchain_state;
+    // The depth image is always created as VK_FORMAT_D32_SFLOAT_S8_UINT in
+    // create_swapchain(); there is no per-swapchain field tracking it.
+    (void)sc;
+    return VK_FORMAT_D32_SFLOAT_S8_UINT;
 }
 
 } // extern "C"

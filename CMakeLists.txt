@@ -80,10 +80,13 @@ endif()
 # MobileGlues layout which uses add_subdirectory(3rdparty/glslang) instead of
 # FetchContent so the sources are available for local hacking).
 #
-# SPIRV-Cross is intentionally NOT used in the Vulkan/MoltenVK rewrite:
-# MoltenVK cross-translates Vulkan SPIR-V to MSL internally at
-# vkCreateShaderModule time, so the project no longer needs a separate
-# SPIR-V -> MSL translation stage.
+# SPIRV-Cross is used at runtime for SPIR-V *reflection* (not translation):
+# DescriptorSet.cpp reflects each linked program's VS+FS SPIR-V to discover
+# UBO / sampled-image bindings, then builds VkDescriptorSetLayout /
+# VkPipelineLayout / VkDescriptorPool. MoltenVK still cross-translates the
+# Vulkan SPIR-V to MSL internally at vkCreateShaderModule time, so SPIRV-Cross
+# is NOT used for shader translation — only for the binding reflection needed
+# to wire uniforms + textures into the shader.
 # ---------------------------------------------------------------------------
 set(ENABLE_RTTI                ON  CACHE BOOL "" FORCE)
 set(ENABLE_HLSL                OFF CACHE BOOL "" FORCE)
@@ -93,6 +96,25 @@ set(BUILD_EXTERNAL             OFF CACHE BOOL "" FORCE)
 set(SKIP_GLSLANG_INSTALL       ON  CACHE BOOL "" FORCE)
 set(GLSLANG_TESTS              OFF CACHE BOOL "" FORCE)
 add_subdirectory(Mithril-Wrapper-cpp/3rdparty/glslang)
+
+# SPIRV-Cross: used for SPIR-V reflection (spirv_cross::Compiler +
+# get_shader_resources) in MG_Backend/DirectVulkan/DescriptorSet.cpp. Only the
+# core library is needed (no GLSL/HLSL/MSL/CPP backends, no CLI, no tests).
+# SPIRV-Headers (sibling submodule) provides <spirv.h> for the spv:: enums.
+set(SPIRV_CROSS_STATIC                 ON  CACHE BOOL "" FORCE)
+set(SPIRV_CROSS_CLI                    OFF CACHE BOOL "" FORCE)
+set(SPIRV_CROSS_ENABLE_TESTS           OFF CACHE BOOL "" FORCE)
+set(SPIRV_CROSS_ENABLE_GLSL            OFF CACHE BOOL "" FORCE)
+set(SPIRV_CROSS_ENABLE_HLSL            OFF CACHE BOOL "" FORCE)
+set(SPIRV_CROSS_ENABLE_MSL             OFF CACHE BOOL "" FORCE)
+set(SPIRV_CROSS_ENABLE_CPP             OFF CACHE BOOL "" FORCE)
+set(SPIRV_CROSS_ENABLE_REFLECT         OFF CACHE BOOL "" FORCE)
+set(SPIRV_CROSS_ENABLE_C_API           OFF CACHE BOOL "" FORCE)
+set(SPIRV_CROSS_SKIP_INSTALL           ON  CACHE BOOL "" FORCE)
+set(SPIRV_HEADERS_INCLUDE_DIR
+    "${CMAKE_CURRENT_SOURCE_DIR}/Mithril-Wrapper-cpp/3rdparty/SPIRV-Headers/include"
+    CACHE PATH "" FORCE)
+add_subdirectory(Mithril-Wrapper-cpp/3rdparty/SPIRV-Cross)
 
 # ---------------------------------------------------------------------------
 # Mithril-Wrapper shared library (iOS arm64 dylib)
@@ -132,8 +154,10 @@ set(MITHRIL_SOURCES
     Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Device.cpp
     Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Resources.cpp
     Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Pipeline.cpp
+    Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/DescriptorSet.cpp
     Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Swapchain.cpp
     Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/CommandStream.cpp
+    Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/ImageOps.cpp
 )
 
 if(APPLE)
@@ -161,10 +185,19 @@ target_include_directories(${PROJECT_NAME}
 # Without it the link fails with "Undefined symbols: GetDefaultResources()"
 # when ENABLE_GLSLANG_BINARIES=OFF (the standalone glslangValidator that used
 # to host it is disabled).
+#
+# spirv-cross-core: SPIR-V reflection API (spirv_cross::Compiler,
+# get_shader_resources) used by DescriptorSet.cpp to build descriptor set
+# layouts. The SPIRV-Headers include dir supplies <spirv.h> (spv::Decoration*).
 target_link_libraries(${PROJECT_NAME} PRIVATE
     glslang::glslang
     glslang::SPIRV
     glslang::glslang-default-resource-limits
+    spirv-cross-core
+)
+target_include_directories(${PROJECT_NAME} PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/Mithril-Wrapper-cpp/3rdparty/SPIRV-Cross
+    ${CMAKE_CURRENT_SOURCE_DIR}/Mithril-Wrapper-cpp/3rdparty/SPIRV-Headers/include
 )
 
 if(APPLE)

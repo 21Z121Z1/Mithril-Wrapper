@@ -6,6 +6,7 @@
 #include "Pipeline.h"
 #include "Device.h"
 #include "Resources.h"
+#include "DescriptorSet.h"
 #include "../Backend.h"
 #include "../../MG_Impl/Log.h"
 
@@ -161,6 +162,20 @@ VkShaderModule create_module(const uint32_t* spirv, int word_count) {
     return mod;
 }
 
+// Process-wide empty VkPipelineLayout used as a fallback for programs whose
+// SPIR-V reflects no descriptor bindings (e.g. vertex-only / pass-through
+// shaders). Created lazily on first use.
+VkPipelineLayout empty_pipeline_layout() {
+    Backend* b = backend();
+    static VkPipelineLayout layout = VK_NULL_HANDLE;
+    if (layout == VK_NULL_HANDLE) {
+        VkPipelineLayoutCreateInfo plci{};
+        plci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        vkCreatePipelineLayout(b->device, &plci, nullptr, &layout);
+    }
+    return layout;
+}
+
 } // namespace
 
 VkPipeline get_or_create_pipeline(GLuint program,
@@ -185,6 +200,14 @@ VkPipeline get_or_create_pipeline(GLuint program,
         pr.fragmentModule = create_module(fragment_spirv, fragment_word_count);
     }
     if (pr.vertexModule == VK_NULL_HANDLE) return VK_NULL_HANDLE;
+
+    // Reflect SPIR-V + build VkDescriptorSetLayout / VkPipelineLayout /
+    // VkDescriptorPool once per program (idempotent). The pipeline below binds
+    // against pr.pipelineLayout (or the empty fallback for binding-less
+    // shaders), and prepare_draw later calls backend_bind_program_descriptors
+    // to populate the descriptor set from Program.uniforms + bound textures.
+    ensure_program_layouts(program, vertex_spirv, vertex_word_count,
+                           fragment_spirv, fragment_word_count);
 
     uint64_t sig = hash_signature(program, attribs, attrib_count, color_formats,
                                   color_count, depth_format, blend_enabled,
@@ -282,6 +305,11 @@ VkPipeline get_or_create_pipeline(GLuint program,
     cb.pAttachments = &cbAttach;
 
     // ---- Dynamic state ----
+    // VK_DYNAMIC_STATE_COLOR_WRITE_ENABLE_EXT requires the
+    // VK_EXT_color_write_enable extension which we do not enable; colour
+    // write is therefore part of the pipeline's blend attachment state
+    // (cbAttach.colorWriteMask above). The extended-dynamic-state extension
+    // we DO enable covers cull/front-face/depth-test/depth-write/depth-compare.
     VkDynamicState dynStates[] = {
         VK_DYNAMIC_STATE_VIEWPORT,
         VK_DYNAMIC_STATE_SCISSOR,
@@ -291,11 +319,10 @@ VkPipeline get_or_create_pipeline(GLuint program,
         VK_DYNAMIC_STATE_DEPTH_WRITE_ENABLE,
         VK_DYNAMIC_STATE_DEPTH_COMPARE_OP,
         VK_DYNAMIC_STATE_BLEND_CONSTANTS,
-        VK_DYNAMIC_STATE_COLOR_WRITE_ENABLE_EXT,
     };
     VkPipelineDynamicStateCreateInfo dyn{};
     dyn.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
-    dyn.dynamicStateCount = (uint32_t)(sizeof(dynStates) / sizeof(dynStates[0])) - 1; // skip COLOR_WRITE_ENABLE_EXT (extension)
+    dyn.dynamicStateCount = (uint32_t)(sizeof(dynStates) / sizeof(dynStates[0]));
     dyn.pDynamicStates = dynStates;
 
     // ---- Shader stages ----
@@ -339,22 +366,16 @@ VkPipeline get_or_create_pipeline(GLuint program,
     gi.pDepthStencilState = &ds;
     gi.pColorBlendState = &cb;
     gi.pDynamicState = &dyn;
-    gi.layout = VK_NULL_HANDLE;   // TODO: pipeline layout (see note below)
     gi.renderPass = VK_NULL_HANDLE;
     gi.subpass = 0;
 
-    // NOTE: a real pipeline needs a VkPipelineLayout describing descriptor set
-    // layouts (uniform buffers, sampled textures). For bring-up we create a
-    // bare layout with zero sets so that vkCreateGraphicsPipelines succeeds
-    // and the pipeline is usable for vertex-only draws. Full descriptor
-    // binding is iterated post-merge.
-    static VkPipelineLayout g_emptyLayout = VK_NULL_HANDLE;
-    if (g_emptyLayout == VK_NULL_HANDLE) {
-        VkPipelineLayoutCreateInfo plci{};
-        plci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-        vkCreatePipelineLayout(b->device, &plci, nullptr, &g_emptyLayout);
-    }
-    gi.layout = g_emptyLayout;
+    // Pipeline layout: use the program's reflected layout (built by
+    // ensure_program_layouts above) so UBO / sampled-image bindings declared in
+    // the SPIR-V are visible to the shader. Programs with no descriptor
+    // bindings (reflection produced an empty set) fall back to the
+    // process-wide empty layout so vkCreateGraphicsPipelines still succeeds.
+    gi.layout = (pr.pipelineLayout != VK_NULL_HANDLE) ? pr.pipelineLayout
+                                                      : empty_pipeline_layout();
 
     VkPipeline pipeline = VK_NULL_HANDLE;
     VkResult r = vkCreateGraphicsPipelines(b->device, b->pipelineCache, 1, &gi,
@@ -380,6 +401,14 @@ void delete_program_resources(GLuint program) {
     pr.pipelines.clear();
     if (pr.vertexModule)   { vkDestroyShaderModule(b->device, pr.vertexModule, nullptr);   pr.vertexModule = VK_NULL_HANDLE; }
     if (pr.fragmentModule) { vkDestroyShaderModule(b->device, pr.fragmentModule, nullptr); pr.fragmentModule = VK_NULL_HANDLE; }
+    // Descriptor resources built by ensure_program_layouts. The pool must be
+    // destroyed before the set layout it was created from (Vulkan ordering);
+    // destroying a pool implicitly frees all sets allocated from it.
+    if (pr.descriptorPool)      { vkDestroyDescriptorPool(b->device, pr.descriptorPool, nullptr);      pr.descriptorPool = VK_NULL_HANDLE; }
+    if (pr.pipelineLayout)      { vkDestroyPipelineLayout(b->device, pr.pipelineLayout, nullptr);      pr.pipelineLayout = VK_NULL_HANDLE; }
+    if (pr.descriptorSetLayout) { vkDestroyDescriptorSetLayout(b->device, pr.descriptorSetLayout, nullptr); pr.descriptorSetLayout = VK_NULL_HANDLE; }
+    pr.bindings.clear();
+    pr.layoutsBuilt = false;
     tbl.erase(it);
 }
 

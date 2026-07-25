@@ -154,10 +154,83 @@ GLenum glCheckFramebufferStatus(GLenum target) {
     return GL_FRAMEBUFFER_COMPLETE;
 }
 
-void glBlitFramebuffer(GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLint,
-                       GLbitfield, GLenum) {
+void glBlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1,
+                       GLint dstX0, GLint dstY0, GLint dstX1, GLint dstY1,
+                       GLbitfield mask, GLenum filter) {
     MITHRIL_ENSURE_INIT();
-    // Best-effort: not fully implemented in bring-up; future: vkCmdBlitImage.
+
+    // Only colour blits are implemented (depth/stencil blits are rare in MC
+    // Java's modern pipeline and require NEAREST filtering + aspect masks).
+    if (!(mask & GL_COLOR_BUFFER_BIT)) return;
+
+    // Flush any pending rendering into the source/destination so the blit
+    // sees the latest pixels and subsequent draws see the blit's result.
+    backend_end_render_pass();
+    backend_commit();
+
+    // Resolve the source FBO's colour attachment. The read FBO is the source.
+    //   - FBO 0 (EGL default): use the swapchain image installed on g_state.
+    //   - User FBO: use the texture attached to GL_COLOR_ATTACHMENT0 (or the
+    //     buffer selected by glReadBuffer, but MC Java only uses attachment 0).
+    VkImage src_image = VK_NULL_HANDLE;
+    VkFormat src_format = VK_FORMAT_UNDEFINED;
+    if (g_state->currentReadFBO == 0) {
+        src_image  = g_state->eglDefaultColorImage;
+        src_format = g_state->eglDefaultColorFormat;
+    } else {
+        mithril::Framebuffer* fbo = mithril::state_get_framebuffer(g_state->currentReadFBO);
+        if (fbo) {
+            GLuint tex = 0;
+            // glReadBuffer selects which color attachment is the read source.
+            // Default is GL_COLOR_ATTACHMENT0. MC Java doesn't change this.
+            if (g_state->currentReadFBO == g_state->currentDrawFBO &&
+                fbo->readBuffer >= GL_COLOR_ATTACHMENT0 && fbo->readBuffer <= GL_COLOR_ATTACHMENT7) {
+                tex = fbo->colors[fbo->readBuffer - GL_COLOR_ATTACHMENT0].texture;
+            } else if (fbo->readBuffer >= GL_COLOR_ATTACHMENT0 && fbo->readBuffer <= GL_COLOR_ATTACHMENT7) {
+                tex = fbo->colors[fbo->readBuffer - GL_COLOR_ATTACHMENT0].texture;
+            } else {
+                tex = fbo->colors[0].texture;
+            }
+            if (tex) {
+                src_image = backend_get_texture_image(tex);
+                mithril::Texture* t = mithril::state_get_texture(tex);
+                if (t) src_format = backend_vk_format_for_gl((GLenum)t->internalFormat);
+            }
+        }
+    }
+
+    // Resolve the destination FBO's colour attachment. The draw FBO is the
+    // destination.
+    VkImage dst_image = VK_NULL_HANDLE;
+    VkFormat dst_format = VK_FORMAT_UNDEFINED;
+    if (g_state->currentDrawFBO == 0) {
+        dst_image  = g_state->eglDefaultColorImage;
+        dst_format = g_state->eglDefaultColorFormat;
+    } else {
+        mithril::Framebuffer* fbo = mithril::state_get_framebuffer(g_state->currentDrawFBO);
+        if (fbo) {
+            GLuint tex = fbo->colors[0].texture;
+            if (tex) {
+                dst_image = backend_get_texture_image(tex);
+                mithril::Texture* t = mithril::state_get_texture(tex);
+                if (t) dst_format = backend_vk_format_for_gl((GLenum)t->internalFormat);
+            }
+        }
+    }
+
+    if (src_image == VK_NULL_HANDLE || dst_image == VK_NULL_HANDLE) return;
+    if (src_format == VK_FORMAT_UNDEFINED) src_format = VK_FORMAT_R8G8B8A8_UNORM;
+    if (dst_format == VK_FORMAT_UNDEFINED) dst_format = VK_FORMAT_R8G8B8A8_UNORM;
+
+    // GL's framebuffer origin is bottom-left; Vulkan's is top-left. MoltenVK
+    // flips the Y axis when translating to Metal, so passing the GL coordinates
+    // through unchanged matches the on-screen behaviour expected by the host
+    // app (this mirrors how backend_set_viewport handles the Y flip).
+    backend_blit_images(src_image, src_format,
+                        dst_image, dst_format,
+                        srcX0, srcY0, srcX1, srcY1,
+                        dstX0, dstY0, dstX1, dstY1,
+                        mask, filter);
 }
 
 /* Renderbuffers are minimally supported (used rarely by MC Java). */
