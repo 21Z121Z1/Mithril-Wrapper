@@ -32,26 +32,34 @@ jobs:
           # lookups locate it via ${CMAKE_SOURCE_DIR}/MoltenVK.xcframework.
           #
           # MoltenVK v1.4.x requires iOS 15.0+ (raised minimum target).
-          set -euo pipefail
+          set -uo pipefail
           MOLTENVK_TAG="v1.4.2"
           TARBALL="MoltenVK-ios.tar"
           echo "Fetching MoltenVK ${MOLTENVK_TAG} (iOS)..."
           curl -fsSL -o "${TARBALL}" \
             "https://github.com/KhronosGroup/MoltenVK/releases/download/${MOLTENVK_TAG}/${TARBALL}"
           ls -lh "${TARBALL}"
-          tar -xf "${TARBALL}"
-          # The tarball expands to MoltenVK.xcframework at the root.
-          # If nested, move it to the repo root for CMake lookup paths.
-          if [ ! -d "MoltenVK.xcframework" ]; then
-            FOUND=$(find . -maxdepth 3 -type d -name "MoltenVK.xcframework" | head -1)
-            if [ -n "${FOUND}" ]; then
-              mv "${FOUND}" ./MoltenVK.xcframework
-            fi
+          # Extract to a staging dir to inspect the layout.
+          mkdir -p moltenvk-staging
+          tar -xf "${TARBALL}" -C moltenvk-staging
+          echo "=== Tarball top-level contents ==="
+          ls -la moltenvk-staging/
+          echo "=== Searching for MoltenVK.xcframework ==="
+          FOUND=$(find moltenvk-staging -type d -name "MoltenVK.xcframework" | head -1)
+          if [ -z "${FOUND}" ]; then
+            echo "::error::MoltenVK.xcframework not found in tarball. Contents:"
+            find moltenvk-staging -maxdepth 3 -type d | head -30
+            exit 1
           fi
-          echo "MoltenVK.xcframework in place:"
+          echo "Found at: ${FOUND}"
+          mv "${FOUND}" ./MoltenVK.xcframework
+          rm -rf moltenvk-staging
+          echo "=== MoltenVK.xcframework in place ==="
           ls -ld MoltenVK.xcframework
           ls -l MoltenVK.xcframework/Headers/vulkan/vulkan.h || true
           ls -ld MoltenVK.xcframework/ios-arm64 || true
+          # List the framework contents to verify structure
+          ls -l MoltenVK.xcframework/ || true
 
       - name: Configure (iOS arm64)
         run: |

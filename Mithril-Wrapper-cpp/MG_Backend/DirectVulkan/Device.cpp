@@ -170,6 +170,11 @@ bool init_device() {
     if (has_extension(devExtProps, VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME)) {
         devExts.push_back(VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME);
     }
+    // VK_EXT_extended_dynamic_state: vkCmdSetCullMode/FrontFace/DepthTestEnable/
+    // DepthWriteEnable/DepthCompareOp etc. without rebuilding pipelines.
+    if (has_extension(devExtProps, VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME)) {
+        devExts.push_back(VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME);
+    }
 
     float queuePriority = 1.0f;
     VkDeviceQueueCreateInfo queueCI{};
@@ -178,8 +183,24 @@ bool init_device() {
     queueCI.queueCount = 1;
     queueCI.pQueuePriorities = &queuePriority;
 
+    // Feature chain: enable dynamic rendering + extended dynamic state so the
+    // vkCmdBeginRendering / vkCmdSetCullMode etc. calls in CommandStream.cpp
+    // are valid. Without these features a strict driver rejects pipeline
+    // creation that carries VkPipelineRenderingCreateInfo and rejects the
+    // dynamic-state vkCmdSet* calls. (MoltenVK is lenient but the spec
+    // requires the features to be enabled.)
+    VkPhysicalDeviceExtendedDynamicStateFeaturesEXT extDynStateFeat{};
+    extDynStateFeat.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_FEATURES_EXT;
+    extDynStateFeat.extendedDynamicState = VK_TRUE;
+
+    VkPhysicalDeviceDynamicRenderingFeaturesKHR dynRenderFeat{};
+    dynRenderFeat.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES_KHR;
+    dynRenderFeat.dynamicRendering = VK_TRUE;
+    dynRenderFeat.pNext = &extDynStateFeat;
+
     VkDeviceCreateInfo devCI{};
     devCI.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+    devCI.pNext = &dynRenderFeat;
     devCI.queueCreateInfoCount = 1;
     devCI.pQueueCreateInfos = &queueCI;
     devCI.enabledExtensionCount = (uint32_t)devExts.size();
