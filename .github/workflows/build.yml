@@ -26,33 +26,39 @@ jobs:
 
       - name: Download MoltenVK.xcframework (static)
         run: |
-          # Pull a tagged MoltenVK release tarball. The static .xcframework
-          # ships MoltenVK + Vulkan-Headers; we drop it at the repo root so
-          # CMakeLists.txt's find_path / find_library lookups locate it via
-          # ${CMAKE_SOURCE_DIR}/MoltenVK.xcframework.
+          # Pull a tagged MoltenVK release tarball. The iOS-only tarball ships
+          # MoltenVK.xcframework (static framework + Vulkan-Headers); we drop
+          # it at the repo root so CMakeLists.txt's find_path / find_library
+          # lookups locate it via ${CMAKE_SOURCE_DIR}/MoltenVK.xcframework.
+          #
+          # MoltenVK v1.4.x requires iOS 15.0+ (raised minimum target).
           set -euo pipefail
-          MOLTENVK_TAG="v1.2.9"
-          TARBALL="MoltenVK-${MOLTENVK_TAG}.tar.gz"
-          echo "Fetching MoltenVK ${MOLTENVK_TAG}..."
+          MOLTENVK_TAG="v1.4.2"
+          TARBALL="MoltenVK-ios.tar"
+          echo "Fetching MoltenVK ${MOLTENVK_TAG} (iOS)..."
           curl -fsSL -o "${TARBALL}" \
             "https://github.com/KhronosGroup/MoltenVK/releases/download/${MOLTENVK_TAG}/${TARBALL}"
-          ls -l "${TARBALL}"
-          tar -xzf "${TARBALL}"
-          # The tarball expands to MoltenVK-${MOLTENVK_TAG}/MoltenVK.xcframework;
-          # move the .xcframework to the repo root for the CMake lookup paths.
-          if [ -d "MoltenVK-${MOLTENVK_TAG}/MoltenVK.xcframework" ]; then
-            mv "MoltenVK-${MOLTENVK_TAG}/MoltenVK.xcframework" ./MoltenVK.xcframework
+          ls -lh "${TARBALL}"
+          tar -xf "${TARBALL}"
+          # The tarball expands to MoltenVK.xcframework at the root.
+          # If nested, move it to the repo root for CMake lookup paths.
+          if [ ! -d "MoltenVK.xcframework" ]; then
+            FOUND=$(find . -maxdepth 3 -type d -name "MoltenVK.xcframework" | head -1)
+            if [ -n "${FOUND}" ]; then
+              mv "${FOUND}" ./MoltenVK.xcframework
+            fi
           fi
           echo "MoltenVK.xcframework in place:"
           ls -ld MoltenVK.xcframework
           ls -l MoltenVK.xcframework/Headers/vulkan/vulkan.h || true
+          ls -ld MoltenVK.xcframework/ios-arm64 || true
 
       - name: Configure (iOS arm64)
         run: |
           cmake -B build \
             -DCMAKE_TOOLCHAIN_FILE=ios.toolchain.cmake \
             -DPLATFORM=OS64 \
-            -DDEPLOYMENT_TARGET=14.0 \
+            -DDEPLOYMENT_TARGET=15.0 \
             -DENABLE_BITCODE=OFF \
             -DENABLE_ARC=OFF \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
