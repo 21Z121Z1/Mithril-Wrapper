@@ -224,7 +224,8 @@ if(APPLE)
     # MoltenVK static framework + Vulkan headers. The framework transitively
     # links Metal.framework / QuartzCore.framework / Foundation.framework, but
     # we still list them explicitly to satisfy -framework lookup when the
-    # static link strips MoltenVK's lazy references.
+    # static link strips MoltenVK's lazy references. UIKit is required because
+    # libMoltenVK.a references UIScreen / UIView (iOS surface/scale handling).
     #
     # -ObjC: forces the linker to load all Objective-C class/category symbols
     # from static archives. MoltenVK's libMoltenVK.a contains ObjC++ code
@@ -239,6 +240,7 @@ if(APPLE)
         "-framework QuartzCore"
         "-framework CoreGraphics"
         "-framework IOSurface"
+        "-framework UIKit"
     )
     target_link_options(${PROJECT_NAME} PRIVATE -ObjC)
     target_compile_definitions(${PROJECT_NAME} PRIVATE MITHRIL_VULKAN=1)
