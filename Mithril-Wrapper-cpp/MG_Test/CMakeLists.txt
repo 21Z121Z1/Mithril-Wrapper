@@ -59,8 +59,16 @@ set(MITHRIL_TEST_SOURCES
     # Subsystems under test
     ${CMAKE_CURRENT_SOURCE_DIR}/../MG_State/State.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../MG_Impl/Shader.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/../MG_Backend/DirectVulkan/FormatMap.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../MG_Impl/Buffer.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../MG_Impl/Texture.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../MG_Impl/Framebuffer.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../MG_Impl/VertexArray.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../MG_Impl/Program.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../MG_Impl/lookup.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../MG_Impl/init.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../MG_Impl/EGLConfig.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../MG_Backend/DirectVulkan/FormatMap.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../MG_Backend/DirectVulkan/Reflect.cpp
     # Log.cpp: pulled in because Shader.cpp (and State.h via includes.h)
     # reference mithril::log_write via the MITHRIL_LOG_* macros. Log.cpp is
     # pure C++ (stderr + std::getenv) — no Vulkan / ObjC / iOS dependencies.
@@ -70,6 +78,13 @@ set(MITHRIL_TEST_SOURCES
     ShaderTest.cpp
     FormatMapTest.cpp
     EGLConfigTest.cpp
+    BufferTest.cpp
+    TextureTest.cpp
+    FramebufferTest.cpp
+    VertexArrayTest.cpp
+    ProgramTest.cpp
+    LookupTest.cpp
+    ReflectTest.cpp
 )
 
 add_executable(mithril_tests ${MITHRIL_TEST_SOURCES})
@@ -104,6 +119,15 @@ target_include_directories(mithril_tests PRIVATE
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
     target_compile_options(mithril_tests PRIVATE
         -Wall -Wextra -Wno-unused-parameter -Wno-unused-variable)
+endif()
+
+# Export the test executable's global symbol table so dlsym(RTLD_DEFAULT)
+# (used by lookup.cpp's glXGetProcAddress) can resolve the GL entry points
+# compiled into the test binary (glGenBuffers etc. from Buffer.cpp). Without
+# -rdynamic the ELF executable only exports symbols needed for dynamic
+# linking, and LookupTest's dlsym("glGenBuffers") returns NULL.
+if(UNIX AND NOT APPLE)
+    target_link_options(mithril_tests PRIVATE -rdynamic)
 endif()
 
 # Register with CTest so `ctest --output-on-failure` discovers the binary.

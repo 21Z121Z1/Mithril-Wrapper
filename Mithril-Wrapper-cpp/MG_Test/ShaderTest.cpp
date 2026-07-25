@@ -147,3 +147,61 @@ TEST(Shader, AutoMapsBindingsWhenNoneProvided) {
     EXPECT_TRUE(ok) << "info log: " << info;
     EXPECT_FALSE(spirv.empty());
 }
+
+// GL_GEOMETRY_SHADER maps to EShLangGeometry via to_esh_stage(). A minimal
+// points-in / triangle_strip-out geometry shader compiles to a non-empty
+// SPIR-V blob under the Vulkan client.
+TEST(Shader, CompilesGeometryShader) {
+    std::vector<uint32_t> spirv;
+    std::string info;
+    std::string src =
+        "#version 330 core\n"
+        "layout(points) in; layout(triangle_strip,max_vertices=3) out;"
+        "void main(){gl_Position=vec4(0);EmitVertex();}\n";
+    bool ok = mithril::shader_translate(GL_GEOMETRY_SHADER, src, spirv, info);
+    EXPECT_TRUE(ok) << "info log: " << info;
+    EXPECT_FALSE(spirv.empty());
+}
+
+// GL_COMPUTE_SHADER maps to EShLangCompute via to_esh_stage(). A minimal
+// local_size_x=1 compute shader compiles to a non-empty SPIR-V blob whose
+// first word is the canonical SPIR-V magic number. NOTE: compute shaders
+// became core in GLSL 4.30 — glslang rejects #version 420 with "required
+// extension not requested: GL_ARB_compute_shader", and #version 330 with
+// "compute shaders require ... version 420 or above". The source pins 430
+// explicitly; ensure_glsl_version() leaves it untouched (only upgrades <330).
+TEST(Shader, CompilesComputeShader) {
+    std::vector<uint32_t> spirv;
+    std::string info;
+    std::string src = "#version 430 core\nlayout(local_size_x=1) in;void main(){}\n";
+    bool ok = mithril::shader_translate(GL_COMPUTE_SHADER, src, spirv, info);
+    EXPECT_TRUE(ok) << "info log: " << info;
+    ASSERT_FALSE(spirv.empty());
+    EXPECT_EQ(spirv[0], kSpirvMagic);
+}
+
+// Source with no #version line is handled by ensure_glsl_version(), which
+// prepends "#version 330 core\n" so the shader compiles under the Vulkan
+// client (Vulkan GLSL requires #version 330 minimum).
+TEST(Shader, MissingVersionIsPrepended) {
+    std::vector<uint32_t> spirv;
+    std::string info;
+    std::string src = "void main(){gl_Position=vec4(0);}\n";
+    bool ok = mithril::shader_translate(GL_VERTEX_SHADER, src, spirv, info);
+    EXPECT_TRUE(ok) << "info log: " << info;
+    EXPECT_FALSE(spirv.empty());
+}
+
+// #version 300 es is below the Vulkan GLSL minimum of 330. Reading
+// ensure_glsl_version(): the "es" version is treated as < 330, so the entire
+// #version line is replaced with "#version 330 core" — i.e. the ES profile
+// is NOT preserved as-is, it is upgraded to desktop core. As a result the
+// shader compiles successfully under the Vulkan client.
+TEST(Shader, EsProfileNotUpgraded) {
+    std::vector<uint32_t> spirv;
+    std::string info;
+    std::string src = "#version 300 es\nvoid main(){gl_Position=vec4(0);}\n";
+    bool ok = mithril::shader_translate(GL_VERTEX_SHADER, src, spirv, info);
+    EXPECT_TRUE(ok) << "info log: " << info;
+    EXPECT_FALSE(spirv.empty());
+}

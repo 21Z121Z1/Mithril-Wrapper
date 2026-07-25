@@ -13,30 +13,10 @@
 #include <vulkan/vulkan.h>
 #include <GL/gl.h>
 
-#include <cstdint>
-#include <string>
-#include <vector>
+#include "Reflect.h"  // DescriptorBinding / DescriptorBindingMember + reflect_stage / merge_bindings
 
 namespace mithril {
 namespace vk {
-
-// One reflected descriptor binding (merged across vertex + fragment stages).
-struct DescriptorBindingMember {
-    std::string name;     // struct member name (UBOs only)
-    uint32_t offset = 0;  // byte offset within the UBO
-    uint32_t size = 0;    // byte size of the member
-};
-
-struct DescriptorBinding {
-    uint32_t set = 0;
-    uint32_t binding = 0;
-    VkDescriptorType type = VK_DESCRIPTOR_TYPE_MAX_ENUM;
-    VkShaderStageFlags stageMask = 0;
-    uint32_t bufferSize = 0;        // UBO size in bytes (0 for images)
-    uint32_t descriptorCount = 1;   // array size (1 for non-array samplers)
-    std::string name;               // reflected resource name (for UBO matching)
-    std::vector<DescriptorBindingMember> members;  // UBO members (for packed $Global-style blocks)
-};
 
 /*
  * Reflect the vertex + fragment SPIR-V of `program`, merge the binding sets

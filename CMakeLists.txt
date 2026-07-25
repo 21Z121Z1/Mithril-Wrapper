@@ -167,6 +167,7 @@ set(MITHRIL_SOURCES
     Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Device.cpp
     Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Resources.cpp
     Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/FormatMap.cpp
+    Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Reflect.cpp
     Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Pipeline.cpp
     Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/DescriptorSet.cpp
     Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/CommandStream.cpp

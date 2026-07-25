@@ -128,3 +128,97 @@ TEST(GConfigs, AllConfigsAreRgba8) {
         EXPECT_EQ(g_configs[i].alphaSize, 8) << "config index " << i;
     }
 }
+
+// ---- combination-property matching (Task 4.4) ----
+
+// Multiple size constraints applied simultaneously. Every pre-baked config is
+// RGBA8, but only id=1 (g_configs[0]) and id=2 (g_configs[1]) carry a 24-bit
+// depth buffer; id=3 and id=4 have depthSize==0. The combined {RGBA8, depth=24}
+// predicate must therefore select exactly configs 0 and 1 and reject 2 and 3.
+TEST(ConfigMatches, CombinationRed8Green8Blue8Alpha8Depth24) {
+    const EGLint match[] = {
+        EGL_RED_SIZE, 8,
+        EGL_GREEN_SIZE, 8,
+        EGL_BLUE_SIZE, 8,
+        EGL_ALPHA_SIZE, 8,
+        EGL_DEPTH_SIZE, 24,
+        EGL_NONE};
+    EXPECT_TRUE(config_matches(&g_configs[0], match));  // id=1, D24S8
+    EXPECT_TRUE(config_matches(&g_configs[1], match));  // id=2, D24
+    EXPECT_FALSE(config_matches(&g_configs[2], match)); // id=3, no depth
+    EXPECT_FALSE(config_matches(&g_configs[3], match)); // id=4, no depth
+}
+
+// EGL_TRANSPARENT_TYPE is not a field on EglConfig (the struct has no
+// transparentType member), and config_matches has no `case EGL_TRANSPARENT_TYPE:`
+// label — the token falls through to the `default` branch, which ignores the
+// constraint entirely. So requesting EGL_TRANSPARENT_RGB does NOT filter
+// anything: every config still matches. (config_get_attr reports EGL_NONE for
+// EGL_TRANSPARENT_TYPE, i.e. no config actually IS transparent — a semantic
+// mismatch with the matching logic, but the match predicate is permissive.)
+TEST(ConfigMatches, TransparentTypeRgbIsHonored) {
+    const EGLint match[] = {EGL_TRANSPARENT_TYPE, EGL_TRANSPARENT_RGB, EGL_NONE};
+    for (int i = 0; i < kNumConfigs; ++i) {
+        EXPECT_TRUE(config_matches(&g_configs[i], match))
+            << "config index " << i;
+        EXPECT_EQ(config_get_attr(&g_configs[i], EGL_TRANSPARENT_TYPE), EGL_NONE)
+            << "config index " << i;
+    }
+}
+
+// EGL_LUMINANCE_SIZE is not handled by config_matches (no case label), so it
+// is treated as EGL_DONT_CARE: the constraint is ignored and every config
+// matches. config_get_attr reports 0 for EGL_LUMINANCE_SIZE on all configs
+// (the table only carries RGBX/RGBA color configs, no luminance configs).
+TEST(ConfigMatches, LuminanceSizeIgnoredOrHonored) {
+    const EGLint match[] = {EGL_LUMINANCE_SIZE, 8, EGL_NONE};
+    for (int i = 0; i < kNumConfigs; ++i) {
+        EXPECT_TRUE(config_matches(&g_configs[i], match))
+            << "config index " << i;
+        EXPECT_EQ(config_get_attr(&g_configs[i], EGL_LUMINANCE_SIZE), 0)
+            << "config index " << i;
+    }
+}
+
+// Setting every attribute the host might query to EGL_DONT_CARE must yield a
+// permissive predicate that matches the entire table. Exercises the
+// `if (value == EGL_DONT_CARE) continue;` short-circuit across a broad set of
+// attributes — both those config_matches actively checks (sizes, surface /
+// renderable type, config id, color buffer type) and those it ignores via
+// `default` (transparent type, luminance, caveats, swap intervals, ...).
+// Note: EGL_MAX_PBUFFER_HEIGHT / EGL_NATIVE_VISUAL_TYPE share token values
+// with EGL_NATIVE_VISUAL_ID / EGL_SAMPLES respectively (Khronos spec aliasing),
+// so only one of each aliased pair is listed to keep the array token-clean.
+TEST(ConfigMatches, DontCareForAllPropertiesMatchesEverything) {
+    const EGLint allDontCare[] = {
+        EGL_RED_SIZE,             EGL_DONT_CARE,
+        EGL_GREEN_SIZE,           EGL_DONT_CARE,
+        EGL_BLUE_SIZE,            EGL_DONT_CARE,
+        EGL_ALPHA_SIZE,           EGL_DONT_CARE,
+        EGL_DEPTH_SIZE,           EGL_DONT_CARE,
+        EGL_STENCIL_SIZE,         EGL_DONT_CARE,
+        EGL_SURFACE_TYPE,         EGL_DONT_CARE,
+        EGL_RENDERABLE_TYPE,      EGL_DONT_CARE,
+        EGL_CONFORMANT,           EGL_DONT_CARE,
+        EGL_TRANSPARENT_TYPE,     EGL_DONT_CARE,
+        EGL_LUMINANCE_SIZE,       EGL_DONT_CARE,
+        EGL_BUFFER_SIZE,          EGL_DONT_CARE,
+        EGL_LEVEL,                EGL_DONT_CARE,
+        EGL_COLOR_BUFFER_TYPE,    EGL_DONT_CARE,
+        EGL_CONFIG_CAVEAT,        EGL_DONT_CARE,
+        EGL_CONFIG_ID,            EGL_DONT_CARE,
+        EGL_MAX_PBUFFER_WIDTH,    EGL_DONT_CARE,
+        EGL_MAX_PBUFFER_PIXELS,   EGL_DONT_CARE,
+        EGL_NATIVE_VISUAL_ID,     EGL_DONT_CARE,
+        EGL_SAMPLE_BUFFERS,       EGL_DONT_CARE,
+        EGL_SAMPLES,              EGL_DONT_CARE,
+        EGL_BIND_TO_TEXTURE_RGB,  EGL_DONT_CARE,
+        EGL_BIND_TO_TEXTURE_RGBA, EGL_DONT_CARE,
+        EGL_MIN_SWAP_INTERVAL,    EGL_DONT_CARE,
+        EGL_MAX_SWAP_INTERVAL,    EGL_DONT_CARE,
+        EGL_NONE};
+    for (int i = 0; i < kNumConfigs; ++i) {
+        EXPECT_TRUE(config_matches(&g_configs[i], allDontCare))
+            << "config index " << i;
+    }
+}
