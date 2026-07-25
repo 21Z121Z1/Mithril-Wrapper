@@ -1,0 +1,110 @@
+# Mithril-Wrapper - MG_Test/CMakeLists.txt
+# Google Test unit test infrastructure for the Mithril-Wrapper pure-logic
+# subsystems (state machine, GLSL->SPIR-V translation, GL format mapping,
+# EGL config matching). Built only when MITHRIL_BUILD_TEST=ON.
+#
+# Layout mirrors MobileGL's MobileGL/MG_Test/ (one test file per subsystem,
+# FetchContent for Google Test v1.17.0, gtest_main as the entry point).
+#
+# NOTE: FetchContent_Declare() requires network access to clone googletest
+# from GitHub. In a sandbox without network access, CMake configuration will
+# fail at the FetchContent_MakeAvailable() step with a git clone error — this
+# is expected and is handled by the CI runner, which provides network. Local
+# no-network configuration failures here can be safely ignored; the rest of
+# the build system (the iOS dylib target) is unaffected because
+# MITHRIL_BUILD_TEST defaults to OFF.
+
+include(FetchContent)
+FetchContent_Declare(
+    googletest
+    GIT_REPOSITORY https://github.com/google/googletest.git
+    GIT_TAG        v1.17.0
+)
+# For Windows: prevent overriding the parent project's compiler/linker settings
+set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(googletest)
+
+enable_testing()
+
+# Vulkan headers are required for <vulkan/vulkan.h> pulled in by Backend.h /
+# Resources.h / State.h. On iOS the production build sources them from
+# MoltenVK-Headers; the Linux test build uses the system Vulkan SDK (installed
+# in CI via LunarG installer / apt). find_package(Vulkan) requires BOTH the
+# headers AND libvulkan.so, which is overkill for the test target — we never
+# call into the Vulkan loader (BackendStub provides the backend_* symbols).
+# Use find_path so a headers-only install (e.g. Vulkan-Headers package, or a
+# VULKAN_HEADERS_INCLUDE_DIR hint) is sufficient.
+find_package(Vulkan QUIET)
+if(Vulkan_FOUND AND Vulkan_INCLUDE_DIRS)
+    set(MITHRIL_TEST_VULKAN_INCLUDE_DIR "${Vulkan_INCLUDE_DIRS}")
+else()
+    find_path(MITHRIL_TEST_VULKAN_INCLUDE_DIR
+        NAMES vulkan/vulkan.h
+        PATHS
+            "${VULKAN_HEADERS_INCLUDE_DIR}"
+            "$ENV{VULKAN_SDK}/include"
+            "$ENV{VULKAN_HEADERS_INCLUDE_DIR}"
+            /usr/include
+            /usr/local/include
+        REQUIRED
+    )
+endif()
+
+# ---- Sources under test (pure-logic, no MoltenVK / ObjC++ / iOS framework deps) ----
+set(MITHRIL_TEST_SOURCES
+    # gtest main replacement (placeholder for future global init hooks)
+    main.cpp
+    # backend_* C API stubs (return safe defaults; isolate from real Vulkan)
+    BackendStub.cpp
+    # Subsystems under test
+    ${CMAKE_CURRENT_SOURCE_DIR}/../MG_State/State.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../MG_Impl/Shader.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../MG_Backend/DirectVulkan/FormatMap.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/../MG_Impl/EGLConfig.cpp
+    # Log.cpp: pulled in because Shader.cpp (and State.h via includes.h)
+    # reference mithril::log_write via the MITHRIL_LOG_* macros. Log.cpp is
+    # pure C++ (stderr + std::getenv) — no Vulkan / ObjC / iOS dependencies.
+    ${CMAKE_CURRENT_SOURCE_DIR}/../MG_Impl/Log.cpp
+    # Unit test files (one per subsystem under test).
+    StateTest.cpp
+    ShaderTest.cpp
+    FormatMapTest.cpp
+    EGLConfigTest.cpp
+)
+
+add_executable(mithril_tests ${MITHRIL_TEST_SOURCES})
+
+target_link_libraries(mithril_tests PRIVATE
+    GTest::gtest_main
+    # glslang + SPIRV-Cross: mirror the production target's link list so
+    # Shader.cpp (glslang::InitializeProcess / GlslangToSpv) links cleanly.
+    glslang::glslang
+    glslang::SPIRV
+    glslang::glslang-default-resource-limits
+    spirv-cross-core
+    # Linux: dladdr / dlsym used by the lookup path (and glslang internally).
+    ${CMAKE_DL_LIBS}
+)
+
+target_include_directories(mithril_tests PRIVATE
+    # Mithril-Wrapper-cpp/ root — every internal header is referenced relative
+    # to here (e.g. "MG_Impl/Shader.h", "MG_Backend/Backend.h").
+    ${CMAKE_CURRENT_SOURCE_DIR}/..
+    # Mithril-Wrapper-cpp/include/ — public GL / EGL headers.
+    ${CMAKE_CURRENT_SOURCE_DIR}/../include
+    # SPIRV-Cross + SPIRV-Headers includes (mirrors the production target).
+    ${CMAKE_CURRENT_SOURCE_DIR}/../3rdparty/SPIRV-Cross
+    ${CMAKE_CURRENT_SOURCE_DIR}/../3rdparty/SPIRV-Headers/include
+    # Vulkan headers (resolved above; on Linux this is the system Vulkan SDK
+    # or a VULKAN_HEADERS_INCLUDE_DIR hint).
+    ${MITHRIL_TEST_VULKAN_INCLUDE_DIR}
+)
+
+# Reasonable warnings for the test target (mirror the production target).
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(mithril_tests PRIVATE
+        -Wall -Wextra -Wno-unused-parameter -Wno-unused-variable)
+endif()
+
+# Register with CTest so `ctest --output-on-failure` discovers the binary.
+add_test(NAME mithril_tests COMMAND mithril_tests)

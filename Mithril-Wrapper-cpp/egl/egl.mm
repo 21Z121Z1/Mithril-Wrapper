@@ -45,6 +45,7 @@
 // the egl/ directory is not on the include search path and the quote-include
 // lookup only checks the current file's directory + -I dirs.
 #include "../MG_Impl/includes.h"
+#include "../MG_Impl/EGLConfig.h"
 #include <EGL/egl.h>
 
 #include <atomic>
@@ -56,21 +57,20 @@
 // ---------------------------------------------------------------------------
 namespace {
 
+// Bring the extracted config table + matching helpers from
+// mithril::egl (see MG_Impl/EGLConfig.h) into this TU's anonymous namespace
+// so egl.mm can keep referring to EglConfig / g_configs / kNumConfigs /
+// config_matches / config_get_attr unqualified, exactly as it did before the
+// extraction.
+using mithril::egl::EglConfig;
+using mithril::egl::g_configs;
+using mithril::egl::kNumConfigs;
+using mithril::egl::config_matches;
+using mithril::egl::config_get_attr;
+
 struct EglDisplay {
     bool      initialized = false;
     EGLenum   boundAPI   = EGL_OPENGL_API;
-};
-
-struct EglConfig {
-    EGLint  redSize;
-    EGLint  greenSize;
-    EGLint  blueSize;
-    EGLint  alphaSize;
-    EGLint  depthSize;
-    EGLint  stencilSize;
-    EGLint  surfaceType;   // EGL_WINDOW_BIT | EGL_PBUFFER_BIT
-    EGLint  renderableType; // EGL_OPENGL_BIT (we expose Core Profile)
-    EGLint  configId;
 };
 
 struct EglSurface {
@@ -97,19 +97,6 @@ struct EglContext {
 
 // Singleton display. Returned for every eglGetDisplay / eglGetPlatformDisplay.
 EglDisplay g_display;
-
-// Pre-baked configs. Indexed by EGLConfig (we hand out &g_configs[i]).
-EglConfig g_configs[] = {
-    // id=1: RGBA8 + D24S8 (the config Amethyst requests for MC Java)
-    { 8, 8, 8, 8, 24, 8,  EGL_WINDOW_BIT | EGL_PBUFFER_BIT, EGL_OPENGL_BIT, 1 },
-    // id=2: RGBA8 + D24 (no stencil)
-    { 8, 8, 8, 8, 24, 0,  EGL_WINDOW_BIT | EGL_PBUFFER_BIT, EGL_OPENGL_BIT, 2 },
-    // id=3: RGBA8 + S8 (no depth)
-    { 8, 8, 8, 8, 0,  8,  EGL_WINDOW_BIT | EGL_PBUFFER_BIT, EGL_OPENGL_BIT, 3 },
-    // id=4: RGBA8 only
-    { 8, 8, 8, 8, 0,  0,  EGL_WINDOW_BIT | EGL_PBUFFER_BIT, EGL_OPENGL_BIT, 4 },
-};
-constexpr int kNumConfigs = sizeof(g_configs) / sizeof(g_configs[0]);
 
 // Thread-local EGL current state (mirrors Khronos EGL semantics).
 thread_local EglContext* t_currentCtx    = nullptr;
@@ -214,74 +201,10 @@ void install_surface_on_state(EglSurface* s) {
 // ---------------------------------------------------------------------------
 // Config matching
 // ---------------------------------------------------------------------------
-bool config_matches(const EglConfig* cfg, const EGLint* attribs) {
-    if (!attribs) return true;
-    for (const EGLint* a = attribs; *a != EGL_NONE; a += 2) {
-        EGLint name  = a[0];
-        EGLint value = a[1];
-        if (value == EGL_DONT_CARE) continue;
-        switch (name) {
-            case EGL_RED_SIZE:        if (cfg->redSize       < value) return false; break;
-            case EGL_GREEN_SIZE:      if (cfg->greenSize     < value) return false; break;
-            case EGL_BLUE_SIZE:       if (cfg->blueSize      < value) return false; break;
-            case EGL_ALPHA_SIZE:      if (cfg->alphaSize     < value) return false; break;
-            case EGL_DEPTH_SIZE:      if (cfg->depthSize     < value) return false; break;
-            case EGL_STENCIL_SIZE:    if (cfg->stencilSize   < value) return false; break;
-            case EGL_SURFACE_TYPE:    if ((cfg->surfaceType & value) != value) return false; break;
-            case EGL_RENDERABLE_TYPE: if ((cfg->renderableType & value) != value) return false; break;
-            case EGL_COLOR_BUFFER_TYPE: if (value != EGL_RGB_BUFFER) return false; break;
-            case EGL_CONFIG_ID:       if (cfg->configId != value) return false; break;
-            case EGL_LEVEL:           break; // ignored
-            case EGL_NATIVE_RENDERABLE: break; // ignored
-            case EGL_NATIVE_VISUAL_ID: break; // ignored
-            case EGL_BIND_TO_TEXTURE_RGB:
-            case EGL_BIND_TO_TEXTURE_RGBA:
-                // We always permit texturing; ignore the constraint.
-                break;
-            default:
-                // Unknown attribute — EGL says this is EGL_BAD_ATTRIBUTE,
-                // but to be tolerant of extension tokens we ignore it.
-                break;
-        }
-    }
-    return true;
-}
-
-EGLint config_get_attr(const EglConfig* cfg, EGLint attr) {
-    switch (attr) {
-        case EGL_RED_SIZE:        return cfg->redSize;
-        case EGL_GREEN_SIZE:      return cfg->greenSize;
-        case EGL_BLUE_SIZE:       return cfg->blueSize;
-        case EGL_ALPHA_SIZE:      return cfg->alphaSize;
-        case EGL_DEPTH_SIZE:      return cfg->depthSize;
-        case EGL_STENCIL_SIZE:    return cfg->stencilSize;
-        case EGL_SURFACE_TYPE:    return cfg->surfaceType;
-        case EGL_RENDERABLE_TYPE: return cfg->renderableType;
-        case EGL_CONFORMANT:      return cfg->renderableType;
-        case EGL_CONFIG_ID:       return cfg->configId;
-        case EGL_COLOR_BUFFER_TYPE: return EGL_RGB_BUFFER;
-        case EGL_BUFFER_SIZE:     return cfg->redSize + cfg->greenSize + cfg->blueSize;
-        case EGL_LUMINANCE_SIZE:  return 0;
-        case EGL_ALPHA_MASK_SIZE: return 0;
-        case EGL_CONFIG_CAVEAT:   return EGL_NONE;
-        case EGL_LEVEL:           return 0;
-        case EGL_MAX_PBUFFER_WIDTH:  return 16384;
-        case EGL_MAX_PBUFFER_PIXELS: return 16384 * 16384;
-        case EGL_NATIVE_RENDERABLE:  return EGL_FALSE;
-        // EGL_NATIVE_VISUAL_ID and EGL_MAX_PBUFFER_HEIGHT are the same token
-        // (0x3030) in the Khronos EGL spec; EGL_NATIVE_VISUAL_TYPE and
-        // EGL_SAMPLES share 0x3031. A config query at 0x3030 returns the
-        // native visual id (0 — gl_bridge.m tolerates this), and 0x3031
-        // returns the sample count (0 == no MSAA). One case label per value.
-        case EGL_NATIVE_VISUAL_ID:   return 0;
-        case EGL_SAMPLES:            return 0;
-        case EGL_SAMPLE_BUFFERS:     return 0;
-        case EGL_TRANSPARENT_TYPE:   return EGL_NONE;
-        case EGL_MIN_SWAP_INTERVAL:  return 0;
-        case EGL_MAX_SWAP_INTERVAL:  return 1;
-        default:                     return 0;
-    }
-}
+// config_matches / config_get_attr live in mithril::egl (see
+// MG_Impl/EGLConfig.{h,cpp}). The using-declarations above alias them into
+// this anonymous namespace so call sites in egl.mm can refer to them
+// unqualified, exactly as before the extraction.
 
 } // namespace
 

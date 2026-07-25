@@ -9,6 +9,8 @@
 
 #include <unordered_map>
 
+#include "FormatMap.h"
+
 namespace mithril {
 namespace vk {
 
@@ -80,15 +82,8 @@ void stage_and_copy_image(TextureEntry& tex, int level, int x, int y, int z,
 // that needs the texture in a specific layout before issuing a command.
 void transition_image_layout(TextureEntry& tex, VkImageLayout newLayout);
 
-// VkImageAspectFlags for a VkFormat (color / depth / depth+stencil / stencil).
-VkImageAspectFlags aspect_for_format(VkFormat fmt);
-
-// GL internalFormat -> VkFormat. Returns VK_FORMAT_UNDEFINED if unsupported.
-VkFormat gl_internal_to_vk(GLenum internal);
-
-// Bytes per pixel for the (format,type) pair as seen on the host side. Used by
-// staging buffer sizing for glTexImage* uploads and glReadPixels readback.
-int host_texel_bytes(GLenum format, GLenum type);
+// gl_internal_to_vk / host_texel_bytes / aspect_for_format live in FormatMap.h
+// (pure-logic helpers extracted for unit testing).
 
 } // namespace vk
 } // namespace mithril

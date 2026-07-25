@@ -166,10 +166,16 @@ set(MITHRIL_SOURCES
     # MG_Backend: Vulkan 1.2 + MoltenVK direct backend
     Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Device.cpp
     Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Resources.cpp
+    Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/FormatMap.cpp
     Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Pipeline.cpp
     Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/DescriptorSet.cpp
     Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/CommandStream.cpp
     Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/ImageOps.cpp
+
+    # MG_Impl: pure-logic EGL config table extracted from egl.mm so it can be
+    # unit-tested without an ObjC++ toolchain. Compiled into the iOS dylib too
+    # (egl.mm #includes EGLConfig.h and treats g_configs as its config table).
+    Mithril-Wrapper-cpp/MG_Impl/EGLConfig.cpp
 )
 
 if(APPLE)
@@ -276,3 +282,21 @@ set_target_properties(${PROJECT_NAME} PROPERTIES
     PREFIX "lib"
     SUFFIX ".dylib"
 )
+
+# ---------------------------------------------------------------------------
+# Unit tests (Linux CI). Off by default so the iOS build is untouched.
+#
+# When MITHRIL_BUILD_TEST=ON, add the MG_Test subdirectory which FetchContent's
+# Google Test v1.17.0 and builds the `mithril_tests` executable against the
+# pure-logic subsystems (State / Shader / FormatMap / EGLConfig) plus a
+# BackendStub that isolates the test binary from real Vulkan / MoltenVK.
+#
+# The test target only links plain-C++ translation units (no .mm, no MoltenVK,
+# no iOS frameworks) so it builds on ubuntu-latest. See MG_Test/CMakeLists.txt
+# for the source + link list.
+# ---------------------------------------------------------------------------
+option(MITHRIL_BUILD_TEST "Build unit tests" OFF)
+if(MITHRIL_BUILD_TEST)
+    enable_testing()
+    add_subdirectory(Mithril-Wrapper-cpp/MG_Test)
+endif()
