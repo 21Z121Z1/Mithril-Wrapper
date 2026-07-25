@@ -287,23 +287,26 @@ int read_pixels(int x, int y, int w, int h, GLenum format, GLenum type, void* ou
     }
 
     // Transition the source image to TRANSFER_SRC_OPTIMAL.
-    VkImageMemoryBarrier b{};
-    b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    b.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-    b.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-    b.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    b.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    b.image = src_image;
-    b.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    b.subresourceRange.baseMipLevel = 0;
-    b.subresourceRange.levelCount = 1;
-    b.subresourceRange.baseArrayLayer = 0;
-    b.subresourceRange.layerCount = 1;
+    // NOTE: named `bar` (not `b`) to avoid clashing with the `Backend* b`
+    // declared at the top of read_pixels(); the backend pointer is reused
+    // below (b->device) after this barrier block.
+    VkImageMemoryBarrier bar{};
+    bar.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    bar.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    bar.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    bar.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    bar.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    bar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    bar.image = src_image;
+    bar.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    bar.subresourceRange.baseMipLevel = 0;
+    bar.subresourceRange.levelCount = 1;
+    bar.subresourceRange.baseArrayLayer = 0;
+    bar.subresourceRange.layerCount = 1;
     vkCmdPipelineBarrier(c.cmd, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                          VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
-                         0, nullptr, 0, nullptr, 1, &b);
+                         0, nullptr, 0, nullptr, 1, &bar);
 
     // GL's origin is bottom-left; Vulkan's is top-left. Flip the Y axis by
     // adjusting the source offset: read from (x, imageHeight - y - h).
@@ -326,13 +329,13 @@ int read_pixels(int x, int y, int w, int h, GLenum format, GLenum type, void* ou
 
     // Transition the source image back to COLOR_ATTACHMENT_OPTIMAL so
     // subsequent draws can render into it again.
-    b.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-    b.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-    b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    b.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    bar.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    bar.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    bar.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    bar.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     vkCmdPipelineBarrier(c.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
                          VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0,
-                         0, nullptr, 0, nullptr, 1, &b);
+                         0, nullptr, 0, nullptr, 1, &bar);
 
     end_one_shot(c);
 

@@ -41,7 +41,10 @@
 #import <Foundation/Foundation.h>
 #import <objc/runtime.h>   // object_setClass() for layer coercion
 
-#include "includes.h"
+// includes.h lives in MG_Impl/ (sibling of egl/); use a relative path since
+// the egl/ directory is not on the include search path and the quote-include
+// lookup only checks the current file's directory + -I dirs.
+#include "../MG_Impl/includes.h"
 #include <EGL/egl.h>
 
 #include <atomic>
