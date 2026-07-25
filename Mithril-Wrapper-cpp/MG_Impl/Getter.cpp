@@ -8,7 +8,7 @@
 // the hood). The F3 debug strings are built in Getter_gpu.mm.
 //
 // F3 debug info mapping (mirrors MobileGlues' approach):
-//   GL_VERSION     — "3.3 Mithril-Wrapper 1.0 (Vulkan 1.2 / MoltenVK)"
+//   GL_VERSION     — "3.3.0 Mithril-Wrapper 1.0 (Vulkan 1.2 / MoltenVK)"
 //                    with Minecraft §b color highlight on the name.
 //   GL_RENDERER    — GPU name | Vulkan 1.2 | Mithril-Wrapper (+ VRAM if known)
 //   GL_VENDOR      — Project maintainers
@@ -66,7 +66,7 @@ static const char* kRenderer = "Mithril-Wrapper (Vulkan 1.2 / MoltenVK backend)"
 // Java Edition's modern pipeline). The Vulkan/MoltenVK backend implements
 // the subset of Core Profile 3.3 actually exercised by the host.
 // The §b (cyan) Minecraft formatting code highlights Mithril in the F3 screen.
-static const char* kVersion  = "3.3 §bMithril-Wrapper§r 1.0 (Vulkan 1.2 / MoltenVK)";
+static const char* kVersion  = "3.3.0 §bMithril-Wrapper§r 1.0 (Vulkan 1.2 / MoltenVK)";
 static const char* kShadingLangVer = "3.30 Mithril-Wrapper (glslang -> SPIR-V)";
 
 // Sparse extensions list — applications usually only need the count and the
