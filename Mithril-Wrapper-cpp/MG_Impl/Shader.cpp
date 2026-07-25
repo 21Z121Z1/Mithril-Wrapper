@@ -126,7 +126,7 @@ void apply_attrib_bindings(std::string& src, GLenum gl_stage,
 
     static std::regex in_decl_re(
         R"(^\s*(?:layout\s*\([^)]*\)\s*)?(in|attribute)\s+(\w+)\s+(\w+)\s*(\[[^\]]*\])?\s*;)",
-        std::regex::optimize);
+        std::regex::optimize | std::regex::multiline);
 
     std::string out;
     out.reserve(src.size() + bindings->size() * 24);
