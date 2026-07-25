@@ -1,7 +1,17 @@
-// Mithril-Wrapper - MG_Backend/DirectVulkan/Swapchain.cpp
+// Mithril-Wrapper - MG_Backend/DirectVulkan/Swapchain.mm
 // Per-EGLSurface Vulkan swapchain: VkSurfaceKHR (via VK_EXT_metal_surface) +
 // VkSwapchainKHR + swapchain images/views + depth VkImage. The CAMetalLayer is
-// bridged in as void* so this TU stays pure C++ (only egl/egl.mm touches Metal).
+// bridged in as void* from egl.mm; this TU is compiled as Objective-C++ so it
+// can define VK_USE_PLATFORM_METAL_EXT (which pulls in <Metal/Metal.h> for the
+// VkMetalSurfaceCreateInfoEXT / PFN_vkCreateMetalSurfaceEXT declarations).
+//
+// VK_USE_PLATFORM_METAL_EXT MUST be defined before #include <vulkan/vulkan.h>
+// (transitively via Swapchain.h / Device.h) so vulkan_metal.h is visible. It
+// is intentionally NOT a global CMake compile-definition: doing so would force
+// every .cpp in the backend to be compiled as .mm (the Metal system header is
+// Objective-C only). Device.h stores the function pointer as PFN_vkVoidFunction
+// to stay metal-free; this file casts it to PFN_vkCreateMetalSurfaceEXT here.
+#define VK_USE_PLATFORM_METAL_EXT 1
 #include "Swapchain.h"
 #include "Device.h"
 #include "Resources.h"
@@ -22,16 +32,20 @@ Swapchain* create_swapchain(void* cametal_layer, int width, int height,
     sc->width = width;
     sc->height = height;
 
-    // VkSurfaceKHR via VK_EXT_metal_surface.
+    // VkSurfaceKHR via VK_EXT_metal_surface. The layer pointer is bridged from
+    // egl.mm as void*; cast to CAMetalLayer* (the type vulkan_metal.h expects).
+    // createMetalSurfaceEXT is stored as PFN_vkVoidFunction on the Backend
+    // (see Device.h) — cast to the real type here.
     VkMetalSurfaceCreateInfoEXT sci{};
     sci.sType = VK_STRUCTURE_TYPE_METAL_SURFACE_CREATE_INFO_EXT;
-    sci.pLayer = cametal_layer;
+    sci.pLayer = (const CAMetalLayer*)cametal_layer;
     if (!b->createMetalSurfaceEXT) {
         MITHRIL_LOG_ERROR("vk", "vkCreateMetalSurfaceEXT not resolved");
         delete sc;
         return nullptr;
     }
-    if (b->createMetalSurfaceEXT(b->instance, &sci, nullptr, &sc->surface) != VK_SUCCESS) {
+    auto createMetalSurfaceEXT = (PFN_vkCreateMetalSurfaceEXT)b->createMetalSurfaceEXT;
+    if (createMetalSurfaceEXT(b->instance, &sci, nullptr, &sc->surface) != VK_SUCCESS) {
         MITHRIL_LOG_ERROR("vk", "vkCreateMetalSurfaceEXT failed");
         delete sc;
         return nullptr;

@@ -46,13 +46,26 @@ endif()
 # release tarball before configuring.
 # ---------------------------------------------------------------------------
 if(APPLE)
+    # MoltenVK v1.4.x tarball ships Vulkan headers in a sibling `include/`
+    # directory NEXT TO the static/dynamic xcframeworks — NOT inside the
+    # xcframework itself. The CI workflow (build.yml) extracts both into:
+    #   ./MoltenVK-Headers/vulkan/vulkan.h   (the headers tree)
+    #   ./MoltenVK.xcframework/ios-arm64/libMoltenVK.a   (the static lib)
+    # We search MoltenVK-Headers first, then fall back to the legacy
+    # `MoltenVK.xcframework/Headers` layout (older tarballs / Vulkan SDK)
+    # and the per-platform slice `ios-arm64/Headers` (dynamic framework).
     find_path(MOLTENVK_INCLUDE_DIR
         NAMES vulkan/vulkan.h
         PATHS
+            "${MOLTENVK_ROOT}/MoltenVK-Headers"
+            "${CMAKE_SOURCE_DIR}/MoltenVK-Headers"
+            "${CMAKE_SOURCE_DIR}/3rdparty/MoltenVK/MoltenVK-Headers"
             "${MOLTENVK_ROOT}/MoltenVK.xcframework/Headers"
             "${CMAKE_SOURCE_DIR}/MoltenVK.xcframework/Headers"
             "${CMAKE_SOURCE_DIR}/3rdparty/MoltenVK/MoltenVK.xcframework/Headers"
             "${CMAKE_SOURCE_DIR}/Mithril-Wrapper-cpp/3rdparty/MoltenVK/MoltenVK.xcframework/Headers"
+            "${CMAKE_SOURCE_DIR}/MoltenVK.xcframework/ios-arm64/Headers"
+            "${CMAKE_SOURCE_DIR}/MoltenVK.xcframework/ios-arm64_x86_64-simulator/Headers"
         REQUIRED
     )
     message(STATUS "MoltenVK headers: ${MOLTENVK_INCLUDE_DIR}")
@@ -155,7 +168,6 @@ set(MITHRIL_SOURCES
     Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Resources.cpp
     Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Pipeline.cpp
     Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/DescriptorSet.cpp
-    Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Swapchain.cpp
     Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/CommandStream.cpp
     Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/ImageOps.cpp
 )
@@ -169,6 +181,14 @@ if(APPLE)
         # GPU info string builder (queries VkPhysicalDeviceProperties for
         # GL_RENDERER; .mm so it can use NSString/NSLog without an #ifdef dance).
         Mithril-Wrapper-cpp/MG_Impl/Getter_gpu.mm
+        # Vulkan swapchain (VkSurfaceKHR via VK_EXT_metal_surface). Compiled as
+        # Objective-C++ because it #defines VK_USE_PLATFORM_METAL_EXT before
+        # including <vulkan/vulkan.h>, which pulls in <Metal/Metal.h> (ObjC-only)
+        # for the VkMetalSurfaceCreateInfoEXT / PFN_vkCreateMetalSurfaceEXT
+        # declarations. The other DirectVulkan .cpp files stay plain C++ —
+        # Device.h stores the function pointer as PFN_vkVoidFunction to avoid
+        # needing the metal platform define there.
+        Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Swapchain.mm
     )
 endif()
 
@@ -205,6 +225,12 @@ if(APPLE)
     # links Metal.framework / QuartzCore.framework / Foundation.framework, but
     # we still list them explicitly to satisfy -framework lookup when the
     # static link strips MoltenVK's lazy references.
+    #
+    # -ObjC: forces the linker to load all Objective-C class/category symbols
+    # from static archives. MoltenVK's libMoltenVK.a contains ObjC++ code
+    # (Metal interop); without this flag, categories may be stripped and cause
+    # runtime "unrecognized selector" crashes. Standard Apple recommendation
+    # for static libraries containing Objective-C.
     target_include_directories(${PROJECT_NAME} PRIVATE ${MOLTENVK_INCLUDE_DIR})
     target_link_libraries(${PROJECT_NAME} PRIVATE
         ${MOLTENVK_LIBRARY}
@@ -212,17 +238,20 @@ if(APPLE)
         "-framework Foundation"
         "-framework QuartzCore"
         "-framework CoreGraphics"
+        "-framework IOSurface"
     )
+    target_link_options(${PROJECT_NAME} PRIVATE -ObjC)
     target_compile_definitions(${PROJECT_NAME} PRIVATE MITHRIL_VULKAN=1)
 else()
     target_link_libraries(${PROJECT_NAME} PRIVATE ${CMAKE_DL_LIBS})
 endif()
 
-# ARC for Objective-C++ EGL + Getter_gpu translation units.
+# ARC for Objective-C++ translation units (EGL, GPU info, Vulkan swapchain).
 if(APPLE)
     set_source_files_properties(
         Mithril-Wrapper-cpp/egl/egl.mm
         Mithril-Wrapper-cpp/MG_Impl/Getter_gpu.mm
+        Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Swapchain.mm
         PROPERTIES COMPILE_FLAGS "-fobjc-arc"
     )
 endif()

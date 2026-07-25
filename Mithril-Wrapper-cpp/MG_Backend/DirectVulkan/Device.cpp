@@ -112,8 +112,11 @@ bool init_device() {
         }
     }
 
-    // Resolve vkCreateMetalSurfaceEXT (used by Swapchain.cpp).
-    b->createMetalSurfaceEXT = (PFN_vkCreateMetalSurfaceEXT)
+    // Resolve vkCreateMetalSurfaceEXT (used by Swapchain.mm). Stored as
+    // PFN_vkVoidFunction to avoid needing VK_USE_PLATFORM_METAL_EXT here
+    // (that macro pulls in <Metal/Metal.h>, which is ObjC-only). The .mm
+    // translation unit casts it to PFN_vkCreateMetalSurfaceEXT at the call.
+    b->createMetalSurfaceEXT =
         vkGetInstanceProcAddr(b->instance, "vkCreateMetalSurfaceEXT");
 
     // ---- Physical device ----

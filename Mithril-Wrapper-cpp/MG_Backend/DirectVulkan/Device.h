@@ -43,7 +43,12 @@ struct Backend {
     VkPhysicalDeviceProperties props{};
 
     // vkCreateMetalSurfaceEXT function pointer (resolved from the instance).
-    PFN_vkCreateMetalSurfaceEXT createMetalSurfaceEXT = nullptr;
+    // Stored as PFN_vkVoidFunction (always declared by vulkan_core.h) so this
+    // header does NOT need VK_USE_PLATFORM_METAL_EXT — that macro pulls in
+    // <Metal/Metal.h> (Objective-C only) and would break every .cpp that
+    // includes this header. Swapchain.mm casts to PFN_vkCreateMetalSurfaceEXT
+    // at the call site, where the metal platform define is active.
+    PFN_vkVoidFunction createMetalSurfaceEXT = nullptr;
 
     // Per-frame sync: a fence per in-flight frame so we can wait on the GPU
     // before reusing the command buffer.

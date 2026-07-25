@@ -24,12 +24,23 @@ jobs:
           echo "Toolchain downloaded:"
           ls -l ios.toolchain.cmake
 
-      - name: Download MoltenVK.xcframework (static)
+      - name: Download MoltenVK (static framework + Vulkan headers)
         run: |
-          # Pull a tagged MoltenVK release tarball. The iOS-only tarball ships
-          # MoltenVK.xcframework (static framework + Vulkan-Headers); we drop
-          # it at the repo root so CMakeLists.txt's find_path / find_library
-          # lookups locate it via ${CMAKE_SOURCE_DIR}/MoltenVK.xcframework.
+          # Pull a tagged MoltenVK release tarball (iOS-only). The tarball
+          # layout (v1.4.x) is:
+          #
+          #   MoltenVK/MoltenVK/
+          #     ├── include/vulkan/vulkan.h        ← Vulkan headers (SEPARATE
+          #     │                                    from the xcframework!)
+          #     ├── static/MoltenVK.xcframework/   ← static framework
+          #     │     ├── Info.plist
+          #     │     └── ios-arm64/libMoltenVK.a
+          #     └── dynamic/MoltenVK.xcframework/  ← dynamic framework (unused)
+          #
+          # The static xcframework does NOT bundle headers — they live in the
+          # sibling `include/` directory. We move both into place at the repo
+          # root so CMakeLists.txt's find_path (MoltenVK-Headers) and
+          # find_library (MoltenVK.xcframework) resolve them.
           #
           # MoltenVK v1.4.x requires iOS 15.0+ (raised minimum target).
           set -uo pipefail
@@ -44,21 +55,40 @@ jobs:
           tar -xf "${TARBALL}" -C moltenvk-staging
           echo "=== Tarball top-level contents ==="
           ls -la moltenvk-staging/
-          echo "=== Searching for MoltenVK.xcframework ==="
-          FOUND=$(find moltenvk-staging -type d -name "MoltenVK.xcframework" | head -1)
+          echo "=== Searching for STATIC MoltenVK.xcframework ==="
+          # Prefer the static framework (the dynamic framework's headers live
+          # inside per-platform slices, and we want static linking anyway).
+          FOUND=$(find moltenvk-staging -type d -name "MoltenVK.xcframework" -path "*static*" | head -1)
+          if [ -z "${FOUND}" ]; then
+            # Fallback: any MoltenVK.xcframework (older tarballs may not split static/dynamic)
+            FOUND=$(find moltenvk-staging -type d -name "MoltenVK.xcframework" | head -1)
+          fi
           if [ -z "${FOUND}" ]; then
             echo "::error::MoltenVK.xcframework not found in tarball. Contents:"
-            find moltenvk-staging -maxdepth 3 -type d | head -30
+            find moltenvk-staging -maxdepth 4 -type d | head -40
             exit 1
           fi
-          echo "Found at: ${FOUND}"
+          echo "Found xcframework at: ${FOUND}"
           mv "${FOUND}" ./MoltenVK.xcframework
+          echo "=== Searching for Vulkan headers (include/) ==="
+          # The headers are in a sibling `include/` directory next to the
+          # static/dynamic framework dirs: MoltenVK/MoltenVK/include/vulkan/vulkan.h
+          HDRS=$(find moltenvk-staging -type d -name "vulkan" -path "*/include/vulkan" | head -1)
+          if [ -z "${HDRS}" ]; then
+            echo "::error::Vulkan headers (include/vulkan/) not found in tarball."
+            find moltenvk-staging -maxdepth 4 -type d | head -40
+            exit 1
+          fi
+          HDR_ROOT=$(dirname "${HDRS}")   # .../include
+          echo "Found headers at: ${HDR_ROOT}"
+          mv "${HDR_ROOT}" ./MoltenVK-Headers
           rm -rf moltenvk-staging
-          echo "=== MoltenVK.xcframework in place ==="
+          echo "=== Verify layout ==="
           ls -ld MoltenVK.xcframework
-          ls -l MoltenVK.xcframework/Headers/vulkan/vulkan.h || true
-          ls -ld MoltenVK.xcframework/ios-arm64 || true
-          # List the framework contents to verify structure
+          ls -l MoltenVK-Headers/vulkan/vulkan.h
+          ls -l MoltenVK-Headers/vulkan/vulkan_metal.h || true
+          ls -l MoltenVK.xcframework/ios-arm64/libMoltenVK.a
+          echo "=== xcframework contents ==="
           ls -l MoltenVK.xcframework/ || true
 
       - name: Configure (iOS arm64)
