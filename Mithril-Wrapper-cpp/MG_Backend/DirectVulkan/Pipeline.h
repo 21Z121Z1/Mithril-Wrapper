@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "DescriptorSet.h"
+#include "../Backend.h"   // defines ::MGVertexAttrib (extern "C", global scope)
 
 namespace mithril {
 namespace vk {
@@ -49,7 +50,7 @@ std::unordered_map<GLuint, ProgramResources>& program_table();
 VkPipeline get_or_create_pipeline(GLuint program,
                                   const uint32_t* vertex_spirv, int vertex_word_count,
                                   const uint32_t* fragment_spirv, int fragment_word_count,
-                                  const struct MGVertexAttrib* attribs, int attrib_count,
+                                  const ::MGVertexAttrib* attribs, int attrib_count,
                                   const VkFormat* color_formats, int color_count,
                                   VkFormat depth_format,
                                   int blend_enabled, GLenum blend_src, GLenum blend_dst,
