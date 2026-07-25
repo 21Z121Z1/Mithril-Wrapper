@@ -38,7 +38,10 @@ Swapchain* create_swapchain(void* cametal_layer, int width, int height,
     // (see Device.h) — cast to the real type here.
     VkMetalSurfaceCreateInfoEXT sci{};
     sci.sType = VK_STRUCTURE_TYPE_METAL_SURFACE_CREATE_INFO_EXT;
-    sci.pLayer = (const CAMetalLayer*)cametal_layer;
+    // __bridge: the CAMetalLayer is owned by the host view (EglSurface.layer,
+    // a weak ARC reference). We borrow the pointer for Vulkan surface creation
+    // without transferring ownership. A plain C cast is rejected under -fobjc-arc.
+    sci.pLayer = (__bridge const CAMetalLayer*)cametal_layer;
     if (!b->createMetalSurfaceEXT) {
         MITHRIL_LOG_ERROR("vk", "vkCreateMetalSurfaceEXT not resolved");
         delete sc;
