@@ -10,11 +10,13 @@
 //   2. Inject layout(location=N) into vertex `in` declarations from
 //      glBindAttribLocation mappings so the SPIR-V stage_input locations match
 //      the application's vertex descriptor.
-//   3. glslang compiles the GLSL to Vulkan SPIR-V (EShClientVulkan,
-//      EShTargetVulkan_1_2, EShTargetSpv_1_5). Loose (non-block) uniforms such
-//      as Minecraft's `uniform mat4 ModelViewMat;` are permitted: glslang wraps
-//      them into a default UBO (the aggregate `$Global` block) because the
-//      strict EShMsgVulkanRules flag is intentionally omitted.
+//   3. glslang compiles the GLSL to Vulkan SPIR-V via the GL_KHR_vulkan_glsl
+//      path: EShClientOpenGL + EShMsgVulkanRules. This parses desktop (OpenGL)
+//      GLSL but applies Vulkan rules, so loose (non-block) uniforms such as
+//      Minecraft's `uniform mat4 ModelViewMat;` are automatically wrapped into
+//      a single default UBO — the aggregate `$Global` block — and the emitted
+//      SPIR-V stays Vulkan-conformant (MoltenVK accepts it). The `$Global` name
+//      is exactly what DescriptorSet.cpp reflects/packs by member name.
 //      setAutoMapLocations(true) + setAutoMapBindings(true) auto-assign any
 //      remaining locations/bindings.
 //   4. The SPIR-V words are returned directly — MoltenVK cross-translates
@@ -199,12 +201,18 @@ bool glsl_to_spirv(GLenum gl_stage, const std::string& src,
     const char* s = source.c_str();
     shader.setStrings(&s, 1);
 
-    // Use the Vulkan client so the emitted SPIR-V is Vulkan-conformant —
-    // MoltenVK only accepts Vulkan SPIR-V (not OpenGL SPIR-V). Target
-    // Vulkan 1.2 (the API version the backend was built against) and
-    // SPIR-V 1.5 (the version paired with Vulkan 1.2).
-    shader.setEnvInput(glslang::EShSourceGlsl, stage, glslang::EShClientVulkan, glsl_version);
-    shader.setEnvClient(glslang::EShClientVulkan, glslang::EShTargetVulkan_1_2);
+    // GL_KHR_vulkan_glsl path: parse as OpenGL GLSL but emit Vulkan SPIR-V.
+    // EShClientOpenGL (NOT EShClientVulkan) is required — the Vulkan client
+    // forbids non-block uniforms outright, rejecting Minecraft's loose
+    // `uniform` declarations with "non-opaque uniforms outside a block". With
+    // the OpenGL client + EShMsgVulkanRules (set below), glslang applies Vulkan
+    // rules and auto-wraps loose uniforms into the `$Global` UBO, producing
+    // valid Vulkan SPIR-V for MoltenVK. The OpenGL client also keeps desktop
+    // GLSL builtin semantics (e.g. gl_VertexID 1-based, gl_InstanceID 1-based).
+    // Target OpenGL 4.50 feature level (a superset of Minecraft's GLSL 150-330)
+    // and emit SPIR-V 1.5 (paired with Vulkan 1.2).
+    shader.setEnvInput(glslang::EShSourceGlsl, stage, glslang::EShClientOpenGL, glsl_version);
+    shader.setEnvClient(glslang::EShClientOpenGL, glslang::EShTargetOpenGL_450);
     shader.setEnvTarget(glslang::EShTargetSpv, glslang::EShTargetSpv_1_5);
 
     // Auto-assign locations/bindings for any `in`/`out`/uniform declarations
@@ -221,15 +229,16 @@ bool glsl_to_spirv(GLenum gl_stage, const std::string& src,
         "#define MG_MITHRIL_VERSION 1000000\n"
     );
 
-    // NOTE: EShMsgVulkanRules is intentionally NOT set. That flag forbids
-    // non-opaque uniforms declared outside a block, which breaks Minecraft's
-    // vanilla core shaders (e.g. `uniform mat4 ModelViewMat;`). Without it,
-    // glslang wraps loose uniforms into a default UBO (the aggregate `$Global`
-    // block) and still emits Vulkan SPIR-V (the client stays EShClientVulkan),
-    // which MoltenVK translates to MSL. DescriptorSet.cpp already uploads that
-    // UBO's members by name via SPIRV-Cross reflection.
+    // EShMsgVulkanRules IS set: this is what triggers the GL_KHR_vulkan_glsl
+    // behavior that wraps loose non-opaque uniforms (e.g. Minecraft's
+    // `uniform mat4 ModelViewMat;`) into the synthetic `$Global` UBO. Without
+    // it (or with EShClientVulkan instead of EShClientOpenGL) glslang rejects
+    // loose uniforms with "non-opaque uniforms outside a block". The client
+    // stays EShClientOpenGL so the emitted SPIR-V remains Vulkan-conformant for
+    // MoltenVK. DescriptorSet.cpp uploads the `$Global` UBO's members by name
+    // via SPIRV-Cross reflection.
     const EShMessages messages = static_cast<EShMessages>(
-        EShMsgDefault | EShMsgSpvRules);
+        EShMsgDefault | EShMsgSpvRules | EShMsgVulkanRules);
 
     if (!shader.parse(GetDefaultResources(), glsl_version, true, messages)) {
         info = shader.getInfoLog();
