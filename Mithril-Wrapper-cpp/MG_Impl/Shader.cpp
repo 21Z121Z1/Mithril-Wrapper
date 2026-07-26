@@ -11,8 +11,12 @@
 //      glBindAttribLocation mappings so the SPIR-V stage_input locations match
 //      the application's vertex descriptor.
 //   3. glslang compiles the GLSL to Vulkan SPIR-V (EShClientVulkan,
-//      EShTargetVulkan_1_2, EShTargetSpv_1_5). setAutoMapLocations(true) +
-//      setAutoMapBindings(true) auto-assign any remaining locations/bindings.
+//      EShTargetVulkan_1_2, EShTargetSpv_1_5). Loose (non-block) uniforms such
+//      as Minecraft's `uniform mat4 ModelViewMat;` are permitted: glslang wraps
+//      them into a default UBO (the aggregate `$Global` block) because the
+//      strict EShMsgVulkanRules flag is intentionally omitted.
+//      setAutoMapLocations(true) + setAutoMapBindings(true) auto-assign any
+//      remaining locations/bindings.
 //   4. The SPIR-V words are returned directly — MoltenVK cross-translates
 //      Vulkan SPIR-V to MSL internally at vkCreateShaderModule time, so no
 //      SPIRV-Cross stage is needed here.
@@ -217,8 +221,15 @@ bool glsl_to_spirv(GLenum gl_stage, const std::string& src,
         "#define MG_MITHRIL_VERSION 1000000\n"
     );
 
+    // NOTE: EShMsgVulkanRules is intentionally NOT set. That flag forbids
+    // non-opaque uniforms declared outside a block, which breaks Minecraft's
+    // vanilla core shaders (e.g. `uniform mat4 ModelViewMat;`). Without it,
+    // glslang wraps loose uniforms into a default UBO (the aggregate `$Global`
+    // block) and still emits Vulkan SPIR-V (the client stays EShClientVulkan),
+    // which MoltenVK translates to MSL. DescriptorSet.cpp already uploads that
+    // UBO's members by name via SPIRV-Cross reflection.
     const EShMessages messages = static_cast<EShMessages>(
-        EShMsgDefault | EShMsgVulkanRules | EShMsgSpvRules);
+        EShMsgDefault | EShMsgSpvRules);
 
     if (!shader.parse(GetDefaultResources(), glsl_version, true, messages)) {
         info = shader.getInfoLog();

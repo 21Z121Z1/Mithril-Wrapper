@@ -42,6 +42,14 @@ VkFormat gl_internal_to_vk(GLenum internal) {
         case GL_DEPTH24_STENCIL8:     return VK_FORMAT_D24_UNORM_S8_UINT;
         case GL_DEPTH32F_STENCIL8:    return VK_FORMAT_D32_SFLOAT_S8_UINT;
         case GL_STENCIL_INDEX8:       return VK_FORMAT_S8_UINT;
+        // Unsized internal formats (Minecraft passes these for many textures
+        // and for depth). glslang/MoltenVK need a concrete VkFormat, so map
+        // them to the natural sized equivalent. Without these, gl_internal_to_vk
+        // returns VK_FORMAT_UNDEFINED and the texture falls back to a color
+        // format — which is especially wrong for GL_DEPTH_COMPONENT.
+        case GL_RGBA:             return VK_FORMAT_R8G8B8A8_UNORM;  // 0x1908
+        case GL_RGB:              return VK_FORMAT_R8G8B8_UNORM;    // 0x1907
+        case GL_DEPTH_COMPONENT:  return VK_FORMAT_D32_SFLOAT;      // 0x1902
         case GL_COMPRESSED_RGBA_S3TC_DXT1_EXT:
         case GL_COMPRESSED_RGB_S3TC_DXT1_EXT: return VK_FORMAT_BC1_RGBA_UNORM_BLOCK;
         case GL_COMPRESSED_RGBA_S3TC_DXT3_EXT: return VK_FORMAT_BC2_UNORM_BLOCK;

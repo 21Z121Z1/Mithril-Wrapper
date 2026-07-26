@@ -132,6 +132,16 @@ bool init_device() {
     // translation unit casts it to PFN_vkCreateMetalSurfaceEXT at the call.
     b->createMetalSurfaceEXT =
         vkGetInstanceProcAddr(b->instance, "vkCreateMetalSurfaceEXT");
+    if (!b->createMetalSurfaceEXT) {
+        // Diagnostic: this function is only exported when VK_EXT_metal_surface
+        // is enabled at instance creation. Dump the enumerated instance
+        // extensions so a null resolution is self-explaining on-device.
+        MITHRIL_LOG_WARN("vk", "vkCreateMetalSurfaceEXT not resolved; "
+                              "enumerated instance extensions:");
+        for (const auto& e : instExtProps) {
+            MITHRIL_LOG_WARN("vk", "  %s", e.extensionName);
+        }
+    }
 
     // ---- Physical device ----
     uint32_t gpuCount = 0;
