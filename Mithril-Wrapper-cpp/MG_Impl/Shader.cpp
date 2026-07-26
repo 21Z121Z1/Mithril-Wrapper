@@ -11,9 +11,12 @@
 //      glBindAttribLocation mappings so the SPIR-V stage_input locations match
 //      the application's vertex descriptor.
 //   3. Preprocess: wrap loose non-opaque uniforms (e.g. `uniform mat4 MVM;`)
-//      into a synthetic `mithril_GlobalBlock` UBO so glslang never encounters
-//      the "non-opaque uniforms outside a block" error that some glslang
-//      versions emit even with EShClientOpenGL + EShMsgVulkanRules.
+//      into a synthetic `mithril_GlobalBlock` UBO that is injected right after
+//      #version, paired with #define renames so the shader body can still
+//      reference members by their original names without an explicit block
+//      prefix. This avoids the "non-opaque uniforms outside a block" error
+//      that some glslang versions emit even with EShClientOpenGL +
+//      EShMsgVulkanRules.
 //   4. glslang compiles the GLSL to Vulkan SPIR-V via the GL_KHR_vulkan_glsl
 //      path: EShClientOpenGL + EShMsgVulkanRules. Because step 3 already
 //      wrapped loose uniforms, glslang never needs the auto-wrap path — it
@@ -205,15 +208,30 @@ static bool is_opaque_glsl_type(const std::string& name) {
  *
  * To avoid this, we rewrite:
  *
+ *   #version 150
  *   uniform mat4 ModelViewMat;
  *   uniform sampler2D Sampler0;     // opaque — stays as-is
+ *   uniform mat4 ProjMat;
+ *
+ *   out = ProjMat * ModelViewMat * v;
  *
  * into:
  *
- *   uniform sampler2D Sampler0;     // opaque, unchanged
- *   uniform mithril_GlobalBlock {   // synthetic UBO
+ *   #version 150
+ *   uniform mithril_GlobalBlock {   // synthetic UBO (named block, no instance)
  *       mat4 ModelViewMat;
+ *       mat4 ProjMat;
  *   };
+ *   #define ModelViewMat mithril_GlobalBlock.ModelViewMat
+ *   #define ProjMat      mithril_GlobalBlock.ProjMat
+ *
+ *   uniform sampler2D Sampler0;     // opaque, unchanged
+ *
+ *   out = ProjMat * ModelViewMat * v;
+ *
+ * The block + #define are inserted immediately after the #version directive
+ * so the pre-processor renames all occurrences before the compiler runs.
+ * The original loose-uniform lines are erased from wherever they appeared.
  *
  * The block name "mithril_GlobalBlock" is arbitrary — it does not match any
  * GL uniform name, so the descriptor-upload code in DescriptorSet.cpp falls
@@ -234,53 +252,71 @@ static void wrap_loose_uniforms(std::string& source) {
         R"(^[ \t]*((layout\s*\([^)]*\)\s*)?uniform\s+(\w+)\s+(\w+)(\s*\[[^\]]*\])?\s*;))",
         std::regex::multiline | std::regex::optimize);
 
-    // Accumulator: interleaving text + non-opaque uniforms for the block.
-    std::string out;
-    out.reserve(source.size() + 256);
-    std::vector<std::pair<std::string, std::string>> non_opaque;
+    // Phase 1: scan and collect all non-opaque uniform declarations.
+    struct UniformDecl {
+        size_t pos;
+        size_t len;
+        std::string type;
+        std::string var;  // base variable name (no array suffix)
+        std::string arr;  // array suffix ("" or "[N]")
+    };
+    std::vector<UniformDecl> non_opaque;
 
-    auto cur = source.cbegin();
-    auto end = source.cend();
-    std::smatch m;
-    size_t pos = 0;
+    {
+        auto cur = source.cbegin();
+        auto end = source.cend();
+        std::smatch m;
+        while (std::regex_search(cur, end, m, decl_re)) {
+            size_t match_off = m.position(0) + (cur - source.cbegin());
+            size_t match_len = m[1].str().size();
+            const std::string& layout = m[2].str();
+            const std::string& type   = m[3].str();
+            const std::string& var    = m[4].str();
+            const std::string& arr    = m[5].str();
 
-    while (std::regex_search(cur, end, m, decl_re)) {
-        size_t match_off = m.position(0) + (cur - source.cbegin());
-        // Copy everything before this declaration verbatim.
-        out.append(source, pos, match_off - pos);
+            if (layout.empty() && !is_opaque_glsl_type(type)) {
+                non_opaque.push_back({match_off, match_len, type, var, arr});
+            }
 
-        const std::string& full   = m[1].str();
-        const std::string& layout = m[2].matched ? m[2].str() : "";
-        const std::string& type   = m[3].str();
-        const std::string& var    = m[4].str();
-        const std::string& arr    = m[5].matched ? m[5].str() : "";
-
-        bool has_explicit_layout = !layout.empty();
-        if (has_explicit_layout || is_opaque_glsl_type(type)) {
-            out += full;                    // keep as-is
-        } else {
-            non_opaque.emplace_back(type, var + arr);  //collect for block
+            cur = m.suffix().first;
         }
-
-        pos = match_off + full.size();
-        cur = m.suffix().first;
-    }
-    // Trailing content after the last declaration.
-    out.append(source, pos, std::string::npos);
-
-    if (!non_opaque.empty()) {
-        out += "\nuniform mithril_GlobalBlock {\n";
-        for (const auto& u : non_opaque) {
-            out += "    ";
-            out += u.first;
-            out += ' ';
-            out += u.second;
-            out += ";\n";
-        }
-        out += "};\n";
     }
 
-    source = std::move(out);
+    if (non_opaque.empty())
+        return;
+
+    // Phase 2: determine the insertion point — right after the #version
+    // directive (which ensure_glsl_version guarantees is present).
+    size_t version_end = 0;
+    {
+        auto vp = source.find("#version");
+        if (vp != std::string::npos) {
+            auto nl = source.find('\n', vp);
+            version_end = (nl != std::string::npos) ? nl + 1 : source.size();
+        }
+    }
+
+    // Phase 3: build the synthetic block and #define redirects.
+    std::string injection;
+    injection += "\nuniform mithril_GlobalBlock {\n";
+    for (const auto& u : non_opaque) {
+        injection += "    " + u.type + " " + u.var + u.arr + ";\n";
+    }
+    injection += "};\n\n";
+    for (const auto& u : non_opaque) {
+        injection += "#define " + u.var + " mithril_GlobalBlock." + u.var + "\n";
+    }
+    injection += "\n";
+
+    // Phase 4: erase the original loose-uniform declarations (reverse order
+    // so earlier positions are unaffected by later erasures).
+    for (auto it = non_opaque.rbegin(); it != non_opaque.rend(); ++it) {
+        source.erase(it->pos, it->len);
+    }
+
+    // Phase 5: inject the block + defines at the insertion point (stable
+    // because all erasures are after version_end in the source).
+    source.insert(version_end, injection);
 }
 
 // FNV-1a 64-bit hash for cache keying.
