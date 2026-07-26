@@ -1,17 +1,19 @@
-// Mithril-Wrapper - MG_Backend/DirectVulkan/Swapchain.mm
-// Per-EGLSurface Vulkan swapchain: VkSurfaceKHR (via VK_EXT_metal_surface) +
-// VkSwapchainKHR + swapchain images/views + depth VkImage. The CAMetalLayer is
-// bridged in as void* from egl.mm; this TU is compiled as Objective-C++ so it
-// can define VK_USE_PLATFORM_METAL_EXT (which pulls in <Metal/Metal.h> for the
-// VkMetalSurfaceCreateInfoEXT / PFN_vkCreateMetalSurfaceEXT declarations).
+// Mithril-Wrapper - MG_Backend/DirectVulkan/SwapchainCommon.cpp
+// Platform-independent swapchain logic that runs AFTER the platform-specific
+// file (SwapchainMetal.mm / SwapchainX11.cpp) has created the VkSurfaceKHR.
+// Contains: surface-format query, vkCreateSwapchainKHR, swapchain image views,
+// acquire semaphore, optional depth/stencil image, plus the destroy/acquire/
+// present helpers and the per-Swapchain state lifecycle.
 //
-// VK_USE_PLATFORM_METAL_EXT MUST be defined before #include <vulkan/vulkan.h>
-// (transitively via Swapchain.h / Device.h) so vulkan_metal.h is visible. It
-// is intentionally NOT a global CMake compile-definition: doing so would force
-// every .cpp in the backend to be compiled as .mm (the Metal system header is
-// Objective-C only). Device.h stores the function pointer as PFN_vkVoidFunction
-// to stay metal-free; this file casts it to PFN_vkCreateMetalSurfaceEXT here.
-#define VK_USE_PLATFORM_METAL_EXT 1
+// The surface-creation step (VK_EXT_metal_surface or VK_KHR_xlib_surface)
+// lives in the platform-specific TUs. This file does NOT define
+// VK_USE_PLATFORM_* — it is plain C++ and compiles on every platform.
+//
+// Ownership contract for create_swapchain_post_surface():
+//   * On success: the returned Swapchain takes ownership of `surface`;
+//     destroy_swapchain() will call vkDestroySurfaceKHR on it.
+//   * On failure (returns nullptr): ownership stays with the caller, which
+//     must call vkDestroySurfaceKHR(b->instance, surface, nullptr) itself.
 #include "Swapchain.h"
 #include "Device.h"
 #include "Resources.h"
@@ -23,36 +25,18 @@
 namespace mithril {
 namespace vk {
 
-Swapchain* create_swapchain(void* cametal_layer, int width, int height,
-                            int want_depth_stencil) {
+Swapchain* create_swapchain_post_surface(VkSurfaceKHR surface, int width, int height,
+                                         int want_depth_stencil) {
     Backend* b = backend();
-    if (!b->initialized || !cametal_layer || width <= 0 || height <= 0) return nullptr;
+    if (!b->initialized || surface == VK_NULL_HANDLE || width <= 0 || height <= 0) return nullptr;
 
     Swapchain* sc = new Swapchain{};
     sc->width = width;
     sc->height = height;
-
-    // VkSurfaceKHR via VK_EXT_metal_surface. The layer pointer is bridged from
-    // egl.mm as void*; cast to CAMetalLayer* (the type vulkan_metal.h expects).
-    // createMetalSurfaceEXT is stored as PFN_vkVoidFunction on the Backend
-    // (see Device.h) — cast to the real type here.
-    VkMetalSurfaceCreateInfoEXT sci{};
-    sci.sType = VK_STRUCTURE_TYPE_METAL_SURFACE_CREATE_INFO_EXT;
-    // __bridge: the CAMetalLayer is owned by the host view (EglSurface.layer,
-    // a weak ARC reference). We borrow the pointer for Vulkan surface creation
-    // without transferring ownership. A plain C cast is rejected under -fobjc-arc.
-    sci.pLayer = (__bridge const CAMetalLayer*)cametal_layer;
-    if (!b->createMetalSurfaceEXT) {
-        MITHRIL_LOG_ERROR("vk", "vkCreateMetalSurfaceEXT not resolved");
-        delete sc;
-        return nullptr;
-    }
-    auto createMetalSurfaceEXT = (PFN_vkCreateMetalSurfaceEXT)b->createMetalSurfaceEXT;
-    if (createMetalSurfaceEXT(b->instance, &sci, nullptr, &sc->surface) != VK_SUCCESS) {
-        MITHRIL_LOG_ERROR("vk", "vkCreateMetalSurfaceEXT failed");
-        delete sc;
-        return nullptr;
-    }
+    // Take ownership of the surface; destroy_swapchain() will free it on
+    // teardown. On failure paths below we clear this before `delete sc` so
+    // the caller remains responsible for destroying the surface itself.
+    sc->surface = surface;
 
     // Surface format (prefer BGRA8Unorm, CAMetalLayer's default).
     uint32_t fmtCount = 0;
@@ -95,7 +79,8 @@ Swapchain* create_swapchain(void* cametal_layer, int width, int height,
     scci.clipped = VK_TRUE;
     if (vkCreateSwapchainKHR(b->device, &scci, nullptr, &sc->swapchain) != VK_SUCCESS) {
         MITHRIL_LOG_ERROR("vk", "vkCreateSwapchainKHR failed");
-        vkDestroySurfaceKHR(b->instance, sc->surface, nullptr);
+        // Surface ownership stays with the caller (see contract above).
+        sc->surface = VK_NULL_HANDLE;
         delete sc;
         return nullptr;
     }
@@ -244,66 +229,3 @@ void swapchain_present_and_acquire(Swapchain* sc) {
 
 } // namespace vk
 } // namespace mithril
-
-// ===========================================================================
-// Public C API wrappers (declared in MG_Backend/Backend.h)
-// ===========================================================================
-extern "C" {
-
-void* backend_create_swapchain(void* cametal_layer, int width, int height,
-                               int want_depth_stencil) {
-    return mithril::vk::create_swapchain(cametal_layer, width, height, want_depth_stencil);
-}
-
-void backend_destroy_swapchain(void* swapchain_state) {
-    mithril::vk::destroy_swapchain((mithril::vk::Swapchain*)swapchain_state);
-}
-
-VkImageView backend_swapchain_acquire_color(void* swapchain_state) {
-    return mithril::vk::swapchain_acquire_color((mithril::vk::Swapchain*)swapchain_state);
-}
-
-VkImageView backend_swapchain_acquire_depth(void* swapchain_state) {
-    return mithril::vk::swapchain_acquire_depth((mithril::vk::Swapchain*)swapchain_state);
-}
-
-int backend_swapchain_width(void* swapchain_state) {
-    auto* sc = (mithril::vk::Swapchain*)swapchain_state;
-    return sc ? sc->width : 0;
-}
-
-int backend_swapchain_height(void* swapchain_state) {
-    auto* sc = (mithril::vk::Swapchain*)swapchain_state;
-    return sc ? sc->height : 0;
-}
-
-void backend_present_and_acquire(void* swapchain_state) {
-    mithril::vk::swapchain_present_and_acquire((mithril::vk::Swapchain*)swapchain_state);
-}
-
-VkImage backend_swapchain_current_color_image(void* swapchain_state) {
-    auto* sc = (mithril::vk::Swapchain*)swapchain_state;
-    if (!sc || sc->currentImage < 0 || sc->currentImage >= (int)sc->images.size())
-        return VK_NULL_HANDLE;
-    return sc->images[sc->currentImage];
-}
-
-VkFormat backend_swapchain_color_format(void* swapchain_state) {
-    auto* sc = (mithril::vk::Swapchain*)swapchain_state;
-    return sc ? sc->format : VK_FORMAT_UNDEFINED;
-}
-
-VkImage backend_swapchain_current_depth_image(void* swapchain_state) {
-    auto* sc = (mithril::vk::Swapchain*)swapchain_state;
-    return sc ? sc->depthImage : VK_NULL_HANDLE;
-}
-
-VkFormat backend_swapchain_depth_format(void* swapchain_state) {
-    auto* sc = (mithril::vk::Swapchain*)swapchain_state;
-    // The depth image is always created as VK_FORMAT_D32_SFLOAT_S8_UINT in
-    // create_swapchain(); there is no per-swapchain field tracking it.
-    (void)sc;
-    return VK_FORMAT_D32_SFLOAT_S8_UINT;
-}
-
-} // extern "C"

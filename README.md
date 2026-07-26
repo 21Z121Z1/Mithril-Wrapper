@@ -30,15 +30,20 @@ GLSL 源码  ──glslang──▶  SPIR-V  ──vkCreateShaderModule──▶
   `3.3 §bMithril-Wrapper§r 1.0 (Vulkan 1.2 / MoltenVK)`，
   `glGetIntegerv(GL_MAJOR_VERSION/GL_MINOR_VERSION)` 返回 `3 / 3`，
   `GL_CONTEXT_PROFILE_MASK` 返回 `GL_CONTEXT_CORE_PROFILE_BIT`。
-- **自带 EGL 1.5（Vulkan 后端）**：`egl/egl.mm` 导出 21 个 `egl*` 入口
-  （`eglGetDisplay` / `eglInitialize` / `eglChooseConfig` / `eglCreateContext`
-  / `eglCreateWindowSurface` / `eglMakeCurrent` / `eglSwapBuffers` …），宿主启动器
+- **自带 EGL 1.5（Vulkan 后端）**：`egl/egl.cpp` 导出 ~44 个 `egl*` 入口
+  （EGL 1.5 全套：`eglGetDisplay` / `eglInitialize` / `eglChooseConfig` /
+  `eglCreateContext` / `eglCreateWindowSurface` / `eglMakeCurrent` /
+  `eglSwapBuffers` + EGL 1.5 Sync / Image / Platform Surface API …），宿主启动器
   （如 Amethyst-iOS 的 `Natives/ctxbridges/gl_bridge.m`）可直接 `dlsym` 解析。
-  EGLDisplay 映射到单例 Vulkan 实例/设备；EGLSurface 包装 `CAMetalLayer` +
-  `mithril::vk::Swapchain*`，每帧由 `vkAcquireNextImageKHR` 拉取的
-  `VkImageView` 直接挂到 GL 状态机的默认帧缓冲（FBO 0）上，GL 绘制命令因此直接
-  渲染到屏幕 drawable；EGLContext 各自持有独立的 `mithril::GLState`，
-  `eglMakeCurrent` 切换 `mithril::g_state` 指向当前上下文。
+  EGLDisplay 映射到单例 Vulkan 实例/设备；EGLSurface 包装原生窗口
+  （`CAMetalLayer` / X11 Window / `ANativeWindow`）+ `mithril::vk::Swapchain*`，
+  每帧由 `vkAcquireNextImageKHR` 拉取的 `VkImageView` 直接挂到 GL 状态机的默认
+  帧缓冲（FBO 0）上，GL 绘制命令因此直接渲染到屏幕 drawable；EGLContext 各自
+  持有独立的 `mithril::GLState`，`eglMakeCurrent` 切换 `mithril::g_state` 指向
+  当前上下文。新增的 EGL 1.5 Sync/Image API 为**影子实现**（参考 MobileGL，仅
+  维护状态层，不创建真实 `VkFence` / `VkImage`）；平台相关 surface 创建由
+  `SurfaceMetal.mm` / `SurfaceX11.cpp` / `SurfaceAndroid.cpp` 拆分承担，覆盖
+  Apple (Metal) / Linux (X11) / Android (桩) 三个平台。
 - Vulkan 后端（`MG_Backend/DirectVulkan/`）：
   - `Device` —— `VkInstance` / `VkPhysicalDevice` / `VkDevice` / `VkQueue` /
     `VkCommandPool` 生命周期与端口性枚举（`VK_KHR_portability_enumeration` +
@@ -48,10 +53,14 @@ GLSL 源码  ──glslang──▶  SPIR-V  ──vkCreateShaderModule──▶
   - `Pipeline` —— 从 SPIR-V 构建 `VkShaderModule`，并按
     `(程序, 顶点格式, 附件格式, 混合状态, 图元模式)` 的哈希签名缓存
     `VkGraphicsPipeline`。
-  - `Swapchain` —— 通过 `VK_EXT_metal_surface` (`vkCreateMetalSurfaceEXT`) 把
-    `CAMetalLayer` 包成 `VkSurfaceKHR` + `VkSwapchainKHR`，并管理深度/模板
-    `VkImage`/`VkImageView`（`VK_FORMAT_D32_SFLOAT_S8_UINT`）。编译为
-    Objective-C++（`.mm`），因为需要 `VK_USE_PLATFORM_METAL_EXT` 宏定义。
+  - `Swapchain` —— 拆分为 `SwapchainCommon.cpp`（共享后处理：格式查询 /
+    `vkCreateSwapchainKHR` / image views / 深度模板）+ `SwapchainMetal.mm`
+    （Apple，`VK_EXT_metal_surface` 把 `CAMetalLayer` 包成 `VkSurfaceKHR`）
+    + `SwapchainX11.cpp`（Linux，`VK_KHR_xlib_surface` 经 dlopen libX11 创建
+    surface，不硬链接 libX11）。深度/模板格式 `VK_FORMAT_D32_SFLOAT_S8_UINT`。
+    `SwapchainMetal.mm` 编译为 Objective-C++（`.mm`），因为需要
+    `VK_USE_PLATFORM_METAL_EXT` 宏定义；`SwapchainX11.cpp` 定义
+    `VK_USE_PLATFORM_XLIB_KHR`，但 libX11 通过 dlopen 运行时加载。
   - `CommandStream` —— Vulkan dynamic rendering (`VK_KHR_dynamic_rendering`)
     的渲染通道编排与命令缓冲区管理。
   - `DescriptorSet` —— 通过 SPIRV-Cross 反射 VS+FS 的 SPIR-V，发现 UBO 和
@@ -125,16 +134,24 @@ framebuffer、VAO），以及 EGL 默认帧缓冲的 `VkImageView`。每个 `EGL
 - `Pipeline.cpp/h` —— `VkShaderModule` 构建 + `VkPipeline` 哈希缓存
 - `CommandStream.cpp/h` —— `VK_KHR_dynamic_rendering` 动态渲染通道编排
 - `DescriptorSet.cpp/h` —— SPIRV-Cross 反射 UBO/sampler 绑定，构建描述符布局
-- `Swapchain.h` / `Swapchain.mm` —— `VK_EXT_metal_surface` 交换链（Objective-C++）
+- `Swapchain.h` / `SwapchainCommon.cpp` —— 共享 swapchain 逻辑（格式查询 /
+  `vkCreateSwapchainKHR` / image views / 深度模板）
+- `SwapchainMetal.mm` —— Apple 路径（`VK_EXT_metal_surface`，Objective-C++）
+- `SwapchainX11.cpp` —— Linux 路径（`VK_KHR_xlib_surface`，经 dlopen libX11）
 - `FormatMap.cpp/h` —— GL internalFormat → VkFormat 映射
 - `ImageOps.cpp` —— blit、mipmap 生成、readPixels 等图像操作
 - `Reflect.cpp/h` —— SPIR-V 反射辅助（封装 SPIRV-Cross）
 
 ### egl/ — EGL 1.5 实现
 
-- `egl.mm` —— 21 个 `egl*` 入口点，Objective-C++ 实现。
-  EGLDisplay → 单例 Vulkan 实例/设备；EGLSurface → `CAMetalLayer` +
+- `egl.cpp` —— 跨平台 EGL 1.5 核心（~44 个 `egl*` 入口 + 影子 sync/image 对象）。
+  无平台相关 include；surface 创建通过 `surface_create()` / `surface_get_size()`
+  分派到平台文件。EGLDisplay → 单例 Vulkan 实例/设备；EGLSurface → 原生窗口 +
   `VkSwapchainKHR`；EGLContext → 独立 `GLState`。
+- `SurfaceMetal.mm` —— Apple `CAMetalLayer` 强制转换（`CALayer` → `CAMetalLayer`）
+  + drawable 尺寸查询（Objective-C++）
+- `SurfaceX11.cpp` —— Linux X11 窗口尺寸查询（dlopen libX11，无需硬链接）
+- `SurfaceAndroid.cpp` —— Android `ANativeWindow` 路径（桩，未实际构建）
 
 ## 实现细节
 
@@ -178,14 +195,30 @@ SPIRV-Cross **仅用于 SPIR-V 反射**（非翻译）。`DescriptorSet.cpp` 在
 
 ### EGL 实现
 
-`egl.mm` 提供完整 EGL 1.5 实现：
+`egl/egl.cpp` 提供完整 EGL 1.5 实现（~44 个 `egl*` 入口，EGL 1.5 全套）：
 - `EGLDisplay` → 单例 Vulkan 实例/设备
-- `EGLSurface` → `CAMetalLayer` + `VkSwapchainKHR`（通过 `VK_EXT_metal_surface`）
+- `EGLSurface` → 原生窗口 + `VkSwapchainKHR`（平台对应：Apple
+  `VK_EXT_metal_surface` / Linux `VK_KHR_xlib_surface`）
 - `EGLContext` → 独立 `GLState`，`eglMakeCurrent` 切换上下文
 - `eglSwapBuffers` → 提交命令 + `vkAcquireNextImageKHR` + 呈现
+- EGL 1.5 Sync API（`eglCreateSync` / `eglClientWaitSync` / …）—— **影子实现**，
+  参考 MobileGL：仅维护状态层（始终 signaled），不创建真实 `VkFence`
+- EGL 1.5 Image API（`eglCreateImage` / `eglDestroyImage`）—— **影子实现**，
+  不创建真实 `VkImage`，仅返回进程内句柄
 
 项目**不直接使用 Metal 框架**——所有 Metal 交互通过 MoltenVK 内部完成。
 `CAMetalLayer` 仅用于 `VK_EXT_metal_surface` 创建 Vulkan surface。
+
+#### 平台支持矩阵
+
+| 平台 | Vulkan surface 扩展 | 原生窗口 | 备注 |
+|---|---|---|---|
+| iOS / macOS | `VK_EXT_metal_surface` + `CAMetalLayer` | `CAMetalLayer*` | 主路径，CI 实际构建 |
+| Linux | `VK_KHR_xlib_surface`（dlopen libX11） | X11 `Window` | 不硬链接 libX11，运行时按需加载 |
+| Android | （未实现） | `ANativeWindow*` | 桩，CI 未构建 |
+
+`egl/Surface<Platform>.cpp/mm` 提供 `surface_create()` / `surface_get_size()`，
+由 CMake 按 `APPLE` / `UNIX AND NOT APPLE` / `ANDROID` 守卫选择。
 
 ## 目录结构
 
@@ -218,7 +251,10 @@ SPIRV-Cross **仅用于 SPIR-V 反射**（非翻译）。`DescriptorSet.cpp` 在
 │   │       ├── FormatMap.{h,cpp}  #   GL → VkFormat 映射
 │   │       ├── ImageOps.cpp       #   图像操作（blit/mipmap/readPixels）
 │   │       ├── Reflect.{h,cpp}    #   SPIR-V 反射辅助
-│   │       └── Swapchain.{h,mm}   #   VK_EXT_metal_surface + VkSwapchainKHR（.mm）
+│   │       ├── Swapchain.h            #   Swapchain 接口（平台无关）
+│   │       ├── SwapchainCommon.cpp    #   共享 swapchain 逻辑（格式查询 / vkCreateSwapchainKHR / image views / 深度模板）
+│   │       ├── SwapchainMetal.mm      #   Apple 路径（VK_EXT_metal_surface，.mm）
+│   │       └── SwapchainX11.cpp       #   Linux 路径（VK_KHR_xlib_surface，dlopen libX11）
 │   ├── MG_Test/                   # 单元测试（Google Test, Linux CI）
 │   │   ├── CMakeLists.txt         #   FetchContent googletest v1.17.0
 │   │   ├── main.cpp               #   测试入口
@@ -227,6 +263,9 @@ SPIRV-Cross **仅用于 SPIR-V 反射**（非翻译）。`DescriptorSet.cpp` 在
 │   │   ├── ShaderTest.cpp         #   着色器编译测试
 │   │   ├── FormatMapTest.cpp      #   格式映射测试
 │   │   ├── EGLConfigTest.cpp      #   EGL 配置测试
+│   │   ├── EGLSyncTest.cpp        #   EGL 1.5 Sync 影子实现测试
+│   │   ├── EGLImageTest.cpp       #   EGL 1.5 Image 影子实现测试
+│   │   ├── EGLPlatformSurfaceTest.cpp  # EGL 1.5 Platform Surface API 测试
 │   │   ├── BufferTest.cpp         #   缓冲区测试
 │   │   ├── TextureTest.cpp        #   纹理测试
 │   │   ├── FramebufferTest.cpp    #   帧缓冲测试
@@ -234,8 +273,11 @@ SPIRV-Cross **仅用于 SPIR-V 反射**（非翻译）。`DescriptorSet.cpp` 在
 │   │   ├── ProgramTest.cpp        #   程序对象测试
 │   │   ├── LookupTest.cpp         #   入口查找测试
 │   │   └── ReflectTest.cpp        #   SPIR-V 反射测试
-│   ├── egl/                       # EGL 1.5（Vulkan 后端，Objective-C++ .mm）
-│   │   └── egl.mm                 #   21 个 egl* 入口 + VK_EXT_metal_surface 包装
+│   ├── egl/                       # EGL 1.5（跨平台核心 + 平台 surface 分裂）
+│   │   ├── egl.cpp                #   ~44 个 egl* 入口 + 影子 sync/image 对象（跨平台 C++）
+│   │   ├── SurfaceMetal.mm        #   Apple CAMetalLayer 强制转换 + 尺寸查询（.mm）
+│   │   ├── SurfaceX11.cpp         #   Linux X11 窗口尺寸查询（dlopen libX11）
+│   │   └── SurfaceAndroid.cpp     #   Android ANativeWindow 路径（桩，未构建）
 │   ├── include/                   # 对外公共头
 │   │   ├── GL/                    #   gl.h、glcorearb.h
 │   │   ├── KHR/                   #   khrplatform.h
@@ -333,11 +375,25 @@ cmake --build build --target mithril_tests -j$(nproc)
 ctest --test-dir build --output-on-failure
 ```
 
-构建产物是单个 `libmithril.dylib`，可注入到目标进程的 OpenGL / EGL 加载路径中。
-该 dylib 同时导出 `gl*`（OpenGL 3.3 Core）与 `egl*`（EGL 1.5）符号，宿主启动器
-只需 `dlopen("@rpath/libmithril.dylib", RTLD_NOW)` 即可同时拿到两套入口。
-MoltenVK 静态链接进 dylib，所以**不需要在目标设备上额外安装 Vulkan ICD 或
-`VK_ICD_FILENAMES`**。
+Linux 平台同样会构建生产库 `libmithril.so`（不只是测试二进制），通过 X11
+（`VK_KHR_xlib_surface`，运行时 dlopen libX11，无需硬链接 `-lX11`）暴露 EGL
+surface 路径。Vulkan 头文件由 `libvulkan-dev` 提供；CMakeLists.txt 自动定义
+`VK_ENABLE_BETA_EXTENSIONS=1` 以启用 `VK_KHR_portability_subset` 声明（MoltenVK
+与 Mesa / NVIDIA 端口性子集驱动都需要），无需手动传 `-D`。
+
+```bash
+# 仅构建库（不开测试）
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j$(nproc)
+# 产物：build/libmithril.so（Linux）/ build/libmithril.dylib（Apple）
+```
+
+构建产物是单个共享库（Apple 为 `libmithril.dylib`，Linux 为 `libmithril.so`），
+可注入到目标进程的 OpenGL / EGL 加载路径中。该库同时导出 `gl*`（OpenGL 3.3
+Core）与 `egl*`（EGL 1.5，~44 个入口）符号，宿主启动器只需
+`dlopen("@rpath/libmithril.dylib", RTLD_NOW)`（或 Linux 上的
+`libmithril.so`）即可同时拿到两套入口。MoltenVK 静态链接进 dylib（仅 Apple
+构建），所以**不需要在目标设备上额外安装 Vulkan ICD 或 `VK_ICD_FILENAMES`**。
 
 ## 与 Amethyst-iOS 集成
 

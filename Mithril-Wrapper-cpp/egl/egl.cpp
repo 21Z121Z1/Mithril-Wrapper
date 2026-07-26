@@ -1,5 +1,11 @@
-// Mithril-Wrapper - egl/egl.mm
-// EGL 1.5 implementation backed by Vulkan 1.2 (MoltenVK).
+// Mithril-Wrapper - egl/egl.cpp
+// EGL 1.5 cross-platform core implementation backed by Vulkan 1.2.
+//
+// Platform-specific surface creation (CAMetalLayer coercion on Apple,
+// X11 window size query on Linux, ANativeWindow on Android) is isolated
+// in egl/Surface<Platform>.cpp/mm, selected by CMake based on APPLE /
+// UNIX AND NOT APPLE / ANDROID guards. This file stays pure C++ with no
+// platform-specific includes.
 //
 // This is the layer that Amethyst-iOS' Natives/ctxbridges/gl_bridge.m dlsym's
 // against libmithril.dylib. It exposes the 21 egl* entry points listed in
@@ -12,11 +18,12 @@
 //                  eglInitialize brings them up via backend_init().
 //   EGLConfig   -> opaque pointer to one of a small set of pre-baked
 //                  EglConfig records (RGBA8 + optional depth/stencil).
-//   EGLSurface  -> EglSurface holding a CAMetalLayer* + an opaque
+//   EGLSurface  -> EglSurface holding a void* native_window + an opaque
 //                  swapchain_state pointer (a mithril::vk::Swapchain* created
 //                  by backend_create_swapchain()). The swapchain owns the
-//                  VkSurfaceKHR (via VK_EXT_metal_surface), VkSwapchainKHR,
-//                  swapchain images/views, and the depth/stencil VkImage/View
+//                  VkSurfaceKHR (via VK_EXT_metal_surface / VK_KHR_xlib_surface
+//                  / VK_KHR_android_surface), VkSwapchainKHR, swapchain
+//                  images/views, and the depth/stencil VkImage/View
 //                  (VK_FORMAT_D32_SFLOAT_S8_UINT).
 //   EGLContext  -> EglContext holding its own mithril::GLState* (allocated
 //                  via state_create()) so multiple contexts do not share GL
@@ -31,26 +38,37 @@
 //   eglSwapBuffers flushes Mithril's pending Vulkan work, presents the
 //   swapchain image via vkQueuePresentKHR, then acquires the next image for
 //   the following frame.
-//
-// Minimum requirements: Vulkan 1.2 (MoltenVK static link), iOS 14+, arm64,
-// Apple A11+ (the MoltenVK portability subset target). The CAMetalLayer is
-// still the on-screen drawable owner — MoltenVK cross-translates the Vulkan
-// swapchain into Metal presentables under the hood.
-#import <Metal/Metal.h>
-#import <QuartzCore/QuartzCore.h>
-#import <Foundation/Foundation.h>
-#import <objc/runtime.h>   // object_setClass() for layer coercion
 
 // includes.h lives in MG_Impl/ (sibling of egl/); use a relative path since
 // the egl/ directory is not on the include search path and the quote-include
 // lookup only checks the current file's directory + -I dirs.
 #include "../MG_Impl/includes.h"
 #include "../MG_Impl/EGLConfig.h"
+#include "../MG_Impl/Log.h"
 #include <EGL/egl.h>
 
 #include <atomic>
 #include <mutex>
 #include <thread>
+#include <unordered_map>
+
+// ---------------------------------------------------------------------------
+// Platform dispatch (defined in egl/Surface<Platform>.cpp/mm, selected by CMake)
+// ---------------------------------------------------------------------------
+// surface_create() prepares the native window for use as a Vulkan surface and
+// returns a void* native_window suitable for backend_create_swapchain():
+//   - Apple:   CAMetalLayer* (after CALayer -> CAMetalLayer coercion)
+//   - Linux:   X11 Window (passed through; backend_create_swapchain uses
+//              vkCreateXlibSurfaceKHR)
+//   - Android: ANativeWindow* (passed through)
+// Returns nullptr on failure. out_w / out_h receive the window's current size
+// (0 if undetermined).
+//
+// surface_get_size() queries the current size of a native_window previously
+// returned by surface_create(). Returns false if the window is invalid or the
+// size cannot be determined.
+extern "C" void* surface_create(void* native_window, int* out_w, int* out_h);
+extern "C" bool  surface_get_size(void* native_window, int* out_w, int* out_h);
 
 // ---------------------------------------------------------------------------
 // Internal handle types
@@ -59,7 +77,7 @@ namespace {
 
 // Bring the extracted config table + matching helpers from
 // mithril::egl (see MG_Impl/EGLConfig.h) into this TU's anonymous namespace
-// so egl.mm can keep referring to EglConfig / g_configs / kNumConfigs /
+// so egl.cpp can keep referring to EglConfig / g_configs / kNumConfigs /
 // config_matches / config_get_attr unqualified, exactly as it did before the
 // extraction.
 using mithril::egl::EglConfig;
@@ -74,7 +92,7 @@ struct EglDisplay {
 };
 
 struct EglSurface {
-    CAMetalLayer* layer            = nil;  // weak ref; owned by the host view
+    void*         native_window    = nullptr;  // CAMetalLayer* / X11 Window / ANativeWindow* (weak ref; owned by host)
     void*         swapchain_state  = nullptr;  // mithril::vk::Swapchain*
     EGLConfig     config           = nullptr;
     EGLint        width            = 0;
@@ -95,6 +113,24 @@ struct EglContext {
     std::atomic<int>    refcount{1};
 };
 
+// EGL 1.5 sync object (shadow implementation: always signaled, no real GPU
+// fence). Backed by a process-local handle so eglClientWaitSync/eglWaitSync
+// can validate the handle without touching the Vulkan backend.
+struct EglSync {
+    EGLDisplay dpy       = EGL_NO_DISPLAY;
+    EGLenum    type      = 0;
+    EGLenum    condition = 0;
+    EGLenum    status    = EGL_SIGNALED;
+};
+
+// EGL 1.5 image object (shadow implementation: records target + buffer only,
+// no real VkImage import). Real interop will land with the Vulkan Image bind.
+struct EglImage {
+    EGLDisplay      dpy    = EGL_NO_DISPLAY;
+    EGLenum         target = 0;
+    EGLClientBuffer buffer = nullptr;
+};
+
 // Singleton display. Returned for every eglGetDisplay / eglGetPlatformDisplay.
 EglDisplay g_display;
 
@@ -103,9 +139,17 @@ thread_local EglContext* t_currentCtx    = nullptr;
 thread_local EglSurface* t_currentDraw   = nullptr;
 thread_local EglSurface* t_currentRead   = nullptr;
 thread_local EGLint      t_lastError     = EGL_SUCCESS;
-thread_local EGLenum     t_boundAPI      = EGL_OPENGL_API;
+thread_local EGLenum     t_boundAPI      = EGL_OPENGL_ES_API;
 
 std::mutex g_ctxMutex; // guards share-group refcount updates
+
+// EGL 1.5 sync/image handle tables (shadow implementations). Handles are
+// process-local integers cast to EGLSync/EGLImage; 0 is reserved for
+// EGL_NO_SYNC / EGL_NO_IMAGE.
+static std::unordered_map<EGLSync, EglSync> g_syncs;
+static uintptr_t g_nextSyncHandle = 1;
+static std::unordered_map<EGLImage, EglImage> g_images;
+static uintptr_t g_nextImageHandle = 1;
 
 // ---------------------------------------------------------------------------
 // Error helpers
@@ -127,22 +171,17 @@ inline bool valid_config(EGLConfig c) {
 // ---------------------------------------------------------------------------
 // Vulkan swapchain helpers
 // ---------------------------------------------------------------------------
-// Build (or rebuild) the per-surface Vulkan swapchain against the CAMetalLayer.
-// Returns true on success. The swapchain is owned by the EglSurface and freed
-// in eglDestroySurface / when the layer size changes.
+// Build (or rebuild) the per-surface Vulkan swapchain against the native
+// window. Returns true on success. The swapchain is owned by the EglSurface
+// and freed in eglDestroySurface / when the window size changes.
 bool ensure_swapchain(EglSurface* s) {
-    if (!s || !s->layer) return false;
-    CGSize sz = s->layer.drawableSize;
-    if (sz.width <= 0 || sz.height <= 0) {
-        sz = s->layer.bounds.size;
-        if (sz.width <= 0 || sz.height <= 0) {
-            // Layer not yet sized; defer swapchain creation to a later call.
-            return false;
-        }
-        s->layer.drawableSize = sz;
+    if (!s || !s->native_window) return false;
+    int w = 0, h = 0;
+    if (!surface_get_size(s->native_window, &w, &h)) return false;
+    if (w <= 0 || h <= 0) {
+        // Window not yet sized; defer swapchain creation to a later call.
+        return false;
     }
-    int w = (int)sz.width;
-    int h = (int)sz.height;
     if (s->swapchain_state) {
         int cur_w = backend_swapchain_width(s->swapchain_state);
         int cur_h = backend_swapchain_height(s->swapchain_state);
@@ -156,10 +195,9 @@ bool ensure_swapchain(EglSurface* s) {
         s->swapchain_state = nullptr;
     }
     s->swapchain_state = backend_create_swapchain(
-        (__bridge void*)s->layer, w, h, s->wantDepthStencil ? 1 : 0);
+        s->native_window, w, h, s->wantDepthStencil ? 1 : 0, /*platform_hint=*/0);
     if (!s->swapchain_state) {
-        NSLog(@"[egl] backend_create_swapchain failed (layer size = %.0fx%.0f)",
-              sz.width, sz.height);
+        MITHRIL_LOG_WARN("egl", "backend_create_swapchain failed (window size = %dx%d)", w, h);
         return false;
     }
     s->width  = backend_swapchain_width(s->swapchain_state);
@@ -203,7 +241,7 @@ void install_surface_on_state(EglSurface* s) {
 // ---------------------------------------------------------------------------
 // config_matches / config_get_attr live in mithril::egl (see
 // MG_Impl/EGLConfig.{h,cpp}). The using-declarations above alias them into
-// this anonymous namespace so call sites in egl.mm can refer to them
+// this anonymous namespace so call sites in egl.cpp can refer to them
 // unqualified, exactly as before the extraction.
 
 } // namespace
@@ -278,8 +316,11 @@ const char* eglQueryString(EGLDisplay dpy, EGLint name) {
         case EGL_EXTENSIONS:
             // Minimal but honest list of what we actually implement.
             return "EGL_EXT_platform_base EGL_KHR_platform_android "
-                   "EGL_ANDROID_recordable EGL_MESA_platform_surfaceless "
-                   "EGL_KHR_swap_buffers_with_damage";
+                   "EGL_MESA_platform_surfaceless "
+                   "EGL_KHR_swap_buffers_with_damage "
+                   "EGL_KHR_fence_sync EGL_KHR_wait_sync EGL_KHR_image "
+                   "EGL_KHR_image_base EGL_KHR_create_context "
+                   "EGL_KHR_platform_base";
         default:
             set_error(EGL_BAD_PARAMETER);
             return nullptr;
@@ -375,51 +416,28 @@ EGLSurface eglCreateWindowSurface(EGLDisplay dpy, EGLConfig config,
     if (!valid_config(config)) { set_error(EGL_BAD_CONFIG); return EGL_NO_SURFACE; }
     if (!win) { set_error(EGL_BAD_NATIVE_WINDOW); return EGL_NO_SURFACE; }
 
-    // The native window is the host CALayer. Amethyst's SurfaceViewController
-    // passes its view's root layer; for Vulkan/MoltenVK rendering it MUST be
-    // a CAMetalLayer (MoltenVK's VK_EXT_metal_surface consumes the layer
-    // directly). If it isn't, we coerce it (the host view sets this up itself
-    // in production; the coercion is a safety net for ad-hoc hosts).
-    CALayer* layer = (__bridge CALayer*)win;
-    CAMetalLayer* mtlLayer = nil;
-    if ([layer isKindOfClass:[CAMetalLayer class]]) {
-        mtlLayer = (CAMetalLayer*)layer;
-    } else {
-        // Coerce: replace the layer's class with CAMetalLayer. This mirrors
-        // what UIKit views do in +layerClass. We only do this if the layer is
-        // standalone (not yet attached as a sublayer) to avoid surprising the
-        // host view hierarchy.
-        object_setClass(layer, [CAMetalLayer class]);
-        mtlLayer = (CAMetalLayer*)layer;
-    }
-    if (!mtlLayer) {
+    // Platform-specific surface preparation. Returns a void* native_window
+    // suitable for backend_create_swapchain (CAMetalLayer* on Apple,
+    // X11 Window on Linux, ANativeWindow* on Android), or nullptr on failure.
+    int w = 0, h = 0;
+    void* native_window = surface_create((void*)win, &w, &h);
+    if (!native_window) {
         set_error(EGL_BAD_NATIVE_WINDOW);
         return EGL_NO_SURFACE;
-    }
-    // MoltenVK picks the MTLDevice itself via vkCreateMetalSurfaceEXT; we do
-    // NOT bind the layer to a specific MTLDevice here (MoltenVK will choose
-    // the system default device, which matches the VkPhysicalDevice it
-    // exposes). The pixel format must be BGRA8Unorm to match the swapchain's
-    // VK_FORMAT_B8G8R8A8_UNORM.
-    mtlLayer.pixelFormat = MTLPixelFormatBGRA8Unorm;
-    mtlLayer.framebufferOnly = YES;
-    if (mtlLayer.drawableSize.width == 0 || mtlLayer.drawableSize.height == 0) {
-        mtlLayer.drawableSize = layer.bounds.size;
     }
 
     (void)attrib_list; // we ignore render-buffer / post-sub-buffer attribs
 
     EglSurface* s = new EglSurface{};
-    s->layer  = mtlLayer;
+    s->native_window = native_window;
     s->config = config;
     s->firstFrame = true;
     EglConfig* cfg = (EglConfig*)config;
     s->wantDepthStencil = (cfg->depthSize > 0 || cfg->stencilSize > 0);
-    // Build the Vulkan swapchain now if the layer is already sized. If not,
+    // Build the Vulkan swapchain now if the window is already sized. If not,
     // defer to eglMakeCurrent / eglSwapBuffers which will retry.
     if (!ensure_swapchain(s)) {
-        NSLog(@"[egl] eglCreateWindowSurface: deferred swapchain (layer size = %.0fx%.0f)",
-              mtlLayer.drawableSize.width, mtlLayer.drawableSize.height);
+        MITHRIL_LOG_WARN("egl", "eglCreateWindowSurface: deferred swapchain (window size = %dx%d)", w, h);
     }
     return (EGLSurface)s;
 }
@@ -450,7 +468,7 @@ EGLBoolean eglDestroySurface(EGLDisplay dpy, EGLSurface surface) {
         backend_destroy_swapchain(s->swapchain_state);
         s->swapchain_state = nullptr;
     }
-    s->layer = nil;
+    s->native_window = nullptr;
     delete s;
     return EGL_TRUE;
 }
@@ -577,11 +595,11 @@ EGLBoolean eglMakeCurrent(EGLDisplay dpy, EGLSurface draw, EGLSurface read,
     mithril::g_state = c->state;
 
     // Install the draw surface's swapchain image views on the (now current)
-    // GLState so framebuffer-0 rendering lands on the on-screen CAMetalLayer.
+    // GLState so framebuffer-0 rendering lands on the on-screen surface.
     if (d) {
-        if (!d->swapchain_state && d->layer) {
+        if (!d->swapchain_state && d->native_window) {
             // First make-current on a freshly-created surface whose initial
-            // swapchain creation failed (layer wasn't sized yet). Retry now.
+            // swapchain creation failed (window wasn't sized yet). Retry now.
             ensure_swapchain(d);
         }
         install_surface_on_state(d);
@@ -655,12 +673,14 @@ EGLBoolean eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
     backend_end_render_pass();
     backend_commit();
 
-    // Rebuild the swapchain if the layer was resized between frames. This
-    // invalidates the currently-acquired image, so we do it BEFORE presenting.
-    if (s->layer) {
-        CGSize sz = s->layer.drawableSize;
-        if (sz.width > 0 && sz.height > 0 &&
-            ((int)sz.width != s->width || (int)sz.height != s->height)) {
+    // Rebuild the swapchain if the native window was resized between frames.
+    // This invalidates the currently-acquired image, so we do it BEFORE
+    // presenting.
+    if (s->native_window) {
+        int w = 0, h = 0;
+        if (surface_get_size(s->native_window, &w, &h) &&
+            w > 0 && h > 0 &&
+            (w != s->width || h != s->height)) {
             ensure_swapchain(s);
         }
     }
@@ -734,8 +754,183 @@ EGLBoolean eglCopyBuffers(EGLDisplay dpy, EGLSurface surface, EGLNativePixmapTyp
     return EGL_TRUE;
 }
 
-EGLBoolean eglQueryAPI(void) {
-    return (EGLBoolean)t_boundAPI;
+// ---- EGL 1.5 Sync (shadow implementation) ----
+EGLSync eglCreateSync(EGLDisplay dpy, EGLenum type, const EGLAttrib* attrib_list) {
+    clear_error();
+    if (!valid_display(dpy)) { set_error(EGL_BAD_DISPLAY); return EGL_NO_SYNC; }
+    if (type != EGL_SYNC_FENCE) { set_error(EGL_BAD_ATTRIBUTE); return EGL_NO_SYNC; }
+    (void)attrib_list;  // EGL_SYNC_FENCE ignores attrib_list per spec
+
+    EglSync sync{};
+    sync.dpy = dpy;
+    sync.type = EGL_SYNC_FENCE;
+    sync.condition = EGL_SYNC_PRIOR_COMMANDS_COMPLETE;
+    sync.status = EGL_SIGNALED;
+
+    EGLSync handle = reinterpret_cast<EGLSync>(g_nextSyncHandle++);
+    g_syncs[handle] = sync;
+    return handle;
+}
+
+EGLBoolean eglDestroySync(EGLDisplay dpy, EGLSync sync) {
+    clear_error();
+    if (!valid_display(dpy)) { set_error(EGL_BAD_DISPLAY); return EGL_FALSE; }
+    auto it = g_syncs.find(sync);
+    if (it == g_syncs.end()) { set_error(EGL_BAD_SYNC_KHR); return EGL_FALSE; }
+    g_syncs.erase(it);
+    return EGL_TRUE;
+}
+
+EGLint eglClientWaitSync(EGLDisplay dpy, EGLSync sync, EGLint flags, EGLTime timeout) {
+    clear_error();
+    (void)flags; (void)timeout;
+    if (!valid_display(dpy)) { set_error(EGL_BAD_DISPLAY); return EGL_FALSE; }
+    auto it = g_syncs.find(sync);
+    if (it == g_syncs.end()) { set_error(EGL_BAD_SYNC_KHR); return EGL_FALSE; }
+    // Shadow implementation: always signaled, return immediately.
+    return EGL_CONDITION_SATISFIED;
+}
+
+EGLBoolean eglWaitSync(EGLDisplay dpy, EGLSync sync, EGLint flags) {
+    clear_error();
+    (void)flags;
+    if (!valid_display(dpy)) { set_error(EGL_BAD_DISPLAY); return EGL_FALSE; }
+    auto it = g_syncs.find(sync);
+    if (it == g_syncs.end()) { set_error(EGL_BAD_SYNC_KHR); return EGL_FALSE; }
+    // Shadow implementation: no real GPU-side wait.
+    return EGL_TRUE;
+}
+
+EGLBoolean eglGetSyncAttrib(EGLDisplay dpy, EGLSync sync, EGLint attribute, EGLAttrib* value) {
+    clear_error();
+    if (!valid_display(dpy)) { set_error(EGL_BAD_DISPLAY); return EGL_FALSE; }
+    auto it = g_syncs.find(sync);
+    if (it == g_syncs.end()) { set_error(EGL_BAD_SYNC_KHR); return EGL_FALSE; }
+    if (!value) { set_error(EGL_BAD_PARAMETER); return EGL_FALSE; }
+    const EglSync& s = it->second;
+    switch (attribute) {
+        case EGL_SYNC_TYPE:      *value = s.type;      break;
+        case EGL_SYNC_STATUS:    *value = s.status;    break;
+        case EGL_SYNC_CONDITION: *value = s.condition; break;
+        default:                 set_error(EGL_BAD_ATTRIBUTE); return EGL_FALSE;
+    }
+    return EGL_TRUE;
+}
+
+// ---- EGL 1.5 Image (shadow implementation) ----
+EGLImage eglCreateImage(EGLDisplay dpy, EGLContext ctx, EGLenum target,
+                        EGLClientBuffer buffer, const EGLAttrib* attrib_list) {
+    clear_error();
+    (void)ctx; (void)attrib_list;
+    if (!valid_display(dpy)) { set_error(EGL_BAD_DISPLAY); return EGL_NO_IMAGE; }
+    // Accept known targets; reject unknown.
+    switch (target) {
+        case EGL_GL_TEXTURE_2D:
+        case EGL_GL_TEXTURE_3D:
+        case EGL_GL_TEXTURE_CUBE_MAP_POSITIVE_X:
+        case EGL_GL_RENDERBUFFER:
+            break;
+        default:
+            set_error(EGL_BAD_PARAMETER);
+            return EGL_NO_IMAGE;
+    }
+
+    EglImage img{};
+    img.dpy = dpy;
+    img.target = target;
+    img.buffer = buffer;
+
+    EGLImage handle = reinterpret_cast<EGLImage>(g_nextImageHandle++);
+    g_images[handle] = img;
+    return handle;
+}
+
+EGLBoolean eglDestroyImage(EGLDisplay dpy, EGLImage image) {
+    clear_error();
+    if (!valid_display(dpy)) { set_error(EGL_BAD_DISPLAY); return EGL_FALSE; }
+    auto it = g_images.find(image);
+    if (it == g_images.end()) { set_error(EGL_BAD_PARAMETER); return EGL_FALSE; }
+    g_images.erase(it);
+    return EGL_TRUE;
+}
+
+// ---- EGL 1.5 Platform Surface ----
+EGLSurface eglCreatePlatformWindowSurface(EGLDisplay dpy, EGLConfig config,
+                                          void* native_window,
+                                          const EGLAttrib* attrib_list) {
+    clear_error();
+    (void)attrib_list;
+
+    // Surfaceless / headless mode: return a placeholder surface with no
+    // swapchain. Used by EGL_MESA_platform_surfaceless with a null window.
+    if (native_window == nullptr) {
+        if (!valid_display(dpy)) { set_error(EGL_BAD_DISPLAY); return EGL_NO_SURFACE; }
+        if (!valid_config(config)) { set_error(EGL_BAD_CONFIG); return EGL_NO_SURFACE; }
+        EglSurface* s = new EglSurface{};
+        s->config = config;
+        s->width = 0;
+        s->height = 0;
+        s->swapchain_state = nullptr;
+        s->wantDepthStencil = false;
+        s->swapInterval = 0;
+        return (EGLSurface)s;
+    }
+
+    // Default: delegate to eglCreateWindowSurface (handles platform-specific
+    // surface preparation via surface_create()).
+    return eglCreateWindowSurface(dpy, config, (EGLNativeWindowType)native_window, nullptr);
+}
+
+EGLSurface eglCreatePlatformPixmapSurface(EGLDisplay dpy, EGLConfig config,
+                                          void* native_pixmap,
+                                          const EGLAttrib* attrib_list) {
+    clear_error();
+    (void)native_pixmap; (void)attrib_list;
+    if (!valid_display(dpy)) { set_error(EGL_BAD_DISPLAY); return EGL_NO_SURFACE; }
+    if (!valid_config(config)) { set_error(EGL_BAD_CONFIG); return EGL_NO_SURFACE; }
+    // Pixmap surfaces are recorded in the state layer only, no swapchain.
+    EglSurface* s = new EglSurface{};
+    s->config = config;
+    s->width = 0;
+    s->height = 0;
+    s->swapchain_state = nullptr;
+    s->wantDepthStencil = false;
+    s->swapInterval = 0;
+    return (EGLSurface)s;
+}
+
+EGLSurface eglCreatePixmapSurface(EGLDisplay dpy, EGLConfig config,
+                                  EGLNativePixmapType pixmap,
+                                  const EGLint* attrib_list) {
+    clear_error();
+    (void)pixmap; (void)attrib_list;
+    if (!valid_display(dpy)) { set_error(EGL_BAD_DISPLAY); return EGL_NO_SURFACE; }
+    if (!valid_config(config)) { set_error(EGL_BAD_CONFIG); return EGL_NO_SURFACE; }
+    // Pixmap surfaces are recorded in the state layer only, no swapchain.
+    EglSurface* s = new EglSurface{};
+    s->config = config;
+    s->width = 0;
+    s->height = 0;
+    s->swapchain_state = nullptr;
+    s->wantDepthStencil = false;
+    s->swapInterval = 0;
+    return (EGLSurface)s;
+}
+
+EGLSurface eglCreatePbufferFromClientBuffer(EGLDisplay dpy, EGLenum buftype,
+                                            EGLClientBuffer buffer, EGLConfig config,
+                                            const EGLint* attrib_list) {
+    clear_error();
+    (void)buffer; (void)config; (void)attrib_list;
+    if (!valid_display(dpy)) { set_error(EGL_BAD_DISPLAY); return EGL_NO_SURFACE; }
+    // OpenVG is not supported.
+    if (buftype == EGL_OPENVG_IMAGE) { set_error(EGL_BAD_MATCH); return EGL_NO_SURFACE; }
+    set_error(EGL_BAD_PARAMETER);
+    return EGL_NO_SURFACE;
+}
+
+EGLenum eglQueryAPI(void) {
+    return t_boundAPI;  // defaults to EGL_OPENGL_ES_API per EGL 1.5 spec
 }
 
 } // extern "C"

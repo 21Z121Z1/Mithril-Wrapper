@@ -124,21 +124,30 @@ jobs:
           # early), which spams the log with "LLVM ERROR: Broken pipe".
           NM_OUT=$(nm -gU "$DYLIB")
           echo "=== Exported egl* symbols ==="
-          echo "$NM_OUT" | grep -Ei ' [Tt] _?egl' | head -40
+          echo "$NM_OUT" | grep -Ei ' [Tt] _?egl' | head -60
           echo "=== Exported gl* symbols (sample) ==="
           echo "$NM_OUT" | grep -Ei ' [Tt] _(glCreate|glDrawArrays|glGetString)' | head
           echo "=== Required EGL entry points present? ==="
           missing=0
-          for sym in eglGetDisplay eglInitialize eglTerminate eglChooseConfig \
-                     eglGetConfigs eglGetConfigAttrib eglCreateContext \
-                     eglDestroyContext eglMakeCurrent eglCreateWindowSurface \
-                     eglCreatePbufferSurface eglDestroySurface eglQuerySurface \
-                     eglSwapBuffers eglSwapInterval eglBindAPI eglReleaseThread \
-                     eglQueryString eglGetError eglGetCurrentContext \
+          # EGL 1.5 surface/config/context/sync/image/platform-surface API.
+          # The wrapper now exports ~44 egl* symbols (up from ~21 in the EGL
+          # 1.4 era). The list below is the full set the host dlsym()s at
+          # runtime — the second half (eglCreateSync onward) is the EGL 1.5
+          # sync / image / platform-surface API added by the new impl.
+          for sym in eglGetDisplay eglGetPlatformDisplay eglInitialize \
+                     eglTerminate eglQueryString eglBindAPI eglReleaseThread \
+                     eglGetError eglGetConfigs eglChooseConfig eglGetConfigAttrib \
+                     eglCreateWindowSurface eglCreatePbufferSurface \
+                     eglDestroySurface eglQuerySurface eglCreateContext \
+                     eglDestroyContext eglMakeCurrent eglGetCurrentContext \
                      eglGetCurrentSurface eglGetCurrentDisplay eglQueryContext \
-                     eglWaitClient eglWaitGL eglWaitNative eglGetPlatformDisplay \
-                     eglGetProcAddress eglSurfaceAttrib eglBindTexImage \
-                     eglReleaseTexImage eglCopyBuffers; do
+                     eglSwapBuffers eglSwapInterval eglWaitClient eglWaitGL \
+                     eglWaitNative eglGetProcAddress eglSurfaceAttrib \
+                     eglBindTexImage eglReleaseTexImage eglCopyBuffers eglQueryAPI \
+                     eglCreateSync eglDestroySync eglClientWaitSync eglWaitSync \
+                     eglGetSyncAttrib eglCreateImage eglDestroyImage \
+                     eglCreatePlatformWindowSurface eglCreatePlatformPixmapSurface \
+                     eglCreatePixmapSurface eglCreatePbufferFromClientBuffer; do
             if echo "$NM_OUT" | grep -qE " [Tt] _?${sym}$"; then
               echo "OK   $sym"
             else
@@ -148,6 +157,13 @@ jobs:
           done
           if [ "$missing" -ne 0 ]; then
             echo "::error::Required EGL entry points missing from libmithril.dylib export table — host dlsym() will fail."
+            exit 1
+          fi
+          echo "=== Total egl* symbol count ==="
+          TOTAL=$(echo "$NM_OUT" | grep -cEi ' [Tt] _?egl')
+          echo "Exported egl* symbols: $TOTAL (expected >= 40)"
+          if [ "$TOTAL" -lt 40 ]; then
+            echo "::error::Expected at least 40 exported egl* symbols, found $TOTAL — EGL 1.5 sync/image/platform-surface impl may be missing."
             exit 1
           fi
 

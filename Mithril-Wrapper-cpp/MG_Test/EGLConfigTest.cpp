@@ -149,43 +149,75 @@ TEST(ConfigMatches, CombinationRed8Green8Blue8Alpha8Depth24) {
     EXPECT_FALSE(config_matches(&g_configs[3], match)); // id=4, no depth
 }
 
-// EGL_TRANSPARENT_TYPE is not a field on EglConfig (the struct has no
-// transparentType member), and config_matches has no `case EGL_TRANSPARENT_TYPE:`
-// label — the token falls through to the `default` branch, which ignores the
-// constraint entirely. So requesting EGL_TRANSPARENT_RGB does NOT filter
-// anything: every config still matches. (config_get_attr reports EGL_NONE for
-// EGL_TRANSPARENT_TYPE, i.e. no config actually IS transparent — a semantic
-// mismatch with the matching logic, but the match predicate is permissive.)
-TEST(ConfigMatches, TransparentTypeRgbIsHonored) {
+// config_matches now has an explicit `case EGL_TRANSPARENT_TYPE:` that
+// rejects any value other than EGL_NONE (no pre-baked config is transparent).
+// So requesting EGL_TRANSPARENT_RGB filters out every config. config_get_attr
+// reports EGL_NONE for EGL_TRANSPARENT_TYPE — the match predicate and the
+// attribute lookup now agree.
+TEST(ConfigMatches, TransparentTypeRgbIsRejected) {
     const EGLint match[] = {EGL_TRANSPARENT_TYPE, EGL_TRANSPARENT_RGB, EGL_NONE};
+    int matched = 0;
     for (int i = 0; i < kNumConfigs; ++i) {
-        EXPECT_TRUE(config_matches(&g_configs[i], match))
-            << "config index " << i;
+        if (config_matches(&g_configs[i], match)) ++matched;
         EXPECT_EQ(config_get_attr(&g_configs[i], EGL_TRANSPARENT_TYPE), EGL_NONE)
             << "config index " << i;
     }
+    EXPECT_EQ(matched, 0);
 }
 
-// EGL_LUMINANCE_SIZE is not handled by config_matches (no case label), so it
-// is treated as EGL_DONT_CARE: the constraint is ignored and every config
-// matches. config_get_attr reports 0 for EGL_LUMINANCE_SIZE on all configs
-// (the table only carries RGBX/RGBA color configs, no luminance configs).
-TEST(ConfigMatches, LuminanceSizeIgnoredOrHonored) {
-    const EGLint match[] = {EGL_LUMINANCE_SIZE, 8, EGL_NONE};
+// EGL_TRANSPARENT_TYPE = EGL_NONE is the value every pre-baked config reports
+// (none is transparent), so the constraint matches the entire table.
+TEST(ConfigMatches, TransparentTypeNoneMatchesAll) {
+    const EGLint attribs[] = {EGL_TRANSPARENT_TYPE, EGL_NONE, EGL_NONE};
+    int matched = 0;
     for (int i = 0; i < kNumConfigs; ++i) {
-        EXPECT_TRUE(config_matches(&g_configs[i], match))
-            << "config index " << i;
+        if (config_matches(&g_configs[i], attribs)) ++matched;
+    }
+    EXPECT_EQ(matched, kNumConfigs);
+}
+
+// config_matches now has an explicit `case EGL_LUMINANCE_SIZE:` that only
+// accepts 0 (no pre-baked config carries a luminance buffer — they are all
+// RGB / RGBA). Requesting 8 therefore matches nothing; requesting 0 matches
+// every config. config_get_attr reports 0 for EGL_LUMINANCE_SIZE on all
+// configs, so the match predicate and the attribute lookup now agree.
+TEST(ConfigMatches, LuminanceSizeIsHonored) {
+    // EGL_LUMINANCE_SIZE = 8 matches no config (no luminance buffers).
+    const EGLint match8[] = {EGL_LUMINANCE_SIZE, 8, EGL_NONE};
+    int matched8 = 0;
+    for (int i = 0; i < kNumConfigs; ++i) {
+        if (config_matches(&g_configs[i], match8)) ++matched8;
         EXPECT_EQ(config_get_attr(&g_configs[i], EGL_LUMINANCE_SIZE), 0)
             << "config index " << i;
     }
+    EXPECT_EQ(matched8, 0);
+
+    // EGL_LUMINANCE_SIZE = 0 matches all configs.
+    const EGLint match0[] = {EGL_LUMINANCE_SIZE, 0, EGL_NONE};
+    int matched0 = 0;
+    for (int i = 0; i < kNumConfigs; ++i) {
+        if (config_matches(&g_configs[i], match0)) ++matched0;
+    }
+    EXPECT_EQ(matched0, kNumConfigs);
+}
+
+// EGL_LUMINANCE_SIZE = 0 is the value every pre-baked config reports, so the
+// constraint matches the entire table.
+TEST(ConfigMatches, LuminanceSizeZeroMatchesAll) {
+    const EGLint attribs[] = {EGL_LUMINANCE_SIZE, 0, EGL_NONE};
+    int matched = 0;
+    for (int i = 0; i < kNumConfigs; ++i) {
+        if (config_matches(&g_configs[i], attribs)) ++matched;
+    }
+    EXPECT_EQ(matched, kNumConfigs);
 }
 
 // Setting every attribute the host might query to EGL_DONT_CARE must yield a
 // permissive predicate that matches the entire table. Exercises the
 // `if (value == EGL_DONT_CARE) continue;` short-circuit across a broad set of
 // attributes — both those config_matches actively checks (sizes, surface /
-// renderable type, config id, color buffer type) and those it ignores via
-// `default` (transparent type, luminance, caveats, swap intervals, ...).
+// renderable type, config id, color buffer type, transparent type, luminance
+// size) and those it ignores via `default` (caveats, swap intervals, ...).
 // Note: EGL_MAX_PBUFFER_HEIGHT / EGL_NATIVE_VISUAL_TYPE share token values
 // with EGL_NATIVE_VISUAL_ID / EGL_SAMPLES respectively (Khronos spec aliasing),
 // so only one of each aliased pair is listed to keep the array token-clean.

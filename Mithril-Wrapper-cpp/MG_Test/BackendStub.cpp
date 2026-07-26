@@ -120,7 +120,7 @@ void backend_bind_program_descriptors(GLuint)                                   
 // ---- Swapchain ----
 void backend_present_and_acquire(void*)                                         {}
 
-void* backend_create_swapchain(void*, int, int, int)                            { return nullptr; }
+void* backend_create_swapchain(void*, int, int, int, int)                    { return nullptr; }
 void  backend_destroy_swapchain(void*)                                          {}
 
 VkImageView backend_swapchain_acquire_color(void*)                              { return VK_NULL_HANDLE; }

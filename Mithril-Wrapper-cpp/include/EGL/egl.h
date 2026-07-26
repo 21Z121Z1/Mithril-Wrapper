@@ -35,6 +35,11 @@ typedef uint64_t EGLTime;
 typedef int64_t  EGLint64NV;
 typedef uint64_t EGLuint64KHR;
 
+/* ---- EGL 1.5 sync / image / attrib types ---- */
+typedef void*    EGLSync;
+typedef void*    EGLImage;
+typedef intptr_t EGLAttrib;
+
 /*
  * Native window/display types. On iOS there is no X/Wayland/Win32 native
  * display; EGL_DEFAULT_DISPLAY (0) resolves to the singleton Metal-backed
@@ -75,6 +80,7 @@ typedef EGLNativeWindowType  NativeWindowType;
 #define EGL_BAD_PARAMETER            0x300C
 #define EGL_BAD_SURFACE              0x300D
 #define EGL_CONTEXT_LOST             0x300E
+#define EGL_BAD_SYNC_KHR             0x307F
 
 /* ---- Config attributes ---- */
 #define EGL_BUFFER_SIZE              0x3080
@@ -148,6 +154,9 @@ typedef EGLNativeWindowType  NativeWindowType;
 #define EGL_CONTEXT_OPENGL_PROFILE_MASK 0x30FD
 #define EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT 0x00000001
 #define EGL_CONTEXT_OPENGL_COMPATIBILITY_PROFILE_BIT 0x00000002
+#define EGL_CONTEXT_OPENGL_DEBUG_BIT_KHR             0x0001
+#define EGL_CONTEXT_OPENGL_FORWARD_COMPATIBLE_BIT_KHR 0x0002
+#define EGL_CONTEXT_OPENGL_ROBUST_ACCESS_BIT_KHR     0x0004
 
 /* ---- QueryString targets ---- */
 #define EGL_VENDOR                   0x3053
@@ -162,6 +171,7 @@ typedef EGLNativeWindowType  NativeWindowType;
 #define EGL_PLATFORM_WAYLAND_KHR     0x31D8
 #define EGL_PLATFORM_X11_KHR         0x31D5
 #define EGL_PLATFORM_SURFACELESS_MESA 0x31DD
+#define EGL_PLATFORM_XCB_EXT          0x31DC
 
 /* ---- Surface attributes ---- */
 #define EGL_HEIGHT                   0x3056
@@ -202,6 +212,22 @@ typedef EGLNativeWindowType  NativeWindowType;
 #define EGL_SYNC_NATIVE_FENCE_ANDROID 0x3144
 #define EGL_FOREVER_KHR              0xFFFFFFFFFFFFFFFFULL
 
+/* EGL 1.5 Sync API */
+#define EGL_NO_SYNC                  ((EGLSync)0)
+#define EGL_SYNC_TYPE                0x30F7
+#define EGL_SYNC_CONDITION           0x30F8
+#define EGL_SYNC_REUSABLE_KHR        0x30FA
+#define EGL_SYNC_FLUSH_COMMANDS_BIT  0x0001
+
+/* EGL 1.5 Image API */
+#define EGL_NO_IMAGE                 ((EGLImage)0)
+#define EGL_GL_TEXTURE_2D            0x30B1
+#define EGL_GL_TEXTURE_3D            0x30B2
+#define EGL_GL_TEXTURE_CUBE_MAP_POSITIVE_X 0x30B3
+#define EGL_GL_RENDERBUFFER          0x30B9
+#define EGL_IMAGE_PRESERVED          0x30D2
+#define EGL_OPENVG_IMAGE             0x3096
+
 /* ===========================================================================
  * Function-pointer typedefs. These match the Khronos EGL 1.5 signatures and
  * are what Amethyst's `egl_library` struct stores. The implementations are
@@ -237,7 +263,25 @@ typedef EGLBoolean  (*PFNEGLWAITCLIENTPROC)           (void);
 typedef EGLBoolean  (*PFNEGLWAITGLPROC)               (void);
 typedef EGLBoolean  (*PFNEGLWAITNATIVEPROC)           (EGLint engine);
 typedef EGLDisplay  (*PFNEGLGETCURRENTDISPLAYPROC)    (void);
-typedef EGLBoolean  (*PFNEGLRELEASECONTEXTPROC)       (EGLDisplay dpy);
+
+/* EGL 1.5 Sync / Image / Platform Surface / helper typedefs. */
+typedef void*       (*PFNEGLCREATESYNCPROC)            (EGLDisplay dpy, EGLenum type, const EGLAttrib *attrib_list);
+typedef EGLBoolean  (*PFNEGLDESTROYSYNCPROC)           (EGLDisplay dpy, EGLSync sync);
+typedef EGLint      (*PFNEGLCLIENTWAITSYNCPROC)        (EGLDisplay dpy, EGLSync sync, EGLint flags, EGLTime timeout);
+typedef EGLBoolean  (*PFNEGLWAITSYNCPROC)              (EGLDisplay dpy, EGLSync sync, EGLint flags);
+typedef EGLBoolean  (*PFNEGLGETSYNCATTRIBPROC)         (EGLDisplay dpy, EGLSync sync, EGLint attribute, EGLAttrib *value);
+typedef void*       (*PFNEGLCREATEIMAGEPROC)           (EGLDisplay dpy, EGLContext ctx, EGLenum target, EGLClientBuffer buffer, const EGLAttrib *attrib_list);
+typedef EGLBoolean  (*PFNEGLDESTROYIMAGEPROC)          (EGLDisplay dpy, EGLImage image);
+typedef EGLSurface  (*PFNEGLCREATEPLATFORMWINDOWSURFACEPROC) (EGLDisplay dpy, EGLConfig config, void *native_window, const EGLAttrib *attrib_list);
+typedef EGLSurface  (*PFNEGLCREATEPLATFORMPIXMAPSURFACEPROC) (EGLDisplay dpy, EGLConfig config, void *native_pixmap, const EGLAttrib *attrib_list);
+typedef EGLSurface  (*PFNEGLCREATEPIXMAPSURFACEPROC)   (EGLDisplay dpy, EGLConfig config, EGLNativePixmapType pixmap, const EGLint *attrib_list);
+typedef EGLSurface  (*PFNEGLCREATEPBUFFERFROMCLIENTBUFFERPROC) (EGLDisplay dpy, EGLenum buftype, EGLClientBuffer buffer, EGLConfig config, const EGLint *attrib_list);
+typedef void        (*(*PFNEGLGETPROCADDRESSPROC)      (const char *procname))(void);
+typedef EGLBoolean  (*PFNEGLSURFACEATTRIBPROC)         (EGLDisplay dpy, EGLSurface surface, EGLint attribute, EGLint value);
+typedef EGLBoolean  (*PFNEGLBINDTEXIMAGEPROC)          (EGLDisplay dpy, EGLSurface surface, EGLint buffer);
+typedef EGLBoolean  (*PFNEGLRELEASETEXIMAGEPROC)       (EGLDisplay dpy, EGLSurface surface, EGLint buffer);
+typedef EGLBoolean  (*PFNEGLCOPYBUFFERSPROC)           (EGLDisplay dpy, EGLSurface surface, EGLNativePixmapType target);
+typedef EGLenum     (*PFNEGLQUERYAPIPROC)              (void);
 
 /* ===========================================================================
  * Public EGL entry points (exported by this dylib). Consumers may either
@@ -274,6 +318,31 @@ EGLBoolean  eglSwapInterval(EGLDisplay dpy, EGLint interval);
 EGLBoolean  eglWaitClient(void);
 EGLBoolean  eglWaitGL(void);
 EGLBoolean  eglWaitNative(EGLint engine);
+
+/* EGL 1.5 Sync API */
+EGLSync     eglCreateSync(EGLDisplay dpy, EGLenum type, const EGLAttrib *attrib_list);
+EGLBoolean  eglDestroySync(EGLDisplay dpy, EGLSync sync);
+EGLint      eglClientWaitSync(EGLDisplay dpy, EGLSync sync, EGLint flags, EGLTime timeout);
+EGLBoolean  eglWaitSync(EGLDisplay dpy, EGLSync sync, EGLint flags);
+EGLBoolean  eglGetSyncAttrib(EGLDisplay dpy, EGLSync sync, EGLint attribute, EGLAttrib *value);
+
+/* EGL 1.5 Image API */
+EGLImage    eglCreateImage(EGLDisplay dpy, EGLContext ctx, EGLenum target, EGLClientBuffer buffer, const EGLAttrib *attrib_list);
+EGLBoolean  eglDestroyImage(EGLDisplay dpy, EGLImage image);
+
+/* EGL 1.5 Platform Surface API */
+EGLSurface  eglCreatePlatformWindowSurface(EGLDisplay dpy, EGLConfig config, void *native_window, const EGLAttrib *attrib_list);
+EGLSurface  eglCreatePlatformPixmapSurface(EGLDisplay dpy, EGLConfig config, void *native_pixmap, const EGLAttrib *attrib_list);
+EGLSurface  eglCreatePixmapSurface(EGLDisplay dpy, EGLConfig config, EGLNativePixmapType pixmap, const EGLint *attrib_list);
+EGLSurface  eglCreatePbufferFromClientBuffer(EGLDisplay dpy, EGLenum buftype, EGLClientBuffer buffer, EGLConfig config, const EGLint *attrib_list);
+
+/* EGL 1.5 / extension helpers already implemented but previously undeclared. */
+void        (*eglGetProcAddress(const char *procname))(void);
+EGLBoolean  eglSurfaceAttrib(EGLDisplay dpy, EGLSurface surface, EGLint attribute, EGLint value);
+EGLBoolean  eglBindTexImage(EGLDisplay dpy, EGLSurface surface, EGLint buffer);
+EGLBoolean  eglReleaseTexImage(EGLDisplay dpy, EGLSurface surface, EGLint buffer);
+EGLBoolean  eglCopyBuffers(EGLDisplay dpy, EGLSurface surface, EGLNativePixmapType target);
+EGLenum     eglQueryAPI(void); /* Non-standard extension, retained for Amethyst-iOS compatibility */
 
 #ifdef __cplusplus
 }

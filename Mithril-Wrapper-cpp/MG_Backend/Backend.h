@@ -290,15 +290,24 @@ void backend_bind_program_descriptors(GLuint program);
 void backend_present_and_acquire(void* swapchain_state);
 
 /*
- * Create the Vulkan surface + swapchain for a CAMetalLayer. Returns an opaque
+ * Create the Vulkan surface + swapchain for a native window. Returns an opaque
  * pointer the EGL layer holds onto. The depth VkImage/View is created here
- * (Depth32Float + Stencil8 → VK_FORMAT_D32_SFLOAT_S8_UINT).
- *   layer      : CAMetalLayer* (bridged void*)
- *   width/height: drawable size
- *   want_depth_stencil: 1 to allocate a depth/stencil image
+ * (Depth32Float + Stencil8 -> VK_FORMAT_D32_SFLOAT_S8_UINT).
+ *   native_window      : platform-native window handle
+ *                        - Apple:   CAMetalLayer* (bridged void*)
+ *                        - Linux:   X11 Window (cast to void*)
+ *                        - Android: ANativeWindow* (cast to void*)
+ *   width/height       : drawable size
+ *   want_depth_stencil : 1 to allocate a depth/stencil image
+ *   platform_hint      : 0 = auto-detect via compile-time platform; or one of
+ *                        EGL_PLATFORM_ANDROID_KHR / EGL_PLATFORM_X11_KHR /
+ *                        EGL_PLATFORM_SURFACELESS_MESA for explicit dispatch
+ *                        (forward-looking; the current split implementation
+ *                        routes by CMake-selected TU, so the value is taken
+ *                        as a hint and may be ignored by the impl).
  */
-void* backend_create_swapchain(void* cametal_layer, int width, int height,
-                               int want_depth_stencil);
+void* backend_create_swapchain(void* native_window, int width, int height,
+                               int want_depth_stencil, int platform_hint);
 void  backend_destroy_swapchain(void* swapchain_state);
 
 /* Acquire the next swapchain image and return its color VkImageView (plus the

@@ -43,6 +43,14 @@ bool config_matches(const EglConfig* cfg, const EGLint* attribs) {
             case EGL_SURFACE_TYPE:    if ((cfg->surfaceType & value) != value) return false; break;
             case EGL_RENDERABLE_TYPE: if ((cfg->renderableType & value) != value) return false; break;
             case EGL_COLOR_BUFFER_TYPE: if (value != EGL_RGB_BUFFER) return false; break;
+            // All pre-baked configs are non-transparent RGB buffers, so a
+            // request for EGL_TRANSPARENT_RGB must reject them (config_get_attr
+            // reports EGL_NONE for EGL_TRANSPARENT_TYPE). Without this case
+            // the token fell through to `default` and the constraint was
+            // silently ignored — a semantic mismatch with config_get_attr.
+            case EGL_TRANSPARENT_TYPE: if (value != EGL_NONE) return false; break;
+            // No pre-baked config carries a luminance buffer; only 0 matches.
+            case EGL_LUMINANCE_SIZE:   if (value != 0) return false; break;
             case EGL_CONFIG_ID:       if (cfg->configId != value) return false; break;
             case EGL_LEVEL:           break; // ignored
             case EGL_NATIVE_RENDERABLE: break; // ignored

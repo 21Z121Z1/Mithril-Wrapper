@@ -6,22 +6,26 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-# Objective-C++ (.mm) standard for the EGL layer (only .mm files left in the
-# Vulkan/MoltenVK rewrite are egl/egl.mm and MG_Impl/Getter_gpu.mm — both pure
-# Foundation/QuartzCore; no Metal framework is referenced directly).
+# Objective-C++ (.mm) standard for the EGL surface layer + Apple GPU info +
+# Vulkan Metal-backed swapchain. The .mm files in the cross-platform split are
+# egl/SurfaceMetal.mm (CAMetalLayer coercion), MG_Impl/Getter_gpu.mm (NSString
+# / NSLog helpers), and MG_Backend/DirectVulkan/SwapchainMetal.mm (defines
+# VK_USE_PLATFORM_METAL_EXT so it can call vkCreateMetalSurfaceEXT). All of
+# them are Foundation/QuartzCore/Metal — no other platforms build .mm files.
 if(APPLE)
     enable_language(OBJCXX)
     set(CMAKE_OBJCXX_STANDARD 20)
     set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
 endif()
 
-# GL/EGL symbols must be exported (the dylib is a drop-in OpenGL/EGL
-# replacement). IMPORTANT: .mm files (EGL, Getter_gpu) are compiled as OBJCXX;
-# leetal/ios-cmake defaults OBJCXX to -fvisibility=hidden, which would hide the
-# egl* entry points and make host dlsym("eglCreateContext") fail. Mirror the
-# CXX visibility on OBJCXX so egl.mm's extern "C" functions are exported. (The
-# egl.mm translation unit also guards itself with #pragma GCC visibility
-# push(default); both layers are intentional belt-and-suspenders.)
+# GL/EGL symbols must be exported (the dylib/so is a drop-in OpenGL/EGL
+# replacement). IMPORTANT: .mm files (EGL surface, Getter_gpu, SwapchainMetal)
+# are compiled as OBJCXX; leetal/ios-cmake defaults OBJCXX to
+# -fvisibility=hidden, which would hide the egl* entry points and make host
+# dlsym("eglCreateContext") fail. Mirror the CXX visibility on OBJCXX so
+# egl.cpp's extern "C" functions are exported. (The egl.cpp translation unit
+# also guards itself with #pragma GCC visibility push(default); both layers
+# are intentional belt-and-suspenders.)
 set(CMAKE_CXX_VISIBILITY_PRESET default)
 set(CMAKE_C_VISIBILITY_PRESET default)
 set(CMAKE_OBJCXX_VISIBILITY_PRESET default)
@@ -130,17 +134,20 @@ set(SPIRV_HEADERS_INCLUDE_DIR
 add_subdirectory(Mithril-Wrapper-cpp/3rdparty/SPIRV-Cross)
 
 # ---------------------------------------------------------------------------
-# Mithril-Wrapper shared library (iOS arm64 dylib)
+# Mithril-Wrapper shared library (libmithril.dylib on Apple, libmithril.so on
+# Linux, libmithril.so on Android)
 #
-# Source layout (Vulkan/MoltenVK rewrite):
+# Source layout (cross-platform Vulkan/MoltenVK rewrite):
 #   Mithril-Wrapper-cpp/
 #     MG_Impl/         — OpenGL 3.3 Core Profile entry points (GL calls into
 #                        the Vulkan backend via the C API in MG_Backend/Backend.h)
 #     MG_State/        — GL state machine (per-EGLContext GLState)
 #     MG_Backend/      — abstract backend C API (Backend.h)
-#       DirectVulkan/  — Vulkan 1.2 + MoltenVK implementation
-#     egl/             — EGL 1.5 (Vulkan-backed; egl.mm is the only .mm here
-#                        that touches CAMetalLayer via VK_EXT_metal_surface)
+#       DirectVulkan/  — Vulkan 1.2 + MoltenVK implementation (split into
+#                        platform-specific surface files + a shared common core)
+#     egl/             — EGL 1.5 (cross-platform core egl.cpp + platform-specific
+#                        Surface<Platform>.cpp/mm; the platform file is picked
+#                        by the APPLE / UNIX-AND-NOT-APPLE / ANDROID guards below)
 #     include/         — public GL/EGL headers
 # ---------------------------------------------------------------------------
 set(MITHRIL_SOURCES
@@ -163,7 +170,7 @@ set(MITHRIL_SOURCES
     # MG_State: GL state machine
     Mithril-Wrapper-cpp/MG_State/State.cpp
 
-    # MG_Backend: Vulkan 1.2 + MoltenVK direct backend
+    # MG_Backend: Vulkan 1.2 + MoltenVK direct backend (platform-agnostic core)
     Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Device.cpp
     Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Resources.cpp
     Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/FormatMap.cpp
@@ -172,30 +179,69 @@ set(MITHRIL_SOURCES
     Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/DescriptorSet.cpp
     Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/CommandStream.cpp
     Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/ImageOps.cpp
+    # SwapchainCommon.cpp: shared post-surface swapchain creation logic
+    # (format query / vkCreateSwapchainKHR / image views / depth-stencil /
+    # destroy / acquire / present). Platform-specific files
+    # (SwapchainMetal.mm / SwapchainX11.cpp) call create_swapchain_post_surface
+    # after creating the VkSurfaceKHR.
+    Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/SwapchainCommon.cpp
 
-    # MG_Impl: pure-logic EGL config table extracted from egl.mm so it can be
-    # unit-tested without an ObjC++ toolchain. Compiled into the iOS dylib too
-    # (egl.mm #includes EGLConfig.h and treats g_configs as its config table).
+    # MG_Impl: pure-logic EGL config table extracted from the EGL layer so it
+    # can be unit-tested without an ObjC++ toolchain. Compiled into every
+    # platform's dylib/so (egl.cpp #includes EGLConfig.h and treats g_configs
+    # as its config table).
     Mithril-Wrapper-cpp/MG_Impl/EGLConfig.cpp
+
+    # egl/egl.cpp: cross-platform EGL 1.5 core (all egl* entry points +
+    # shadow sync/image objects). No platform-specific includes — surface
+    # creation dispatches to surface_create() / surface_get_size() provided
+    # by the platform file (SurfaceMetal.mm / SurfaceX11.cpp /
+    # SurfaceAndroid.cpp) selected by the platform guards below.
+    Mithril-Wrapper-cpp/egl/egl.cpp
 )
 
+# ---- Platform-specific sources ----
+# Each platform contributes:
+#   - One egl/Surface<Platform>.{cpp,mm} providing surface_create/surface_get_size
+#   - One MG_Backend/DirectVulkan/Swapchain<Platform>.{cpp,mm} providing
+#     create_swapchain + the backend_* C API wrappers (the wrappers are
+#     identical across platforms; CMake picks one TU per build).
 if(APPLE)
     list(APPEND MITHRIL_SOURCES
-        # EGL 1.5 surface backed by Vulkan 1.2 (CAMetalLayer + VK_EXT_metal_surface).
-        # On iOS this is the layer Amethyst-iOS' gl_bridge.m dlsym's eglCreateContext
-        # etc. against. Compiled as Objective-C++ so it can talk to CAMetalLayer.
-        Mithril-Wrapper-cpp/egl/egl.mm
+        # EGL surface creation: CAMetalLayer coercion + drawable size query.
+        # Compiled as Objective-C++ so it can talk to CAMetalLayer.
+        Mithril-Wrapper-cpp/egl/SurfaceMetal.mm
         # GPU info string builder (queries VkPhysicalDeviceProperties for
         # GL_RENDERER; .mm so it can use NSString/NSLog without an #ifdef dance).
         Mithril-Wrapper-cpp/MG_Impl/Getter_gpu.mm
-        # Vulkan swapchain (VkSurfaceKHR via VK_EXT_metal_surface). Compiled as
+        # Vulkan swapchain: VkSurfaceKHR via VK_EXT_metal_surface. Compiled as
         # Objective-C++ because it #defines VK_USE_PLATFORM_METAL_EXT before
-        # including <vulkan/vulkan.h>, which pulls in <Metal/Metal.h> (ObjC-only)
-        # for the VkMetalSurfaceCreateInfoEXT / PFN_vkCreateMetalSurfaceEXT
-        # declarations. The other DirectVulkan .cpp files stay plain C++ —
-        # Device.h stores the function pointer as PFN_vkVoidFunction to avoid
-        # needing the metal platform define there.
-        Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Swapchain.mm
+        # including <vulkan/vulkan.h>, which pulls in <Metal/Metal.h>
+        # (ObjC-only) for the VkMetalSurfaceCreateInfoEXT /
+        # PFN_vkCreateMetalSurfaceEXT declarations. The other DirectVulkan
+        # .cpp files stay plain C++ — Device.h stores the function pointer as
+        # PFN_vkVoidFunction to avoid needing the metal platform define there.
+        Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/SwapchainMetal.mm
+    )
+elseif(UNIX AND NOT APPLE)
+    list(APPEND MITHRIL_SOURCES
+        # EGL surface creation: X11 window size query via dlopen libX11.
+        Mithril-Wrapper-cpp/egl/SurfaceX11.cpp
+        # Vulkan swapchain: VkSurfaceKHR via VK_KHR_xlib_surface. Defines
+        # VK_USE_PLATFORM_XLIB_KHR before <vulkan/vulkan.h>, which pulls in
+        # <X11/Xlib.h> (host must have libx11-dev installed). libX11 itself
+        # is loaded at runtime via dlopen, so no hard link-time -lX11.
+        Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/SwapchainX11.cpp
+    )
+elseif(ANDROID)
+    list(APPEND MITHRIL_SOURCES
+        # EGL surface creation: ANativeWindow size query (stub — Android
+        # dylib not actually built by current CI; the source is here so the
+        # path compiles when an Android toolchain is configured).
+        Mithril-Wrapper-cpp/egl/SurfaceAndroid.cpp
+        # No Swapchain<Platform>.cpp for Android yet — would be
+        # SwapchainAndroid.cpp using VK_KHR_android_surface. Until that
+        # lands, Android builds will fail at link time on backend_create_swapchain.
     )
 endif()
 
@@ -251,24 +297,25 @@ if(APPLE)
     )
     target_link_options(${PROJECT_NAME} PRIVATE -ObjC)
     target_compile_definitions(${PROJECT_NAME} PRIVATE MITHRIL_VULKAN=1)
-    # VK_ENABLE_BETA_EXTENSIONS: vulkan_core.h only includes
-    # vulkan_portability_subset.h (which defines
-    # VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME and the portability-subset
-    # feature/property structs) when this macro is defined. MoltenVK always
-    # advertises VK_KHR_portability_subset, and Device.cpp enables it by name,
-    # so the macro MUST be visible across the whole build. (Safe to define
-    # globally — it only gates beta-extension declarations, no codegen effect.)
-    target_compile_definitions(${PROJECT_NAME} PRIVATE VK_ENABLE_BETA_EXTENSIONS=1)
 else()
     target_link_libraries(${PROJECT_NAME} PRIVATE ${CMAKE_DL_LIBS})
 endif()
 
-# ARC for Objective-C++ translation units (EGL, GPU info, Vulkan swapchain).
+# VK_ENABLE_BETA_EXTENSIONS: vulkan_core.h only includes vulkan_beta.h (which
+# defines VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME / VK_KHR_portability_subset
+# structs) when this macro is defined. MoltenVK on Apple AND conformant Linux
+# drivers (Mesa / NVIDIA with portability subset) advertise
+# VK_KHR_portability_subset; Device.cpp enables it by name on every platform,
+# so the macro MUST be visible across the whole build. Safe to define globally
+# — it only gates beta-extension declarations, no codegen effect.
+target_compile_definitions(${PROJECT_NAME} PRIVATE VK_ENABLE_BETA_EXTENSIONS=1)
+
+# ARC for Objective-C++ translation units (EGL surface, GPU info, Vulkan swapchain).
 if(APPLE)
     set_source_files_properties(
-        Mithril-Wrapper-cpp/egl/egl.mm
+        Mithril-Wrapper-cpp/egl/SurfaceMetal.mm
         Mithril-Wrapper-cpp/MG_Impl/Getter_gpu.mm
-        Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Swapchain.mm
+        Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/SwapchainMetal.mm
         PROPERTIES COMPILE_FLAGS "-fobjc-arc"
     )
 endif()
@@ -281,8 +328,17 @@ endif()
 set_target_properties(${PROJECT_NAME} PROPERTIES
     OUTPUT_NAME "mithril"
     PREFIX "lib"
-    SUFFIX ".dylib"
 )
+# Apple produces libmithril.dylib; Linux/Android produce libmithril.so.
+# CMake's default SHARED suffix already differs by platform (.dylib on Apple,
+# .so on Linux/Android), but we set it explicitly so the value is
+# self-documenting and survives any global SUFFIX overrides from toolchain
+# files (leetal/ios-cmake in particular forces .dylib unconditionally).
+if(APPLE)
+    set_target_properties(${PROJECT_NAME} PROPERTIES SUFFIX ".dylib")
+else()
+    set_target_properties(${PROJECT_NAME} PROPERTIES SUFFIX ".so")
+endif()
 
 # ---------------------------------------------------------------------------
 # Unit tests (Linux CI). Off by default so the iOS build is untouched.

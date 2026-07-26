@@ -20,6 +20,10 @@ jobs:
 
       - name: Install build dependencies
         run: |
+          # libvulkan-dev provides <vulkan/vulkan.h> + libvulkan.so. The Linux
+          # build needs VK_ENABLE_BETA_EXTENSIONS (set in CMakeLists.txt) for
+          # the VK_KHR_portability_subset declarations pulled in by
+          # vulkan_beta.h — the system Vulkan headers are sufficient.
           sudo apt-get update
           sudo apt-get install -y cmake ninja-build libvulkan-dev mesa-vulkan-drivers
 
@@ -34,7 +38,57 @@ jobs:
         run: |
           cmake --build build --target mithril_tests -j$(nproc)
 
+      - name: Build libmithril.so
+        run: |
+          # Linux now also builds the shared library (previously Linux CI only
+          # built the test executable). The `mithril` target produces
+          # build/libmithril.so — a drop-in OpenGL/EGL replacement that the
+          # host dlsym()s the egl* / gl* entry points out of.
+          cmake --build build --target mithril -j$(nproc)
+          ls -l build/libmithril.so
+          file build/libmithril.so
+
+      - name: Verify Linux libmithril.so EGL exports
+        run: |
+          SO=build/libmithril.so
+          # Capture once (llvm-nm + grep -q SIGPIPE workaround, same as iOS).
+          NM_OUT=$(nm -gU "$SO")
+          echo "=== Exported egl* symbols (sample) ==="
+          echo "$NM_OUT" | grep -Ei ' [Tt] _?egl' | head -60
+          echo "=== Required EGL 1.5 entry points present? ==="
+          missing=0
+          # Spot-check the EGL 1.5 sync / image / platform-surface API that is
+          # new to the Linux build — the full ~44-symbol list is enforced by
+          # build.yml on iOS; here we just confirm the new symbols made it into
+          # libmithril.so (not stripped by the linker / visibility defaults).
+          for sym in eglCreateSync eglDestroySync eglClientWaitSync eglWaitSync \
+                     eglGetSyncAttrib eglCreateImage eglDestroyImage \
+                     eglCreatePlatformWindowSurface eglCreatePlatformPixmapSurface \
+                     eglCreatePixmapSurface eglCreatePbufferFromClientBuffer; do
+            if echo "$NM_OUT" | grep -qE " [Tt] _?${sym}$"; then
+              echo "OK   $sym"
+            else
+              echo "MISS $sym"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::Required EGL 1.5 entry points missing from libmithril.so export table."
+            exit 1
+          fi
+          echo "=== Total egl* symbol count ==="
+          TOTAL=$(echo "$NM_OUT" | grep -cEi ' [Tt] _?egl')
+          echo "Exported egl* symbols on Linux: $TOTAL (expected >= 40)"
+          if [ "$TOTAL" -lt 40 ]; then
+            echo "::error::Expected at least 40 exported egl* symbols, found $TOTAL."
+            exit 1
+          fi
+
       - name: Run tests
+        # ctest auto-discovers all Google Test cases registered via TEST() /
+        # TEST_F(), so the new EGLSyncTest / EGLImageTest / EGLPlatformSurfaceTest
+        # suites are picked up automatically — no separate `ctest -R EGL` step
+        # is needed.
         run: |
           ctest --test-dir build --output-on-failure --no-tests=error
 

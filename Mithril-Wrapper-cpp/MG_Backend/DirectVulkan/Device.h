@@ -46,9 +46,17 @@ struct Backend {
     // Stored as PFN_vkVoidFunction (always declared by vulkan_core.h) so this
     // header does NOT need VK_USE_PLATFORM_METAL_EXT — that macro pulls in
     // <Metal/Metal.h> (Objective-C only) and would break every .cpp that
-    // includes this header. Swapchain.mm casts to PFN_vkCreateMetalSurfaceEXT
+    // includes this header. SwapchainMetal.mm casts to PFN_vkCreateMetalSurfaceEXT
     // at the call site, where the metal platform define is active.
     PFN_vkVoidFunction createMetalSurfaceEXT = nullptr;
+
+    // vkCreateXlibSurfaceKHR function pointer (resolved from the instance on
+    // Linux). Same PFN_vkVoidFunction storage trick as createMetalSurfaceEXT
+    // so this header does NOT need VK_USE_PLATFORM_XLIB_KHR — that macro pulls
+    // in <X11/Xlib.h> and would break TUs that don't have X11 dev headers.
+    // SwapchainX11.cpp casts to PFN_vkCreateXlibSurfaceKHR at the call site.
+    // Remains null on platforms that don't advertise VK_KHR_xlib_surface.
+    PFN_vkVoidFunction createXlibSurfaceKHR = nullptr;
 
     // Per-frame sync: a fence per in-flight frame so we can wait on the GPU
     // before reusing the command buffer.
