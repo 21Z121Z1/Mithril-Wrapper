@@ -10,13 +10,14 @@
 //   2. Inject layout(location=N) into vertex `in` declarations from
 //      glBindAttribLocation mappings so the SPIR-V stage_input locations match
 //      the application's vertex descriptor.
-//   3. Preprocess: wrap loose non-opaque uniforms (e.g. `uniform mat4 MVM;`)
-//      into a synthetic `mithril_GlobalBlock` UBO that is injected right after
-//      #version, paired with #define renames so the shader body can still
-//      reference members by their original names without an explicit block
-//      prefix. This avoids the "non-opaque uniforms outside a block" error
-//      that some glslang versions emit even with EShClientOpenGL +
-//      EShMsgVulkanRules.
+//   3. Preprocess: fold loose non-opaque uniforms into a synthetic
+//      `mithril_GlobalBlock` UBO (mirroring ANGLE's ANGLE_DefaultUniformBlock).
+//      Handles precision qualifiers, multi-dimensional arrays, multiple
+//      declarators, named and anonymous struct uniforms, and skips
+//      declarations inside comments. The #define renames let the shader body
+//      reference members by their original names without a block prefix.
+//      This avoids the "non-opaque uniforms outside a block" error that some
+//      glslang versions emit even with EShClientOpenGL + EShMsgVulkanRules.
 //   4. glslang compiles the GLSL to Vulkan SPIR-V via the GL_KHR_vulkan_glsl
 //      path: EShClientOpenGL + EShMsgVulkanRules. Because step 3 already
 //      wrapped loose uniforms, glslang never needs the auto-wrap path — it
@@ -196,97 +197,167 @@ static bool is_opaque_glsl_type(const std::string& name) {
     return false;
 }
 
-/*
- * Preprocess GLSL source to wrap loose (non-block) non-opaque uniform
- * declarations into a synthetic UBO.  Vulkan-conformant SPIR-V requires all
- * uniforms to live inside blocks; glslang's EShClientOpenGL +
- * EShMsgVulkanRules combination is supposed to auto-wrap but some versions
- * reject the shader with:
- *
- *   ERROR: 'non-opaque uniforms outside a block' : not allowed when using
- *   GLSL for Vulkan
- *
- * To avoid this, we rewrite:
- *
- *   #version 150
- *   uniform mat4 ModelViewMat;
- *   uniform sampler2D Sampler0;     // opaque — stays as-is
- *   uniform mat4 ProjMat;
- *
- *   out = ProjMat * ModelViewMat * v;
- *
- * into:
- *
- *   #version 150
- *   uniform mithril_GlobalBlock {   // synthetic UBO (named block, no instance)
- *       mat4 ModelViewMat;
- *       mat4 ProjMat;
- *   };
- *   #define ModelViewMat mithril_GlobalBlock.ModelViewMat
- *   #define ProjMat      mithril_GlobalBlock.ProjMat
- *
- *   uniform sampler2D Sampler0;     // opaque, unchanged
- *
- *   out = ProjMat * ModelViewMat * v;
- *
- * The block + #define are inserted immediately after the #version directive
- * so the pre-processor renames all occurrences before the compiler runs.
- * The original loose-uniform lines are erased from wherever they appeared.
- *
- * The block name "mithril_GlobalBlock" is arbitrary — it does not match any
- * GL uniform name, so the descriptor-upload code in DescriptorSet.cpp falls
- * through to member-by-member packing via SPIRV-Cross reflection, which is
- * identical to the $Global convention that glslang's auto-wrap produces.
- * The block is emitted without an explicit binding so setAutoMapBindings(true)
- * (set in glsl_to_spirv) assigns one; the binding number is irrelevant since
- * the UBO is only ever consumed by member-name lookup in bind_program_descriptors.
- *
- * Shaders that already have all uniforms in blocks or use only opaque-sampler
- * uniforms are unaffected (a no-op scan).
- */
+// ---------------------------------------------------------------------------
+// Loose-uniform collection: fold every non-block non-opaque uniform into a
+// synthetic UBO, mirroring how ANGLE's CollectVariables folds default uniforms
+// into ANGLE_DefaultUniformBlock. The GL_KHR_vulkan_glsl path *should* do
+// this automatically via EShClientOpenGL + EShMsgVulkanRules wrapping into
+// $Global, but some glslang versions still reject the shader with
+// "non-opaque uniforms outside a block". We stay deterministic by doing the
+// wrapping ourselves as a preprocessor pass before glslang sees the source.
+//
+// Forms folded (this is the superset ANGLE collects, minus interface blocks
+// and SSBOs which stay as-is):
+//   uniform mat4 M;                    single declaration
+//   uniform mat4 A, B;                 multiple declarators on one line
+//   uniform highp float f;             precision qualifier
+//   uniform mat4 arr[8];               (multi-dimensional) arrays
+//   uniform MyStruct s;                named struct-typed uniform
+//   uniform struct { mat4 a; } u;      anonymous inline struct uniform
+//
+// All collected declarations are removed from their original locations and
+// re-emitted inside a single `mithril_GlobalBlock` UBO injected right after
+// #version, with `#define <name> mithril_GlobalBlock.<name>` so the body keeps
+// using the original identifier. Opaque uniforms (samplers, images,
+// atomic_uint, subpass inputs) remain standalone — they cannot sit in a block.
+// Shaders with no loose non-opaque uniforms are left untouched (no-op scan).
+// Declarations inside // or /* */ comments are ignored.
+// ---------------------------------------------------------------------------
+
+// Find the '}' that closes the '{' at open_idx (brace-depth scan).
+static size_t find_matching_brace(const std::string& s, size_t open_idx) {
+    int depth = 0;
+    for (size_t i = open_idx; i < s.size(); ++i) {
+        if (s[i] == '{')       ++depth;
+        else if (s[i] == '}') { --depth; if (depth == 0) return i; }
+    }
+    return std::string::npos;
+}
+
+// True if offset `off` sits inside a // or /* */ comment.
+static bool is_in_comment(const std::string& s, size_t off) {
+    // Line comment: any "//" between line start and off?
+    size_t line_start = s.rfind('\n', off);
+    line_start = (line_start == std::string::npos) ? 0 : line_start + 1;
+    if (s.find("//", line_start) < off) return true;
+    // Block comment: count unterminated /* before off.
+    int depth = 0;
+    for (size_t i = 0; i < off; ++i) {
+        if (i + 1 < off && s[i] == '/' && s[i + 1] == '*') { ++depth; ++i; }
+        else if (i + 1 < off && s[i] == '*' && s[i + 1] == '/') { if (depth) --depth; ++i; }
+    }
+    return depth > 0;
+}
+
+// Split a declarator list ("a, b[2], c") into individual trimmed declarators,
+// tracking [] depth so commas inside array sizes are ignored.
+static void split_declarators(const std::string& list,
+                              std::vector<std::string>& out) {
+    std::string cur;
+    int depth = 0;
+    for (char c : list) {
+        if (c == '[')      ++depth;
+        else if (c == ']') { if (depth) --depth; }
+        if (c == ',' && depth == 0) { out.push_back(cur); cur.clear(); }
+        else cur += c;
+    }
+    if (!cur.empty()) out.push_back(cur);
+}
+
+// Extract (name, arraySuffix) from a single declarator "arr[2][3]".
+static bool parse_declarator(const std::string& d, std::string& name,
+                             std::string& arr) {
+    static const std::regex nm_re(R"(^\s*(\w+)\s*((?:\[[^\]]*\])*)\s*$)");
+    std::smatch m;
+    if (!std::regex_match(d, m, nm_re)) return false;
+    name = m[1].str();
+    arr  = m[2].str();
+    return true;
+}
 static void wrap_loose_uniforms(std::string& source) {
-    // Match: [layout(...)] uniform <type> <name>[<array>] ;
-    // Group 1 = full declaration, group 2 = optional layout qualifier,
-    // group 3 = type name, group 4 = variable name, group 5 = optional array.
-    static const std::regex decl_re(
-        R"(^[ \t]*((layout\s*\([^)]*\)\s*)?uniform\s+(\w+)\s+(\w+)(\s*\[[^\]]*\])?\s*;))",
+    struct Member { std::string decl; std::string name; };
+    struct Erase  { size_t pos; size_t len; };
+    std::vector<Member> members;
+    std::vector<Erase>  erases;
+
+    // --- Pass A: simple / named-struct / precision / array / multi-declarator.
+    //     uniform [layout(...)] [prec] <type> <decllist> ;
+    static const std::regex simple_re(
+        R"(^[ \t]*((?:layout\s*\([^)]*\)\s*)?uniform\s+(?!struct\b)(?:(?:highp|mediump|lowp)\s+)?(\w+)\s+([^;]+?)\s*;))",
         std::regex::multiline | std::regex::optimize);
 
-    // Phase 1: scan and collect all non-opaque uniform declarations.
-    struct UniformDecl {
-        size_t pos;
-        size_t len;
-        std::string type;
-        std::string var;  // base variable name (no array suffix)
-        std::string arr;  // array suffix ("" or "[N]")
-    };
-    std::vector<UniformDecl> non_opaque;
-
     {
-        auto cur = source.cbegin();
-        auto end = source.cend();
+        auto cur = source.cbegin(), end = source.cend();
         std::smatch m;
-        while (std::regex_search(cur, end, m, decl_re)) {
-            size_t match_off = m.position(0) + (cur - source.cbegin());
-            size_t match_len = m[1].str().size();
-            const std::string& layout = m[2].str();
-            const std::string& type   = m[3].str();
-            const std::string& var    = m[4].str();
-            const std::string& arr    = m[5].str();
-
-            if (layout.empty() && !is_opaque_glsl_type(type)) {
-                non_opaque.push_back({match_off, match_len, type, var, arr});
-            }
-
+        while (std::regex_search(cur, end, m, simple_re)) {
+            size_t off  = m.position(0) + (cur - source.cbegin());
+            size_t full = m[1].str().size();
+            std::string type      = m[2].str();
+            std::string decllist  = m[3].str();
             cur = m.suffix().first;
+
+            if (is_in_comment(source, off)) continue;
+            if (is_opaque_glsl_type(type))  continue;
+
+            std::vector<std::string> names;
+            split_declarators(decllist, names);
+            for (const auto& n : names) {
+                std::string var, arr;
+                if (parse_declarator(n, var, arr)) {
+                    members.push_back({type + " " + var + arr, var});
+                    erases.push_back({off, full});
+                }
+            }
         }
     }
 
-    if (non_opaque.empty())
-        return;
+    // --- Pass B: anonymous / inline / named struct uniforms.
+    //     uniform struct [Name] { ... } <decllist> ;
+    static const std::regex struct_re(
+        R"(^[ \t]*(uniform\s+struct\s+(\w+)?\s*\{))",
+        std::regex::multiline | std::regex::optimize);
 
-    // Phase 2: determine the insertion point — right after the #version
-    // directive (which ensure_glsl_version guarantees is present).
+    {
+        auto cur = source.cbegin(), end = source.cend();
+        std::smatch m;
+        while (std::regex_search(cur, end, m, struct_re)) {
+            size_t off     = m.position(0) + (cur - source.cbegin());
+            size_t brace   = off + m[1].str().size() - 1;
+            bool  named    = m[2].matched;
+            std::string struct_name = named ? m[2].str() : "";
+            size_t close   = find_matching_brace(source, brace);
+            cur = m.suffix().first;
+            if (close == std::string::npos) continue;
+            if (is_in_comment(source, off)) continue;
+
+            std::string struct_def = source.substr(brace, close - brace + 1);
+            size_t after = close + 1;
+            size_t semi  = source.find(';', after);
+            if (semi == std::string::npos) continue;
+            std::string decllist = source.substr(after, semi - after);
+
+            std::vector<std::string> names;
+            split_declarators(decllist, names);
+            for (const auto& n : names) {
+                std::string var, arr;
+                if (!parse_declarator(n, var, arr)) continue;
+                if (named) {
+                    // Keep "struct Name { ... };" globally; drop "uniform " and
+                    // the trailing declarator so only the type definition survives.
+                    erases.push_back({off, 7});                  // "uniform "
+                    erases.push_back({after, semi - after + 1}); // " u;"
+                    members.push_back({struct_name + " " + var + arr, var});
+                } else {
+                    erases.push_back({off, semi - off + 1});
+                    members.push_back({struct_def + " " + var + arr, var});
+                }
+            }
+        }
+    }
+
+    if (members.empty()) return;
+
+    // Insertion point: right after #version (ensure_glsl_version guarantees it).
     size_t version_end = 0;
     {
         auto vp = source.find("#version");
@@ -296,26 +367,21 @@ static void wrap_loose_uniforms(std::string& source) {
         }
     }
 
-    // Phase 3: build the synthetic block and #define redirects.
     std::string injection;
     injection += "\nuniform mithril_GlobalBlock {\n";
-    for (const auto& u : non_opaque) {
-        injection += "    " + u.type + " " + u.var + u.arr + ";\n";
-    }
+    for (const auto& u : members)
+        injection += "    " + u.decl + ";\n";
     injection += "};\n\n";
-    for (const auto& u : non_opaque) {
-        injection += "#define " + u.var + " mithril_GlobalBlock." + u.var + "\n";
-    }
+    for (const auto& u : members)
+        injection += "#define " + u.name + " mithril_GlobalBlock." + u.name + "\n";
     injection += "\n";
 
-    // Phase 4: erase the original loose-uniform declarations (reverse order
-    // so earlier positions are unaffected by later erasures).
-    for (auto it = non_opaque.rbegin(); it != non_opaque.rend(); ++it) {
-        source.erase(it->pos, it->len);
-    }
+    // Erase originals (descending position so earlier offsets stay valid).
+    std::sort(erases.begin(), erases.end(),
+              [](const Erase& a, const Erase& b) { return a.pos > b.pos; });
+    for (const auto& e : erases)
+        source.erase(e.pos, e.len);
 
-    // Phase 5: inject the block + defines at the insertion point (stable
-    // because all erasures are after version_end in the source).
     source.insert(version_end, injection);
 }
 
