@@ -16,17 +16,6 @@
 #define VK_EXT_METAL_SURFACE_EXTENSION_NAME "VK_EXT_metal_surface"
 #endif
 
-// VK_KHR_xlib_surface extension-name macro. The canonical definition lives in
-// vulkan_xlib.h, which vulkan.h only pulls in when VK_USE_PLATFORM_XLIB_KHR is
-// defined BEFORE the include. We intentionally do NOT define that macro here
-// (it drags in <X11/Xlib.h> — would require X11 dev headers on every TU that
-// includes Device.h). SwapchainX11.cpp is the one TU that defines it. The
-// spec-mandated string literal lets Device.cpp request the instance extension
-// by name on Linux. Guarded with #ifndef for the same reason as the metal one.
-#ifndef VK_KHR_XLIB_SURFACE_EXTENSION_NAME
-#define VK_KHR_XLIB_SURFACE_EXTENSION_NAME "VK_KHR_xlib_surface"
-#endif
-
 #include "Device.h"
 #include "../../MG_Impl/Log.h"
 
@@ -88,12 +77,6 @@ bool init_device() {
     if (has_extension(instExtProps, VK_EXT_METAL_SURFACE_EXTENSION_NAME)) {
         instExts.push_back(VK_EXT_METAL_SURFACE_EXTENSION_NAME);
     }
-    // VK_KHR_xlib_surface: Linux/X11 surface creation. Available on desktop
-    // Vulkan loaders (Mesa, NVIDIA, etc.). On Apple platforms (MoltenVK)
-    // this extension is not advertised and the call is a no-op.
-    if (has_extension(instExtProps, VK_KHR_XLIB_SURFACE_EXTENSION_NAME)) {
-        instExts.push_back(VK_KHR_XLIB_SURFACE_EXTENSION_NAME);
-    }
     if (has_extension(instExtProps, VK_KHR_SURFACE_EXTENSION_NAME)) {
         instExts.push_back(VK_KHR_SURFACE_EXTENSION_NAME);
     }
@@ -149,12 +132,6 @@ bool init_device() {
     // translation unit casts it to PFN_vkCreateMetalSurfaceEXT at the call.
     b->createMetalSurfaceEXT =
         vkGetInstanceProcAddr(b->instance, "vkCreateMetalSurfaceEXT");
-
-    // Resolve vkCreateXlibSurfaceKHR (used by SwapchainX11.cpp on Linux).
-    // Same PFN_vkVoidFunction storage trick; the Linux TU casts at the call
-    // site. Remains null on Apple/MoltenVK (extension not advertised).
-    b->createXlibSurfaceKHR =
-        vkGetInstanceProcAddr(b->instance, "vkCreateXlibSurfaceKHR");
 
     // ---- Physical device ----
     uint32_t gpuCount = 0;

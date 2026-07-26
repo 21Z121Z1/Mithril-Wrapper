@@ -1,11 +1,11 @@
 // Mithril-Wrapper - MG_Backend/DirectVulkan/SwapchainCommon.cpp
 // Platform-independent swapchain logic that runs AFTER the platform-specific
-// file (SwapchainMetal.mm / SwapchainX11.cpp) has created the VkSurfaceKHR.
+// file (SwapchainMetal.mm) has created the VkSurfaceKHR.
 // Contains: surface-format query, vkCreateSwapchainKHR, swapchain image views,
 // acquire semaphore, optional depth/stencil image, plus the destroy/acquire/
 // present helpers and the per-Swapchain state lifecycle.
 //
-// The surface-creation step (VK_EXT_metal_surface or VK_KHR_xlib_surface)
+// The surface-creation step (VK_EXT_metal_surface)
 // lives in the platform-specific TUs. This file does NOT define
 // VK_USE_PLATFORM_* — it is plain C++ and compiles on every platform.
 //

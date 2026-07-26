@@ -134,8 +134,7 @@ set(SPIRV_HEADERS_INCLUDE_DIR
 add_subdirectory(Mithril-Wrapper-cpp/3rdparty/SPIRV-Cross)
 
 # ---------------------------------------------------------------------------
-# Mithril-Wrapper shared library (libmithril.dylib on Apple, libmithril.so on
-# Linux, libmithril.so on Android)
+# Mithril-Wrapper shared library (libmithril.dylib on Apple)
 #
 # Source layout (cross-platform Vulkan/MoltenVK rewrite):
 #   Mithril-Wrapper-cpp/
@@ -147,7 +146,7 @@ add_subdirectory(Mithril-Wrapper-cpp/3rdparty/SPIRV-Cross)
 #                        platform-specific surface files + a shared common core)
 #     egl/             — EGL 1.5 (cross-platform core egl.cpp + platform-specific
 #                        Surface<Platform>.cpp/mm; the platform file is picked
-#                        by the APPLE / UNIX-AND-NOT-APPLE / ANDROID guards below)
+#                        by the APPLE guard below)
 #     include/         — public GL/EGL headers
 # ---------------------------------------------------------------------------
 set(MITHRIL_SOURCES
@@ -182,7 +181,7 @@ set(MITHRIL_SOURCES
     # SwapchainCommon.cpp: shared post-surface swapchain creation logic
     # (format query / vkCreateSwapchainKHR / image views / depth-stencil /
     # destroy / acquire / present). Platform-specific files
-    # (SwapchainMetal.mm / SwapchainX11.cpp) call create_swapchain_post_surface
+# (SwapchainMetal.mm) call create_swapchain_post_surface
     # after creating the VkSurfaceKHR.
     Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/SwapchainCommon.cpp
 
@@ -195,8 +194,8 @@ set(MITHRIL_SOURCES
     # egl/egl.cpp: cross-platform EGL 1.5 core (all egl* entry points +
     # shadow sync/image objects). No platform-specific includes — surface
     # creation dispatches to surface_create() / surface_get_size() provided
-    # by the platform file (SurfaceMetal.mm / SurfaceX11.cpp /
-    # SurfaceAndroid.cpp) selected by the platform guards below.
+    # by the platform file (SurfaceMetal.mm) selected by
+    # the APPLE guard below.
     Mithril-Wrapper-cpp/egl/egl.cpp
 )
 
@@ -222,26 +221,6 @@ if(APPLE)
         # .cpp files stay plain C++ — Device.h stores the function pointer as
         # PFN_vkVoidFunction to avoid needing the metal platform define there.
         Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/SwapchainMetal.mm
-    )
-elseif(UNIX AND NOT APPLE)
-    list(APPEND MITHRIL_SOURCES
-        # EGL surface creation: X11 window size query via dlopen libX11.
-        Mithril-Wrapper-cpp/egl/SurfaceX11.cpp
-        # Vulkan swapchain: VkSurfaceKHR via VK_KHR_xlib_surface. Defines
-        # VK_USE_PLATFORM_XLIB_KHR before <vulkan/vulkan.h>, which pulls in
-        # <X11/Xlib.h> (host must have libx11-dev installed). libX11 itself
-        # is loaded at runtime via dlopen, so no hard link-time -lX11.
-        Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/SwapchainX11.cpp
-    )
-elseif(ANDROID)
-    list(APPEND MITHRIL_SOURCES
-        # EGL surface creation: ANativeWindow size query (stub — Android
-        # dylib not actually built by current CI; the source is here so the
-        # path compiles when an Android toolchain is configured).
-        Mithril-Wrapper-cpp/egl/SurfaceAndroid.cpp
-        # No Swapchain<Platform>.cpp for Android yet — would be
-        # SwapchainAndroid.cpp using VK_KHR_android_surface. Until that
-        # lands, Android builds will fail at link time on backend_create_swapchain.
     )
 endif()
 
@@ -329,9 +308,9 @@ set_target_properties(${PROJECT_NAME} PROPERTIES
     OUTPUT_NAME "mithril"
     PREFIX "lib"
 )
-# Apple produces libmithril.dylib; Linux/Android produce libmithril.so.
+# Apple produces libmithril.dylib.
 # CMake's default SHARED suffix already differs by platform (.dylib on Apple,
-# .so on Linux/Android), but we set it explicitly so the value is
+# .so elsewhere), but we set it explicitly so the value is
 # self-documenting and survives any global SUFFIX overrides from toolchain
 # files (leetal/ios-cmake in particular forces .dylib unconditionally).
 if(APPLE)
@@ -340,20 +319,3 @@ else()
     set_target_properties(${PROJECT_NAME} PROPERTIES SUFFIX ".so")
 endif()
 
-# ---------------------------------------------------------------------------
-# Unit tests (Linux CI). Off by default so the iOS build is untouched.
-#
-# When MITHRIL_BUILD_TEST=ON, add the MG_Test subdirectory which FetchContent's
-# Google Test v1.17.0 and builds the `mithril_tests` executable against the
-# pure-logic subsystems (State / Shader / FormatMap / EGLConfig) plus a
-# BackendStub that isolates the test binary from real Vulkan / MoltenVK.
-#
-# The test target only links plain-C++ translation units (no .mm, no MoltenVK,
-# no iOS frameworks) so it builds on ubuntu-latest. See MG_Test/CMakeLists.txt
-# for the source + link list.
-# ---------------------------------------------------------------------------
-option(MITHRIL_BUILD_TEST "Build unit tests" OFF)
-if(MITHRIL_BUILD_TEST)
-    enable_testing()
-    add_subdirectory(Mithril-Wrapper-cpp/MG_Test)
-endif()

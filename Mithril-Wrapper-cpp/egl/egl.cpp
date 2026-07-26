@@ -1,11 +1,9 @@
 // Mithril-Wrapper - egl/egl.cpp
 // EGL 1.5 cross-platform core implementation backed by Vulkan 1.2.
 //
-// Platform-specific surface creation (CAMetalLayer coercion on Apple,
-// X11 window size query on Linux, ANativeWindow on Android) is isolated
-// in egl/Surface<Platform>.cpp/mm, selected by CMake based on APPLE /
-// UNIX AND NOT APPLE / ANDROID guards. This file stays pure C++ with no
-// platform-specific includes.
+// Platform-specific surface creation (CAMetalLayer coercion on Apple) is
+// isolated in egl/Surface<Platform>.cpp/mm, selected by CMake based on the
+// APPLE guard. This file stays pure C++ with no platform-specific includes.
 //
 // This is the layer that Amethyst-iOS' Natives/ctxbridges/gl_bridge.m dlsym's
 // against libmithril.dylib. It exposes the 21 egl* entry points listed in
@@ -21,8 +19,8 @@
 //   EGLSurface  -> EglSurface holding a void* native_window + an opaque
 //                  swapchain_state pointer (a mithril::vk::Swapchain* created
 //                  by backend_create_swapchain()). The swapchain owns the
-//                  VkSurfaceKHR (via VK_EXT_metal_surface / VK_KHR_xlib_surface
-//                  / VK_KHR_android_surface), VkSwapchainKHR, swapchain
+//                  VkSurfaceKHR (via VK_EXT_metal_surface), VkSwapchainKHR,
+//                  swapchain
 //                  images/views, and the depth/stencil VkImage/View
 //                  (VK_FORMAT_D32_SFLOAT_S8_UINT).
 //   EGLContext  -> EglContext holding its own mithril::GLState* (allocated
@@ -58,9 +56,6 @@
 // surface_create() prepares the native window for use as a Vulkan surface and
 // returns a void* native_window suitable for backend_create_swapchain():
 //   - Apple:   CAMetalLayer* (after CALayer -> CAMetalLayer coercion)
-//   - Linux:   X11 Window (passed through; backend_create_swapchain uses
-//              vkCreateXlibSurfaceKHR)
-//   - Android: ANativeWindow* (passed through)
 // Returns nullptr on failure. out_w / out_h receive the window's current size
 // (0 if undetermined).
 //
@@ -92,7 +87,7 @@ struct EglDisplay {
 };
 
 struct EglSurface {
-    void*         native_window    = nullptr;  // CAMetalLayer* / X11 Window / ANativeWindow* (weak ref; owned by host)
+    void*         native_window    = nullptr;  // CAMetalLayer* (weak ref; owned by host)
     void*         swapchain_state  = nullptr;  // mithril::vk::Swapchain*
     EGLConfig     config           = nullptr;
     EGLint        width            = 0;
@@ -315,7 +310,7 @@ const char* eglQueryString(EGLDisplay dpy, EGLint name) {
             return "OpenGL";   // we expose OpenGL 3.3 Core Profile
         case EGL_EXTENSIONS:
             // Minimal but honest list of what we actually implement.
-            return "EGL_EXT_platform_base EGL_KHR_platform_android "
+            return "EGL_EXT_platform_base "
                    "EGL_MESA_platform_surfaceless "
                    "EGL_KHR_swap_buffers_with_damage "
                    "EGL_KHR_fence_sync EGL_KHR_wait_sync EGL_KHR_image "
@@ -417,8 +412,8 @@ EGLSurface eglCreateWindowSurface(EGLDisplay dpy, EGLConfig config,
     if (!win) { set_error(EGL_BAD_NATIVE_WINDOW); return EGL_NO_SURFACE; }
 
     // Platform-specific surface preparation. Returns a void* native_window
-    // suitable for backend_create_swapchain (CAMetalLayer* on Apple,
-    // X11 Window on Linux, ANativeWindow* on Android), or nullptr on failure.
+    // suitable for backend_create_swapchain (CAMetalLayer* on Apple),
+    // or nullptr on failure.
     int w = 0, h = 0;
     void* native_window = surface_create((void*)win, &w, &h);
     if (!native_window) {

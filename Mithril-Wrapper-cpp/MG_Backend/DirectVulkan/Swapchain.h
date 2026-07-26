@@ -45,15 +45,14 @@ struct Swapchain {
 // Create the surface + swapchain (+ optional depth image) for a native window.
 // Returns a heap-owned Swapchain* (caller frees with destroy_swapchain()).
 // On Apple this is defined in SwapchainMetal.mm (native_window is a
-// CAMetalLayer*); on Linux/X11 the same name is defined in SwapchainX11.cpp
-// (native_window is an X11 Window). The platform_hint parameter is taken as
+// CAMetalLayer*). The platform_hint parameter is taken as
 // a hint and may be ignored by the implementation (the CMake-selected TU
 // already determines the active platform path). 0 = auto-detect.
 Swapchain* create_swapchain(void* native_window, int width, int height,
                             int want_depth_stencil, int platform_hint);
 
 // Create the swapchain given an already-created VkSurfaceKHR. Used by
-// platform-specific files (SwapchainMetal.mm / SwapchainX11.cpp) after
+// platform-specific files (SwapchainMetal.mm) after
 // they create the surface via the platform-specific Vulkan extension.
 // On success, the returned Swapchain takes ownership of `surface` and will
 // destroy it in destroy_swapchain(). On failure (returns nullptr), ownership

@@ -13,8 +13,7 @@
 // Objective-C only). Device.h stores the function pointer as PFN_vkVoidFunction
 // to stay metal-free; this file casts it to PFN_vkCreateMetalSurfaceEXT here.
 //
-// The public C API (backend_* wrappers) is defined here on Apple platforms;
-// on Linux the same set of wrappers is provided by SwapchainX11.cpp.
+// The public C API (backend_* wrappers) is defined here on Apple platforms.
 #define VK_USE_PLATFORM_METAL_EXT 1
 #include "Swapchain.h"
 #include "Device.h"
@@ -28,7 +27,7 @@ Swapchain* create_swapchain(void* native_window, int width, int height,
     Backend* b = backend();
     if (!b->initialized || !native_window || width <= 0 || height <= 0) return nullptr;
     // platform_hint is taken as a hint; the Metal path is the only one
-    // compiled into this TU, so any explicit non-X11/Android token is
+    // compiled into this TU, so any explicit non-Metal token is
     // honoured by simply proceeding with the Metal surface creation path.
     (void)platform_hint;
 

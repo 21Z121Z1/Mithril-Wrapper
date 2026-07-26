@@ -50,14 +50,6 @@ struct Backend {
     // at the call site, where the metal platform define is active.
     PFN_vkVoidFunction createMetalSurfaceEXT = nullptr;
 
-    // vkCreateXlibSurfaceKHR function pointer (resolved from the instance on
-    // Linux). Same PFN_vkVoidFunction storage trick as createMetalSurfaceEXT
-    // so this header does NOT need VK_USE_PLATFORM_XLIB_KHR — that macro pulls
-    // in <X11/Xlib.h> and would break TUs that don't have X11 dev headers.
-    // SwapchainX11.cpp casts to PFN_vkCreateXlibSurfaceKHR at the call site.
-    // Remains null on platforms that don't advertise VK_KHR_xlib_surface.
-    PFN_vkVoidFunction createXlibSurfaceKHR = nullptr;
-
     // Per-frame sync: a fence per in-flight frame so we can wait on the GPU
     // before reusing the command buffer.
     VkFence frameFences[kMaxFramesInFlight] = {};
