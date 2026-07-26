@@ -24,8 +24,15 @@ jobs:
           # build needs VK_ENABLE_BETA_EXTENSIONS (set in CMakeLists.txt) for
           # the VK_KHR_portability_subset declarations pulled in by
           # vulkan_beta.h — the system Vulkan headers are sufficient.
+          #
+          # libx11-dev: SwapchainX11.cpp defines VK_USE_PLATFORM_XLIB_KHR before
+          # including <vulkan/vulkan.h>, which makes vulkan_xlib.h pull in
+          # <X11/Xlib.h> for the Display/Window typedefs used by
+          # VkXlibSurfaceCreateInfoKHR. libX11 itself is still loaded at runtime
+          # via dlopen (no hard link-time -lX11), but the dev headers are
+          # required at compile time.
           sudo apt-get update
-          sudo apt-get install -y cmake ninja-build libvulkan-dev mesa-vulkan-drivers
+          sudo apt-get install -y cmake ninja-build libvulkan-dev mesa-vulkan-drivers libx11-dev
 
       - name: Configure CMake
         run: |
