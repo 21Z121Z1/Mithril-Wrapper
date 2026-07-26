@@ -10,16 +10,21 @@
 //   2. Inject layout(location=N) into vertex `in` declarations from
 //      glBindAttribLocation mappings so the SPIR-V stage_input locations match
 //      the application's vertex descriptor.
-//   3. glslang compiles the GLSL to Vulkan SPIR-V via the GL_KHR_vulkan_glsl
-//      path: EShClientOpenGL + EShMsgVulkanRules. This parses desktop (OpenGL)
-//      GLSL but applies Vulkan rules, so loose (non-block) uniforms such as
-//      Minecraft's `uniform mat4 ModelViewMat;` are automatically wrapped into
-//      a single default UBO — the aggregate `$Global` block — and the emitted
-//      SPIR-V stays Vulkan-conformant (MoltenVK accepts it). The `$Global` name
-//      is exactly what DescriptorSet.cpp reflects/packs by member name.
+//   3. Preprocess: wrap loose non-opaque uniforms (e.g. `uniform mat4 MVM;`)
+//      into a synthetic `mithril_GlobalBlock` UBO so glslang never encounters
+//      the "non-opaque uniforms outside a block" error that some glslang
+//      versions emit even with EShClientOpenGL + EShMsgVulkanRules.
+//   4. glslang compiles the GLSL to Vulkan SPIR-V via the GL_KHR_vulkan_glsl
+//      path: EShClientOpenGL + EShMsgVulkanRules. Because step 3 already
+//      wrapped loose uniforms, glslang never needs the auto-wrap path — it
+//      sees only block uniforms and opaque samplers. The emitted SPIR-V stays
+//      Vulkan-conformant (MoltenVK accepts it). The synthetic block name
+//      "mithril_GlobalBlock" does not match any GL uniform name, so
+//      DescriptorSet.cpp falls through to member-by-member packing (same
+//      $Global convention), which works identically.
 //      setAutoMapLocations(true) + setAutoMapBindings(true) auto-assign any
 //      remaining locations/bindings.
-//   4. The SPIR-V words are returned directly — MoltenVK cross-translates
+//   5. The SPIR-V words are returned directly — MoltenVK cross-translates
 //      Vulkan SPIR-V to MSL internally at vkCreateShaderModule time, so no
 //      SPIRV-Cross stage is needed here.
 #include "Shader.h"
@@ -171,6 +176,113 @@ void apply_attrib_bindings(std::string& src, GLenum gl_stage,
     src.swap(out);
 }
 
+// ---------------------------------------------------------------------------
+// Opaque GLSL type detection: types that MUST remain as standalone uniform
+// declarations (samplers, images, atomic counters, subpass inputs) because
+// they cannot be placed inside a uniform block.
+// ---------------------------------------------------------------------------
+static bool is_opaque_glsl_type(const std::string& name) {
+    // All sampler types contain "sampler" in the name (sampler2D, isampler2D,
+    // usampler2D, samplerCube, sampler2DArray, sampler2DShadow, etc.).
+    if (name.find("sampler") != std::string::npos) return true;
+    // All image types contain "image" (image2D, iimage2D, uimage2D, etc.).
+    if (name.find("image")   != std::string::npos) return true;
+    // Atomic counters and subpass inputs.
+    if (name == "atomic_uint") return true;
+    if (name.find("subpass") != std::string::npos) return true;
+    return false;
+}
+
+/*
+ * Preprocess GLSL source to wrap loose (non-block) non-opaque uniform
+ * declarations into a synthetic UBO.  Vulkan-conformant SPIR-V requires all
+ * uniforms to live inside blocks; glslang's EShClientOpenGL +
+ * EShMsgVulkanRules combination is supposed to auto-wrap but some versions
+ * reject the shader with:
+ *
+ *   ERROR: 'non-opaque uniforms outside a block' : not allowed when using
+ *   GLSL for Vulkan
+ *
+ * To avoid this, we rewrite:
+ *
+ *   uniform mat4 ModelViewMat;
+ *   uniform sampler2D Sampler0;     // opaque — stays as-is
+ *
+ * into:
+ *
+ *   uniform sampler2D Sampler0;     // opaque, unchanged
+ *   uniform mithril_GlobalBlock {   // synthetic UBO
+ *       mat4 ModelViewMat;
+ *   };
+ *
+ * The block name "mithril_GlobalBlock" is arbitrary — it does not match any
+ * GL uniform name, so the descriptor-upload code in DescriptorSet.cpp falls
+ * through to member-by-member packing via SPIRV-Cross reflection, which is
+ * identical to the $Global convention that glslang's auto-wrap produces.
+ * The block is emitted without an explicit binding so setAutoMapBindings(true)
+ * (set in glsl_to_spirv) assigns one; the binding number is irrelevant since
+ * the UBO is only ever consumed by member-name lookup in bind_program_descriptors.
+ *
+ * Shaders that already have all uniforms in blocks or use only opaque-sampler
+ * uniforms are unaffected (a no-op scan).
+ */
+static void wrap_loose_uniforms(std::string& source) {
+    // Match: [layout(...)] uniform <type> <name>[<array>] ;
+    // Group 1 = full declaration, group 2 = optional layout qualifier,
+    // group 3 = type name, group 4 = variable name, group 5 = optional array.
+    static const std::regex decl_re(
+        R"(^[ \t]*((layout\s*\([^)]*\)\s*)?uniform\s+(\w+)\s+(\w+)(\s*\[[^\]]*\])?\s*;))",
+        std::regex::multiline | std::regex::optimize);
+
+    // Accumulator: interleaving text + non-opaque uniforms for the block.
+    std::string out;
+    out.reserve(source.size() + 256);
+    std::vector<std::pair<std::string, std::string>> non_opaque;
+
+    auto cur = source.cbegin();
+    auto end = source.cend();
+    std::smatch m;
+    size_t pos = 0;
+
+    while (std::regex_search(cur, end, m, decl_re)) {
+        size_t match_off = m.position(0) + (cur - source.cbegin());
+        // Copy everything before this declaration verbatim.
+        out.append(source, pos, match_off - pos);
+
+        const std::string& full   = m[1].str();
+        const std::string& layout = m[2].matched ? m[2].str() : "";
+        const std::string& type   = m[3].str();
+        const std::string& var    = m[4].str();
+        const std::string& arr    = m[5].matched ? m[5].str() : "";
+
+        bool has_explicit_layout = !layout.empty();
+        if (has_explicit_layout || is_opaque_glsl_type(type)) {
+            out += full;                    // keep as-is
+        } else {
+            non_opaque.emplace_back(type, var + arr);  //collect for block
+        }
+
+        pos = match_off + full.size();
+        cur = m.suffix().first;
+    }
+    // Trailing content after the last declaration.
+    out.append(source, pos, std::string::npos);
+
+    if (!non_opaque.empty()) {
+        out += "\nuniform mithril_GlobalBlock {\n";
+        for (const auto& u : non_opaque) {
+            out += "    ";
+            out += u.first;
+            out += ' ';
+            out += u.second;
+            out += ";\n";
+        }
+        out += "};\n";
+    }
+
+    source = std::move(out);
+}
+
 // FNV-1a 64-bit hash for cache keying.
 uint64_t fnv1a(const std::string& s) {
     uint64_t h = 1469598103934665603ULL;
@@ -191,11 +303,13 @@ bool glsl_to_spirv(GLenum gl_stage, const std::string& src,
     EShLanguage stage = to_esh_stage(gl_stage);
     if (stage == EShLangCount) { info = "unsupported shader stage"; return false; }
 
-    // Preprocess: upgrade GLSL version (Vulkan requires 330+) and inject
-    // attribute location bindings.
+    // Preprocess: upgrade GLSL version (Vulkan requires 330+), inject
+    // attribute location bindings, and wrap loose non-opaque uniforms into
+    // a synthetic UBO so glslang produces Vulkan-conformant SPIR-V.
     std::string source = src;
     int glsl_version = ensure_glsl_version(source);
     apply_attrib_bindings(source, gl_stage, attrib_bindings);
+    wrap_loose_uniforms(source);
 
     glslang::TShader shader(stage);
     const char* s = source.c_str();
@@ -203,12 +317,15 @@ bool glsl_to_spirv(GLenum gl_stage, const std::string& src,
 
     // GL_KHR_vulkan_glsl path: parse as OpenGL GLSL but emit Vulkan SPIR-V.
     // EShClientOpenGL (NOT EShClientVulkan) is required — the Vulkan client
-    // forbids non-block uniforms outright, rejecting Minecraft's loose
-    // `uniform` declarations with "non-opaque uniforms outside a block". With
-    // the OpenGL client + EShMsgVulkanRules (set below), glslang applies Vulkan
-    // rules and auto-wraps loose uniforms into the `$Global` UBO, producing
-    // valid Vulkan SPIR-V for MoltenVK. The OpenGL client also keeps desktop
-    // GLSL builtin semantics (e.g. gl_VertexID 1-based, gl_InstanceID 1-based).
+    // forbids non-block uniforms outright. However, the loose uniforms have
+    // already been wrapped into a synthetic block by wrap_loose_uniforms()
+    // above (step 3 of the pipeline comment), so glslang never encounters
+    // them unadorned. The EShMsgVulkanRules flag + EShClientOpenGL pair is
+    // kept as a belt-and-suspenders safety net: if any loose non-opaque
+    // uniform slips through (e.g. a type the regex did not recognise), the
+    // auto-wrap code path will still protect it. The OpenGL client also keeps
+    // desktop GLSL builtin semantics (e.g. gl_VertexID 1-based, gl_InstanceID
+    // 1-based).
     // Target OpenGL 4.50 feature level (a superset of Minecraft's GLSL 150-330)
     // and emit SPIR-V 1.5 (paired with Vulkan 1.2).
     shader.setEnvInput(glslang::EShSourceGlsl, stage, glslang::EShClientOpenGL, glsl_version);
@@ -229,14 +346,15 @@ bool glsl_to_spirv(GLenum gl_stage, const std::string& src,
         "#define MG_MITHRIL_VERSION 1000000\n"
     );
 
-    // EShMsgVulkanRules IS set: this is what triggers the GL_KHR_vulkan_glsl
-    // behavior that wraps loose non-opaque uniforms (e.g. Minecraft's
-    // `uniform mat4 ModelViewMat;`) into the synthetic `$Global` UBO. Without
-    // it (or with EShClientVulkan instead of EShClientOpenGL) glslang rejects
-    // loose uniforms with "non-opaque uniforms outside a block". The client
-    // stays EShClientOpenGL so the emitted SPIR-V remains Vulkan-conformant for
-    // MoltenVK. DescriptorSet.cpp uploads the `$Global` UBO's members by name
-    // via SPIRV-Cross reflection.
+    // EShMsgVulkanRules IS set as a belt-and-suspenders safety net. If any
+    // loose non-opaque uniform somehow bypasses wrap_loose_uniforms() (e.g.
+    // an unrecognised type), the glslang auto-wrap path will still catch it
+    // and wrap it into the synthetic `$Global` UBO. Without EShMsgVulkanRules,
+    // glslang would not enforce Vulkan rules and the emitted SPIR-V might
+    // contain non-block uniforms that MoltenVK rejects at module-creation
+    // time. The client stays EShClientOpenGL so the emitted SPIR-V remains
+    // Vulkan-conformant for MoltenVK. DescriptorSet.cpp uploads the `$Global`
+    // UBO's members by name via SPIRV-Cross reflection.
     const EShMessages messages = static_cast<EShMessages>(
         EShMsgDefault | EShMsgSpvRules | EShMsgVulkanRules);
 
