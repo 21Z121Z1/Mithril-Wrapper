@@ -6,6 +6,17 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
+# Build identity: stamp the git commit id so the dylib prints it on every game
+# startup (crash-log triage). Source it directly from GITHUB_SHA — the commit
+# id GitHub Actions injects as an environment variable on every run. Local
+# (non-CI) builds fall back to "unknown".
+if(DEFINED ENV{GITHUB_SHA} AND NOT "$ENV{GITHUB_SHA}" STREQUAL "")
+    set(MITHRIL_COMMIT_ID "$ENV{GITHUB_SHA}")
+else()
+    set(MITHRIL_COMMIT_ID "unknown")
+endif()
+message(STATUS "Mithril build commit id: ${MITHRIL_COMMIT_ID}")
+
 # Objective-C++ (.mm) standard for the EGL surface layer + Apple GPU info +
 # Vulkan Metal-backed swapchain. The .mm files in the cross-platform split are
 # egl/SurfaceMetal.mm (CAMetalLayer coercion), MG_Impl/Getter_gpu.mm (NSString
@@ -288,6 +299,13 @@ endif()
 # so the macro MUST be visible across the whole build. Safe to define globally
 # — it only gates beta-extension declarations, no codegen effect.
 target_compile_definitions(${PROJECT_NAME} PRIVATE VK_ENABLE_BETA_EXTENSIONS=1)
+
+# Inject the build's git commit id (captured from GITHUB_SHA at the top of this
+# file) so proc_init() can print it on every startup for crash-log triage. The
+# value is a quoted string so it concatenates into a printf format literal.
+target_compile_definitions(${PROJECT_NAME} PRIVATE
+    MITHRIL_COMMIT_ID="${MITHRIL_COMMIT_ID}"
+)
 
 # ARC for Objective-C++ translation units (EGL surface, GPU info, Vulkan swapchain).
 if(APPLE)

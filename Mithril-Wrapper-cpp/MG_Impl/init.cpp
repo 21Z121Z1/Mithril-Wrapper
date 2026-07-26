@@ -19,6 +19,13 @@ void proc_init(void) {
     if (done) return;
     done = true;
 
+    // Print the build's commit id on every startup (sourced from GITHUB_SHA at
+    // build time) so crash logs tie back to the exact dylib build. Warn level
+    // is used deliberately: the default log filter is Warning, so an Info line
+    // would be suppressed on a clean launch. MITHRIL_COMMIT_ID is a quoted
+    // string literal injected by CMake and concatenated here.
+    MITHRIL_LOG_WARN("init", "Build commit: " MITHRIL_COMMIT_ID);
+
     ::mithril::state_init();
     backend_init();
 
