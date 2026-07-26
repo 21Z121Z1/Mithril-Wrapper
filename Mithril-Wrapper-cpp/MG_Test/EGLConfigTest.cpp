@@ -59,6 +59,24 @@ TEST(ConfigMatches, RenderableType) {
     EXPECT_TRUE(config_matches(&g_configs[0], opengl));
 }
 
+// Amethyst's gl_bridge.m queries EGL_OPENGL_ES3_BIT when running in Mithril
+// mode (angleDesktopGL==NO). The config table declares both EGL_OPENGL_BIT
+// and EGL_OPENGL_ES3_BIT so the same config satisfies desktop-GL and ES3
+// queries — without this, eglChooseConfig returns 0 configs and
+// gl_init_context asserts (bundle->config == NULL) at gl_bridge.m:147.
+TEST(ConfigMatches, RenderableTypeES3) {
+    const EGLint es3[] = {EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT, EGL_NONE};
+    EXPECT_TRUE(config_matches(&g_configs[0], es3));
+    // Amethyst's actual query: RGBA8 + D24 + WINDOW|PBUFFER + ES3.
+    const EGLint amethyst[] = {
+        EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8,
+        EGL_DEPTH_SIZE, 24,
+        EGL_SURFACE_TYPE, EGL_WINDOW_BIT | EGL_PBUFFER_BIT,
+        EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT,
+        EGL_NONE};
+    EXPECT_TRUE(config_matches(&g_configs[0], amethyst));
+}
+
 TEST(ConfigMatches, TerminatedByEglNone) {
     // A well-formed list with multiple constraints terminated by EGL_NONE.
     const EGLint list[] = {EGL_RED_SIZE, 8,

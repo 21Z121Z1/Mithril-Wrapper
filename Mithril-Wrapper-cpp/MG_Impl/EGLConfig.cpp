@@ -12,15 +12,31 @@ namespace mithril {
 namespace egl {
 
 // Pre-baked configs. Indexed by EGLConfig (we hand out &g_configs[i]).
+//
+// renderableType declares BOTH EGL_OPENGL_BIT and EGL_OPENGL_ES3_BIT:
+//   - EGL_OPENGL_BIT    — the wrapper truly implements desktop GL 3.3 Core
+//                         Profile (GL_VERSION = "3.3.0 Mithril-Wrapper").
+//   - EGL_OPENGL_ES3_BIT — advertised so host EGL clients that probe for an
+//                         ES3 config (e.g. Amethyst's gl_bridge.m in Mithril
+//                         mode, where angleDesktopGL==NO) match successfully.
+//                         eglBindAPI accepts both EGL_OPENGL_API and
+//                         EGL_OPENGL_ES_API (egl.cpp::eglBindAPI), and the GL
+//                         frontend exposes the desktop Core Profile entry
+//                         points either way; the host sees GL_VERSION 3.3.0
+//                         regardless of which client API bit it bound.
+// EGL_RENDERABLE_TYPE is a bitmask (EGL 1.5 §3.4.1.2), so advertising both is
+// spec-compliant and lets the same config satisfy ANGLE-style desktop-GL
+// queries (EGL_OPENGL_BIT) and ES3 queries (EGL_OPENGL_ES3_BIT) from
+// different host bridges without needing two config tables.
 EglConfig g_configs[kNumConfigs] = {
     // id=1: RGBA8 + D24S8 (the config Amethyst requests for MC Java)
-    { 8, 8, 8, 8, 24, 8,  EGL_WINDOW_BIT | EGL_PBUFFER_BIT, EGL_OPENGL_BIT, 1 },
+    { 8, 8, 8, 8, 24, 8,  EGL_WINDOW_BIT | EGL_PBUFFER_BIT, EGL_OPENGL_BIT | EGL_OPENGL_ES3_BIT, 1 },
     // id=2: RGBA8 + D24 (no stencil)
-    { 8, 8, 8, 8, 24, 0,  EGL_WINDOW_BIT | EGL_PBUFFER_BIT, EGL_OPENGL_BIT, 2 },
+    { 8, 8, 8, 8, 24, 0,  EGL_WINDOW_BIT | EGL_PBUFFER_BIT, EGL_OPENGL_BIT | EGL_OPENGL_ES3_BIT, 2 },
     // id=3: RGBA8 + S8 (no depth)
-    { 8, 8, 8, 8, 0,  8,  EGL_WINDOW_BIT | EGL_PBUFFER_BIT, EGL_OPENGL_BIT, 3 },
+    { 8, 8, 8, 8, 0,  8,  EGL_WINDOW_BIT | EGL_PBUFFER_BIT, EGL_OPENGL_BIT | EGL_OPENGL_ES3_BIT, 3 },
     // id=4: RGBA8 only
-    { 8, 8, 8, 8, 0,  0,  EGL_WINDOW_BIT | EGL_PBUFFER_BIT, EGL_OPENGL_BIT, 4 },
+    { 8, 8, 8, 8, 0,  0,  EGL_WINDOW_BIT | EGL_PBUFFER_BIT, EGL_OPENGL_BIT | EGL_OPENGL_ES3_BIT, 4 },
 };
 
 // Match `cfg` against an EGL attribute list (a sequence of {name, value}
