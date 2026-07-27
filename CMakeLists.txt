@@ -49,26 +49,13 @@ endif()
 
 # ---------------------------------------------------------------------------
 # MoltenVK: Vulkan 1.2 implementation backed by Metal 2.
-#
-# MoltenVK is consumed as a static .xcframework (MoltenVK.xcframework) plus its
-# bundled Vulkan-Headers include tree. There is no Vulkan loader / ICD file —
-# the static link embeds the MoltenVK ICD, so vkCreateInstance etc. resolve at
-# link time. The xcframework is expected at one of:
-#   - ${MOLTENVK_ROOT}                 (explicit -DMOLTENVK_ROOT=/path)
-#   - ${CMAKE_SOURCE_DIR}/MoltenVK.xcframework
-#   - ${CMAKE_SOURCE_DIR}/3rdparty/MoltenVK/MoltenVK.xcframework
-# The CI workflow (build.yml) downloads it from the KhronosGroup/MoltenVK
-# release tarball before configuring.
+# Linked dynamically via libMoltenVK.dylib (v1.2.9, from Amethyst).
+# Lives at Mithril-Wrapper-cpp/3rdparty/MoltenVK/libMoltenVK.dylib.
+# Post-build patches the install_name reference to match Amethyst's layout.
+# Vulkan headers come from MoltenVK-Headers (extracted from the CI tarball
+# or from the MoltenVK.xcframework/Headers fallback).
 # ---------------------------------------------------------------------------
 if(APPLE)
-    # MoltenVK v1.4.x tarball ships Vulkan headers in a sibling `include/`
-    # directory NEXT TO the static/dynamic xcframeworks — NOT inside the
-    # xcframework itself. The CI workflow (build.yml) extracts both into:
-    #   ./MoltenVK-Headers/vulkan/vulkan.h   (the headers tree)
-    #   ./MoltenVK.xcframework/ios-arm64/libMoltenVK.a   (the static lib)
-    # We search MoltenVK-Headers first, then fall back to the legacy
-    # `MoltenVK.xcframework/Headers` layout (older tarballs / Vulkan SDK)
-    # and the per-platform slice `ios-arm64/Headers` (dynamic framework).
     find_path(MOLTENVK_INCLUDE_DIR
         NAMES vulkan/vulkan.h
         PATHS
@@ -85,19 +72,11 @@ if(APPLE)
     )
     message(STATUS "MoltenVK headers: ${MOLTENVK_INCLUDE_DIR}")
 
-    # The static framework lives under ios-arm64 (device) or ios-arm64_x86_64-simulator
-    # (simulator) inside the xcframework. CMake's link step just needs the bare
-    # framework path; the linker picks the right slice from the fat binary.
+    # Link against the dynamic dylib bundled in the repo.
     find_library(MOLTENVK_LIBRARY
         NAMES MoltenVK
-        PATHS
-            "${MOLTENVK_ROOT}/MoltenVK.xcframework"
-            "${CMAKE_SOURCE_DIR}/MoltenVK.xcframework"
-            "${CMAKE_SOURCE_DIR}/3rdparty/MoltenVK/MoltenVK.xcframework"
-            "${CMAKE_SOURCE_DIR}/Mithril-Wrapper-cpp/3rdparty/MoltenVK/MoltenVK.xcframework"
-        PATH_SUFFIXES
-            "ios-arm64"
-            "ios-arm64_x86_64-simulator"
+        PATHS "${CMAKE_SOURCE_DIR}/Mithril-Wrapper-cpp/3rdparty/MoltenVK"
+        NO_CMAKE_FIND_ROOT_PATH
         REQUIRED
     )
     message(STATUS "MoltenVK library: ${MOLTENVK_LIBRARY}")
@@ -289,9 +268,7 @@ if(APPLE)
     # -force_load above ensures both ObjC and C++ initializers are loaded.
     target_include_directories(${PROJECT_NAME} PRIVATE ${MOLTENVK_INCLUDE_DIR})
     target_link_libraries(${PROJECT_NAME} PRIVATE
-        # NOTE: ${MOLTENVK_LIBRARY} is NOT listed here — it is force-loaded
-        # via target_link_options below (-force_load) so C++ static
-        # initializers in every object file are preserved.
+        "${MOLTENVK_LIBRARY}"
         "-framework Metal"
         "-framework Foundation"
         "-framework QuartzCore"
@@ -299,13 +276,17 @@ if(APPLE)
         "-framework IOSurface"
         "-framework UIKit"
     )
-    # Force-load ALL object files from the MoltenVK archive so C++ global
-    # constructors (extension registration) are NOT stripped by the linker.
-    # Without this, vkEnumerateInstanceExtensionProperties returns 0 on
-    # certain build configurations (see comment block above).
-    target_link_options(${PROJECT_NAME} PRIVATE
-        -ObjC
-        "-force_load" "${MOLTENVK_LIBRARY}"
+    # The bundled libMoltenVK.dylib has install name
+    # "@rpath/MoltenVK.framework/MoltenVK", but it's a raw dylib, not a
+    # framework bundle. Patch the load reference so libmithril.dylib looks
+    # for "@rpath/libMoltenVK.dylib" instead — which is where Amethyst
+    # places it at runtime.
+    add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+        COMMAND install_name_tool -change
+            "@rpath/MoltenVK.framework/MoltenVK"
+            "@rpath/libMoltenVK.dylib"
+            "$<TARGET_FILE:${PROJECT_NAME}>"
+        COMMENT "Patching MoltenVK load path: @rpath/MoltenVK.framework/MoltenVK → @rpath/libMoltenVK.dylib"
     )
     target_compile_definitions(${PROJECT_NAME} PRIVATE MITHRIL_VULKAN=1)
 else()
