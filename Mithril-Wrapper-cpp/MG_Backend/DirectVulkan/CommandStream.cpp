@@ -192,14 +192,6 @@ void begin_render_pass(VkImageView* color_views, int color_count,
     e.width = width;
     e.height = height;
 
-    // Diagnostic: log every color attachment before starting the pass.
-    // Helps identify null VkImageViews that cause IOSurfaceClientBindAccel crashes.
-    for (int i = 0; i < e.colorCount; ++i) {
-        MITHRIL_LOG_WARN("vk", "begin_render_pass: color[%d]=%p depth=%p size=%dx%d",
-                          i, (void*)e.colorViews[i], (void*)e.depthView,
-                          width, height);
-    }
-
     // ---- Layout barriers for the swapchain-backed default framebuffer ----
     // dynamic-rendering hard-codes imageLayout = COLOR_ATTACHMENT_OPTIMAL in
     // the VkRenderingAttachmentInfo below. The swapchain image comes back from

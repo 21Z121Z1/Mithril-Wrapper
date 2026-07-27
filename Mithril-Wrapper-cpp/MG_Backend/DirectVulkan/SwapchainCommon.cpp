@@ -79,7 +79,7 @@ Swapchain* create_swapchain_post_surface(VkSurfaceKHR surface, int width, int he
             }
         }
     }
-    MITHRIL_LOG_WARN("vk", "Swapchain: compositeAlpha=0x%x, supported=0x%x",
+    MITHRIL_LOG_INFO("vk", "Swapchain: compositeAlpha=0x%x, supported=0x%x",
                      (unsigned)compAlpha, (unsigned)caps.supportedCompositeAlpha);
 
     // Swapchain.
@@ -201,11 +201,7 @@ void destroy_swapchain(Swapchain* sc) {
 }
 
 VkImageView swapchain_acquire_color(Swapchain* sc) {
-    if (!sc || !sc->swapchain) {
-        MITHRIL_LOG_WARN("vk", "swapchain_acquire_color: sc=%p swapchain=%p", (void*)sc,
-                          (void*)(sc ? sc->swapchain : nullptr));
-        return VK_NULL_HANDLE;
-    }
+    if (!sc || !sc->swapchain) return VK_NULL_HANDLE;
     // If the swapchain was marked dead by a previous fatal error (OOM,
     // surface lost, device lost), refuse to acquire. EGL will see the null
     // return, detect needsRebuild, and rebuild the swapchain on the next
@@ -250,8 +246,6 @@ VkImageView swapchain_acquire_color(Swapchain* sc) {
     }
     VkImageView view = (sc->currentImage >= 0 && sc->currentImage < (int)sc->views.size())
                        ? sc->views[sc->currentImage] : VK_NULL_HANDLE;
-    MITHRIL_LOG_WARN("vk", "swapchain_acquire_color: currentImage=%d view=%p "
-                      "(swapchain images=%zu)", sc->currentImage, (void*)view, sc->views.size());
     return view;
 }
 
