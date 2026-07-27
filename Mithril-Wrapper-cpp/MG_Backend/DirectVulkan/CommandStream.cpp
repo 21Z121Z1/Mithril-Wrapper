@@ -39,6 +39,15 @@ struct EncoderState {
     // by begin_render_pass() / commit_frame() to record layout barriers and
     // signal pendingRenderFinished.
     Swapchain* activeSwapchain = nullptr;
+
+    // True once any command has been recorded into the current command buffer
+    // since the last commit_frame() / vkBeginCommandBuffer. Used by
+    // commit_frame() to skip empty submits (eglWaitClient + eglSwapBuffers
+    // both call backend_commit; the second call would otherwise submit an
+    // empty command buffer, which is wasteful and — under resize/destruction
+    // races — can submit against a destroyed swapchain's semaphore, triggering
+    // MoltenVK / IOSurface UAF crashes).
+    bool hasCommands = false;
 };
 
 EncoderState& encoder() {
@@ -308,6 +317,7 @@ void begin_render_pass(VkImageView* color_views, int color_count,
     if (fn) fn(b->commandBuffer, &ri);
 
     e.passActive = true;
+    e.hasCommands = true;  // begin_render_pass recorded real commands
     e.loadClear = false;  // subsequent passes within the frame use LOAD
 }
 
@@ -331,6 +341,18 @@ void commit_frame() {
     if (!b->initialized || !b->commandBuffer) return;
     EncoderState& e = encoder();
     if (e.passActive) end_render_pass();
+
+    // Empty-submit defense: if no commands were recorded since the last
+    // commit_frame() (e.g. eglWaitClient followed by eglSwapBuffers both call
+    // backend_commit; the second call has nothing to do), skip the submit
+    // entirely. Submitting an empty command buffer is wasteful and — under
+    // resize/destruction races where activeSwapchain was just detached — the
+    // signal-pendingRenderFinished path below would dereference a swapchain
+    // pointer that EGL is concurrently destroying, hand MoltenVK a stale
+    // semaphore, and trigger IOSurface UAF crashes in the GPU driver.
+    if (!e.hasCommands) {
+        return;
+    }
 
     // Transition the swapchain color image back to PRESENT_SRC_KHR before
     // vkEndCommandBuffer so vkQueuePresentKHR sees a legal layout. Without
@@ -398,6 +420,38 @@ void commit_frame() {
     bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(b->commandBuffer, &bi);
+
+    e.hasCommands = false;  // fresh command buffer, no commands yet
+}
+
+/*
+ * Drain GPU work that references the active swapchain, then detach the
+ * swapchain from the encoder. Called by EGL BEFORE backend_destroy_swapchain()
+ * (eglDestroySurface / ensure_swapchain resize path).
+ *
+ * Sequence:
+ *   1. end_render_pass() + commit_frame() — flush any pending commands that
+ *      reference the swapchain's images into the GPU.
+ *   2. vkDeviceWaitIdle() — block until the GPU has finished executing those
+ *      commands, so the swapchain's IOSurface-backed images are no longer
+ *      referenced by the driver. Without this wait, vkDestroySwapchainKHR /
+ *      vkDestroyImageView would free IOSurfaces that the GPU is still reading,
+ *      and the next IOSurfaceBindAccel call in the Metal driver would crash
+ *      with SIGSEGV (UAF).
+ *   3. set_active_swapchain(nullptr) — clear the encoder's raw pointer to the
+ *      swapchain so begin_render_pass() / commit_frame() cannot record layout
+ *      barriers against its (soon-to-be-freed) images.
+ */
+void drain_and_detach_swapchain() {
+    Backend* b = backend();
+    if (!b->initialized || !b->device) {
+        set_active_swapchain(nullptr);
+        return;
+    }
+    end_render_pass();
+    commit_frame();
+    vkDeviceWaitIdle(b->device);
+    set_active_swapchain(nullptr);
 }
 
 } // namespace vk
@@ -426,6 +480,10 @@ void backend_commit(void)          { mithril::vk::commit_frame(); }
 
 void backend_set_active_swapchain(void* swapchain_state) {
     mithril::vk::set_active_swapchain((mithril::vk::Swapchain*)swapchain_state);
+}
+
+void backend_drain_and_detach_swapchain(void) {
+    mithril::vk::drain_and_detach_swapchain();
 }
 
 void backend_bind_pipeline(VkPipeline pipeline) {

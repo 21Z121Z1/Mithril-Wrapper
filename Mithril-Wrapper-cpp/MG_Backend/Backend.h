@@ -84,6 +84,24 @@ void backend_commit(void);
 void backend_set_active_swapchain(void* swapchain_state);
 
 /*
+ * Drain any in-flight GPU work that references the active swapchain, then
+ * detach the swapchain from the encoder so subsequent begin_render_pass() /
+ * commit_frame() calls cannot record barriers against its (soon-to-be-destroyed)
+ * images. Called by EGL BEFORE backend_destroy_swapchain() (in
+ * eglDestroySurface / ensure_swapchain resize path).
+ *
+ * Without this call, destroying a swapchain whose currentImage is still
+ * encoded in the pending command buffer leaves a dangling reference: the
+ * next vkQueueSubmit hands MoltenVK a command that references an already-
+ * freed IOSurface, and IOSurfaceBindAccel crashes in the GPU driver with
+ * SIGSEGV (UAF). The vkDeviceWaitIdle() inside ensures the GPU has finished
+ * reading the swapchain images before they are torn down; the
+ * set_active_swapchain(nullptr) ensures the encoder never records against
+ * the dead swapchain again.
+ */
+void backend_drain_and_detach_swapchain(void);
+
+/*
  * Encoder-side dynamic state setters (vkCmdSet* under dynamic rendering).
  * Each is a no-op when no render pass is active. Stage: 0 = vertex, 1 = fragment
  * (used for buffer/texture/sampler binding).

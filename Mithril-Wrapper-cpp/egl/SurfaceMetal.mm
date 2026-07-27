@@ -68,6 +68,22 @@ extern "C" void* surface_create(void* native_window, int* out_w, int* out_h) {
     // tries to use the image for non-attachment operations.
     mtlLayer.pixelFormat = MTLPixelFormatBGRA8Unorm;
     mtlLayer.framebufferOnly = NO;
+    // presentsWithTransaction MUST be NO. When YES, CAMetalLayer blocks on
+    // -[CAMetalLayer present:] until the compositor commits the drawable,
+    // which serializes the render thread against the UI thread and — under
+    // the high frame rates seen in the field (260 FPS) — interacts badly
+    // with IOSurface lifetime: the drawable's IOSurface can be recycled by
+    // the compositor while the next vkQueueSubmit is still encoding against
+    // it, producing the IOSurfaceBindAccel SIGSEGV (UAF) reported on
+    // iPadOS 16.1.1. NO (the default) uses the asynchronous path that
+    // MoltenVK and Apple's own GLKView expect.
+    mtlLayer.presentsWithTransaction = NO;
+    // opaque = YES skips alpha compositing in the iOS compositor. Besides
+    // being a small perf win, it prevents the compositor from holding an
+    // extra reference to the drawable's IOSurface across the frame boundary,
+    // which on some iPadOS 16.x builds delays IOSurface recycling long
+    // enough to race with the next present.
+    mtlLayer.opaque = YES;
     if (mtlLayer.drawableSize.width == 0 || mtlLayer.drawableSize.height == 0) {
         mtlLayer.drawableSize = layer.bounds.size;
     }

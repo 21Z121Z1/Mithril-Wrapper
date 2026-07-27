@@ -169,6 +169,12 @@ inline bool valid_config(EGLConfig c) {
 // Build (or rebuild) the per-surface Vulkan swapchain against the native
 // window. Returns true on success. The swapchain is owned by the EglSurface
 // and freed in eglDestroySurface / when the window size changes.
+//
+// On rebuild (size changed), this drains GPU work that references the old
+// swapchain BEFORE destroying it, so the Metal driver is no longer reading
+// the old IOSurface-backed images when they are torn down. Without this
+// drain, vkDestroySwapchainKHR frees IOSurfaces that the GPU is still
+// accessing, and the next IOSurfaceBindAccel call crashes with SIGSEGV (UAF).
 bool ensure_swapchain(EglSurface* s) {
     if (!s || !s->native_window) return false;
     int w = 0, h = 0;
@@ -185,7 +191,15 @@ bool ensure_swapchain(EglSurface* s) {
             s->height = h;
             return true;
         }
-        // Size changed: tear down + recreate.
+        // Size changed: drain GPU work referencing the old swapchain, detach
+        // it from the encoder, THEN tear down + recreate. The drain is
+        // critical: it ensures the Metal driver has released the old
+        // IOSurface-backed drawables before vkDestroySwapchainKHR frees them.
+        // Skipping the drain causes IOSurfaceBindAccel UAF crashes on the
+        // next present.
+        if (t_currentDraw == s) {
+            backend_drain_and_detach_swapchain();
+        }
         backend_destroy_swapchain(s->swapchain_state);
         s->swapchain_state = nullptr;
     }
@@ -482,8 +496,18 @@ EGLBoolean eglDestroySurface(EGLDisplay dpy, EGLSurface surface) {
     if (!valid_display(dpy)) { set_error(EGL_BAD_DISPLAY); return EGL_FALSE; }
     if (surface == EGL_NO_SURFACE) { set_error(EGL_BAD_SURFACE); return EGL_FALSE; }
     EglSurface* s = (EglSurface*)surface;
-    // Detach from any current context on this thread.
-    if (t_currentDraw == s) { t_currentDraw = nullptr; install_surface_on_state(nullptr); }
+    // If this surface is current on this thread, drain GPU work referencing
+    // its swapchain and detach the swapchain from the encoder BEFORE we tear
+    // it down. Without the drain, vkDestroySwapchainKHR frees IOSurfaces that
+    // the GPU may still be reading, and the next IOSurfaceBindAccel call in
+    // the Metal driver crashes with SIGSEGV (UAF). The drain also calls
+    // set_active_swapchain(nullptr), so the encoder never records against
+    // the dying swapchain again.
+    if (t_currentDraw == s) {
+        backend_drain_and_detach_swapchain();
+        t_currentDraw = nullptr;
+        install_surface_on_state(nullptr);
+    }
     if (t_currentRead == s) { t_currentRead = nullptr; }
     if (s->swapchain_state) {
         backend_destroy_swapchain(s->swapchain_state);
@@ -707,36 +731,45 @@ EGLBoolean eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
     // Flush any pending Vulkan work into the current swapchain image view.
     // backend_end_render_pass() + backend_commit() end the active render pass
     // and submit the command buffer, so the encoded draws land on the
-    // currently-acquired swapchain image before we present.
+    // currently-acquired swapchain image before we present. commit_frame()'s
+    // empty-submit defense skips the submit if no commands were recorded
+    // since the last commit (e.g. eglWaitClient already flushed this frame).
     backend_end_render_pass();
     backend_commit();
 
+    // Present the frame we just rendered, then acquire the next image for
+    // the following frame. backend_present_and_acquire() calls
+    // vkQueuePresentKHR followed by vkAcquireNextImageKHR.
+    //
+    // IMPORTANT: present happens BEFORE the resize check below. If we rebuilt
+    // the swapchain before presenting, the vkQueuePresentKHR would reference
+    // a just-destroyed swapchain (UAF) — exactly the IOSurfaceBindAccel
+    // SIGSEGV seen in the field. The correct order is: present the already-
+    // rendered frame against the current (still-valid) swapchain, THEN tear
+    // down + recreate for the next frame.
+    if (s->swapchain_state) {
+        backend_present_and_acquire(s->swapchain_state);
+    }
+
     // Rebuild the swapchain if the native window was resized between frames.
-    // This invalidates the currently-acquired image, so we do it BEFORE
-    // presenting.
+    // Done AFTER present so the just-presented image's swapchain is still
+    // alive during the present call. ensure_swapchain() drains GPU work and
+    // detaches the old swapchain from the encoder before destroying it.
     if (s->native_window && s->swapchain_state) {
         int w = 0, h = 0;
         if (surface_get_size(s->native_window, &w, &h) &&
             w > 0 && h > 0 &&
             (w != s->width || h != s->height)) {
             ensure_swapchain(s);
-            // After rebuild, the previously-acquired image is gone; acquire a
-            // fresh one and re-install on the GLState so present below has a
-            // valid image to present.
-            if (t_currentDraw == s) {
-                install_surface_on_state(s);
-            }
         }
     }
 
-    // Present the frame we just rendered, then acquire the next image for
-    // the following frame. backend_present_and_acquire() calls
-    // vkQueuePresentKHR followed by vkAcquireNextImageKHR.
-    if (s->swapchain_state) {
-        backend_present_and_acquire(s->swapchain_state);
-        if (t_currentDraw == s) {
-            install_surface_on_state(s);
-        }
+    // Re-install the (possibly new) swapchain's current image on the GLState
+    // so the next frame's draws land on a valid drawable. This also re-
+    // registers the swapchain with the encoder (backend_set_active_swapchain)
+    // so layout barriers + pendingRenderFinished signaling work next frame.
+    if (s->swapchain_state && t_currentDraw == s) {
+        install_surface_on_state(s);
     }
     s->firstFrame = false;
     return EGL_TRUE;
