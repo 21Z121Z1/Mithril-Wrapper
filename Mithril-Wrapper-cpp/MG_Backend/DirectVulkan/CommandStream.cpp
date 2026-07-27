@@ -330,6 +330,10 @@ void end_render_pass() {
 
 void commit_frame() {
     Backend* b = backend();
+    if (b->deviceLost) {
+        // 持久性故障已挂起，跳过 submit 避免死循环刷屏
+        return;
+    }
     if (!b->initialized || !b->commandBuffer) return;
     EncoderState& e = encoder();
     if (e.passActive) end_render_pass();
@@ -473,8 +477,30 @@ void commit_frame() {
     vkResetFences(b->device, 1, &fence);
     r = vkQueueSubmit(b->graphicsQueue, 1, &si, fence);
     if (r != VK_SUCCESS) {
-        MITHRIL_LOG_ERROR("vk", "vkQueueSubmit failed (rc=%d) — marking swapchain "
-                          "for rebuild", (int)r);
+        // Classify the failure: VK_ERROR_OUT_OF_DATE_KHR / VK_SUBOPTIMAL_KHR
+        // are swapchain-rebuild signals handled by the eglSwapBuffers path,
+        // NOT fatal GPU faults. Every other non-success result (DEVICE_LOST,
+        // OUT_OF_DEVICE_MEMORY, OUT_OF_HOST_MEMORY, INVALID_EXTERNAL_HANDLE,
+        // and any other negative VkResult) indicates a persistent GPU fault
+        // and is counted toward the deviceLost threshold.
+        if (r != VK_ERROR_OUT_OF_DATE_KHR && r != VK_SUBOPTIMAL_KHR) {
+            b->consecutiveSubmitFailures++;
+            if (b->consecutiveSubmitFailures >= 3 && !b->deviceLost) {
+                b->deviceLost = true;
+                MITHRIL_LOG_ERROR("vk", "Persistent GPU fault detected after %d "
+                                  "consecutive submit failures — rendering "
+                                  "suspended to prevent log flooding",
+                                  b->consecutiveSubmitFailures);
+            }
+        }
+        // Throttle the per-failure log: first failure, then every 100th.
+        // Once deviceLost is set, commit_frame returns early above and this
+        // path is no longer reached.
+        if (b->consecutiveSubmitFailures == 1 ||
+            b->consecutiveSubmitFailures % 100 == 0) {
+            MITHRIL_LOG_ERROR("vk", "vkQueueSubmit failed (rc=%d) — marking "
+                              "swapchain for rebuild", (int)r);
+        }
         // vkQueueSubmit failure (e.g. VK_ERROR_OUT_OF_DEVICE_MEMORY /
         // VK_ERROR_DEVICE_LOST) means the command buffer was NOT consumed.
         // The fence will NOT be signaled, so we must NOT wait on it below
@@ -503,6 +529,10 @@ void commit_frame() {
         e.hasCommands = false;
         return;
     }
+
+    // Success: a clean submit clears the consecutive-failure counter (only
+    // persistent faults should keep it climbing toward the deviceLost threshold).
+    b->consecutiveSubmitFailures = 0;
 
     // Submit succeeded: imageAvailable is now consumed (the wait was honored).
     if (sc) {

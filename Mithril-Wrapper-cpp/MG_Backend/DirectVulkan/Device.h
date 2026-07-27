@@ -76,10 +76,28 @@ struct Backend {
     // frame would never see a reset — the monotonic counter fixes that). The
     // value seen by every draw within a single frame is constant.
     uint64_t frameGeneration = 0;
+
+    // 默认 16 字节 zero buffer，用于着色器声明但 GL 未 enable 的 vertex attribute
+    // binding。Pipeline.cpp 的 get_or_create_pipeline 为这些 location 提供 dummy
+    // attribute description 指向此 buffer，让 SPIRV-Cross 为每个 stage_in 字段生成
+    // [[attribute(N)]] 限定符，避免 Metal 编译报错。
+    VkBuffer         dummyVertexBuffer = VK_NULL_HANDLE;
+    VkDeviceMemory   dummyVertexMemory = VK_NULL_HANDLE;
+
+    // 持久性 GPU 故障检测。vkQueueSubmit / vkQueuePresentKHR 致命失败时自增
+    // consecutiveSubmitFailures，成功时清零。≥3 时置 deviceLost=true。
+    // deviceLost 为真时 commit_frame / present / acquire / eglSwapBuffers 全部
+    // 跳过实际 GPU 操作，避免日志死循环刷屏。
+    bool             deviceLost = false;
+    int              consecutiveSubmitFailures = 0;
 };
 
 // Access the singleton backend state. Allocated on first call.
 Backend* backend();
+
+// 返回 backend 是否进入持久性故障状态。一旦置位，渲染线程的 submit/present/
+// acquire/swapchain-rebuild 全部跳过，避免死循环刷屏。
+bool backend_is_device_lost();
 
 // One-time init of the instance/device/queue/command pool/pipeline cache.
 // Idempotent; sets Backend::initialized on success.

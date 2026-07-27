@@ -17,6 +17,7 @@
 #endif
 
 #include "Device.h"
+#include "Resources.h"
 #include "../../MG_Impl/Log.h"
 
 #include <cstring>
@@ -28,6 +29,10 @@ namespace vk {
 Backend* backend() {
     static Backend b;
     return &b;
+}
+
+bool backend_is_device_lost() {
+    return backend()->deviceLost;
 }
 
 namespace {
@@ -287,6 +292,23 @@ bool init_device() {
     cacheCI.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
     vkCreatePipelineCache(b->device, &cacheCI, nullptr, &b->pipelineCache);
 
+    // ---- Dummy vertex buffer ----
+    // 16-byte zero buffer for vertex attributes the shader declares but GL
+    // has not enabled (see Pipeline.cpp's get_or_create_pipeline). Provides
+    // valid backing for dummy attribute descriptions so SPIRV-Cross emits
+    // [[attribute(N)]] for every stage_in field, avoiding the Metal
+    // "invalid type ... stage_in" compile error.
+    {
+        static const uint8_t zeros[16] = {0};
+        BufferEntry tmp{};
+        if (create_buffer(tmp, 16, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, zeros)) {
+            b->dummyVertexBuffer = tmp.buffer;
+            b->dummyVertexMemory = tmp.memory;
+        } else {
+            MITHRIL_LOG_WARN("vk", "failed to allocate dummy vertex buffer");
+        }
+    }
+
     b->initialized = true;
     MITHRIL_LOG_INFO("vk", "Vulkan 1.2 backend initialised (MoltenVK static link)");
     return true;
@@ -302,6 +324,8 @@ void shutdown_device() {
     }
     if (b->commandBuffer) { vkFreeCommandBuffers(b->device, b->commandPool, 1, &b->commandBuffer); b->commandBuffer = VK_NULL_HANDLE; }
     if (b->commandPool) { vkDestroyCommandPool(b->device, b->commandPool, nullptr); b->commandPool = VK_NULL_HANDLE; }
+    if (b->dummyVertexBuffer) { vkDestroyBuffer(b->device, b->dummyVertexBuffer, nullptr); b->dummyVertexBuffer = VK_NULL_HANDLE; }
+    if (b->dummyVertexMemory) { vkFreeMemory(b->device, b->dummyVertexMemory, nullptr); b->dummyVertexMemory = VK_NULL_HANDLE; }
     if (b->device) { vkDestroyDevice(b->device, nullptr); b->device = VK_NULL_HANDLE; }
     if (b->instance) { vkDestroyInstance(b->instance, nullptr); b->instance = VK_NULL_HANDLE; }
     b->initialized = false;

@@ -13,6 +13,11 @@
 #include <cstring>
 #include <vector>
 
+#include <spirv_cross.hpp>
+// spirv_cross.hpp transitively pulls in SPIRV-Cross's bundled spirv.hpp,
+// which defines the spv:: namespace (spv::DecorationLocation, etc.) used by
+// reflect_vertex_input_locations below.
+
 namespace mithril {
 namespace vk {
 
@@ -176,6 +181,30 @@ VkPipelineLayout empty_pipeline_layout() {
     return layout;
 }
 
+// Reflect all vertex-shader input locations from SPIR-V via SPIRV-Cross.
+// Returns the set of locations the vertex shader declares as stage inputs
+// (whether or not GL has enabled a corresponding vertex attrib). Used by
+// get_or_create_pipeline to emit dummy VkVertexInputAttributeDescription
+// entries for un-enabled locations so SPIRV-Cross generates [[attribute(N)]]
+// for every stage_in field — Metal requires this and the MSL compiler rejects
+// a [[stage_in]] struct whose fields lack [[attribute(N)]] with
+// "invalid type ... of input declaration with attribute 'stage_in'".
+std::vector<uint32_t> reflect_vertex_input_locations(const uint32_t* spirv, int words) {
+    std::vector<uint32_t> out;
+    if (!spirv || words <= 0) return out;
+    try {
+        spirv_cross::Compiler compiler(spirv, static_cast<size_t>(words));
+        spirv_cross::ShaderResources res = compiler.get_shader_resources();
+        for (auto& r : res.stage_inputs) {
+            uint32_t loc = compiler.get_decoration(r.id, spv::DecorationLocation);
+            out.push_back(loc);
+        }
+    } catch (const std::exception&) {
+        // Malformed SPIR-V — return empty; pipeline creation will fail later.
+    }
+    return out;
+}
+
 } // namespace
 
 VkPipeline get_or_create_pipeline(GLuint program,
@@ -234,6 +263,40 @@ VkPipeline get_or_create_pipeline(GLuint program,
         ad.binding = (uint32_t)a.location;
         ad.format = attrib_type_to_vk_format(a.type, a.size, a.normalized != 0, a.integer != 0);
         ad.offset = (uint32_t)a.offset;
+        attrDescs.push_back(ad);
+    }
+
+    // Reflect all vertex-shader input locations. SPIRV-Cross (via MoltenVK)
+    // generates [[attribute(N)]] for every stage_in field based on the
+    // VkVertexInputAttributeDescription array. Metal requires every field of
+    // a [[stage_in]] struct to carry [[attribute(N)]] — if a shader-declared
+    // location has no matching attribute description, Metal compilation fails.
+    // For each shader location GL has NOT enabled, append a dummy binding +
+    // attribute (stride 0, format R32G32B32A32_SFLOAT, offset 0) backed by
+    // b->dummyVertexBuffer at draw time.
+    std::vector<uint32_t> shaderLocations =
+        reflect_vertex_input_locations(vertex_spirv, vertex_word_count);
+    for (uint32_t loc : shaderLocations) {
+        bool alreadyEnabled = false;
+        for (int i = 0; i < attrib_count; ++i) {
+            if (attribs[i].enabled && (uint32_t)attribs[i].location == loc) {
+                alreadyEnabled = true;
+                break;
+            }
+        }
+        if (alreadyEnabled) continue;
+
+        VkVertexInputBindingDescription bd{};
+        bd.binding = loc;
+        bd.stride = 0;
+        bd.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+        bindDescs.push_back(bd);
+
+        VkVertexInputAttributeDescription ad{};
+        ad.location = loc;
+        ad.binding = loc;
+        ad.format = VK_FORMAT_R32G32B32A32_SFLOAT;
+        ad.offset = 0;
         attrDescs.push_back(ad);
     }
 

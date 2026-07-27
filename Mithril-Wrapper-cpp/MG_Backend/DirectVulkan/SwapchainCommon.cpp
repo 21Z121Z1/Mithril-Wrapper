@@ -157,24 +157,57 @@ Swapchain* create_swapchain_post_surface(VkSurfaceKHR surface, int width, int he
             VkMemoryRequirements req{};
             vkGetImageMemoryRequirements(b->device, sc->depthImage, &req);
             uint32_t mt = find_memory_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-            VkMemoryAllocateInfo ai{};
-            ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-            ai.allocationSize = req.size;
-            ai.memoryTypeIndex = mt;
-            if (vkAllocateMemory(b->device, &ai, nullptr, &sc->depthMemory) == VK_SUCCESS) {
-                vkBindImageMemory(b->device, sc->depthImage, sc->depthMemory, 0);
+            // SubTask 1.1: find_memory_type failure → skip entire depth
+            // creation (no view). Without this, vkAllocateMemory would be
+            // called with memoryTypeIndex=0xFFFFFFFFu and likely fail, but
+            // the previous code still created a view on the unbound image —
+            // the root cause of kIOGPUCommandBufferCallbackErrorInvalidResource.
+            if (mt == 0xFFFFFFFFu) {
+                MITHRIL_LOG_WARN("vk", "swapchain depth: find_memory_type returned invalid "
+                                 "(memoryTypeBits=0x%x) — skipping depth attachment",
+                                 (unsigned)req.memoryTypeBits);
+            } else {
+                VkMemoryAllocateInfo ai{};
+                ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+                ai.allocationSize = req.size;
+                ai.memoryTypeIndex = mt;
+                // SubTask 1.2 & 1.3: only create the view after BOTH
+                // vkAllocateMemory and vkBindImageMemory succeed — a view
+                // on an unbound VkImage has no backing storage and triggers
+                // InvalidResource at submit time.
+                if (vkAllocateMemory(b->device, &ai, nullptr, &sc->depthMemory) != VK_SUCCESS) {
+                    MITHRIL_LOG_WARN("vk", "swapchain depth: vkAllocateMemory failed — "
+                                     "skipping depth view (image has no memory)");
+                } else {
+                    VkResult bindRc = vkBindImageMemory(b->device, sc->depthImage, sc->depthMemory, 0);
+                    if (bindRc != VK_SUCCESS) {
+                        MITHRIL_LOG_WARN("vk", "swapchain depth: vkBindImageMemory failed (rc=%d) "
+                                         "— skipping depth view (image has no memory)",
+                                         (int)bindRc);
+                    } else {
+                        VkImageViewCreateInfo dvci{};
+                        dvci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+                        dvci.image = sc->depthImage;
+                        dvci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+                        dvci.format = depthFmt;
+                        dvci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
+                        dvci.subresourceRange.baseMipLevel = 0;
+                        dvci.subresourceRange.levelCount = 1;
+                        dvci.subresourceRange.baseArrayLayer = 0;
+                        dvci.subresourceRange.layerCount = 1;
+                        // SubTask 1.4: check view creation; on failure keep
+                        // depthView = VK_NULL_HANDLE so begin_render_pass
+                        // omits the depth attachment and renders color-only.
+                        VkResult viewRc = vkCreateImageView(b->device, &dvci, nullptr, &sc->depthView);
+                        if (viewRc != VK_SUCCESS) {
+                            MITHRIL_LOG_WARN("vk", "swapchain depth: vkCreateImageView failed (rc=%d) "
+                                             "— depthView stays VK_NULL_HANDLE",
+                                             (int)viewRc);
+                            sc->depthView = VK_NULL_HANDLE;
+                        }
+                    }
+                }
             }
-            VkImageViewCreateInfo dvci{};
-            dvci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-            dvci.image = sc->depthImage;
-            dvci.viewType = VK_IMAGE_VIEW_TYPE_2D;
-            dvci.format = depthFmt;
-            dvci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
-            dvci.subresourceRange.baseMipLevel = 0;
-            dvci.subresourceRange.levelCount = 1;
-            dvci.subresourceRange.baseArrayLayer = 0;
-            dvci.subresourceRange.layerCount = 1;
-            vkCreateImageView(b->device, &dvci, nullptr, &sc->depthView);
         }
     }
 
@@ -212,6 +245,9 @@ VkImageView swapchain_acquire_color(Swapchain* sc) {
         return VK_NULL_HANDLE;
     }
     Backend* b = backend();
+    if (b->deviceLost) {
+        return VK_NULL_HANDLE;  // 持久性故障已挂起，跳过 acquire
+    }
     if (sc->currentImage < 0) {
         uint32_t idx = 0;
         VkResult r = vkAcquireNextImageKHR(b->device, sc->swapchain, UINT64_MAX,
@@ -256,6 +292,9 @@ VkImageView swapchain_acquire_depth(Swapchain* sc) {
 void swapchain_present_and_acquire(Swapchain* sc) {
     if (!sc || !sc->swapchain) return;
     Backend* b = backend();
+    if (b->deviceLost) {
+        return;  // 持久性故障已挂起，跳过 present
+    }
 
     if (sc->currentImage >= 0) {
         // Copy the index into a real uint32_t before taking its address.
@@ -294,15 +333,30 @@ void swapchain_present_and_acquire(Swapchain* sc) {
         pi.pSwapchains = &sc->swapchain;
         pi.pImageIndices = &idx;
         VkResult r = vkQueuePresentKHR(b->graphicsQueue, &pi);
-        if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) {
-            MITHRIL_LOG_ERROR("vk", "vkQueuePresentKHR failed (rc=%d) — marking "
-                              "swapchain for rebuild", (int)r);
-            // Fatal present errors (VK_ERROR_OUT_OF_DEVICE_MEMORY,
-            // VK_ERROR_SURFACE_LOST_KHR, VK_ERROR_OUT_OF_HOST_MEMORY) mean the
-            // swapchain is unusable. Mark it dead so EGL rebuilds it on the
-            // next swap; otherwise the next present would fail the same way
-            // and the render thread would spin logging the same error.
+        if (r == VK_SUCCESS || r == VK_SUBOPTIMAL_KHR) {
+            b->consecutiveSubmitFailures = 0;
+        } else if (r == VK_ERROR_OUT_OF_DATE_KHR) {
+            // VK_ERROR_OUT_OF_DATE_KHR 表示 swapchain 需要重建，是正常路径，
+            // 不计入 consecutiveSubmitFailures 计数器。
             sc->needsRebuild = true;
+        } else {
+            // 致命 present 错误（VK_ERROR_OUT_OF_DEVICE_MEMORY /
+            // VK_ERROR_SURFACE_LOST_KHR / VK_ERROR_OUT_OF_HOST_MEMORY 等）：
+            // swapchain 不可用，标记重建；否则下一帧 present 会以同样方式失败，
+            // 渲染线程会在日志风暴中空转。
+            sc->needsRebuild = true;
+            b->consecutiveSubmitFailures++;
+            if (b->consecutiveSubmitFailures >= 3 && !b->deviceLost) {
+                b->deviceLost = true;
+                MITHRIL_LOG_ERROR("vk", "Persistent GPU fault detected after %d "
+                                  "consecutive present failures — rendering suspended",
+                                  b->consecutiveSubmitFailures);
+            }
+            // 日志限流：首次失败 + 每 100 次各打印一条，避免日志风暴。
+            if (b->consecutiveSubmitFailures == 1 || b->consecutiveSubmitFailures % 100 == 0) {
+                MITHRIL_LOG_ERROR("vk", "vkQueuePresentKHR failed (rc=%d) — marking "
+                                  "swapchain for rebuild", (int)r);
+            }
         }
         // The render-finished signal has now been consumed by present (or, on
         // failure, will never be consumed — but we clear the flag either way

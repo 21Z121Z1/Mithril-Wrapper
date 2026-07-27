@@ -43,6 +43,7 @@
 #include "../MG_Impl/includes.h"
 #include "../MG_Impl/EGLConfig.h"
 #include "../MG_Impl/Log.h"
+#include "../MG_Backend/DirectVulkan/Device.h"
 #include <EGL/egl.h>
 
 #include <atomic>
@@ -705,6 +706,14 @@ EGLBoolean eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
     EglSurface* s = (EglSurface*)surface;
     if (!s) { set_error(EGL_BAD_SURFACE); return EGL_FALSE; }
 
+    // 持久性 GPU 故障挂起守卫：一旦 backend 进入 deviceLost 状态，立即静默返回，
+    // 跳过 ensure_swapchain 重建、present、commit 等所有 GPU 操作，避免每帧尝试
+    // 重建 swapchain 形成死循环刷屏（见 latestlog.txt 中 ~3000 行 rebuilding 日志）。
+    // 让 GL 应用继续运行（返回 EGL_TRUE，不抛 EGL_BAD_ALLOC 等错误）。
+    if (mithril::vk::backend_is_device_lost()) {
+        return EGL_TRUE;
+    }
+
     // First-frame / deferred-swapchain retry: if the swapchain wasn't created
     // at eglCreateWindowSurface time (because the native window wasn't sized
     // yet — common on iOS where the CAMetalLayer gets its size asynchronously
@@ -761,8 +770,15 @@ EGLBoolean eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
         bool needs_rebuild = (backend_swapchain_needs_rebuild(s->swapchain_state) != 0);
         if (size_changed || needs_rebuild) {
             if (needs_rebuild) {
-                MITHRIL_LOG_WARN("egl", "eglSwapBuffers: swapchain marked dead by "
-                                  "backend, rebuilding (GPU OOM / surface lost)");
+                // 限流：同一故障串内最多输出一次。首次故障时 consecutiveSubmitFailures
+                // 从 0 自增到 1（≤1 仍输出），之后 ≥2 不再输出，直到计数器被成功提交清零。
+                // 这样既保留首次诊断信息，又避免 deviceLost 置位前后的 rebuilding 死循环
+                // 刷屏（latestlog.txt 中观察到的 ~3000 行重复日志）。
+                mithril::vk::Backend* b = mithril::vk::backend();
+                if (!b || b->consecutiveSubmitFailures <= 1) {
+                    MITHRIL_LOG_WARN("egl", "eglSwapBuffers: swapchain marked dead by "
+                                      "backend, rebuilding (GPU OOM / surface lost)");
+                }
             }
             ensure_swapchain(s);
         }
