@@ -46,8 +46,15 @@ extern "C" void* surface_create(void* native_window, int* out_w, int* out_h) {
     // the system default device, which matches the VkPhysicalDevice it
     // exposes). The pixel format must be BGRA8Unorm to match the swapchain's
     // VK_FORMAT_B8G8R8A8_UNORM.
+    //
+    // framebufferOnly MUST be NO when using MoltenVK (Vulkan-on-Metal), because
+    // the swapchain images need VK_IMAGE_USAGE_TRANSFER_DST_BIT and potentially
+    // other non-color-attachment usage (MSAA resolve, display transform).
+    // Setting it to YES restricts the Metal texture to render-target-only,
+    // causing IOSurfaceBindAccel to crash in the GPU driver when MoltenVK
+    // tries to use the image for non-attachment operations.
     mtlLayer.pixelFormat = MTLPixelFormatBGRA8Unorm;
-    mtlLayer.framebufferOnly = YES;
+    mtlLayer.framebufferOnly = NO;
     if (mtlLayer.drawableSize.width == 0 || mtlLayer.drawableSize.height == 0) {
         mtlLayer.drawableSize = layer.bounds.size;
     }
