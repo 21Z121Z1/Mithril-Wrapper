@@ -371,9 +371,9 @@ static void wrap_loose_uniforms(std::string& source) {
     injection += "\nuniform mithril_GlobalBlock {\n";
     for (const auto& u : members)
         injection += "    " + u.decl + ";\n";
-    injection += "};\n\n";
+    injection += "} _m;\n\n";
     for (const auto& u : members)
-        injection += "#define " + u.name + " mithril_GlobalBlock." + u.name + "\n";
+        injection += "#define " + u.name + " _m." + u.name + "\n";
     injection += "\n";
 
     // Erase originals (descending position so earlier offsets stay valid).
