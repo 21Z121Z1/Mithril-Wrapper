@@ -62,6 +62,26 @@ Swapchain* create_swapchain_post_surface(VkSurfaceKHR surface, int width, int he
         extent.height = (uint32_t)height;
     }
 
+    // Pick a supported composite alpha mode. The INHERIT bit may not be
+    // available on all platforms; prefer OPAQUE (always supported on Metal)
+    // and fall back to any bit the surface accepts.
+    VkCompositeAlphaFlagBitsKHR compAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+    if (caps.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR) {
+        compAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+    } else if (caps.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR) {
+        compAlpha = VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR;
+    } else {
+        // Pick the first available bit.
+        for (uint32_t bit = 1; bit <= VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR; bit <<= 1) {
+            if (caps.supportedCompositeAlpha & bit) {
+                compAlpha = (VkCompositeAlphaFlagBitsKHR)bit;
+                break;
+            }
+        }
+    }
+    MITHRIL_LOG_INFO("vk", "Swapchain: compositeAlpha=0x%x, supported=0x%x",
+                     (unsigned)compAlpha, (unsigned)caps.supportedCompositeAlpha);
+
     // Swapchain.
     VkSwapchainCreateInfoKHR scci{};
     scci.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
@@ -74,7 +94,7 @@ Swapchain* create_swapchain_post_surface(VkSurfaceKHR surface, int width, int he
     scci.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     scci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
     scci.preTransform = caps.currentTransform;
-    scci.compositeAlpha = VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR;
+    scci.compositeAlpha = compAlpha;
     scci.presentMode = VK_PRESENT_MODE_FIFO_KHR;
     scci.clipped = VK_TRUE;
     if (vkCreateSwapchainKHR(b->device, &scci, nullptr, &sc->swapchain) != VK_SUCCESS) {

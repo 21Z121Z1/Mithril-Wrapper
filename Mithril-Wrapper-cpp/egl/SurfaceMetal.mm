@@ -27,15 +27,22 @@ extern "C" void* surface_create(void* native_window, int* out_w, int* out_h) {
 
     CALayer* layer = (__bridge CALayer*)native_window;
     CAMetalLayer* mtlLayer = nil;
+    bool coerced = false;
     if ([layer isKindOfClass:[CAMetalLayer class]]) {
         mtlLayer = (CAMetalLayer*)layer;
+        MITHRIL_LOG_INFO("egl", "SurfaceMetal: layer is already CAMetalLayer");
     } else {
-        // Coerce: replace the layer's class with CAMetalLayer. This mirrors
-        // what UIKit views do in +layerClass. We only do this if the layer is
-        // standalone (not yet attached as a sublayer) to avoid surprising the
-        // host view hierarchy.
+        // Coerce: replace the layer's class with CAMetalLayer.
+        // NOTE: object_setClass on a CALayer to make it a CAMetalLayer is
+        // fundamentally unsafe — CAMetalLayer may add ivars (e.g. device
+        // storage) that a plain CALayer doesn't have, causing memory
+        // corruption when those ivars are accessed. This path should ideally
+        // never be taken; the host app MUST provide a CAMetalLayer.
+        MITHRIL_LOG_WARN("egl", "SurfaceMetal: coercing CALayer -> CAMetalLayer "
+                          "(unsafe, may corrupt memory!)");
         object_setClass(layer, [CAMetalLayer class]);
         mtlLayer = (CAMetalLayer*)layer;
+        coerced = true;
     }
     if (!mtlLayer) {
         MITHRIL_LOG_WARN("egl", "SurfaceMetal: CAMetalLayer coercion failed");
