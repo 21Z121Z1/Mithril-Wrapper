@@ -208,6 +208,9 @@ void install_surface_on_state(EglSurface* s) {
     if (s && s->swapchain_state) {
         VkImageView color = backend_swapchain_acquire_color(s->swapchain_state);
         VkImageView depth = backend_swapchain_acquire_depth(s->swapchain_state);
+        MITHRIL_LOG_WARN("egl", "install_surface_on_state: color=%p depth=%p "
+                          "(swapchain_state=%p)", (void*)color, (void*)depth,
+                          (void*)s->swapchain_state);
         g_state->eglDefaultColor  = color;
         g_state->eglDefaultDepth  = depth;
         // Also expose the underlying VkImage handles + formats so image-level
@@ -220,6 +223,9 @@ void install_surface_on_state(EglSurface* s) {
         g_state->eglDefaultWidth  = s->width;
         g_state->eglDefaultHeight = s->height;
     } else {
+        MITHRIL_LOG_WARN("egl", "install_surface_on_state: no swapchain or surface "
+                          "(s=%p, swapchain_state=%p)", (void*)s,
+                          (void*)(s ? s->swapchain_state : nullptr));
         g_state->eglDefaultColor  = VK_NULL_HANDLE;
         g_state->eglDefaultDepth  = VK_NULL_HANDLE;
         g_state->eglDefaultColorImage  = VK_NULL_HANDLE;

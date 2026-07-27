@@ -193,19 +193,28 @@ void destroy_swapchain(Swapchain* sc) {
 }
 
 VkImageView swapchain_acquire_color(Swapchain* sc) {
-    if (!sc || !sc->swapchain) return VK_NULL_HANDLE;
+    if (!sc || !sc->swapchain) {
+        MITHRIL_LOG_WARN("vk", "swapchain_acquire_color: sc=%p swapchain=%p", (void*)sc,
+                          (void*)(sc ? sc->swapchain : nullptr));
+        return VK_NULL_HANDLE;
+    }
     Backend* b = backend();
     if (sc->currentImage < 0) {
         uint32_t idx = 0;
         VkResult r = vkAcquireNextImageKHR(b->device, sc->swapchain, UINT64_MAX,
                                            sc->imageAvailable, VK_NULL_HANDLE, &idx);
         if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) {
-            MITHRIL_LOG_WARN("vk", "vkAcquireNextImageKHR failed (rc=%d)", (int)r);
+            MITHRIL_LOG_WARN("vk", "swapchain_acquire_color: vkAcquireNextImageKHR failed "
+                              "(rc=%d, idx=%u)", (int)r, (unsigned)idx);
             return VK_NULL_HANDLE;
         }
         sc->currentImage = (int)idx;
     }
-    return sc->currentImage >= 0 ? sc->views[sc->currentImage] : VK_NULL_HANDLE;
+    VkImageView view = (sc->currentImage >= 0 && sc->currentImage < (int)sc->views.size())
+                       ? sc->views[sc->currentImage] : VK_NULL_HANDLE;
+    MITHRIL_LOG_WARN("vk", "swapchain_acquire_color: currentImage=%d view=%p "
+                      "(swapchain images=%zu)", sc->currentImage, (void*)view, sc->views.size());
+    return view;
 }
 
 VkImageView swapchain_acquire_depth(Swapchain* sc) {

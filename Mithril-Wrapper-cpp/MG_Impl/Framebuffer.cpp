@@ -268,7 +268,15 @@ int collect_draw_fbo_attachments(VkImageView out_color[8], VkImageView* out_dept
         if (g_state->eglDefaultDepth != VK_NULL_HANDLE) *out_depth = g_state->eglDefaultDepth;
         if (g_state->eglDefaultWidth > 0 && out_w) *out_w = g_state->eglDefaultWidth;
         if (g_state->eglDefaultHeight > 0 && out_h) *out_h = g_state->eglDefaultHeight;
+        MITHRIL_LOG_WARN("fb", "collect_draw_fbo_attachments: FBO 0 → color=%p depth=%p "
+                          "size=%dx%d", (void*)out_color[0], (void*)*out_depth,
+                          out_w ? *out_w : 0, out_h ? *out_h : 0);
         return 1;
+    }
+
+    // FBO 0 but no color attachment — diagnostic for crash analysis.
+    if (g_state->currentDrawFBO == 0) {
+        MITHRIL_LOG_WARN("fb", "collect_draw_fbo_attachments: FBO 0 with eglDefaultColor=VK_NULL_HANDLE");
     }
 
     Framebuffer* fbo = state_get_framebuffer(g_state->currentDrawFBO);
@@ -298,6 +306,9 @@ int collect_draw_fbo_attachments(VkImageView out_color[8], VkImageView* out_dept
     }
     if (w > 0 && out_w) *out_w = w;
     if (h > 0 && out_h) *out_h = h;
+    MITHRIL_LOG_WARN("fb", "collect_draw_fbo_attachments: FBO=%u count=%d depth=%p size=%dx%d",
+                      (unsigned)g_state->currentDrawFBO, count, (void*)*out_depth,
+                      out_w ? *out_w : 0, out_h ? *out_h : 0);
     return count;
 }
 
