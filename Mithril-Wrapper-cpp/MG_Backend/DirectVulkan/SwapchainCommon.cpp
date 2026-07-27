@@ -79,7 +79,7 @@ Swapchain* create_swapchain_post_surface(VkSurfaceKHR surface, int width, int he
             }
         }
     }
-    MITHRIL_LOG_INFO("vk", "Swapchain: compositeAlpha=0x%x, supported=0x%x",
+    MITHRIL_LOG_WARN("vk", "Swapchain: compositeAlpha=0x%x, supported=0x%x",
                      (unsigned)compAlpha, (unsigned)caps.supportedCompositeAlpha);
 
     // Swapchain.

@@ -30,7 +30,7 @@ extern "C" void* surface_create(void* native_window, int* out_w, int* out_h) {
     bool coerced = false;
     if ([layer isKindOfClass:[CAMetalLayer class]]) {
         mtlLayer = (CAMetalLayer*)layer;
-        MITHRIL_LOG_INFO("egl", "SurfaceMetal: layer is already CAMetalLayer");
+        MITHRIL_LOG_WARN("egl", "SurfaceMetal: layer is already CAMetalLayer");
     } else {
         // Coerce: replace the layer's class with CAMetalLayer.
         // NOTE: object_setClass on a CALayer to make it a CAMetalLayer is
