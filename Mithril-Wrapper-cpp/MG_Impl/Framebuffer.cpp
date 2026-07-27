@@ -270,11 +270,6 @@ int collect_draw_fbo_attachments(VkImageView out_color[8], VkImageView* out_dept
         if (g_state->eglDefaultHeight > 0 && out_h) *out_h = g_state->eglDefaultHeight;
         return 1;
     }
-    // Default framebuffer with no swapchain yet (deferred creation) — return 0
-    // so the draw path does NOT begin a render pass or issue draws against null
-    // attachments (which would crash MoltenVK). The game retries on the next
-    // eglSwapBuffers when ensure_swapchain completes.
-    if (g_state->currentDrawFBO == 0) return 0;
 
     Framebuffer* fbo = state_get_framebuffer(g_state->currentDrawFBO);
     if (!fbo) return 0;

@@ -66,7 +66,6 @@ bool init_device() {
     std::vector<VkExtensionProperties> instExtProps;
     uint32_t extCount = 0;
     vkEnumerateInstanceExtensionProperties(nullptr, &extCount, nullptr);
-    MITHRIL_LOG_INFO("vk", "Instance extensions available: %u", extCount);
     instExtProps.resize(extCount);
     vkEnumerateInstanceExtensionProperties(nullptr, &extCount, instExtProps.data());
 
