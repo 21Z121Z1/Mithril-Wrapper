@@ -270,14 +270,28 @@ if(APPLE)
     # static link strips MoltenVK's lazy references. UIKit is required because
     # libMoltenVK.a references UIScreen / UIView (iOS surface/scale handling).
     #
+    # -force_load: forces the linker to load ALL object files from the MoltenVK
+    # static archive, including C++ static initializers that register Vulkan
+    # instance extensions (VK_EXT_metal_surface, VK_KHR_surface, etc.) at
+    # library load time. Without this flag, the linker may strip object files
+    # whose symbols are not directly referenced — even with -ObjC, which only
+    # preserves Objective-C classes/categories but NOT pure C++ global
+    # constructors. When those initializers are missing,
+    # vkEnumerateInstanceExtensionProperties returns 0 extensions,
+    # VK_EXT_metal_surface is never enabled at instance creation,
+    # vkCreateMetalSurfaceEXT resolves to null, and swapchain creation fails.
+    #
     # -ObjC: forces the linker to load all Objective-C class/category symbols
     # from static archives. MoltenVK's libMoltenVK.a contains ObjC++ code
     # (Metal interop); without this flag, categories may be stripped and cause
     # runtime "unrecognized selector" crashes. Standard Apple recommendation
-    # for static libraries containing Objective-C.
+    # for static libraries containing Objective-C. This flag COMBINED with
+    # -force_load above ensures both ObjC and C++ initializers are loaded.
     target_include_directories(${PROJECT_NAME} PRIVATE ${MOLTENVK_INCLUDE_DIR})
     target_link_libraries(${PROJECT_NAME} PRIVATE
-        ${MOLTENVK_LIBRARY}
+        # NOTE: ${MOLTENVK_LIBRARY} is NOT listed here — it is force-loaded
+        # via target_link_options below (-force_load) so C++ static
+        # initializers in every object file are preserved.
         "-framework Metal"
         "-framework Foundation"
         "-framework QuartzCore"
@@ -285,7 +299,14 @@ if(APPLE)
         "-framework IOSurface"
         "-framework UIKit"
     )
-    target_link_options(${PROJECT_NAME} PRIVATE -ObjC)
+    # Force-load ALL object files from the MoltenVK archive so C++ global
+    # constructors (extension registration) are NOT stripped by the linker.
+    # Without this, vkEnumerateInstanceExtensionProperties returns 0 on
+    # certain build configurations (see comment block above).
+    target_link_options(${PROJECT_NAME} PRIVATE
+        -ObjC
+        "-force_load" "${MOLTENVK_LIBRARY}"
+    )
     target_compile_definitions(${PROJECT_NAME} PRIVATE MITHRIL_VULKAN=1)
 else()
     target_link_libraries(${PROJECT_NAME} PRIVATE ${CMAKE_DL_LIBS})
