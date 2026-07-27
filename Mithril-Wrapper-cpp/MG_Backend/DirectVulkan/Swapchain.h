@@ -57,6 +57,24 @@ struct Swapchain {
     // consumes the signal. Also cleared by destroy_swapchain().
     bool            renderFinishedSignaled = false;
 
+    // Tracks whether imageAvailable has been consumed by a vkQueueSubmit wait
+    // this frame. vkAcquireNextImageKHR signals imageAvailable; the FIRST
+    // vkQueueSubmit of the frame MUST wait on it (at COLOR_ATTACHMENT_OUTPUT
+    // stage) so the GPU does not start writing to the swapchain image before
+    // acquire completes. Without this wait, the GPU races ahead of the
+    // presentation engine and renders into an image it does not yet own —
+    // under MoltenVK this manifests as a black screen (the rendered contents
+    // land in a stale/owned-by-presenter image and never reach the display).
+    //
+    // Mid-frame flushes (eglWaitClient -> backend_commit) call commit_frame
+    // multiple times per frame; only the first submit waits on imageAvailable.
+    // Subsequent submits must NOT wait (the semaphore was already consumed;
+    // waiting again would deadlock). This mirrors MobileGL's
+    // imageAvailableSemaphoreConsumed flag (FrameContext.cpp:191).
+    //
+    // Reset to false by swapchain_acquire_color() right after acquire.
+    bool            imageAvailableConsumed = false;
+
     // Tracked layout of the currently-acquired color image. After acquire it
     // is PRESENT_SRC_KHR (or UNDEFINED on the very first acquire). The
     // acquire->attachment barrier transitions it to COLOR_ATTACHMENT_OPTIMAL;

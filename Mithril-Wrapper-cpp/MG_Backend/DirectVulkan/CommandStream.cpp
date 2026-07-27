@@ -342,15 +342,40 @@ void commit_frame() {
     EncoderState& e = encoder();
     if (e.passActive) end_render_pass();
 
-    // Empty-submit defense: if no commands were recorded since the last
-    // commit_frame() (e.g. eglWaitClient followed by eglSwapBuffers both call
-    // backend_commit; the second call has nothing to do), skip the submit
-    // entirely. Submitting an empty command buffer is wasteful and — under
-    // resize/destruction races where activeSwapchain was just detached — the
-    // signal-pendingRenderFinished path below would dereference a swapchain
-    // pointer that EGL is concurrently destroying, hand MoltenVK a stale
-    // semaphore, and trigger IOSurface UAF crashes in the GPU driver.
-    if (!e.hasCommands) {
+    // ---- Decide whether we need to submit at all ----
+    // MobileGL's Present() logic (VulkanRenderer.cpp:6912):
+    //   shouldSubmit = hasCommandBufferRecorded || needsLayoutTransitionForPresent
+    //
+    // We MUST submit (and signal renderFinished) whenever:
+    //   (a) commands were recorded this frame (normal draw pass), OR
+    //   (b) the swapchain image is NOT already in PRESENT_SRC_KHR (it is in
+    //       COLOR_ATTACHMENT_OPTIMAL from a previous render pass and needs a
+    //       layout-transition barrier before present), OR
+    //   (c) imageAvailable has not been consumed yet this frame (the very
+    //       first commit after acquire — even with no draw commands, we must
+    //       wait on imageAvailable so the GPU does not race ahead of the
+    //       presentation engine; this is the MobileGL TransitionToPresent
+    //       fallback path).
+    //
+    // Without this, a frame where the app only calls glClear (no draws) or a
+    // frame where eglWaitClient already flushed the draws would skip submit,
+    // leave renderFinished unsignaled, and present would wait on a semaphore
+    // that is never signaled -> MoltenVK hangs / black screen.
+    Swapchain* sc = e.activeSwapchain;
+    bool hasCommands = e.hasCommands;
+    bool needsLayoutTransition = false;
+    bool needsImageAvailableWait = false;
+    if (sc && sc->currentImage >= 0 && sc->currentImage < (int)sc->images.size()) {
+        if (sc->currentColorLayout != VK_IMAGE_LAYOUT_PRESENT_SRC_KHR &&
+            sc->currentColorLayout != VK_IMAGE_LAYOUT_UNDEFINED &&
+            sc->currentColorLayout != VK_IMAGE_LAYOUT_SHARED_PRESENT_KHR) {
+            needsLayoutTransition = true;
+        }
+        needsImageAvailableWait = !sc->imageAvailableConsumed;
+    }
+    bool shouldSubmit = hasCommands || needsLayoutTransition || needsImageAvailableWait;
+
+    if (!shouldSubmit) {
         return;
     }
 
@@ -381,17 +406,13 @@ void commit_frame() {
     // Transition the swapchain color image back to PRESENT_SRC_KHR before
     // vkEndCommandBuffer so vkQueuePresentKHR sees a legal layout. Without
     // this, present is spec-illegal and MoltenVK drops the frame (black screen).
-    if (e.activeSwapchain) {
-        Swapchain* sc = e.activeSwapchain;
-        if (sc->currentImage >= 0 && sc->currentImage < (int)sc->images.size() &&
-            sc->currentColorLayout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
-            record_layout_barrier(b->commandBuffer,
-                                  sc->images[sc->currentImage], sc->format,
-                                  VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                                  VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-                                  /*isDepthStencil=*/false);
-            sc->currentColorLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-        }
+    if (sc && needsLayoutTransition) {
+        record_layout_barrier(b->commandBuffer,
+                              sc->images[sc->currentImage], sc->format,
+                              sc->currentColorLayout,
+                              VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                              /*isDepthStencil=*/false);
+        sc->currentColorLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
     }
 
     VkResult r = vkEndCommandBuffer(b->commandBuffer);
@@ -408,7 +429,7 @@ void commit_frame() {
             b->commandBufferRecording = true;
         }
         e.hasCommands = false;
-        if (e.activeSwapchain) e.activeSwapchain->needsRebuild = true;
+        if (sc) sc->needsRebuild = true;
         return;
     }
     b->commandBufferRecording = false;  // executable, not recording
@@ -418,16 +439,38 @@ void commit_frame() {
     si.commandBufferCount = 1;
     si.pCommandBuffers = &b->commandBuffer;
 
-    // Signal the swapchain's render-finished semaphore so vkQueuePresentKHR
-    // can wait on it (proper submit→present dependency). Only signal once per
-    // frame to avoid accumulating unconsumed binary semaphore signals when
-    // commit_frame() is called multiple times (eglWaitClient + eglSwapBuffers).
+    // ---- Wait on imageAvailable (acquire semaphore) if not yet consumed ----
+    // This is the CRITICAL fix for the black screen: vkAcquireNextImageKHR
+    // signals imageAvailable, and the FIRST vkQueueSubmit of the frame MUST
+    // wait on it (at COLOR_ATTACHMENT_OUTPUT stage) so the GPU does not start
+    // writing to the swapchain image before the presentation engine releases
+    // it. Without this wait, the GPU renders into a stale/owned-by-presenter
+    // image and the rendered contents never reach the display -> black screen.
+    //
+    // Only the first commit_frame() per frame waits on imageAvailable (mid-
+    // frame flushes via eglWaitClient consume it on the first submit). This
+    // mirrors MobileGL's imageAvailableSemaphoreConsumed flag
+    // (FrameContext.cpp:191-193).
+    VkSemaphore waitSemaphore = VK_NULL_HANDLE;
+    VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    if (sc && sc->imageAvailable != VK_NULL_HANDLE && !sc->imageAvailableConsumed) {
+        waitSemaphore = sc->imageAvailable;
+        si.waitSemaphoreCount = 1;
+        si.pWaitSemaphores = &waitSemaphore;
+        si.pWaitDstStageMask = &waitStage;
+    }
+
+    // ---- Signal renderFinished so present can wait on it ----
+    // Always signal (if not already signaled this frame) so present has a
+    // semaphore to wait on. Without this, present would either wait on a
+    // never-signaled semaphore (hang) or skip the wait (race). MobileGL's
+    // GetSubmitInfo unconditionally sets signalSemaphoreCount=1
+    // (FrameContext.cpp:196).
     VkSemaphore signalSemaphore = VK_NULL_HANDLE;
-    if (e.activeSwapchain &&
-        e.activeSwapchain->pendingRenderFinished != VK_NULL_HANDLE &&
-        !e.activeSwapchain->renderFinishedSignaled) {
-        signalSemaphore = e.activeSwapchain->pendingRenderFinished;
-        e.activeSwapchain->renderFinishedSignaled = true;
+    if (sc && sc->pendingRenderFinished != VK_NULL_HANDLE &&
+        !sc->renderFinishedSignaled) {
+        signalSemaphore = sc->pendingRenderFinished;
+        sc->renderFinishedSignaled = true;
     }
     if (signalSemaphore != VK_NULL_HANDLE) {
         si.signalSemaphoreCount = 1;
@@ -446,13 +489,16 @@ void commit_frame() {
         // (vkWaitForFences would hang forever). Reset the fence manually and
         // mark the swapchain dead so EGL rebuilds it on the next swap.
         vkResetFences(b->device, 1, &fence);
-        // Roll back the renderFinished signal: present will not consume it
-        // (we return before present), so the next commit must be allowed to
-        // signal again. Without this rollback, the semaphore stays
-        // "signaled" forever and the next submit would double-signal (UB).
-        if (e.activeSwapchain) {
-            e.activeSwapchain->renderFinishedSignaled = false;
-            e.activeSwapchain->needsRebuild = true;
+        // Roll back the semaphore state: neither imageAvailable nor
+        // renderFinished was actually consumed/signal'd (submit failed), so
+        // the next commit must be allowed to wait/signal again. Without
+        // these rollbacks, the state would be inconsistent (e.g. next submit
+        // would skip the imageAvailable wait, racing the presenter again).
+        if (sc) {
+            sc->renderFinishedSignaled = false;
+            // imageAvailableConsumed stays false (we never set it true on
+            // failure) — correct, the next submit should still wait.
+            sc->needsRebuild = true;
         }
         // Reset+begin so the next frame has a recording buffer.
         vkResetCommandBuffer(b->commandBuffer, 0);
@@ -464,6 +510,11 @@ void commit_frame() {
         }
         e.hasCommands = false;
         return;
+    }
+
+    // Submit succeeded: imageAvailable is now consumed (the wait was honored).
+    if (sc) {
+        sc->imageAvailableConsumed = true;
     }
 
     // Wait on the frame we just submitted so the command buffer is reusable.

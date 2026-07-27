@@ -241,6 +241,12 @@ VkImageView swapchain_acquire_color(Swapchain* sc) {
         // the semantics of starting a new frame on a swapchain image whose
         // post-present contents are undefined anyway.
         sc->currentColorLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        // imageAvailable was just signaled by vkAcquireNextImageKHR. Mark it
+        // unconsumed so the next commit_frame()'s vkQueueSubmit waits on it
+        // (at COLOR_ATTACHMENT_OUTPUT stage). Without that wait, the GPU
+        // starts rendering before the presentation engine releases the image
+        // -> MoltenVK black screen. See MobileGL FrameContext.cpp:234.
+        sc->imageAvailableConsumed = false;
     }
     VkImageView view = (sc->currentImage >= 0 && sc->currentImage < (int)sc->views.size())
                        ? sc->views[sc->currentImage] : VK_NULL_HANDLE;
@@ -264,24 +270,32 @@ void swapchain_present_and_acquire(Swapchain* sc) {
         uint32_t idx = (uint32_t)sc->currentImage;
         VkPresentInfoKHR pi{};
         pi.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
-        // Wait on BOTH:
-        //   * imageAvailable      — signaled by vkAcquireNextImageKHR; ensures
-        //                           the image is actually owned before present.
-        //                           Each acquire signal MUST be paired with
-        //                           exactly one wait or the next acquire is UB.
-        //   * pendingRenderFinished — signaled by commit_frame()'s
-        //                           vkQueueSubmit; ensures the present only
-        //                           proceeds once rendering is complete. Only
-        //                           waited on when commit_frame actually
-        //                           signaled it this frame (renderFinishedSignaled).
-        VkSemaphore waitSemaphores[2];
-        uint32_t waitCount = 0;
-        waitSemaphores[waitCount++] = sc->imageAvailable;
+        // Wait on renderFinished ONLY (NOT imageAvailable). This mirrors
+        // MobileGL's GetPresentInfo (FrameContext.cpp:208), which sets
+        // waitSemaphoreCount=1 on the per-image renderFinished semaphore.
+        //
+        // Why NOT imageAvailable: imageAvailable is the acquire semaphore,
+        // signaled by vkAcquireNextImageKHR and consumed by commit_frame()'s
+        // vkQueueSubmit (at COLOR_ATTACHMENT_OUTPUT stage). It expresses the
+        // acquire->render dependency. The render->present dependency is a
+        // SEPARATE edge expressed by renderFinished. If present also waited
+        // on imageAvailable, we would (a) double-consume the acquire signal
+        // (UB: a binary semaphore can only be waited on once per signal), and
+        // (b) NOT actually guarantee rendering is complete — imageAvailable
+        // was signaled at acquire time, long before any draw commands ran.
+        //
+        // Only wait on renderFinished if commit_frame() actually signaled it
+        // this frame (renderFinishedSignaled). If commit_frame skipped submit
+        // (no commands, no layout transition, imageAvailable already consumed
+        // by a previous mid-frame flush), then there is no render work to wait
+        // on and present proceeds without a wait — which is correct because
+        // the image is already in PRESENT_SRC_KHR and no GPU work touches it.
+        VkSemaphore waitSemaphore = VK_NULL_HANDLE;
         if (sc->renderFinishedSignaled && sc->pendingRenderFinished != VK_NULL_HANDLE) {
-            waitSemaphores[waitCount++] = sc->pendingRenderFinished;
+            waitSemaphore = sc->pendingRenderFinished;
+            pi.waitSemaphoreCount = 1;
+            pi.pWaitSemaphores = &waitSemaphore;
         }
-        pi.waitSemaphoreCount = waitCount;
-        pi.pWaitSemaphores = waitSemaphores;
         pi.swapchainCount = 1;
         pi.pSwapchains = &sc->swapchain;
         pi.pImageIndices = &idx;
