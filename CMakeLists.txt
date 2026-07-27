@@ -85,22 +85,23 @@ if(APPLE)
     )
     message(STATUS "MoltenVK headers: ${MOLTENVK_INCLUDE_DIR}")
 
-    # The static framework lives under ios-arm64 (device) or ios-arm64_x86_64-simulator
-    # (simulator) inside the xcframework. CMake's link step just needs the bare
-    # framework path; the linker picks the right slice from the fat binary.
+    # Use the dynamic libMoltenVK.dylib (v1.2.9) bundled with Amethyst instead
+    # of the static MoltenVK.xcframework from CI. The dylib is expected at the
+    # sibling Amethyst-iOS-MyRemastered repo's Frameworks directory.
     find_library(MOLTENVK_LIBRARY
         NAMES MoltenVK
         PATHS
-            "${MOLTENVK_ROOT}/MoltenVK.xcframework"
-            "${CMAKE_SOURCE_DIR}/MoltenVK.xcframework"
-            "${CMAKE_SOURCE_DIR}/3rdparty/MoltenVK/MoltenVK.xcframework"
-            "${CMAKE_SOURCE_DIR}/Mithril-Wrapper-cpp/3rdparty/MoltenVK/MoltenVK.xcframework"
-        PATH_SUFFIXES
-            "ios-arm64"
-            "ios-arm64_x86_64-simulator"
-        REQUIRED
+            "${CMAKE_SOURCE_DIR}/../Amethyst-iOS-MyRemastered/Natives/resources/Frameworks"
+            "${MOLTENVK_ROOT}"
+        NO_CMAKE_FIND_ROOT_PATH
     )
-    message(STATUS "MoltenVK library: ${MOLTENVK_LIBRARY}")
+    if(NOT MOLTENVK_LIBRARY OR MOLTENVK_LIBRARY MATCHES "NOTFOUND$")
+        message(FATAL_ERROR
+            "libMoltenVK.dylib not found.\n"
+            "Expected at: ${CMAKE_SOURCE_DIR}/../Amethyst-iOS-MyRemastered/Natives/resources/Frameworks\n"
+            "Set -DMOLTENVK_ROOT=/path/to/dir/containing/libMoltenVK.dylib to override.")
+    endif()
+    message(STATUS "MoltenVK library (dynamic): ${MOLTENVK_LIBRARY}")
 endif()
 
 # ---------------------------------------------------------------------------
@@ -289,23 +290,17 @@ if(APPLE)
     # -force_load above ensures both ObjC and C++ initializers are loaded.
     target_include_directories(${PROJECT_NAME} PRIVATE ${MOLTENVK_INCLUDE_DIR})
     target_link_libraries(${PROJECT_NAME} PRIVATE
-        # NOTE: ${MOLTENVK_LIBRARY} is NOT listed here — it is force-loaded
-        # via target_link_options below (-force_load) so C++ static
-        # initializers in every object file are preserved.
+        # Link dynamically against the Amethyst-bundled libMoltenVK.dylib
+        # (v1.2.9). Dynamic linking resolves Vulkan entry points at load time
+        # and relies on the host app (Amethyst) providing libMoltenVK.dylib
+        # in its Frameworks/ directory at runtime.
+        "${MOLTENVK_LIBRARY}"
         "-framework Metal"
         "-framework Foundation"
         "-framework QuartzCore"
         "-framework CoreGraphics"
         "-framework IOSurface"
         "-framework UIKit"
-    )
-    # Force-load ALL object files from the MoltenVK archive so C++ global
-    # constructors (extension registration) are NOT stripped by the linker.
-    # Without this, vkEnumerateInstanceExtensionProperties returns 0 on
-    # certain build configurations (see comment block above).
-    target_link_options(${PROJECT_NAME} PRIVATE
-        -ObjC
-        "-force_load" "${MOLTENVK_LIBRARY}"
     )
     target_compile_definitions(${PROJECT_NAME} PRIVATE MITHRIL_VULKAN=1)
 else()
