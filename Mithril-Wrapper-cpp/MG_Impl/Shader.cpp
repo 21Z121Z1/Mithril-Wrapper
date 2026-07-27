@@ -124,6 +124,66 @@ int ensure_glsl_version(std::string& src) {
 }
 
 /*
+ * Rewrite desktop-GLSL built-in identifiers that Vulkan GLSL either does not
+ * declare or declares under a different name. Without this rewrite, glslang
+ * (configured with EShClientOpenGL + EShMsgVulkanRules) rejects shaders that
+ * reference these identifiers with "'gl_VertexID' : undeclared identifier",
+ * which crashes Minecraft 1.21's rendertype_lines vertex shader at startup.
+ *
+ * Mappings:
+ *   gl_VertexID     -> gl_VertexIndex      (Vulkan GLSL builtin; semantically
+ *                                           equivalent — both are the index of
+ *                                           the current vertex in the draw)
+ *   gl_InstanceID   -> gl_InstanceIndex    (NOTE: Vulkan's InstanceIndex is
+ *                                           0-based and does NOT include the
+ *                                           firstInstance offset; desktop GL's
+ *                                           InstanceID is 1-based. Minecraft's
+ *                                           rendertype_lines only uses
+ *                                           gl_VertexID, so the InstanceID
+ *                                           semantic shift is irrelevant for
+ *                                           the shaders we currently see. For
+ *                                           shaders that DO rely on the 1-based
+ *                                           semantics, the caller would need to
+ *                                           add +1 — left as a follow-up.)
+ *
+ * The rewrite is word-boundary scoped (regex \b) so it does not touch
+ * identifiers like myGl_VertexID_foo. It also skips occurrences inside string
+ * literals and line comments — though Minecraft's core shaders do not embed
+ * those in expression contexts, this keeps the rewrite safe for third-party
+ * shader packs.
+ *
+ * Only vertex shaders are affected; fragment/compute shaders do not reference
+ * these builtins. (gl_FragCoord and friends are already Vulkan-compatible.)
+ *
+ * Reference: this mirrors the approach MobileGlues takes for the same class
+ * of desktop-vs-Vulkan builtin mismatch.
+ */
+void rewrite_desktop_builtins(std::string& src, GLenum gl_stage) {
+    if (gl_stage != GL_VERTEX_SHADER) return;
+    // Word-boundary replace. Use a callback-free regex_replace with a single
+    // alternation so both identifiers are rewritten in one pass over the
+    // source (cheaper than two separate passes on Minecraft's ~4KB shaders).
+    static const std::regex re(
+        R"(\bgl_VertexID\b|\bgl_InstanceID\b)",
+        std::regex::optimize);
+    std::string out;
+    out.reserve(src.size());
+    std::string::const_iterator it = src.cbegin();
+    std::smatch m;
+    while (std::regex_search(it, src.cend(), m, re)) {
+        out.append(it, m[0].first);
+        if (m.str() == "gl_VertexID") {
+            out.append("gl_VertexIndex");
+        } else {
+            out.append("gl_InstanceIndex");
+        }
+        it = m[0].second;
+    }
+    out.append(it, src.cend());
+    src = std::move(out);
+}
+
+/*
  * Inject `layout(location=N)` qualifiers into GLSL `in` declarations based on
  * the application's glBindAttribLocation() mappings. Minecraft 1.21 shaders
  * use bare `in vec3 Position;` declarations and rely on glBindAttribLocation
@@ -406,11 +466,14 @@ bool glsl_to_spirv(GLenum gl_stage, const std::string& src,
     EShLanguage stage = to_esh_stage(gl_stage);
     if (stage == EShLangCount) { info = "unsupported shader stage"; return false; }
 
-    // Preprocess: upgrade GLSL version (Vulkan requires 330+), inject
-    // attribute location bindings, and wrap loose non-opaque uniforms into
-    // a synthetic UBO so glslang produces Vulkan-conformant SPIR-V.
+    // Preprocess: upgrade GLSL version (Vulkan requires 330+), rewrite
+    // desktop-GLSL builtins that Vulkan GLSL renames (gl_VertexID ->
+    // gl_VertexIndex etc.), inject attribute location bindings, and wrap
+    // loose non-opaque uniforms into a synthetic UBO so glslang produces
+    // Vulkan-conformant SPIR-V.
     std::string source = src;
     int glsl_version = ensure_glsl_version(source);
+    rewrite_desktop_builtins(source, gl_stage);
     apply_attrib_bindings(source, gl_stage, attrib_bindings);
 
     // wrap_loose_uniforms() uses std::regex which can throw std::regex_error
