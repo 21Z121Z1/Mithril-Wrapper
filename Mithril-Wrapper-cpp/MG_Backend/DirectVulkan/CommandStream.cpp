@@ -60,6 +60,20 @@ void begin_render_pass(VkImageView* color_views, int color_count,
     EncoderState& e = encoder();
     if (e.passActive) return;  // coalesce draws into one pass
 
+    // Guard: skip the render pass if no valid color or depth attachment is
+    // available (e.g. swapchain creation failed). Without this guard MoltenVK
+    // crashes in MVKRenderSubpass::populateMTLRenderPassDescriptor when it
+    // dereferences a null subpass pointer derived from null attachment views.
+    {
+        bool hasValidAttach = false;
+        int checked = color_count > 8 ? 8 : color_count;
+        for (int i = 0; i < checked; ++i)
+            if (color_views && color_views[i] != VK_NULL_HANDLE) { hasValidAttach = true; break; }
+        if (!hasValidAttach && depth_view == VK_NULL_HANDLE) {
+            return;  // no valid attachments — skip this pass entirely
+        }
+    }
+
     // The command buffer is already in the recording state — either begun by
     // init_device() (first frame) or by commit_frame() (subsequent frames).
     // Pre-frame commands (layout transitions, texture uploads, etc.) recorded
@@ -326,7 +340,7 @@ void backend_set_stencil_state(int enabled, int func, int ref, int mask,
 void backend_draw_arrays(int primitive, int first, int count) {
     (void)primitive;
     mithril::vk::Backend* b = mithril::vk::backend();
-    if (!b->commandBuffer) return;
+    if (!b->commandBuffer || !mithril::vk::render_pass_active()) return;
     vkCmdDraw(b->commandBuffer, (uint32_t)count, 1, (uint32_t)first, 0);
 }
 
@@ -334,7 +348,7 @@ void backend_draw_indexed(int primitive, int count, int index_type,
                           VkBuffer index_buffer, VkDeviceSize index_offset) {
     (void)primitive;
     mithril::vk::Backend* b = mithril::vk::backend();
-    if (!b->commandBuffer || !index_buffer) return;
+    if (!b->commandBuffer || !index_buffer || !mithril::vk::render_pass_active()) return;
     VkIndexType t = (index_type == 1) ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16;
     vkCmdBindIndexBuffer(b->commandBuffer, index_buffer, index_offset, t);
     vkCmdDrawIndexed(b->commandBuffer, (uint32_t)count, 1, 0, 0, 0);
@@ -343,7 +357,7 @@ void backend_draw_indexed(int primitive, int count, int index_type,
 void backend_draw_arrays_instanced(int primitive, int first, int count, int primcount) {
     (void)primitive;
     mithril::vk::Backend* b = mithril::vk::backend();
-    if (!b->commandBuffer) return;
+    if (!b->commandBuffer || !mithril::vk::render_pass_active()) return;
     vkCmdDraw(b->commandBuffer, (uint32_t)count, (uint32_t)primcount, (uint32_t)first, 0);
 }
 
@@ -352,7 +366,7 @@ void backend_draw_indexed_instanced(int primitive, int count, int index_type,
                                     int primcount) {
     (void)primitive;
     mithril::vk::Backend* b = mithril::vk::backend();
-    if (!b->commandBuffer || !index_buffer) return;
+    if (!b->commandBuffer || !index_buffer || !mithril::vk::render_pass_active()) return;
     VkIndexType t = (index_type == 1) ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16;
     vkCmdBindIndexBuffer(b->commandBuffer, index_buffer, index_offset, t);
     vkCmdDrawIndexed(b->commandBuffer, (uint32_t)count, (uint32_t)primcount, 0, 0, 0);
