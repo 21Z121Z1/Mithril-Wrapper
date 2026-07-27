@@ -41,10 +41,16 @@ extern "C" void* surface_create(void* native_window, int* out_w, int* out_h) {
         MITHRIL_LOG_WARN("egl", "SurfaceMetal: CAMetalLayer coercion failed");
         return nullptr;
     }
-    // MoltenVK picks the MTLDevice itself via vkCreateMetalSurfaceEXT; we do
-    // NOT bind the layer to a specific MTLDevice here (MoltenVK will choose
-    // the system default device, which matches the VkPhysicalDevice it
-    // exposes). The pixel format must be BGRA8Unorm to match the swapchain's
+    // The layer MUST have its device property set to a valid MTLDevice before
+    // MoltenVK creates a VkSurfaceKHR from it (vkCreateMetalSurfaceEXT).
+    // The Metal spec (and vkCreateMetalSurfaceEXT documentation) require this.
+    // On iOS there is exactly one GPU, so MTLCreateSystemDefaultDevice returns
+    // the same MTLDevice that MoltenVK selects internally for its VkPhysicalDevice.
+    // Without this, the layer's drawable textures have no IOSurface backing,
+    // causing IOSurfaceClientBindAccel to crash in the GPU driver when MoltenVK
+    // tries to bind the drawable's texture during command encoding.
+    mtlLayer.device = MTLCreateSystemDefaultDevice();
+    // The pixel format must be BGRA8Unorm to match the swapchain's
     // VK_FORMAT_B8G8R8A8_UNORM.
     //
     // framebufferOnly MUST be NO when using MoltenVK (Vulkan-on-Metal), because
