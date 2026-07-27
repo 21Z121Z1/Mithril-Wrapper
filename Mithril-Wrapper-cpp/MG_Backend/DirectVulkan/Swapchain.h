@@ -69,6 +69,18 @@ struct Swapchain {
     // DEPTH_STENCIL_ATTACHMENT_OPTIMAL on first use, then stays there for the
     // swapchain's lifetime (the depth image is never presented).
     bool            depthLayoutInitialized = false;
+
+    // Sticky error flag: set when vkAcquireNextImageKHR or vkQueuePresentKHR
+    // returns a fatal error (VK_ERROR_OUT_OF_DEVICE_MEMORY,
+    // VK_ERROR_SURFACE_LOST_KHR, VK_ERROR_DEVICE_LOST, etc.). Once set, the
+    // swapchain is considered dead — install_surface_on_state() detaches it
+    // from the encoder, and eglSwapBuffers triggers a full rebuild via
+    // ensure_swapchain(). Without this flag, a dead swapchain would keep
+    // returning VK_NULL_HANDLE from acquire, and the render thread would spin
+    // in a no-op loop (begin_render_pass returns early, commit_frame returns
+    // early on !hasCommands, present is skipped) burning CPU forever instead
+    // of either recovering or surfacing the error.
+    bool            needsRebuild = false;
 };
 
 // Create the surface + swapchain (+ optional depth image) for a native window.

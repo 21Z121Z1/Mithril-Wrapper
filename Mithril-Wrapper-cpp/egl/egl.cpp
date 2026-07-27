@@ -741,25 +741,35 @@ EGLBoolean eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
     // the following frame. backend_present_and_acquire() calls
     // vkQueuePresentKHR followed by vkAcquireNextImageKHR.
     //
-    // IMPORTANT: present happens BEFORE the resize check below. If we rebuilt
-    // the swapchain before presenting, the vkQueuePresentKHR would reference
-    // a just-destroyed swapchain (UAF) — exactly the IOSurfaceBindAccel
-    // SIGSEGV seen in the field. The correct order is: present the already-
-    // rendered frame against the current (still-valid) swapchain, THEN tear
-    // down + recreate for the next frame.
+    // IMPORTANT: present happens BEFORE the resize/rebuild check below. If we
+    // rebuilt the swapchain before presenting, the vkQueuePresentKHR would
+    // reference a just-destroyed swapchain (UAF) — exactly the
+    // IOSurfaceBindAccel SIGSEGV seen in the field. The correct order is:
+    // present the already-rendered frame against the current (still-valid)
+    // swapchain, THEN tear down + recreate for the next frame.
     if (s->swapchain_state) {
         backend_present_and_acquire(s->swapchain_state);
     }
 
-    // Rebuild the swapchain if the native window was resized between frames.
-    // Done AFTER present so the just-presented image's swapchain is still
-    // alive during the present call. ensure_swapchain() drains GPU work and
-    // detaches the old swapchain from the encoder before destroying it.
+    // Rebuild the swapchain if (a) the native window was resized between
+    // frames, or (b) the backend marked the swapchain dead via
+    // backend_swapchain_needs_rebuild (fatal Vulkan error: GPU OOM, surface
+    // lost, device lost). Case (b) is the recovery path for the VK_NOT_READY
+    // death spiral: without rebuilding, the dead swapchain would keep
+    // returning null from acquire and the render thread would spin forever.
+    // ensure_swapchain() drains GPU work and detaches the old swapchain from
+    // the encoder before destroying it, so this is safe even under OOM.
     if (s->native_window && s->swapchain_state) {
         int w = 0, h = 0;
-        if (surface_get_size(s->native_window, &w, &h) &&
-            w > 0 && h > 0 &&
-            (w != s->width || h != s->height)) {
+        bool size_changed = (surface_get_size(s->native_window, &w, &h) &&
+                             w > 0 && h > 0 &&
+                             (w != s->width || h != s->height));
+        bool needs_rebuild = (backend_swapchain_needs_rebuild(s->swapchain_state) != 0);
+        if (size_changed || needs_rebuild) {
+            if (needs_rebuild) {
+                MITHRIL_LOG_WARN("egl", "eglSwapBuffers: swapchain marked dead by "
+                                  "backend, rebuilding (GPU OOM / surface lost)");
+            }
             ensure_swapchain(s);
         }
     }

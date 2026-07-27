@@ -37,6 +37,21 @@ struct Backend {
     // begin_render_pass / commit, rerecorded each frame.
     VkCommandBuffer  commandBuffer = VK_NULL_HANDLE;
 
+    // Tracks whether commandBuffer is in a usable (recording or reset) state.
+    // Set false when vkEndCommandBuffer succeeds (buffer is now in
+    // pending/executable state and CANNOT accept new vkCmd* calls until
+    // vkResetCommandBuffer + vkBeginCommandBuffer run again). Set true once
+    // vkBeginCommandBuffer succeeds.
+    //
+    // Without this flag, a failed vkQueueSubmit path that returns after
+    // vkEndCommandBuffer leaves the buffer in executable state; the next
+    // begin_render_pass() calls vkCmdBeginRendering on a non-recording buffer,
+    // which is UB and — under the GPU OOM condition reported in the field —
+    // causes vkBeginCommandBuffer itself to return VK_NOT_READY on the next
+    // commit_frame's reset+begin, trapping the render thread in a tight loop
+    // of failed begins.
+    bool             commandBufferRecording = false;
+
     VkPipelineCache  pipelineCache = VK_NULL_HANDLE;
 
     // Physical-device properties (cached on init for the GPU name string).

@@ -104,6 +104,11 @@ void backend_present_and_acquire(void* swapchain_state) {
     mithril::vk::swapchain_present_and_acquire((mithril::vk::Swapchain*)swapchain_state);
 }
 
+int backend_swapchain_needs_rebuild(void* swapchain_state) {
+    auto* sc = (mithril::vk::Swapchain*)swapchain_state;
+    return sc && sc->needsRebuild ? 1 : 0;
+}
+
 VkImage backend_swapchain_current_color_image(void* swapchain_state) {
     auto* sc = (mithril::vk::Swapchain*)swapchain_state;
     if (!sc || sc->currentImage < 0 || sc->currentImage >= (int)sc->images.size())

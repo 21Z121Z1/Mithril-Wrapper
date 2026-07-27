@@ -206,14 +206,30 @@ VkImageView swapchain_acquire_color(Swapchain* sc) {
                           (void*)(sc ? sc->swapchain : nullptr));
         return VK_NULL_HANDLE;
     }
+    // If the swapchain was marked dead by a previous fatal error (OOM,
+    // surface lost, device lost), refuse to acquire. EGL will see the null
+    // return, detect needsRebuild, and rebuild the swapchain on the next
+    // eglSwapBuffers. Without this gate, acquire would keep returning null
+    // (vkAcquireNextImageKHR fails on a dead swapchain) and the render thread
+    // would spin in a no-op loop burning CPU.
+    if (sc->needsRebuild) {
+        return VK_NULL_HANDLE;
+    }
     Backend* b = backend();
     if (sc->currentImage < 0) {
         uint32_t idx = 0;
         VkResult r = vkAcquireNextImageKHR(b->device, sc->swapchain, UINT64_MAX,
                                            sc->imageAvailable, VK_NULL_HANDLE, &idx);
         if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) {
-            MITHRIL_LOG_WARN("vk", "swapchain_acquire_color: vkAcquireNextImageKHR failed "
-                              "(rc=%d, idx=%u)", (int)r, (unsigned)idx);
+            MITHRIL_LOG_ERROR("vk", "swapchain_acquire_color: vkAcquireNextImageKHR "
+                              "failed (rc=%d, idx=%u) — marking swapchain for rebuild",
+                              (int)r, (unsigned)idx);
+            // Fatal acquire errors: VK_ERROR_OUT_OF_DEVICE_MEMORY (-4),
+            // VK_ERROR_SURFACE_LOST_KHR (-7), VK_ERROR_DEVICE_LOST (-4).
+            // Mark the swapchain dead so EGL rebuilds it; otherwise the next
+            // eglSwapBuffers would call acquire again on the same dead
+            // swapchain and spin forever.
+            sc->needsRebuild = true;
             return VK_NULL_HANDLE;
         }
         sc->currentImage = (int)idx;
@@ -271,15 +287,29 @@ void swapchain_present_and_acquire(Swapchain* sc) {
         pi.pImageIndices = &idx;
         VkResult r = vkQueuePresentKHR(b->graphicsQueue, &pi);
         if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) {
-            MITHRIL_LOG_WARN("vk", "vkQueuePresentKHR failed (rc=%d)", (int)r);
+            MITHRIL_LOG_ERROR("vk", "vkQueuePresentKHR failed (rc=%d) — marking "
+                              "swapchain for rebuild", (int)r);
+            // Fatal present errors (VK_ERROR_OUT_OF_DEVICE_MEMORY,
+            // VK_ERROR_SURFACE_LOST_KHR, VK_ERROR_OUT_OF_HOST_MEMORY) mean the
+            // swapchain is unusable. Mark it dead so EGL rebuilds it on the
+            // next swap; otherwise the next present would fail the same way
+            // and the render thread would spin logging the same error.
+            sc->needsRebuild = true;
         }
-        // The render-finished signal has now been consumed by present; clear
-        // the flag so the next commit_frame() can signal it again.
+        // The render-finished signal has now been consumed by present (or, on
+        // failure, will never be consumed — but we clear the flag either way
+        // so the next commit_frame() can signal again). Without this clear,
+        // a failed present would leave renderFinishedSignaled=true forever,
+        // and the next commit_frame would skip signaling (UB: present waits
+        // on a semaphore that was never signaled).
         sc->renderFinishedSignaled = false;
         sc->currentImage = -1;
     }
 
     // Acquire the next image so the GLState default color view is valid.
+    // If the swapchain was just marked needsRebuild, this returns null
+    // (swapchain_acquire_color checks the flag first); EGL will detect the
+    // null and rebuild.
     swapchain_acquire_color(sc);
 }
 

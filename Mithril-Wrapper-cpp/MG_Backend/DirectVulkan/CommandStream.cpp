@@ -354,6 +354,30 @@ void commit_frame() {
         return;
     }
 
+    // If the command buffer is not in the recording state (e.g. a previous
+    // commit_frame vkEndCommandBuffer'd it but then vkQueueSubmit failed and
+    // we returned early before reset+begin), we cannot record the present
+    // barrier below. Force a reset+begin here so the barrier lands in a fresh
+    // buffer. Without this, vkCmdPipelineBarrier on a non-recording buffer is
+    // UB and triggers the VK_NOT_READY death spiral reported under GPU OOM.
+    if (!b->commandBufferRecording) {
+        vkResetCommandBuffer(b->commandBuffer, 0);
+        VkCommandBufferBeginInfo rbi{};
+        rbi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        rbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        if (vkBeginCommandBuffer(b->commandBuffer, &rbi) != VK_SUCCESS) {
+            MITHRIL_LOG_ERROR("vk", "commit_frame: vkBeginCommandBuffer recovery failed");
+            e.hasCommands = false;
+            return;
+        }
+        b->commandBufferRecording = true;
+        // After a forced reset, the previously-recorded commands (draws etc.)
+        // are gone. Only the present barrier below will be in the buffer.
+        // Submitting it is still correct — it transitions the swapchain image
+        // to PRESENT_SRC_KHR — but the frame's actual rendering is lost.
+        // This is acceptable under GPU OOM (the rendering likely failed too).
+    }
+
     // Transition the swapchain color image back to PRESENT_SRC_KHR before
     // vkEndCommandBuffer so vkQueuePresentKHR sees a legal layout. Without
     // this, present is spec-illegal and MoltenVK drops the frame (black screen).
@@ -372,9 +396,22 @@ void commit_frame() {
 
     VkResult r = vkEndCommandBuffer(b->commandBuffer);
     if (r != VK_SUCCESS) {
-        MITHRIL_LOG_WARN("vk", "vkEndCommandBuffer failed (rc=%d)", (int)r);
+        MITHRIL_LOG_ERROR("vk", "vkEndCommandBuffer failed (rc=%d)", (int)r);
+        // Buffer is now in an invalid state. Force reset+begin so the next
+        // begin_render_pass has a recording buffer to write into; otherwise
+        // the render thread spins forever issuing vkCmd* into a dead buffer.
+        vkResetCommandBuffer(b->commandBuffer, 0);
+        VkCommandBufferBeginInfo rbi{};
+        rbi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        rbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        if (vkBeginCommandBuffer(b->commandBuffer, &rbi) == VK_SUCCESS) {
+            b->commandBufferRecording = true;
+        }
+        e.hasCommands = false;
+        if (e.activeSwapchain) e.activeSwapchain->needsRebuild = true;
         return;
     }
+    b->commandBufferRecording = false;  // executable, not recording
 
     VkSubmitInfo si{};
     si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -401,7 +438,31 @@ void commit_frame() {
     vkResetFences(b->device, 1, &fence);
     r = vkQueueSubmit(b->graphicsQueue, 1, &si, fence);
     if (r != VK_SUCCESS) {
-        MITHRIL_LOG_WARN("vk", "vkQueueSubmit failed (rc=%d)", (int)r);
+        MITHRIL_LOG_ERROR("vk", "vkQueueSubmit failed (rc=%d) — marking swapchain "
+                          "for rebuild", (int)r);
+        // vkQueueSubmit failure (e.g. VK_ERROR_OUT_OF_DEVICE_MEMORY /
+        // VK_ERROR_DEVICE_LOST) means the command buffer was NOT consumed.
+        // The fence will NOT be signaled, so we must NOT wait on it below
+        // (vkWaitForFences would hang forever). Reset the fence manually and
+        // mark the swapchain dead so EGL rebuilds it on the next swap.
+        vkResetFences(b->device, 1, &fence);
+        // Roll back the renderFinished signal: present will not consume it
+        // (we return before present), so the next commit must be allowed to
+        // signal again. Without this rollback, the semaphore stays
+        // "signaled" forever and the next submit would double-signal (UB).
+        if (e.activeSwapchain) {
+            e.activeSwapchain->renderFinishedSignaled = false;
+            e.activeSwapchain->needsRebuild = true;
+        }
+        // Reset+begin so the next frame has a recording buffer.
+        vkResetCommandBuffer(b->commandBuffer, 0);
+        VkCommandBufferBeginInfo rbi{};
+        rbi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        rbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        if (vkBeginCommandBuffer(b->commandBuffer, &rbi) == VK_SUCCESS) {
+            b->commandBufferRecording = true;
+        }
+        e.hasCommands = false;
         return;
     }
 
@@ -414,12 +475,22 @@ void commit_frame() {
     b->frameGeneration++;
 
     // Begin a fresh command buffer so subsequent uploads/records have somewhere
-    // to go. (Render pass begins will reset + begin again.)
+    // to go. (Render pass begins will reset + begin again.) Check the return
+    // value: under GPU OOM, vkBeginCommandBuffer can return VK_NOT_READY or
+    // VK_ERROR_OUT_OF_DEVICE_MEMORY. Without this check, the buffer is left in
+    // an invalid state and every subsequent vkCmd* call is UB, trapping the
+    // render thread in the death spiral reported in the field.
     vkResetCommandBuffer(b->commandBuffer, 0);
     VkCommandBufferBeginInfo bi{};
     bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkBeginCommandBuffer(b->commandBuffer, &bi);
+    if (vkBeginCommandBuffer(b->commandBuffer, &bi) == VK_SUCCESS) {
+        b->commandBufferRecording = true;
+    } else {
+        MITHRIL_LOG_ERROR("vk", "post-submit vkBeginCommandBuffer failed — "
+                          "command buffer unusable until next commit");
+        b->commandBufferRecording = false;
+    }
 
     e.hasCommands = false;  // fresh command buffer, no commands yet
 }

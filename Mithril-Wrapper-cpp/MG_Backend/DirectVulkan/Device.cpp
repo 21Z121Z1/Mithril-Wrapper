@@ -275,7 +275,12 @@ bool init_device() {
     VkCommandBufferBeginInfo cbBegin{};
     cbBegin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     cbBegin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkBeginCommandBuffer(b->commandBuffer, &cbBegin);
+    if (vkBeginCommandBuffer(b->commandBuffer, &cbBegin) == VK_SUCCESS) {
+        b->commandBufferRecording = true;
+    } else {
+        MITHRIL_LOG_ERROR("vk", "initial vkBeginCommandBuffer failed");
+        return false;
+    }
 
     // ---- Pipeline cache ----
     VkPipelineCacheCreateInfo cacheCI{};

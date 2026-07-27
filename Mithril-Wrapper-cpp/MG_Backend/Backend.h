@@ -102,6 +102,18 @@ void backend_set_active_swapchain(void* swapchain_state);
 void backend_drain_and_detach_swapchain(void);
 
 /*
+ * Query whether the swapchain has been marked dead by a fatal Vulkan error
+ * (VK_ERROR_OUT_OF_DEVICE_MEMORY / VK_ERROR_SURFACE_LOST_KHR /
+ * VK_ERROR_DEVICE_LOST from vkAcquireNextImageKHR / vkQueuePresentKHR /
+ * vkQueueSubmit). EGL calls this in eglSwapBuffers; if it returns true, EGL
+ * drains + destroys the dead swapchain and creates a fresh one before
+ * continuing. Without this query, a dead swapchain would keep returning null
+ * from acquire and the render thread would spin in a no-op loop (the
+ * "VK_NOT_READY death spiral" reported under GPU OOM).
+ */
+int backend_swapchain_needs_rebuild(void* swapchain_state);
+
+/*
  * Encoder-side dynamic state setters (vkCmdSet* under dynamic rendering).
  * Each is a no-op when no render pass is active. Stage: 0 = vertex, 1 = fragment
  * (used for buffer/texture/sampler binding).
