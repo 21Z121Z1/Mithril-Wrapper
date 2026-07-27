@@ -132,6 +132,12 @@ Swapchain* create_swapchain_post_surface(VkSurfaceKHR surface, int width, int he
     semi.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
     vkCreateSemaphore(b->device, &semi, nullptr, &sc->imageAvailable);
 
+    // Render-finished semaphore signaled by commit_frame()'s vkQueueSubmit
+    // and waited on by swapchain_present_and_acquire()'s vkQueuePresentKHR.
+    // Pairs the submit→present dependency that imageAvailable alone cannot
+    // express (imageAvailable is signaled by acquire, not by render).
+    vkCreateSemaphore(b->device, &semi, nullptr, &sc->pendingRenderFinished);
+
     // Depth/stencil image (VK_FORMAT_D32_SFLOAT_S8_UINT).
     if (want_depth_stencil) {
         VkFormat depthFmt = VK_FORMAT_D32_SFLOAT_S8_UINT;
@@ -187,6 +193,8 @@ void destroy_swapchain(Swapchain* sc) {
     sc->views.clear();
     sc->images.clear();
     if (sc->imageAvailable) { vkDestroySemaphore(b->device, sc->imageAvailable, nullptr); sc->imageAvailable = VK_NULL_HANDLE; }
+    if (sc->pendingRenderFinished) { vkDestroySemaphore(b->device, sc->pendingRenderFinished, nullptr); sc->pendingRenderFinished = VK_NULL_HANDLE; }
+    sc->renderFinishedSignaled = false;
     if (sc->swapchain) { vkDestroySwapchainKHR(b->device, sc->swapchain, nullptr); sc->swapchain = VK_NULL_HANDLE; }
     if (sc->surface)   { vkDestroySurfaceKHR(b->instance, sc->surface, nullptr); sc->surface = VK_NULL_HANDLE; }
     delete sc;
@@ -209,6 +217,14 @@ VkImageView swapchain_acquire_color(Swapchain* sc) {
             return VK_NULL_HANDLE;
         }
         sc->currentImage = (int)idx;
+        // After acquire the image's actual layout is PRESENT_SRC_KHR (or
+        // UNDEFINED on the very first acquire of that image). We deliberately
+        // record the upcoming acquire->attachment barrier with oldLayout =
+        // UNDEFINED so the previous frame's contents are discarded — this is
+        // both legal (UNDEFINED is always a valid source layout) and matches
+        // the semantics of starting a new frame on a swapchain image whose
+        // post-present contents are undefined anyway.
+        sc->currentColorLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     }
     VkImageView view = (sc->currentImage >= 0 && sc->currentImage < (int)sc->views.size())
                        ? sc->views[sc->currentImage] : VK_NULL_HANDLE;
@@ -232,16 +248,24 @@ void swapchain_present_and_acquire(Swapchain* sc) {
         uint32_t idx = (uint32_t)sc->currentImage;
         VkPresentInfoKHR pi{};
         pi.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
-        // Wait on the acquire semaphore so the present only proceeds once the
-        // image is actually available, and so the semaphore is consumed.
-        // Each vkAcquireNextImageKHR signal MUST be paired with exactly one
-        // wait, otherwise the semaphore accumulates signals and the next
-        // acquire behaves as already-signalled (undefined behaviour).
-        // NOTE: full submit-waits-acquire synchronisation is deferred; the
-        // per-frame vkWaitForFences in commit_frame() currently serialises
-        // CPU against GPU completion, which keeps this correct in practice.
-        pi.waitSemaphoreCount = 1;
-        pi.pWaitSemaphores = &sc->imageAvailable;
+        // Wait on BOTH:
+        //   * imageAvailable      — signaled by vkAcquireNextImageKHR; ensures
+        //                           the image is actually owned before present.
+        //                           Each acquire signal MUST be paired with
+        //                           exactly one wait or the next acquire is UB.
+        //   * pendingRenderFinished — signaled by commit_frame()'s
+        //                           vkQueueSubmit; ensures the present only
+        //                           proceeds once rendering is complete. Only
+        //                           waited on when commit_frame actually
+        //                           signaled it this frame (renderFinishedSignaled).
+        VkSemaphore waitSemaphores[2];
+        uint32_t waitCount = 0;
+        waitSemaphores[waitCount++] = sc->imageAvailable;
+        if (sc->renderFinishedSignaled && sc->pendingRenderFinished != VK_NULL_HANDLE) {
+            waitSemaphores[waitCount++] = sc->pendingRenderFinished;
+        }
+        pi.waitSemaphoreCount = waitCount;
+        pi.pWaitSemaphores = waitSemaphores;
         pi.swapchainCount = 1;
         pi.pSwapchains = &sc->swapchain;
         pi.pImageIndices = &idx;
@@ -249,6 +273,9 @@ void swapchain_present_and_acquire(Swapchain* sc) {
         if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) {
             MITHRIL_LOG_WARN("vk", "vkQueuePresentKHR failed (rc=%d)", (int)r);
         }
+        // The render-finished signal has now been consumed by present; clear
+        // the flag so the next commit_frame() can signal it again.
+        sc->renderFinishedSignaled = false;
         sc->currentImage = -1;
     }
 

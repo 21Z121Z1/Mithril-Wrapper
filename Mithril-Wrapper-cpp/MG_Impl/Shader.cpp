@@ -42,6 +42,7 @@
 #include <mutex>
 #include <regex>
 #include <algorithm>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -411,7 +412,26 @@ bool glsl_to_spirv(GLenum gl_stage, const std::string& src,
     std::string source = src;
     int glsl_version = ensure_glsl_version(source);
     apply_attrib_bindings(source, gl_stage, attrib_bindings);
-    wrap_loose_uniforms(source);
+
+    // wrap_loose_uniforms() uses std::regex which can throw std::regex_error
+    // on pathological inputs (e.g. catastrophic backtracking on a deeply
+    // nested declarator list). Wrap it in a try-catch so a single bad shader
+    // never crashes the host process — fall back to the un-wrapped source
+    // and let glslang's EShMsgVulkanRules auto-wrap path handle loose
+    // uniforms instead. The auto-wrap is less robust (some glslang versions
+    // still reject non-block uniforms), but it is strictly better than
+    // crashing.
+    std::string source_unwrapped = source;  // backup for fallback
+    bool wrapped = false;
+    try {
+        wrap_loose_uniforms(source);
+        wrapped = true;
+    } catch (const std::exception& e) {
+        MITHRIL_LOG_WARN("shader", "wrap_loose_uniforms threw: %s; falling back "
+                          "to unwrapped source (glslang auto-wrap will run)",
+                          e.what());
+        source = source_unwrapped;
+    }
 
     glslang::TShader shader(stage);
     const char* s = source.c_str();
@@ -463,6 +483,49 @@ bool glsl_to_spirv(GLenum gl_stage, const std::string& src,
     if (!shader.parse(GetDefaultResources(), glsl_version, true, messages)) {
         info = shader.getInfoLog();
         info += shader.getInfoDebugLog();
+        // Retry without wrap_loose_uniforms if we wrapped: the regex-based
+        // wrapper can occasionally mangle edge-case declarations (e.g.
+        // multi-line declarators, macros in type positions) in ways that
+        // make glslang reject a shader that it would otherwise accept via
+        // the auto-wrap path. Falling back to the unwrapped source gives
+        // glslang one more chance to compile the shader with its own
+        // (more conservative) uniform-wrapping logic.
+        if (wrapped) {
+            MITHRIL_LOG_WARN("shader", "glslang parse failed after wrap; retrying "
+                              "with unwrapped source");
+            source = source_unwrapped;
+            glslang::TShader shader2(stage);
+            const char* s2 = source.c_str();
+            shader2.setStrings(&s2, 1);
+            shader2.setEnvInput(glslang::EShSourceGlsl, stage, glslang::EShClientOpenGL, glsl_version);
+            shader2.setEnvClient(glslang::EShClientOpenGL, glslang::EShTargetOpenGL_450);
+            shader2.setEnvTarget(glslang::EShTargetSpv, glslang::EShTargetSpv_1_5);
+            shader2.setAutoMapLocations(true);
+            shader2.setAutoMapBindings(true);
+            shader2.setPreamble(
+                "#define MG_MITHRIL 1\n"
+                "#define MG_MITHRIL_VERSION 1000000\n"
+            );
+            if (!shader2.parse(GetDefaultResources(), glsl_version, true, messages)) {
+                // Both attempts failed; return the original (wrapped) error
+                // log so the caller sees the more informative message.
+                return false;
+            }
+            glslang::TProgram program2;
+            program2.addShader(&shader2);
+            if (!program2.link(messages)) {
+                info = program2.getInfoLog();
+                info += program2.getInfoDebugLog();
+                return false;
+            }
+            glslang::TIntermediate* inter2 = program2.getIntermediate(stage);
+            if (!inter2) { info = "no intermediate after link (unwrapped retry)"; return false; }
+            glslang::SpvOptions spv_opts2;
+            spv_opts2.disableOptimizer = false;
+            glslang::GlslangToSpv(*inter2, spirv, &spv_opts2);
+            if (spirv.empty()) { info = "SPIR-V generation produced no words (unwrapped retry)"; return false; }
+            return true;
+        }
         return false;
     }
 

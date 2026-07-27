@@ -72,6 +72,18 @@ void backend_end_render_pass(void);
 void backend_commit(void);
 
 /*
+ * Register the swapchain whose currently-acquired image backs framebuffer 0
+ * for the current frame. Called by EGL (install_surface_on_state) right after
+ * backend_swapchain_acquire_color(). begin_render_pass() / commit_frame() use
+ * it to record the PRESENT_SRC/UNDEFINED <-> COLOR_ATTACHMENT_OPTIMAL layout
+ * barriers on the swapchain color image, the one-shot UNDEFINED ->
+ * DEPTH_STENCIL_ATTACHMENT_OPTIMAL barrier on the depth image, and to signal
+ * the swapchain's pendingRenderFinished semaphore on submit. Pass nullptr
+ * when no surface is current (headless / surface destroyed).
+ */
+void backend_set_active_swapchain(void* swapchain_state);
+
+/*
  * Encoder-side dynamic state setters (vkCmdSet* under dynamic rendering).
  * Each is a no-op when no render pass is active. Stage: 0 = vertex, 1 = fragment
  * (used for buffer/texture/sampler binding).

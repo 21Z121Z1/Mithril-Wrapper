@@ -203,6 +203,16 @@ bool ensure_swapchain(EglSurface* s) {
 // Push the surface's current swapchain image views into the active GLState so
 // framebuffer-0 renders land on the on-screen drawable. Acquires the next
 // swapchain image if none is currently acquired.
+//
+// Also registers the swapchain with the backend encoder (via
+// backend_set_active_swapchain) so begin_render_pass()/commit_frame() can
+// record the PRESENT_SRC/UNDEFINED <-> COLOR_ATTACHMENT_OPTIMAL layout barriers
+// on the swapchain color image, the one-shot UNDEFINED ->
+// DEPTH_STENCIL_ATTACHMENT_OPTIMAL barrier on the depth image, and signal the
+// swapchain's pendingRenderFinished semaphore on submit. Without this
+// registration, dynamic rendering would hard-code COLOR_ATTACHMENT_OPTIMAL on
+// an image that is actually in PRESENT_SRC_KHR (or UNDEFINED on first use),
+// which MoltenVK treats as an illegal layout and renders nothing (black screen).
 void install_surface_on_state(EglSurface* s) {
     if (!g_state) return;
     if (s && s->swapchain_state) {
@@ -222,6 +232,12 @@ void install_surface_on_state(EglSurface* s) {
         g_state->eglDefaultDepthFormat  = backend_swapchain_depth_format(s->swapchain_state);
         g_state->eglDefaultWidth  = s->width;
         g_state->eglDefaultHeight = s->height;
+        // Register the swapchain with the encoder so it can record layout
+        // barriers and signal pendingRenderFinished. Only register when the
+        // surface actually has an acquired color view (color != VK_NULL_HANDLE)
+        // — passing a swapchain whose acquire failed would crash the barrier
+        // recorder, which dereferences sc->images[sc->currentImage].
+        backend_set_active_swapchain(color != VK_NULL_HANDLE ? s->swapchain_state : nullptr);
     } else {
         MITHRIL_LOG_WARN("egl", "install_surface_on_state: no swapchain or surface "
                           "(s=%p, swapchain_state=%p)", (void*)s,
@@ -234,6 +250,10 @@ void install_surface_on_state(EglSurface* s) {
         g_state->eglDefaultDepthFormat = VK_FORMAT_UNDEFINED;
         g_state->eglDefaultWidth  = 0;
         g_state->eglDefaultHeight = 0;
+        // Detach the swapchain from the encoder so a headless / surfaceless
+        // frame (or a frame against a user FBO) does not try to record layout
+        // barriers against a destroyed swapchain.
+        backend_set_active_swapchain(nullptr);
     }
 }
 
@@ -667,6 +687,23 @@ EGLBoolean eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
     EglSurface* s = (EglSurface*)surface;
     if (!s) { set_error(EGL_BAD_SURFACE); return EGL_FALSE; }
 
+    // First-frame / deferred-swapchain retry: if the swapchain wasn't created
+    // at eglCreateWindowSurface time (because the native window wasn't sized
+    // yet — common on iOS where the CAMetalLayer gets its size asynchronously
+    // after the view is laid out), retry now. Without this, the host would
+    // call eglSwapBuffers on a surface with no swapchain, present nothing,
+    // and the screen would stay black forever (the swapchain would never be
+    // created because eglMakeCurrent's retry only fires on the very first
+    // make-current). We retry on every swap until the swapchain comes up.
+    if (s->native_window && !s->swapchain_state) {
+        ensure_swapchain(s);
+        if (s->swapchain_state && t_currentDraw == s) {
+            // New swapchain just came up: install it on the current GLState so
+            // the next frame's draws land on the on-screen drawable.
+            install_surface_on_state(s);
+        }
+    }
+
     // Flush any pending Vulkan work into the current swapchain image view.
     // backend_end_render_pass() + backend_commit() end the active render pass
     // and submit the command buffer, so the encoded draws land on the
@@ -677,12 +714,18 @@ EGLBoolean eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
     // Rebuild the swapchain if the native window was resized between frames.
     // This invalidates the currently-acquired image, so we do it BEFORE
     // presenting.
-    if (s->native_window) {
+    if (s->native_window && s->swapchain_state) {
         int w = 0, h = 0;
         if (surface_get_size(s->native_window, &w, &h) &&
             w > 0 && h > 0 &&
             (w != s->width || h != s->height)) {
             ensure_swapchain(s);
+            // After rebuild, the previously-acquired image is gone; acquire a
+            // fresh one and re-install on the GLState so present below has a
+            // valid image to present.
+            if (t_currentDraw == s) {
+                install_surface_on_state(s);
+            }
         }
     }
 

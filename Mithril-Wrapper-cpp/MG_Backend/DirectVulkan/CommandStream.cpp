@@ -3,6 +3,7 @@
 // + encoder dynamic-state setters + draw recording + per-frame submit.
 #include "CommandStream.h"
 #include "Device.h"
+#include "Swapchain.h"
 #include "../Backend.h"
 #include "../../MG_Impl/Log.h"
 
@@ -31,6 +32,13 @@ struct EncoderState {
     VkImageView depthView = VK_NULL_HANDLE;
     int width = 0;
     int height = 0;
+
+    // The swapchain whose currently-acquired image backs framebuffer 0.
+    // nullptr when no EGLSurface is current (headless) or the active FBO is
+    // a user-created framebuffer object. Set by EGL after each acquire; read
+    // by begin_render_pass() / commit_frame() to record layout barriers and
+    // signal pendingRenderFinished.
+    Swapchain* activeSwapchain = nullptr;
 };
 
 EncoderState& encoder() {
@@ -39,6 +47,104 @@ EncoderState& encoder() {
 }
 
 GLbitfield clearMaskPending = 0;
+
+/*
+ * Record an image-memory barrier transitioning `image` from `oldLayout` to
+ * `newLayout` on the active command buffer. Used by begin_render_pass() /
+ * commit_frame() to put swapchain images into COLOR_ATTACHMENT_OPTIMAL before
+ * dynamic rendering and back into PRESENT_SRC_KHR before present. Without
+ * these barriers MoltenVK sees a PRESENT_SRC image used as a colour
+ * attachment, which is spec-illegal and produces a black screen.
+ *
+ *   isDepthStencil : selects the aspect mask (color vs depth+stencil) and
+ *                    the destination pipeline stage.
+ */
+void record_layout_barrier(VkCommandBuffer cb, VkImage image, VkFormat format,
+                           VkImageLayout oldLayout, VkImageLayout newLayout,
+                           bool isDepthStencil) {
+    if (image == VK_NULL_HANDLE || oldLayout == newLayout) return;
+
+    VkImageMemoryBarrier b{};
+    b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    b.oldLayout = oldLayout;
+    b.newLayout = newLayout;
+    b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b.image = image;
+
+    if (isDepthStencil) {
+        // D32_SFLOAT_S8_UINT has separate depth + stencil aspects.
+        b.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
+    } else {
+        b.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    }
+    b.subresourceRange.baseMipLevel = 0;
+    b.subresourceRange.levelCount = 1;
+    b.subresourceRange.baseArrayLayer = 0;
+    b.subresourceRange.layerCount = 1;
+    (void)format;
+
+    // Source stage mask: who wrote the image in oldLayout.
+    VkPipelineStageFlags srcStage;
+    VkAccessFlags srcAccess;
+    switch (oldLayout) {
+        case VK_IMAGE_LAYOUT_UNDEFINED:
+            // No prior writes; contents discarded.
+            srcStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+            srcAccess = 0;
+            break;
+        case VK_IMAGE_LAYOUT_PRESENT_SRC_KHR:
+            // Image came back from present; the presentation engine read it.
+            srcStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+            srcAccess = VK_ACCESS_MEMORY_READ_BIT;
+            break;
+        case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:
+            srcStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+            srcAccess = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+            break;
+        case VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL:
+            srcStage = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+                       VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+            srcAccess = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+            break;
+        default:
+            srcStage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+            srcAccess = VK_ACCESS_MEMORY_WRITE_BIT;
+            break;
+    }
+
+    // Destination stage mask: who will read/write the image in newLayout.
+    VkPipelineStageFlags dstStage;
+    VkAccessFlags dstAccess;
+    switch (newLayout) {
+        case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:
+            dstStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+            dstAccess = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
+                        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+            break;
+        case VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL:
+            dstStage = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+                       VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+            dstAccess = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                        VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+            break;
+        case VK_IMAGE_LAYOUT_PRESENT_SRC_KHR:
+            // Present engine reads the image.
+            dstStage = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
+            dstAccess = VK_ACCESS_MEMORY_READ_BIT;
+            break;
+        default:
+            dstStage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+            dstAccess = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+            break;
+    }
+
+    b.srcAccessMask = srcAccess;
+    b.dstAccessMask = dstAccess;
+
+    vkCmdPipelineBarrier(cb, srcStage, dstStage, 0,
+                         0, nullptr, 0, nullptr, 1, &b);
+}
 
 } // namespace
 
@@ -51,6 +157,10 @@ void set_clear_color(float r, float g, float b, float a) {
 void set_clear_depth(double d) { encoder().clearDepth = d; }
 void set_clear_stencil(int s)  { encoder().clearStencil = s; }
 void set_load_clear(bool clear){ encoder().loadClear = clear; }
+
+void set_active_swapchain(Swapchain* sc) {
+    encoder().activeSwapchain = sc;
+}
 
 void begin_render_pass(VkImageView* color_views, int color_count,
                        VkImageView depth_view, int width, int height, int samples) {
@@ -81,13 +191,81 @@ void begin_render_pass(VkImageView* color_views, int color_count,
                           width, height);
     }
 
+    // ---- Layout barriers for the swapchain-backed default framebuffer ----
+    // dynamic-rendering hard-codes imageLayout = COLOR_ATTACHMENT_OPTIMAL in
+    // the VkRenderingAttachmentInfo below. The swapchain image comes back from
+    // acquire in PRESENT_SRC_KHR (or UNDEFINED on first use); without an
+    // explicit barrier transitioning it to COLOR_ATTACHMENT_OPTIMAL, MoltenVK
+    // sees an illegal layout and renders nothing (black screen). The depth
+    // image is created with initialLayout = UNDEFINED and needs the same
+    // one-shot transition to DEPTH_STENCIL_ATTACHMENT_OPTIMAL on first use.
+    //
+    // swapchainColorWasUndefined: set when the colour image was transitioned
+    // out of UNDEFINED this frame. Used below to pick DONT_CARE for the load
+    // op (LOAD on an image whose contents were discarded is wasteful and
+    // spec-discouraged; DONT_CARE matches the discard semantics).
+    bool swapchainColorWasUndefined = false;
+    bool swapchainDepthWasUndefined = false;
+    if (e.activeSwapchain) {
+        Swapchain* sc = e.activeSwapchain;
+        if (sc->currentImage >= 0 && sc->currentImage < (int)sc->views.size()) {
+            // Only barrier the image if one of the bound colour attachments is
+            // the swapchain's current view (i.e. we're rendering to FBO 0).
+            bool swapchainBound = false;
+            for (int i = 0; i < e.colorCount; ++i) {
+                if (e.colorViews[i] == sc->views[sc->currentImage]) {
+                    swapchainBound = true;
+                    break;
+                }
+            }
+            if (swapchainBound && sc->currentColorLayout != VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
+                swapchainColorWasUndefined = (sc->currentColorLayout == VK_IMAGE_LAYOUT_UNDEFINED);
+                record_layout_barrier(b->commandBuffer,
+                                      sc->images[sc->currentImage], sc->format,
+                                      sc->currentColorLayout,
+                                      VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                      /*isDepthStencil=*/false);
+                sc->currentColorLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            }
+        }
+        // Depth: one-shot UNDEFINED -> DEPTH_STENCIL_ATTACHMENT_OPTIMAL.
+        if (sc->depthImage != VK_NULL_HANDLE && sc->depthView != VK_NULL_HANDLE &&
+            e.depthView == sc->depthView && !sc->depthLayoutInitialized) {
+            record_layout_barrier(b->commandBuffer,
+                                  sc->depthImage, VK_FORMAT_D32_SFLOAT_S8_UINT,
+                                  VK_IMAGE_LAYOUT_UNDEFINED,
+                                  VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                                  /*isDepthStencil=*/true);
+            sc->depthLayoutInitialized = true;
+            swapchainDepthWasUndefined = true;
+        }
+    }
+
     // Begin dynamic rendering.
     VkRenderingAttachmentInfoKHR colorAttachs[8] = {};
     for (int i = 0; i < e.colorCount; ++i) {
         colorAttachs[i].sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR;
         colorAttachs[i].imageView = e.colorViews[i];
         colorAttachs[i].imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-        colorAttachs[i].loadOp = e.loadClear ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
+        // loadOp:
+        //   * CLEAR      — glClear passes (loadClear).
+        //   * DONT_CARE  — draw passes where the swapchain colour image was
+        //                  just acquired (UNDEFINED -> COLOR_ATTACHMENT_OPTIMAL
+        //                  this frame). The previous contents were discarded
+        //                  by the UNDEFINED source layout, so LOAD would read
+        //                  garbage and waste bandwidth.
+        //   * LOAD       — draw passes where the swapchain image came back
+        //                  from present (PRESENT_SRC_KHR) or against a user
+        //                  FBO whose attachment already has valid contents.
+        if (e.loadClear) {
+            colorAttachs[i].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        } else if (swapchainColorWasUndefined &&
+                   e.activeSwapchain &&
+                   e.colorViews[i] == e.activeSwapchain->views[e.activeSwapchain->currentImage]) {
+            colorAttachs[i].loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        } else {
+            colorAttachs[i].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+        }
         colorAttachs[i].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
         colorAttachs[i].clearValue.color.float32[0] = e.clearColor[0];
         colorAttachs[i].clearValue.color.float32[1] = e.clearColor[1];
@@ -98,7 +276,13 @@ void begin_render_pass(VkImageView* color_views, int color_count,
     depthAttach.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR;
     depthAttach.imageView = e.depthView;
     depthAttach.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-    depthAttach.loadOp = e.loadClear ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
+    if (e.loadClear) {
+        depthAttach.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    } else if (swapchainDepthWasUndefined) {
+        depthAttach.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    } else {
+        depthAttach.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    }
     depthAttach.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     depthAttach.clearValue.depthStencil.depth = (float)e.clearDepth;
     depthAttach.clearValue.depthStencil.stencil = (uint32_t)e.clearStencil;
@@ -148,6 +332,22 @@ void commit_frame() {
     EncoderState& e = encoder();
     if (e.passActive) end_render_pass();
 
+    // Transition the swapchain color image back to PRESENT_SRC_KHR before
+    // vkEndCommandBuffer so vkQueuePresentKHR sees a legal layout. Without
+    // this, present is spec-illegal and MoltenVK drops the frame (black screen).
+    if (e.activeSwapchain) {
+        Swapchain* sc = e.activeSwapchain;
+        if (sc->currentImage >= 0 && sc->currentImage < (int)sc->images.size() &&
+            sc->currentColorLayout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
+            record_layout_barrier(b->commandBuffer,
+                                  sc->images[sc->currentImage], sc->format,
+                                  VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                  VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+                                  /*isDepthStencil=*/false);
+            sc->currentColorLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        }
+    }
+
     VkResult r = vkEndCommandBuffer(b->commandBuffer);
     if (r != VK_SUCCESS) {
         MITHRIL_LOG_WARN("vk", "vkEndCommandBuffer failed (rc=%d)", (int)r);
@@ -158,6 +358,22 @@ void commit_frame() {
     si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     si.commandBufferCount = 1;
     si.pCommandBuffers = &b->commandBuffer;
+
+    // Signal the swapchain's render-finished semaphore so vkQueuePresentKHR
+    // can wait on it (proper submit→present dependency). Only signal once per
+    // frame to avoid accumulating unconsumed binary semaphore signals when
+    // commit_frame() is called multiple times (eglWaitClient + eglSwapBuffers).
+    VkSemaphore signalSemaphore = VK_NULL_HANDLE;
+    if (e.activeSwapchain &&
+        e.activeSwapchain->pendingRenderFinished != VK_NULL_HANDLE &&
+        !e.activeSwapchain->renderFinishedSignaled) {
+        signalSemaphore = e.activeSwapchain->pendingRenderFinished;
+        e.activeSwapchain->renderFinishedSignaled = true;
+    }
+    if (signalSemaphore != VK_NULL_HANDLE) {
+        si.signalSemaphoreCount = 1;
+        si.pSignalSemaphores = &signalSemaphore;
+    }
 
     VkFence fence = b->frameFences[b->currentFrame];
     vkResetFences(b->device, 1, &fence);
@@ -207,6 +423,10 @@ void backend_begin_render_pass(VkImageView* color_views, int color_count,
 
 void backend_end_render_pass(void) { mithril::vk::end_render_pass(); }
 void backend_commit(void)          { mithril::vk::commit_frame(); }
+
+void backend_set_active_swapchain(void* swapchain_state) {
+    mithril::vk::set_active_swapchain((mithril::vk::Swapchain*)swapchain_state);
+}
 
 void backend_bind_pipeline(VkPipeline pipeline) {
     mithril::vk::Backend* b = mithril::vk::backend();

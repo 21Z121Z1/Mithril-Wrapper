@@ -38,8 +38,37 @@ struct Swapchain {
     // Index of the currently-acquired image. -1 when none acquired.
     int             currentImage = -1;
 
-    // Semaphore used to gate acquire/present (single in-flight frame for now).
+    // Semaphore signaled by vkAcquireNextImageKHR; the next vkQueueSubmit
+    // waits on it (at COLOR_ATTACHMENT_OUTPUT stage) before the recorded
+    // layout-transition barrier + draw commands execute.
     VkSemaphore     imageAvailable = VK_NULL_HANDLE;
+
+    // Render-finished semaphore signaled by the submit that runs the frame's
+    // command buffer. vkQueuePresentKHR waits on this (not imageAvailable) so
+    // the present only proceeds once rendering is complete. Set by
+    // commit_frame() each frame; read by swapchain_present_and_acquire().
+    VkSemaphore     pendingRenderFinished = VK_NULL_HANDLE;
+
+    // Tracks whether pendingRenderFinished has been signaled but not yet
+    // waited on. vkQueueSubmit signals a binary semaphore; signaling one that
+    // is already signaled is spec-violating and accumulates unconsumed
+    // signals. commit_frame() only signals when this is false; sets it true.
+    // swapchain_present_and_acquire() clears it after vkQueuePresentKHR
+    // consumes the signal. Also cleared by destroy_swapchain().
+    bool            renderFinishedSignaled = false;
+
+    // Tracked layout of the currently-acquired color image. After acquire it
+    // is PRESENT_SRC_KHR (or UNDEFINED on the very first acquire). The
+    // acquire->attachment barrier transitions it to COLOR_ATTACHMENT_OPTIMAL;
+    // the attachment->present barrier transitions it back to PRESENT_SRC_KHR.
+    // Without this tracking, dynamic rendering hard-codes
+    // COLOR_ATTACHMENT_OPTIMAL and MoltenVK behaviour is undefined -> black screen.
+    VkImageLayout   currentColorLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    // One-shot flag: depth image transitions UNDEFINED ->
+    // DEPTH_STENCIL_ATTACHMENT_OPTIMAL on first use, then stays there for the
+    // swapchain's lifetime (the depth image is never presented).
+    bool            depthLayoutInitialized = false;
 };
 
 // Create the surface + swapchain (+ optional depth image) for a native window.

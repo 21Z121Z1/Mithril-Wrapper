@@ -11,6 +11,8 @@
 namespace mithril {
 namespace vk {
 
+struct Swapchain;
+
 // True when a dynamic-rendering pass is currently active (between
 // begin_render_pass() and end_render_pass()).
 bool render_pass_active();
@@ -20,6 +22,20 @@ void set_clear_color(float r, float g, float b, float a);
 void set_clear_depth(double d);
 void set_clear_stencil(int s);
 void set_load_clear(bool clear);   // true = CLEAR (glClear), false = LOAD
+
+/*
+ * Register the swapchain whose currently-acquired image is the render target
+ * for framebuffer 0. Called by EGL (install_surface_on_state) after each
+ * vkAcquireNextImageKHR. begin_render_pass() uses this to record the
+ * PRESENT_SRC/UNDEFINED -> COLOR_ATTACHMENT_OPTIMAL layout barrier on the
+ * swapchain color image (and the one-shot UNDEFINED ->
+ * DEPTH_STENCIL_ATTACHMENT_OPTIMAL barrier on the depth image); commit_frame()
+ * uses it to record the reverse COLOR_ATTACHMENT_OPTIMAL -> PRESENT_SRC_KHR
+ * barrier before vkEndCommandBuffer, and to signal the swapchain's
+ * pendingRenderFinished semaphore on vkQueueSubmit so vkQueuePresentKHR can
+ * wait on it. Pass nullptr to detach (headless / no surface).
+ */
+void set_active_swapchain(Swapchain* sc);
 
 // Begin a dynamic-rendering pass against the given attachments.
 void begin_render_pass(VkImageView* color_views, int color_count,

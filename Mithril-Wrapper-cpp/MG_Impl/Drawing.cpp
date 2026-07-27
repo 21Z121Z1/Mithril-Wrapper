@@ -26,12 +26,39 @@ static void prepare_draw(GLenum mode) {
     // Resolve current program + its SPIR-V.
     mithril::Program* prog = mithril::state_get_program(g_state->currentProgram);
     if (!prog || !prog->linked) return;
+    // Defensive: skip draws whose shader translation produced no SPIR-V
+    // (e.g. glslang failed on an unrecognised construct). Issuing the draw
+    // would pass null/0 to backend_get_or_create_pipeline, which would
+    // either crash on the SPIR-V pointer or fail pipeline creation silently
+    // and leave the screen black. Logging once per program id keeps the log
+    // readable when the host retries the same broken shader every frame.
+    if (prog->vertexSpirv.empty() || prog->fragmentSpirv.empty()) {
+        static GLuint last_warned = 0;
+        if (last_warned != prog->id) {
+            last_warned = prog->id;
+            MITHRIL_LOG_WARN("gl", "prepare_draw: program %u has empty SPIR-V "
+                              "(vertex=%zu fragment=%zu words); skipping draw",
+                              prog->id, prog->vertexSpirv.size(),
+                              prog->fragmentSpirv.size());
+        }
+        return;
+    }
 
     // Resolve current draw FBO attachments (color + depth VkImageViews + size).
     VkImageView colors[8] = {VK_NULL_HANDLE};
     VkImageView depth_view = VK_NULL_HANDLE;
     int w = 0, h = 0;
     int color_count = mithril::collect_draw_fbo_attachments(colors, &depth_view, &w, &h);
+    // Defensive: if no color attachment is bound at all (e.g. the EGL default
+    // framebuffer has no swapchain yet because the surface isn't sized), skip
+    // the draw. Beginning a render pass with all-null attachments produces a
+    // validation error and a no-op pass on MoltenVK, so skipping is both
+    // cheaper and avoids log spam.
+    if (color_count <= 0) {
+        bool any_color = false;
+        for (int i = 0; i < 8; ++i) if (colors[i] != VK_NULL_HANDLE) { any_color = true; break; }
+        if (!any_color) return;
+    }
 
     // Compute color attachment VkFormats.
     VkFormat color_formats[8] = {VK_FORMAT_UNDEFINED};
@@ -43,12 +70,21 @@ static void prepare_draw(GLenum mode) {
             if (tex) color_formats[i] = backend_vk_format_for_gl((GLenum)tex->internalFormat);
         }
     } else {
-        // EGL default framebuffer: the swapchain color format is BGRA8Unorm
-        // (set by the swapchain creation in Swapchain.cpp). Hardcode it here
-        // since there's no GL texture object to query.
+        // EGL default framebuffer: read the swapchain's actual color format
+        // from g_state->eglDefaultColorFormat (set by install_surface_on_state
+        // after each acquire). Hardcoding VK_FORMAT_B8G8R8A8_UNORM would
+        // mismatch if MoltenVK picked a different surface format (e.g. RGBA8
+        // or an sRGB variant), causing a pipeline-creation failure on the
+        // first draw and a black screen.
+        VkFormat swapchainFmt = g_state->eglDefaultColorFormat;
+        if (swapchainFmt == VK_FORMAT_UNDEFINED) {
+            // Fallback for headless / surfaceless mode where no swapchain is
+            // attached. BGRA8Unorm matches MoltenVK's most common default.
+            swapchainFmt = VK_FORMAT_B8G8R8A8_UNORM;
+        }
         for (int i = 0; i < color_count; ++i) {
             if (colors[i] != VK_NULL_HANDLE) {
-                color_formats[i] = VK_FORMAT_B8G8R8A8_UNORM;
+                color_formats[i] = swapchainFmt;
             }
         }
     }
