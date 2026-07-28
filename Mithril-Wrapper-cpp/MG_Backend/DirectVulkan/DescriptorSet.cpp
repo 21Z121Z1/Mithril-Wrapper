@@ -300,6 +300,33 @@ void bind_program_descriptors(GLuint program) {
                     // 用持久的 dummy texture view + dummy sampler 填充，让 draw
                     // 读取全零/透明纹素而非崩溃。
                     if (b->dummyTextureView != VK_NULL_HANDLE && b->dummyTextureSampler != VK_NULL_HANDLE) {
+                        // 第一次使用 dummy texture 时，在当前 command buffer 录制
+                        // UNDEFINED → SHADER_READ_ONLY_OPTIMAL 的 layout transition。
+                        // init_device() 不再录制此命令（避免 init command buffer
+                        // 混入可能引发 InvalidResource 的命令）。后续使用直接以
+                        // SHADER_READ_ONLY_OPTIMAL 填充，不重复 transition。
+                        static bool dummyTextureLayoutInitialized = false;
+                        if (!dummyTextureLayoutInitialized) {
+                            VkImageMemoryBarrier dbar{};
+                            dbar.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                            dbar.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+                            dbar.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                            dbar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                            dbar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                            dbar.image = b->dummyTextureImage;
+                            dbar.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+                            dbar.subresourceRange.baseMipLevel = 0;
+                            dbar.subresourceRange.levelCount = 1;
+                            dbar.subresourceRange.baseArrayLayer = 0;
+                            dbar.subresourceRange.layerCount = 1;
+                            dbar.srcAccessMask = 0;
+                            dbar.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+                            vkCmdPipelineBarrier(b->commandBuffer,
+                                                 VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                                 VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
+                                                 0, nullptr, 0, nullptr, 1, &dbar);
+                            dummyTextureLayoutInitialized = true;
+                        }
                         VkDescriptorImageInfo ii{};
                         ii.sampler = b->dummyTextureSampler;
                         ii.imageView = b->dummyTextureView;

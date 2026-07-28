@@ -314,9 +314,10 @@ bool init_device() {
     // COMBINED_IMAGE_SAMPLER descriptor binding。Pipeline layout 声明的所有
     // binding 在 draw 时必须有有效 descriptor，否则 Metal 驱动读取野指针
     // IOSurface → IOSurfaceBindAccel SIGSEGV（dd972b9 的根因）。
-    // 初始化：创建 image → 分配+绑定 memory → 创建 view → 创建 sampler →
-    // 往主 command buffer 录制 clear-to-zero + layout transition 到
-    // SHADER_READ_ONLY_OPTIMAL（第一帧提交时执行）。
+    // 初始化：创建 image → 分配+绑定 memory → 创建 view → 创建 sampler。
+    // 不在此处录制 clear/transition 命令——layout transition 延迟到
+    // DescriptorSet.cpp 第一次使用 dummy texture 时执行，避免 init command
+    // buffer 混入可能引发 InvalidResource 的命令。
     {
         VkImageCreateInfo dici{};
         dici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -335,18 +336,22 @@ bool init_device() {
             vkGetImageMemoryRequirements(b->device, b->dummyTextureImage, &req);
             uint32_t mt = find_memory_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
             if (mt == 0xFFFFFFFFu) mt = find_memory_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
+            bool ok = false;
             if (mt != 0xFFFFFFFFu) {
                 VkMemoryAllocateInfo ai{};
                 ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
                 ai.allocationSize = req.size;
                 ai.memoryTypeIndex = mt;
                 if (vkAllocateMemory(b->device, &ai, nullptr, &b->dummyTextureMemory) == VK_SUCCESS) {
-                    vkBindImageMemory(b->device, b->dummyTextureImage, b->dummyTextureMemory, 0);
-                } else {
-                    vkDestroyImage(b->device, b->dummyTextureImage, nullptr);
-                    b->dummyTextureImage = VK_NULL_HANDLE;
+                    if (vkBindImageMemory(b->device, b->dummyTextureImage, b->dummyTextureMemory, 0) == VK_SUCCESS) {
+                        ok = true;
+                    } else {
+                        vkFreeMemory(b->device, b->dummyTextureMemory, nullptr);
+                        b->dummyTextureMemory = VK_NULL_HANDLE;
+                    }
                 }
-            } else {
+            }
+            if (!ok) {
                 vkDestroyImage(b->device, b->dummyTextureImage, nullptr);
                 b->dummyTextureImage = VK_NULL_HANDLE;
             }
@@ -362,7 +367,9 @@ bool init_device() {
             vci.subresourceRange.levelCount = 1;
             vci.subresourceRange.baseArrayLayer = 0;
             vci.subresourceRange.layerCount = 1;
-            vkCreateImageView(b->device, &vci, nullptr, &b->dummyTextureView);
+            if (vkCreateImageView(b->device, &vci, nullptr, &b->dummyTextureView) != VK_SUCCESS) {
+                b->dummyTextureView = VK_NULL_HANDLE;
+            }
 
             VkSamplerCreateInfo sci{};
             sci.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
@@ -380,52 +387,22 @@ bool init_device() {
             sci.minLod = 0.0f;
             sci.maxLod = 0.0f;
             sci.unnormalizedCoordinates = VK_FALSE;
-            vkCreateSampler(b->device, &sci, nullptr, &b->dummyTextureSampler);
+            if (vkCreateSampler(b->device, &sci, nullptr, &b->dummyTextureSampler) != VK_SUCCESS) {
+                b->dummyTextureSampler = VK_NULL_HANDLE;
+            }
 
-            // 录制 clear-to-zero + layout transition 到 SHADER_READ_ONLY_OPTIMAL。
-            // 主 command buffer 已在 recording 状态（上方 vkBeginCommandBuffer 成功），
-            // 这些命令随第一帧 commit_frame() 一起提交执行。
-            VkImageMemoryBarrier b1{};
-            b1.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-            b1.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-            b1.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-            b1.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            b1.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            b1.image = b->dummyTextureImage;
-            b1.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-            b1.subresourceRange.baseMipLevel = 0;
-            b1.subresourceRange.levelCount = 1;
-            b1.subresourceRange.baseArrayLayer = 0;
-            b1.subresourceRange.layerCount = 1;
-            b1.srcAccessMask = 0;
-            b1.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-            vkCmdPipelineBarrier(b->commandBuffer,
-                                 VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                                 VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
-                                 0, nullptr, 0, nullptr, 1, &b1);
-            VkClearColorValue clearVal{};
-            vkCmdClearColorImage(b->commandBuffer, b->dummyTextureImage,
-                                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clearVal, 1, &b1.subresourceRange);
-            VkImageMemoryBarrier b2{};
-            b2.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-            b2.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-            b2.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-            b2.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            b2.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            b2.image = b->dummyTextureImage;
-            b2.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-            b2.subresourceRange.baseMipLevel = 0;
-            b2.subresourceRange.levelCount = 1;
-            b2.subresourceRange.baseArrayLayer = 0;
-            b2.subresourceRange.layerCount = 1;
-            b2.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-            b2.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-            vkCmdPipelineBarrier(b->commandBuffer,
-                                 VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                 VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
-                                 0, nullptr, 0, nullptr, 1, &b2);
-        } else {
-            MITHRIL_LOG_WARN("vk", "failed to allocate dummy texture — null "
+            // 任一组件创建失败则全部销毁，确保 dummyTextureView 和
+            // dummyTextureSampler 同时有效或同时为 null（DescriptorSet.cpp
+            // 检查两者非 null 才使用 dummy 填充）。
+            if (b->dummyTextureView == VK_NULL_HANDLE || b->dummyTextureSampler == VK_NULL_HANDLE) {
+                if (b->dummyTextureSampler) { vkDestroySampler(b->device, b->dummyTextureSampler, nullptr); b->dummyTextureSampler = VK_NULL_HANDLE; }
+                if (b->dummyTextureView) { vkDestroyImageView(b->device, b->dummyTextureView, nullptr); b->dummyTextureView = VK_NULL_HANDLE; }
+                if (b->dummyTextureImage) { vkDestroyImage(b->device, b->dummyTextureImage, nullptr); b->dummyTextureImage = VK_NULL_HANDLE; }
+                if (b->dummyTextureMemory) { vkFreeMemory(b->device, b->dummyTextureMemory, nullptr); b->dummyTextureMemory = VK_NULL_HANDLE; }
+            }
+        }
+        if (b->dummyTextureView == VK_NULL_HANDLE) {
+            MITHRIL_LOG_WARN("vk", "failed to create dummy texture — null "
                              "descriptor bindings will be unsafe");
         }
     }
