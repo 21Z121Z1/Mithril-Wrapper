@@ -4,6 +4,7 @@
 // family declared in MG_Backend/Backend.h.
 #include "Resources.h"
 #include "Device.h"
+#include "CommandStream.h"
 #include "../Backend.h"
 #include "../../MG_Impl/Log.h"
 
@@ -105,8 +106,26 @@ void stage_and_copy_image(TextureEntry& tex, int level, int x, int y, int z,
                           int w, int h, int d, const void* pixels,
                           int unpack_alignment, GLenum format, GLenum type) {
     Backend* b = backend();
-    if (!b->commandBuffer) return;
+    if (!b->commandBuffer) {
+        MITHRIL_LOG_ERROR("vk", "stage_and_copy_image: no command buffer — "
+                          "upload of %dx%d level %d DROPPED", w, h, level);
+        return;
+    }
     if (unpack_alignment <= 0) unpack_alignment = 4;  // GL default UNPACK_ALIGNMENT
+
+    // vkCmdCopyBufferToImage / vkCmdPipelineBarrier are ILLEGAL inside a
+    // render pass instance. Minecraft uploads the Mojang logo (and later the
+    // texture atlases) between glClear and the draw calls — i.e. while the
+    // dynamic-rendering pass opened by glClear is still active. Recording the
+    // copy inside the pass makes MoltenVK's Metal encoding silently corrupt:
+    // the texture contents never reach the GPU and every draw samples
+    // garbage/transparent texels, leaving only the clear color visible
+    // (the "red screen"). End the pass first; the next draw re-opens it
+    // with loadOp=LOAD, so already-rendered content is preserved.
+    const bool wasInPass = render_pass_active();
+    if (wasInPass) {
+        end_render_pass();
+    }
 
     // Compute host-side bytes per pixel for this (format, type) pair and
     // honour GL_UNPACK_ALIGNMENT when computing the source row stride. The
@@ -142,6 +161,9 @@ void stage_and_copy_image(TextureEntry& tex, int level, int x, int y, int z,
             tex.stagingMemory = tmp.memory;
             tex.stagingSize = staging;
         } else {
+            MITHRIL_LOG_ERROR("vk", "stage_and_copy_image: staging alloc of "
+                              "%zu bytes FAILED — upload of %dx%d level %d "
+                              "DROPPED", staging, w, h, level);
             return;
         }
     }
@@ -166,10 +188,19 @@ void stage_and_copy_image(TextureEntry& tex, int level, int x, int y, int z,
         } else {
             // Expand a 3-channel source into the 4-channel destination, filling
             // alpha with opaque. Mirrors MobileGL's ExpandRgbSourceToRgba.
-            MITHRIL_LOG_INFO("vk",
-                "stage_and_copy_image: expanding %d-byte src fmt=0x%x -> %d-byte "
-                "VkFormat 0x%x (%dx%d level %d)",
-                src_bpp, (unsigned)format, dst_bpp, (unsigned)tex.format, w, h, level);
+            // WARN (not INFO — INFO is filtered on-device) and throttled: the
+            // atlas builder calls glTexSubImage2D hundreds of times.
+            {
+                static int expand_count = 0;
+                if (expand_count < 4) {
+                    MITHRIL_LOG_WARN("vk",
+                        "stage_and_copy_image: expanding %d-byte src fmt=0x%x -> "
+                        "%d-byte VkFormat 0x%x (%dx%d level %d)",
+                        src_bpp, (unsigned)format, dst_bpp, (unsigned)tex.format,
+                        w, h, level);
+                    expand_count++;
+                }
+            }
             const bool bgr = (format == GL_BGR);
             uint8_t alpha[4] = {0xFF, 0, 0, 0};
             if (type == GL_HALF_FLOAT || type == GL_UNSIGNED_SHORT || type == GL_SHORT) {
@@ -217,12 +248,32 @@ void stage_and_copy_image(TextureEntry& tex, int level, int x, int y, int z,
     region.imageOffset = { x, y, z };
     region.imageExtent = { (uint32_t)w, (uint32_t)h, (uint32_t)d };
 
-    // Transition the image layout to TRANSFER_DST for the copy.
+    // Transition the image layout to TRANSFER_DST for the copy. oldLayout
+    // must be the image's real current layout: UNDEFINED would permit the
+    // driver to discard the existing contents of this mip level, wiping the
+    // regions of a texture atlas that earlier glTexSubImage2D calls uploaded.
+    const bool levelInitialized =
+        level < 32 && (tex.levelInitializedMask & (1u << level));
+    VkImageLayout oldLayout =
+        levelInitialized ? tex.currentLayout : VK_IMAGE_LAYOUT_UNDEFINED;
     VkImageMemoryBarrier barrier{};
     barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    barrier.oldLayout = oldLayout;
+    VkPipelineStageFlags srcStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
     barrier.srcAccessMask = 0;
+    if (oldLayout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+        barrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        srcStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    } else if (oldLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
+        barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        srcStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+    } else if (oldLayout != VK_IMAGE_LAYOUT_UNDEFINED &&
+               oldLayout != VK_IMAGE_LAYOUT_PREINITIALIZED) {
+        // Any other layout (color attachment etc.): conservative full flush.
+        barrier.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+        srcStage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+    }
     barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -233,7 +284,7 @@ void stage_and_copy_image(TextureEntry& tex, int level, int x, int y, int z,
     barrier.subresourceRange.baseArrayLayer = 0;
     barrier.subresourceRange.layerCount = 1;
     vkCmdPipelineBarrier(b->commandBuffer,
-                         VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                         srcStage,
                          VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
                          0, nullptr, 0, nullptr, 1, &barrier);
 
@@ -251,6 +302,24 @@ void stage_and_copy_image(TextureEntry& tex, int level, int x, int y, int z,
                          dstStage, 0,
                          0, nullptr, 0, nullptr, 1, &barrier);
     tex.currentLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    if (level < 32) tex.levelInitializedMask |= (1u << level);
+
+    // Log the first few uploads (and every expansion) so the texture path is
+    // traceable in release logs: if the Mojang logo / atlas is missing, these
+    // lines tell us whether the pixel data ever reached the GPU.
+    {
+        static int upload_count = 0;
+        if (upload_count < 8) {
+            MITHRIL_LOG_WARN("vk", "texture_upload #%d: %dx%d level=%d "
+                              "fmt=0x%x type=0x%x -> VkFormat=0x%x "
+                              "expand=%d passEnded=%d",
+                              upload_count + 1, w, h, level,
+                              (unsigned)format, (unsigned)type,
+                              (unsigned)tex.format, (int)expand,
+                              (int)wasInPass);
+            upload_count++;
+        }
+    }
 }
 
 // aspect_for_format() moved to FormatMap.{h,cpp} (pure-logic helper).
@@ -542,7 +611,14 @@ void backend_texture_upload(GLuint name, int level, int x, int y, int z,
                             const void* pixels, int unpack_alignment) {
     auto& tbl = mithril::vk::texture_table();
     auto it = tbl.find(name);
-    if (it == tbl.end() || !pixels) return;
+    if (it == tbl.end()) {
+        MITHRIL_LOG_ERROR("vk", "texture_upload: texture %u has no VkImage — "
+                          "upload of %dx%d level %d DROPPED (glTexImage2D "
+                          "not routed through backend_get_or_create_texture?)",
+                          name, w, h, level);
+        return;
+    }
+    if (!pixels) return;
     mithril::vk::stage_and_copy_image(it->second, level, x, y, z, w, h, d,
                                       pixels, unpack_alignment, format, type);
 }

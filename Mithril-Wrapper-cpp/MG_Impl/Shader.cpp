@@ -629,8 +629,9 @@ bool glsl_to_spirv(GLenum gl_stage, const std::string& src,
     spv_opts.disableOptimizer = false;
     glslang::GlslangToSpv(*inter, spirv, &spv_opts);
     if (spirv.empty()) { info = "SPIR-V generation produced no words"; return false; }
-    MITHRIL_LOG_WARN("shader", "glsl_to_spirv stage=0x%x -> %zu SPIR-V words",
-                     (unsigned)gl_stage, spirv.size());
+    // Success is silent: one line per shader floods the log (100+ lines per
+    // session) and carries no diagnostic value — failures return false above
+    // and are reported with the full info log by the caller.
     return true;
 }
 

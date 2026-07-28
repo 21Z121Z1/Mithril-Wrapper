@@ -247,12 +247,27 @@ void install_surface_on_state(EglSurface* s) {
         // Log surface state so developers can trace the swapchain format and
         // dimensions that GL commands will render into. The format is critical
         // for diagnosing BGRA vs RGBA channel-swap issues (red/blue tint).
-        MITHRIL_LOG_WARN("egl", "install_surface: size=%dx%d fmt=0x%x depth=%s "
-                          "colorView=%p depthView=%p",
-                          s->width, s->height,
-                          (unsigned)g_state->eglDefaultColorFormat,
-                          depth != VK_NULL_HANDLE ? "yes" : "no",
-                          (void*)color, (void*)depth);
+        // Throttled: this runs every frame (after each present/acquire), so
+        // only log the first few installs and any size/format change —
+        // otherwise it floods the log (500+ identical lines per session).
+        {
+            static int install_count = 0;
+            static int last_w = -1, last_h = -1;
+            static unsigned last_fmt = 0;
+            bool changed = (s->width != last_w || s->height != last_h ||
+                            (unsigned)g_state->eglDefaultColorFormat != last_fmt);
+            if (install_count < 4 || changed) {
+                MITHRIL_LOG_WARN("egl", "install_surface: size=%dx%d fmt=0x%x depth=%s "
+                                  "colorView=%p depthView=%p",
+                                  s->width, s->height,
+                                  (unsigned)g_state->eglDefaultColorFormat,
+                                  depth != VK_NULL_HANDLE ? "yes" : "no",
+                                  (void*)color, (void*)depth);
+                install_count++;
+                last_w = s->width; last_h = s->height;
+                last_fmt = (unsigned)g_state->eglDefaultColorFormat;
+            }
+        }
         // Register the swapchain with the encoder so it can record layout
         // barriers and signal pendingRenderFinished. Only register when the
         // surface actually has an acquired color view (color != VK_NULL_HANDLE)

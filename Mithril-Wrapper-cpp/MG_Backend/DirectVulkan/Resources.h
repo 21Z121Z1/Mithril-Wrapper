@@ -37,6 +37,12 @@ struct TextureEntry {
     // between layouts — it only ensures the layout matches `imageLayout`
     // during the pass). New textures start in UNDEFINED.
     VkImageLayout  currentLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    // Bitmask of mip levels that have received at least one upload/blit.
+    // Used to pick oldLayout for the pre-copy barrier: an untouched level is
+    // still UNDEFINED (nothing to preserve), while a touched level must use
+    // the tracked layout so the driver cannot discard its contents (atlas
+    // sub-uploads depend on this).
+    uint32_t       levelInitializedMask = 0;
     // Staging buffer used for the most recent upload (kept alive to avoid
     // per-texel allocation churn; recreated if too small).
     VkBuffer       stagingBuffer = VK_NULL_HANDLE;
