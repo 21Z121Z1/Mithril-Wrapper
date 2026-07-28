@@ -292,6 +292,21 @@ void bind_program_descriptors(GLuint program) {
                     w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
                     w.pImageInfo = &imgInfos.back();
                     writes.push_back(w);
+                } else if (view == VK_NULL_HANDLE) {
+                    // Throttled diagnostic: tex_id is bound but its VkImageView
+                    // is gone (likely glDeleteTextures ran mid-frame). This leaves
+                    // the descriptor binding unwritten, which on Metal can surface
+                    // as kIOGPUCommandBufferCallbackErrorInvalidResource.
+                    static GLuint last_warned_prog = 0;
+                    static uint32_t last_warned_binding = 0xFFFFFFFFu;
+                    if (last_warned_prog != program || last_warned_binding != db.binding) {
+                        last_warned_prog = program;
+                        last_warned_binding = db.binding;
+                        MITHRIL_LOG_WARN("vk",
+                            "bind_program_descriptors: program %u binding %u has tex_id %u "
+                            "but VkImageView is null (texture deleted?) — descriptor left unwritten",
+                            program, db.binding, tex_id);
+                    }
                 }
             }
         }
