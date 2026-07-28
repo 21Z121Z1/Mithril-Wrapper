@@ -22,10 +22,10 @@
 
 extern "C" {
 
-static bool prepare_draw(GLenum mode) {
+static void prepare_draw(GLenum mode) {
     // Resolve current program + its SPIR-V.
     mithril::Program* prog = mithril::state_get_program(g_state->currentProgram);
-    if (!prog || !prog->linked) return false;
+    if (!prog || !prog->linked) return;
     // Defensive: skip draws whose shader translation produced no SPIR-V
     // (e.g. glslang failed on an unrecognised construct). Issuing the draw
     // would pass null/0 to backend_get_or_create_pipeline, which would
@@ -41,7 +41,7 @@ static bool prepare_draw(GLenum mode) {
                               prog->id, prog->vertexSpirv.size(),
                               prog->fragmentSpirv.size());
         }
-        return false;
+        return;
     }
 
     // Resolve current draw FBO attachments (color + depth VkImageViews + size).
@@ -57,7 +57,7 @@ static bool prepare_draw(GLenum mode) {
     if (color_count <= 0) {
         bool any_color = false;
         for (int i = 0; i < 8; ++i) if (colors[i] != VK_NULL_HANDLE) { any_color = true; break; }
-        if (!any_color) return false;
+        if (!any_color) return;
     }
 
     // Compute color attachment VkFormats.
@@ -122,6 +122,34 @@ static bool prepare_draw(GLenum mode) {
         m.buffer_name  = a.boundBuffer;
     }
 
+    // VBO existence pre-check: verify every enabled attribute's bound VBO
+    // actually resolves to a live VkBuffer BEFORE touching the pipeline cache
+    // or starting a render pass. If any VBO is missing (e.g. the host deleted
+    // the buffer object but left the VAO attrib enabled), skip the whole draw
+    // — do NOT create a pipeline or begin a render pass. Beginning a render
+    // pass triggers MoltenVK's getCAMetalDrawable()/nextDrawable on the
+    // swapchain image; if the draw is then aborted without a vkCmdDraw, the
+    // pass-end store action still touches the IOSurface. When the drawable's
+    // IOSurface is invalid/nil (pool exhaustion, surface lost, present-then-
+    // release race), IOSurfaceBindAccel dereferences a null pointer →
+    // SIGSEGV at +0x10. Mirrors MobileGL VulkanRenderer::SetupDraw's pre-flight
+    // pattern (VulkanRenderer.cpp:4376-4410). The `last_missing_warned`
+    // static is independent from the empty-SPIR-V `last_warned` above so each
+    // warning class throttles per program id on its own.
+    for (int i = 0; i < attrib_count; ++i) {
+        MGVertexAttrib& m = attribs[i];
+        if (backend_get_buffer(m.buffer_name) == VK_NULL_HANDLE) {
+            static GLuint last_missing_warned = 0;
+            if (last_missing_warned != prog->id) {
+                last_missing_warned = prog->id;
+                MITHRIL_LOG_WARN("gl", "prepare_draw: program %u missing VBO %u "
+                                  "for attrib loc %d (stride %d) — skipping draw",
+                                  prog->id, m.buffer_name, m.location, m.stride);
+            }
+            return;
+        }
+    }
+
     // Get-or-create the VkGraphicsPipeline. Blend state is part of the
     // pipeline signature so that enabling/disabling GL_BLEND or changing
     // blend functions creates a distinct pipeline.
@@ -136,7 +164,7 @@ static bool prepare_draw(GLenum mode) {
         g_state->blendSrcRGB,
         g_state->blendDstRGB,
         mode);
-    if (pipeline == VK_NULL_HANDLE) return false;
+    if (pipeline == VK_NULL_HANDLE) return;
 
     // Begin render pass (Load action preserves previous contents).
     backend_set_load_load();
@@ -183,47 +211,17 @@ static bool prepare_draw(GLenum mode) {
     // == attribute location (matches the vertex input binding layout). For
     // attribute slots the VAO didn't enable, bind the shared zero buffer so
     // the unbound vertex input reads vec4(0) instead of dereferencing
-    // unbound memory.
-    // If any enabled attribute's VBO is missing (VK_NULL_HANDLE — the GL
-    // buffer was deleted or never had glBufferData called), skip the draw
-    // entirely. Binding the shared zero buffer to that slot would mismatch
-    // the pipeline's real stride (e.g. 24 bytes); with vkCmdDraw Metal reads
-    // at vertexIndex*stride, so vertex 1+ overruns the 16-byte zero buffer
-    // → OOB read → kIOGPUCommandBufferCallbackErrorInvalidResource.
+    // unbound memory. The pre-check above guarantees every enabled attrib
+    // has a live VBO here, so no missing-VBO handling is needed in this loop.
     VkBuffer zero_buf = backend_get_zero_buffer();
     bool bound_slots[16] = {false};
-    bool missingVBO = false;
-    GLuint missing_buffer_name = 0;
-    int missing_location = 0;
-    int missing_stride = 0;
     for (int i = 0; i < attrib_count; ++i) {
         MGVertexAttrib& m = attribs[i];
         VkBuffer buf = backend_get_buffer(m.buffer_name);
         if (buf != VK_NULL_HANDLE) {
             backend_set_vertex_buffer(m.location, buf, (VkDeviceSize)m.offset);
             if (m.location < 16) bound_slots[m.location] = true;
-        } else if (!missingVBO) {
-            // Record the first missing VBO; subsequent ones are not logged
-            // to keep the warning concise.
-            missingVBO = true;
-            missing_buffer_name = m.buffer_name;
-            missing_location = m.location;
-            missing_stride = m.stride;
         }
-    }
-    if (missingVBO) {
-        // Throttle the warning per program id so a host that retries the
-        // same broken bind every frame doesn't flood the log. Independent
-        // static from the empty-SPIR-V warning's last_warned above.
-        static GLuint last_missing_warned = 0;
-        if (last_missing_warned != prog->id) {
-            last_missing_warned = prog->id;
-            MITHRIL_LOG_WARN("gl", "prepare_draw: program %u missing VBO %u "
-                              "for attrib loc %d (stride %d) — skipping draw",
-                              prog->id, missing_buffer_name, missing_location,
-                              missing_stride);
-        }
-        return false;
     }
     // Bind the zero buffer to any slot 0..15 not covered above. These slots
     // have no enabled attribute, so the pipeline's binding for them (if any)
@@ -244,7 +242,6 @@ static bool prepare_draw(GLenum mode) {
     // for this draw. The legacy backend_set_fragment_buffer /
     // backend_set_fragment_texture stubs are no-ops (kept only for the C API
     // contract) — descriptor binding is centralised in DescriptorSet.cpp.
-    return true;
 }
 
 static void end_draw(void) {
@@ -262,14 +259,14 @@ static int index_type_to_int(GLenum type) {
 
 void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
     MITHRIL_ENSURE_INIT();
-    if (!prepare_draw(mode)) return;
+    prepare_draw(mode);
     backend_draw_arrays((int)mode, (int)first, (int)count);
     end_draw();
 }
 
 void glDrawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLsizei primcount) {
     MITHRIL_ENSURE_INIT();
-    if (!prepare_draw(mode)) return;
+    prepare_draw(mode);
     backend_draw_arrays_instanced((int)mode, (int)first, (int)count, (int)primcount);
     end_draw();
 }
@@ -278,14 +275,14 @@ void glDrawArraysInstancedBaseInstance(GLenum mode, GLint first, GLsizei count,
                                        GLsizei primcount, GLuint baseinstance) {
     MITHRIL_ENSURE_INIT();
     (void)baseinstance; // base-instance is not exposed by the current backend wrapper
-    if (!prepare_draw(mode)) return;
+    prepare_draw(mode);
     backend_draw_arrays_instanced((int)mode, (int)first, (int)count, (int)primcount);
     end_draw();
 }
 
 void glDrawElements(GLenum mode, GLsizei count, GLenum type, const void* indices) {
     MITHRIL_ENSURE_INIT();
-    if (!prepare_draw(mode)) return;
+    prepare_draw(mode);
     // If a VBO is bound for GL_ELEMENT_ARRAY_BUFFER, indices is an offset into it.
     mithril::VertexArray* vao = mithril::state_get_vao(g_state->currentVAO);
     GLuint ib_name = vao ? vao->elementArrayBuffer : 0;
@@ -317,7 +314,7 @@ void glDrawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type,
 void glDrawElementsInstanced(GLenum mode, GLsizei count, GLenum type,
                              const void* indices, GLsizei primcount) {
     MITHRIL_ENSURE_INIT();
-    if (!prepare_draw(mode)) return;
+    prepare_draw(mode);
     mithril::VertexArray* vao = mithril::state_get_vao(g_state->currentVAO);
     GLuint ib_name = vao ? vao->elementArrayBuffer : 0;
     VkBuffer ib = backend_get_buffer(ib_name);
