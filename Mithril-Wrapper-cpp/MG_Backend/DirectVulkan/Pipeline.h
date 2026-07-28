@@ -40,6 +40,12 @@ struct ProgramResources {
     // which this program's descriptor pool was last reset. bind_program_descriptors()
     // resets the pool once per frame so sets can be reused across frames.
     uint64_t lastResetGen = 0;
+
+    // 着色器声明但 GL 未 enable 的顶点 location 对应的 dummy binding 槽位号
+    // (由 get_or_create_pipeline 在追加 dummy VkVertexInputBindingDescription
+    // 时同步填充)。draw 时 DescriptorSet.cpp 据此把 Backend::dummyVertexBuffer
+    // 绑到这些槽位，避免 Vulkan 未定义行为 / MoltenVK 读取 stale Metal buffer。
+    std::vector<uint32_t> dummyBindings;
 };
 
 // Accessor for the per-program resource table (keyed by GL program name).

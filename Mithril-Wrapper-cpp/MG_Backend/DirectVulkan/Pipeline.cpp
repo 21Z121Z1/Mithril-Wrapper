@@ -276,6 +276,10 @@ VkPipeline get_or_create_pipeline(GLuint program,
     // b->dummyVertexBuffer at draw time.
     std::vector<uint32_t> shaderLocations =
         reflect_vertex_input_locations(vertex_spirv, vertex_word_count);
+    // 重建 pipeline 时刷新 pr.dummyBindings，使其与本次创建的 dummy 集合一致。
+    // 缓存命中路径不进入此处，保留上次填充的值（单 program 单 vertex 格式场景下
+    // dummy 集合不变）。
+    pr.dummyBindings.clear();
     for (uint32_t loc : shaderLocations) {
         bool alreadyEnabled = false;
         for (int i = 0; i < attrib_count; ++i) {
@@ -298,6 +302,10 @@ VkPipeline get_or_create_pipeline(GLuint program,
         ad.format = VK_FORMAT_R32G32B32A32_SFLOAT;
         ad.offset = 0;
         attrDescs.push_back(ad);
+
+        // 同步记录 dummy binding 槽位号，供 DescriptorSet.cpp 在 draw 时
+        // 绑定 Backend::dummyVertexBuffer 到这些槽位。
+        pr.dummyBindings.push_back(loc);
     }
 
     VkPipelineVertexInputStateCreateInfo vertexInput{};

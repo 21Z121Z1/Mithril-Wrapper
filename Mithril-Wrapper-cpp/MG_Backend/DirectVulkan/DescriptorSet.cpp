@@ -136,6 +136,32 @@ void bind_program_descriptors(GLuint program) {
     auto it = tbl.find(program);
     if (it == tbl.end()) return;
     ProgramResources& pr = it->second;
+
+    // 为 pipeline 创建时记录的 dummy 顶点 binding 槽位绑定 dummyVertexBuffer。
+    // commit 64aedfa 为着色器声明但 GL 未 enable 的 location 追加了 dummy
+    // binding/attribute description，但 draw 时从未绑定 backing buffer，导致
+    // Vulkan 未定义行为 → MoltenVK 读取 stale Metal buffer → IOSurfaceBindAccel
+    // SIGSEGV (UAF)。此处放在描述符早返回之前，确保 binding-less 程序（无 UBO/
+    // 纹理，pr.bindings 为空）也能绑定 dummy 槽位。
+    if (!pr.dummyBindings.empty()) {
+        if (b->dummyVertexBuffer != VK_NULL_HANDLE) {
+            VkDeviceSize zeroOffset = 0;
+            for (uint32_t binding : pr.dummyBindings) {
+                // dummy 槽位号不连续，逐个绑定（count=1）。
+                vkCmdBindVertexBuffers(b->commandBuffer, binding, 1,
+                                       &b->dummyVertexBuffer, &zeroOffset);
+            }
+        } else {
+            static bool warned = false;
+            if (!warned) {
+                warned = true;
+                MITHRIL_LOG_WARN("vk",
+                    "dummyVertexBuffer not allocated; dummy vertex bindings have no backing buffer (program %u)",
+                    program);
+            }
+        }
+    }
+
     if (!pr.layoutsBuilt || pr.bindings.empty() ||
         pr.pipelineLayout == VK_NULL_HANDLE || pr.descriptorPool == VK_NULL_HANDLE) {
         return;
