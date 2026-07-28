@@ -84,6 +84,15 @@ struct Backend {
     VkBuffer         dummyVertexBuffer = VK_NULL_HANDLE;
     VkDeviceMemory   dummyVertexMemory = VK_NULL_HANDLE;
 
+    // 持久 1×1 RGBA8 透明纹理 + 线性 sampler，用于纹理被删除（VkImageView 为
+    // VK_NULL_HANDLE）时填充 COMBINED_IMAGE_SAMPLER descriptor binding。Pipeline
+    // layout 声明的所有 binding 在 draw 时必须有有效 descriptor，否则 Metal 驱动
+    // 读取野指针 IOSurface → IOSurfaceBindAccel SIGSEGV（dd972b9 的根因）。
+    VkImage          dummyTextureImage = VK_NULL_HANDLE;
+    VkDeviceMemory   dummyTextureMemory = VK_NULL_HANDLE;
+    VkImageView      dummyTextureView = VK_NULL_HANDLE;
+    VkSampler        dummyTextureSampler = VK_NULL_HANDLE;
+
     // 持久性 GPU 故障检测。vkQueueSubmit / vkQueuePresentKHR 致命失败时自增
     // consecutiveSubmitFailures，成功时清零。≥3 时置 deviceLost=true。
     // deviceLost 为真时 commit_frame / present / acquire / eglSwapBuffers 全部

@@ -309,6 +309,127 @@ bool init_device() {
         }
     }
 
+    // ---- Dummy texture (1×1 RGBA8 transparent) ----
+    // 持久占位纹理，用于纹理被删除（VkImageView=null）时填充
+    // COMBINED_IMAGE_SAMPLER descriptor binding。Pipeline layout 声明的所有
+    // binding 在 draw 时必须有有效 descriptor，否则 Metal 驱动读取野指针
+    // IOSurface → IOSurfaceBindAccel SIGSEGV（dd972b9 的根因）。
+    // 初始化：创建 image → 分配+绑定 memory → 创建 view → 创建 sampler →
+    // 往主 command buffer 录制 clear-to-zero + layout transition 到
+    // SHADER_READ_ONLY_OPTIMAL（第一帧提交时执行）。
+    {
+        VkImageCreateInfo dici{};
+        dici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        dici.imageType = VK_IMAGE_TYPE_2D;
+        dici.format = VK_FORMAT_R8G8B8A8_UNORM;
+        dici.extent = { 1, 1, 1 };
+        dici.mipLevels = 1;
+        dici.arrayLayers = 1;
+        dici.samples = VK_SAMPLE_COUNT_1_BIT;
+        dici.tiling = VK_IMAGE_TILING_OPTIMAL;
+        dici.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        dici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        dici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        if (vkCreateImage(b->device, &dici, nullptr, &b->dummyTextureImage) == VK_SUCCESS) {
+            VkMemoryRequirements req{};
+            vkGetImageMemoryRequirements(b->device, b->dummyTextureImage, &req);
+            uint32_t mt = find_memory_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+            if (mt == 0xFFFFFFFFu) mt = find_memory_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
+            if (mt != 0xFFFFFFFFu) {
+                VkMemoryAllocateInfo ai{};
+                ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+                ai.allocationSize = req.size;
+                ai.memoryTypeIndex = mt;
+                if (vkAllocateMemory(b->device, &ai, nullptr, &b->dummyTextureMemory) == VK_SUCCESS) {
+                    vkBindImageMemory(b->device, b->dummyTextureImage, b->dummyTextureMemory, 0);
+                } else {
+                    vkDestroyImage(b->device, b->dummyTextureImage, nullptr);
+                    b->dummyTextureImage = VK_NULL_HANDLE;
+                }
+            } else {
+                vkDestroyImage(b->device, b->dummyTextureImage, nullptr);
+                b->dummyTextureImage = VK_NULL_HANDLE;
+            }
+        }
+        if (b->dummyTextureImage != VK_NULL_HANDLE) {
+            VkImageViewCreateInfo vci{};
+            vci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+            vci.image = b->dummyTextureImage;
+            vci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+            vci.format = VK_FORMAT_R8G8B8A8_UNORM;
+            vci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            vci.subresourceRange.baseMipLevel = 0;
+            vci.subresourceRange.levelCount = 1;
+            vci.subresourceRange.baseArrayLayer = 0;
+            vci.subresourceRange.layerCount = 1;
+            vkCreateImageView(b->device, &vci, nullptr, &b->dummyTextureView);
+
+            VkSamplerCreateInfo sci{};
+            sci.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+            sci.magFilter = VK_FILTER_LINEAR;
+            sci.minFilter = VK_FILTER_LINEAR;
+            sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+            sci.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+            sci.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+            sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+            sci.borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
+            sci.anisotropyEnable = VK_FALSE;
+            sci.maxAnisotropy = 1.0f;
+            sci.compareEnable = VK_FALSE;
+            sci.compareOp = VK_COMPARE_OP_ALWAYS;
+            sci.minLod = 0.0f;
+            sci.maxLod = 0.0f;
+            sci.unnormalizedCoordinates = VK_FALSE;
+            vkCreateSampler(b->device, &sci, nullptr, &b->dummyTextureSampler);
+
+            // 录制 clear-to-zero + layout transition 到 SHADER_READ_ONLY_OPTIMAL。
+            // 主 command buffer 已在 recording 状态（上方 vkBeginCommandBuffer 成功），
+            // 这些命令随第一帧 commit_frame() 一起提交执行。
+            VkImageMemoryBarrier b1{};
+            b1.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            b1.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            b1.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            b1.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            b1.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            b1.image = b->dummyTextureImage;
+            b1.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            b1.subresourceRange.baseMipLevel = 0;
+            b1.subresourceRange.levelCount = 1;
+            b1.subresourceRange.baseArrayLayer = 0;
+            b1.subresourceRange.layerCount = 1;
+            b1.srcAccessMask = 0;
+            b1.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            vkCmdPipelineBarrier(b->commandBuffer,
+                                 VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                 VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+                                 0, nullptr, 0, nullptr, 1, &b1);
+            VkClearColorValue clearVal{};
+            vkCmdClearColorImage(b->commandBuffer, b->dummyTextureImage,
+                                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clearVal, 1, &b1.subresourceRange);
+            VkImageMemoryBarrier b2{};
+            b2.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            b2.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            b2.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            b2.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            b2.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            b2.image = b->dummyTextureImage;
+            b2.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            b2.subresourceRange.baseMipLevel = 0;
+            b2.subresourceRange.levelCount = 1;
+            b2.subresourceRange.baseArrayLayer = 0;
+            b2.subresourceRange.layerCount = 1;
+            b2.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            b2.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            vkCmdPipelineBarrier(b->commandBuffer,
+                                 VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                 VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
+                                 0, nullptr, 0, nullptr, 1, &b2);
+        } else {
+            MITHRIL_LOG_WARN("vk", "failed to allocate dummy texture — null "
+                             "descriptor bindings will be unsafe");
+        }
+    }
+
     b->initialized = true;
     MITHRIL_LOG_INFO("vk", "Vulkan 1.2 backend initialised (MoltenVK static link)");
     return true;
@@ -326,6 +447,10 @@ void shutdown_device() {
     if (b->commandPool) { vkDestroyCommandPool(b->device, b->commandPool, nullptr); b->commandPool = VK_NULL_HANDLE; }
     if (b->dummyVertexBuffer) { vkDestroyBuffer(b->device, b->dummyVertexBuffer, nullptr); b->dummyVertexBuffer = VK_NULL_HANDLE; }
     if (b->dummyVertexMemory) { vkFreeMemory(b->device, b->dummyVertexMemory, nullptr); b->dummyVertexMemory = VK_NULL_HANDLE; }
+    if (b->dummyTextureSampler) { vkDestroySampler(b->device, b->dummyTextureSampler, nullptr); b->dummyTextureSampler = VK_NULL_HANDLE; }
+    if (b->dummyTextureView) { vkDestroyImageView(b->device, b->dummyTextureView, nullptr); b->dummyTextureView = VK_NULL_HANDLE; }
+    if (b->dummyTextureImage) { vkDestroyImage(b->device, b->dummyTextureImage, nullptr); b->dummyTextureImage = VK_NULL_HANDLE; }
+    if (b->dummyTextureMemory) { vkFreeMemory(b->device, b->dummyTextureMemory, nullptr); b->dummyTextureMemory = VK_NULL_HANDLE; }
     if (b->device) { vkDestroyDevice(b->device, nullptr); b->device = VK_NULL_HANDLE; }
     if (b->instance) { vkDestroyInstance(b->instance, nullptr); b->instance = VK_NULL_HANDLE; }
     b->initialized = false;

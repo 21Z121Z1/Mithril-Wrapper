@@ -293,19 +293,27 @@ void bind_program_descriptors(GLuint program) {
                     w.pImageInfo = &imgInfos.back();
                     writes.push_back(w);
                 } else if (view == VK_NULL_HANDLE) {
-                    // Throttled diagnostic: tex_id is bound but its VkImageView
-                    // is gone (likely glDeleteTextures ran mid-frame). This leaves
-                    // the descriptor binding unwritten, which on Metal can surface
-                    // as kIOGPUCommandBufferCallbackErrorInvalidResource.
-                    static GLuint last_warned_prog = 0;
-                    static uint32_t last_warned_binding = 0xFFFFFFFFu;
-                    if (last_warned_prog != program || last_warned_binding != db.binding) {
-                        last_warned_prog = program;
-                        last_warned_binding = db.binding;
-                        MITHRIL_LOG_WARN("vk",
-                            "bind_program_descriptors: program %u binding %u has tex_id %u "
-                            "but VkImageView is null (texture deleted?) — descriptor left unwritten",
-                            program, db.binding, tex_id);
+                    // 纹理被删除（VkImageView=null）但 shader 仍声明该 binding。
+                    // 不能跳过 descriptor 写入——pipeline layout 声明的所有 binding
+                    // 在 draw 时必须有有效 descriptor，否则 Metal 驱动读取野指针
+                    // IOSurface → IOSurfaceBindAccel SIGSEGV（dd972b9 的根因）。
+                    // 用持久的 dummy texture view + dummy sampler 填充，让 draw
+                    // 读取全零/透明纹素而非崩溃。
+                    if (b->dummyTextureView != VK_NULL_HANDLE && b->dummyTextureSampler != VK_NULL_HANDLE) {
+                        VkDescriptorImageInfo ii{};
+                        ii.sampler = b->dummyTextureSampler;
+                        ii.imageView = b->dummyTextureView;
+                        ii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                        imgInfos.push_back(ii);
+                        VkWriteDescriptorSet w{};
+                        w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                        w.dstSet = set;
+                        w.dstBinding = db.binding;
+                        w.dstArrayElement = 0;
+                        w.descriptorCount = 1;
+                        w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                        w.pImageInfo = &imgInfos.back();
+                        writes.push_back(w);
                     }
                 }
             }
