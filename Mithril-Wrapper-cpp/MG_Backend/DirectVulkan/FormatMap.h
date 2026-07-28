@@ -25,6 +25,11 @@ VkFormat gl_internal_to_vk(GLenum internal);
 // glReadPixels.
 int host_texel_bytes(GLenum format, GLenum type);
 
+// Bytes per texel for a VkFormat (the device-side size). Used to size the
+// destination staging buffer for uploads and to decide whether a 3-channel
+// source must be expanded to 4 channels (see stage_and_copy_image).
+int vk_format_texel_bytes(VkFormat fmt);
+
 // VkImageAspectFlags for a VkFormat (color / depth / depth+stencil / stencil).
 VkImageAspectFlags aspect_for_format(VkFormat fmt);
 

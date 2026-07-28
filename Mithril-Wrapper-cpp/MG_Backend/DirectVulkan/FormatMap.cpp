@@ -17,14 +17,15 @@ VkFormat gl_internal_to_vk(GLenum internal) {
     switch (internal) {
         case GL_RGBA8:                return VK_FORMAT_R8G8B8A8_UNORM;
         case GL_SRGB8_ALPHA8:         return VK_FORMAT_R8G8B8A8_SRGB;
-        case GL_RGB8:                 return VK_FORMAT_R8G8B8_UNORM;
+        case GL_SRGB8:                return VK_FORMAT_R8G8B8A8_SRGB;   // 3ch -> 4ch
+        case GL_RGB8:                 return VK_FORMAT_R8G8B8A8_UNORM;  // 3ch -> 4ch
         case GL_RGB565:               return VK_FORMAT_R5G6B5_UNORM_PACK16;
         case GL_RGBA4:                return VK_FORMAT_R4G4B4A4_UNORM_PACK16;
         case GL_RGB5_A1:              return VK_FORMAT_R5G5B5A1_UNORM_PACK16;
         case GL_RGBA16F:              return VK_FORMAT_R16G16B16A16_SFLOAT;
-        case GL_RGB16F:               return VK_FORMAT_R16G16B16_SFLOAT;
+        case GL_RGB16F:               return VK_FORMAT_R16G16B16A16_SFLOAT; // 3ch -> 4ch
         case GL_RGBA32F:              return VK_FORMAT_R32G32B32A32_SFLOAT;
-        case GL_RGB32F:               return VK_FORMAT_R32G32B32_SFLOAT;
+        case GL_RGB32F:               return VK_FORMAT_R32G32B32A32_SFLOAT; // 3ch -> 4ch
         case GL_R8:                   return VK_FORMAT_R8_UNORM;
         case GL_R8_SNORM:             return VK_FORMAT_R8_SNORM;
         case GL_R16F:                 return VK_FORMAT_R16_SFLOAT;
@@ -48,7 +49,7 @@ VkFormat gl_internal_to_vk(GLenum internal) {
         // returns VK_FORMAT_UNDEFINED and the texture falls back to a color
         // format — which is especially wrong for GL_DEPTH_COMPONENT.
         case GL_RGBA:             return VK_FORMAT_R8G8B8A8_UNORM;  // 0x1908
-        case GL_RGB:              return VK_FORMAT_R8G8B8_UNORM;    // 0x1907
+        case GL_RGB:              return VK_FORMAT_R8G8B8A8_UNORM;    // 0x1907, 3ch -> 4ch
         case GL_DEPTH_COMPONENT:  return VK_FORMAT_D32_SFLOAT;      // 0x1902
         case GL_COMPRESSED_RGBA_S3TC_DXT1_EXT:
         case GL_COMPRESSED_RGB_S3TC_DXT1_EXT: return VK_FORMAT_BC1_RGBA_UNORM_BLOCK;
@@ -93,6 +94,84 @@ int host_texel_bytes(GLenum format, GLenum type) {
         case GL_UNSIGNED_INT_8_8_8_8:
         case GL_UNSIGNED_INT_8_8_8_8_REV: return 4;
         default:                         return comp;
+    }
+}
+
+// Bytes per texel for a VkFormat. Used by stage_and_copy_image to size the
+// destination staging buffer and to detect when a 3-channel source must be
+// expanded. 3-byte formats (R8G8B8 / B8G8R8 / R16G16B16 / R32G32B32) report 3
+// so callers force a 4-byte expansion — Vulkan/MoltenVK do not reliably support
+// 3-byte-per-texel transfers (the copy encoder reads past the staging buffer).
+int vk_format_texel_bytes(VkFormat fmt) {
+    switch (fmt) {
+        case VK_FORMAT_R8_UNORM:
+        case VK_FORMAT_R8_SNORM:
+        case VK_FORMAT_R8_UINT:
+        case VK_FORMAT_R8_SINT:
+        case VK_FORMAT_R8_SRGB:
+        case VK_FORMAT_S8_UINT:
+            return 1;
+        case VK_FORMAT_R8G8_UNORM:
+        case VK_FORMAT_R8G8_SNORM:
+        case VK_FORMAT_R8G8_UINT:
+        case VK_FORMAT_R8G8_SINT:
+        case VK_FORMAT_R8G8_SRGB:
+        case VK_FORMAT_R5G6B5_UNORM_PACK16:
+        case VK_FORMAT_R4G4B4A4_UNORM_PACK16:
+        case VK_FORMAT_R5G5B5A1_UNORM_PACK16:
+        case VK_FORMAT_B4G4R4A4_UNORM_PACK16:
+        case VK_FORMAT_A1R5G5B5_UNORM_PACK16:
+        case VK_FORMAT_D16_UNORM:
+        case VK_FORMAT_R16_UNORM:
+        case VK_FORMAT_R16_SNORM:
+        case VK_FORMAT_R16_SFLOAT:
+        case VK_FORMAT_R16_UINT:
+        case VK_FORMAT_R16_SINT:
+            return 2;
+        case VK_FORMAT_R8G8B8_UNORM:
+        case VK_FORMAT_R8G8B8_SNORM:
+        case VK_FORMAT_R8G8B8_SRGB:
+        case VK_FORMAT_B8G8R8_UNORM:
+        case VK_FORMAT_B8G8R8_SNORM:
+        case VK_FORMAT_B8G8R8_SRGB:
+        case VK_FORMAT_R16G16B16_UNORM:
+        case VK_FORMAT_R16G16B16_SFLOAT:
+        case VK_FORMAT_R32G32B32_UNORM:
+        case VK_FORMAT_R32G32B32_SFLOAT:
+        case VK_FORMAT_D24_UNORM_S8_UINT:
+        case VK_FORMAT_D32_SFLOAT_S8_UINT:
+            return 3; // logical 3-byte; callers expand to 4 when used as upload target
+        case VK_FORMAT_R16G16B16A16_UNORM:
+        case VK_FORMAT_R16G16B16A16_SNORM:
+        case VK_FORMAT_R16G16B16A16_SFLOAT:
+            return 8;
+        case VK_FORMAT_R32G32B32A32_UNORM:
+        case VK_FORMAT_R32G32B32A32_SNORM:
+        case VK_FORMAT_R32G32B32A32_SFLOAT:
+        case VK_FORMAT_R32G32B32A32_UINT:
+        case VK_FORMAT_R32G32B32A32_SINT:
+            return 16;
+        case VK_FORMAT_R32_SFLOAT:
+        case VK_FORMAT_R32_UINT:
+        case VK_FORMAT_R32_SINT:
+        case VK_FORMAT_D32_SFLOAT:
+        case VK_FORMAT_R11G11B10_UFLOAT_PACK32:
+        case VK_FORMAT_A2B10G10R10_UNORM_PACK32:
+        case VK_FORMAT_A2B10G10R10_UINT_PACK32:
+            return 4;
+        case VK_FORMAT_BC1_RGBA_UNORM_BLOCK:
+        case VK_FORMAT_BC1_RGBA_SRGB_BLOCK:
+        case VK_FORMAT_BC4_UNORM_BLOCK:
+        case VK_FORMAT_BC4_SNORM_BLOCK:
+            return 1; // block-compressed (not used for client-side uploads)
+        case VK_FORMAT_BC2_UNORM_BLOCK:
+        case VK_FORMAT_BC3_UNORM_BLOCK:
+        case VK_FORMAT_BC5_UNORM_BLOCK:
+        case VK_FORMAT_BC6H_UNORM_BLOCK:
+        case VK_FORMAT_BC7_UNORM_BLOCK:
+            return 2; // block-compressed (not used for client-side uploads)
+        default:
+            return 4;
     }
 }
 

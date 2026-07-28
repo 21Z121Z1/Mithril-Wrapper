@@ -112,12 +112,25 @@ void stage_and_copy_image(TextureEntry& tex, int level, int x, int y, int z,
     // honour GL_UNPACK_ALIGNMENT when computing the source row stride. The
     // staging buffer is repacked to be tightly packed, matching
     // VkBufferImageCopy.bufferRowLength == 0 below.
-    int bpp = host_texel_bytes(format, type);
-    if (bpp <= 0) bpp = 4;  // conservative fallback
-    size_t tight_row = (size_t)w * (size_t)bpp;
+    // Source bytes/texel (host pixel layout) vs destination bytes/texel (the
+    // actual VkImage format). When they differ we expand the source into the
+    // destination layout while staging (e.g. GL_RGB 3-byte -> RGBA8 4-byte).
+    // MoltenVK/Vulkan do not reliably support 3-byte-per-texel transfers:
+    // vkCmdCopyBufferToImage over an R8G8B8 image reads past the staging buffer
+    // and SIGBUSes in MVKCmdBufferImageCopy::encode. Expanding to 4 bytes fixes
+    // both the red-screen (wrong sampling of 3ch textures) and the crash.
+    int src_bpp = host_texel_bytes(format, type);
+    if (src_bpp <= 0) src_bpp = 4;
+    int dst_bpp = vk_format_texel_bytes(tex.format);
+    if (dst_bpp <= 0) dst_bpp = 4;
+    bool expand = (src_bpp != dst_bpp);
+    if (dst_bpp == 3) { dst_bpp = 4; expand = true; } // never emit 3ch transfers
+
+    size_t src_tight_row = (size_t)w * (size_t)src_bpp;
+    size_t dst_tight_row = (size_t)w * (size_t)dst_bpp;
     size_t mask = (size_t)unpack_alignment - 1;
-    size_t src_stride = (tight_row + mask) & ~mask;
-    size_t staging = tight_row * (size_t)h * (size_t)d;
+    size_t src_stride = (src_tight_row + mask) & ~mask;
+    size_t staging = dst_tight_row * (size_t)h * (size_t)d;
 
     if (tex.stagingSize < staging) {
         if (tex.stagingBuffer) { vkDestroyBuffer(b->device, tex.stagingBuffer, nullptr); tex.stagingBuffer = VK_NULL_HANDLE; }
@@ -135,18 +148,51 @@ void stage_and_copy_image(TextureEntry& tex, int level, int x, int y, int z,
     void* dst = nullptr;
     vkMapMemory(b->device, tex.stagingMemory, 0, staging, 0, &dst);
     if (dst && pixels) {
-        if (src_stride == tight_row) {
-            // Source rows are already tightly packed — single memcpy.
-            std::memcpy(dst, pixels, staging);
+        if (!expand) {
+            // No channel-count change: copy (repacking rows for UNPACK padding).
+            char* d8 = (char*)dst;
+            const char* s8 = (const char*)pixels;
+            if (src_stride == src_tight_row) {
+                std::memcpy(d8, s8, staging);
+            } else {
+                for (int layer = 0; layer < d; ++layer) {
+                    for (int row = 0; row < h; ++row) {
+                        std::memcpy(d8, s8, src_tight_row);
+                        d8 += src_tight_row;
+                        s8 += src_stride;
+                    }
+                }
+            }
         } else {
-            // Source rows carry GL_UNPACK_ALIGNMENT padding; repack to tight
-            // so VkBufferImageCopy.bufferRowLength == 0 (== w) is valid.
+            // Expand a 3-channel source into the 4-channel destination, filling
+            // alpha with opaque. Mirrors MobileGL's ExpandRgbSourceToRgba.
+            MITHRIL_LOG_INFO("vk",
+                "stage_and_copy_image: expanding %d-byte src fmt=0x%x -> %d-byte "
+                "VkFormat 0x%x (%dx%d level %d)",
+                src_bpp, (unsigned)format, dst_bpp, (unsigned)tex.format, w, h, level);
+            const bool bgr = (format == GL_BGR);
+            uint8_t alpha[4] = {0xFF, 0, 0, 0};
+            if (type == GL_HALF_FLOAT || type == GL_UNSIGNED_SHORT || type == GL_SHORT) {
+                alpha[0] = 0x00; alpha[1] = 0x3C;            // half float 1.0
+            } else if (type == GL_FLOAT || type == GL_UNSIGNED_INT || type == GL_INT ||
+                       type == GL_UNSIGNED_INT_8_8_8_8 || type == GL_UNSIGNED_INT_8_8_8_8_REV) {
+                alpha[0] = 0x00; alpha[1] = 0x00; alpha[2] = 0x80; alpha[3] = 0x3F; // float 1.0
+            }
             char* d8 = (char*)dst;
             const char* s8 = (const char*)pixels;
             for (int layer = 0; layer < d; ++layer) {
                 for (int row = 0; row < h; ++row) {
-                    std::memcpy(d8, s8, tight_row);
-                    d8 += tight_row;
+                    for (int col = 0; col < w; ++col) {
+                        const char* sp = s8 + (size_t)col * src_bpp;
+                        if (bgr && src_bpp == 3) {
+                            d8[0] = sp[2]; d8[1] = sp[1]; d8[2] = sp[0];
+                        } else {
+                            for (int c = 0; c < src_bpp; ++c) d8[c] = sp[c];
+                        }
+                        for (int a = 0; a < dst_bpp - src_bpp; ++a)
+                            d8[src_bpp + a] = (char)alpha[a];
+                        d8 += dst_bpp;
+                    }
                     s8 += src_stride;
                 }
             }
