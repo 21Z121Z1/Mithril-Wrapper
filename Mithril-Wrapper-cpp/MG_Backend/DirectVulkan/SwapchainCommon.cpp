@@ -50,7 +50,7 @@ Swapchain* create_swapchain_post_surface(VkSurfaceKHR surface, int width, int he
             break;
         }
     }
-    MITHRIL_LOG_INFO("vk", "Swapchain format selected: 0x%x (BGRA8%s) from %zu formats",
+    MITHRIL_LOG_WARN("vk", "Swapchain format selected: 0x%x (BGRA8%s) from %zu formats",
                      (unsigned)sc->format,
                      sc->format == VK_FORMAT_B8G8R8A8_SRGB ? "_SRGB" : "_UNORM",
                      fmts.size());
@@ -110,7 +110,7 @@ Swapchain* create_swapchain_post_surface(VkSurfaceKHR surface, int width, int he
     }
     sc->width = (int)extent.width;
     sc->height = (int)extent.height;
-    MITHRIL_LOG_INFO("vk", "Swapchain created: %dx%d images=%u fmt=0x%x presentMode=FIFO",
+    MITHRIL_LOG_WARN("vk", "Swapchain created: %dx%d images=%u fmt=0x%x presentMode=FIFO",
                      sc->width, sc->height, imgCount, (unsigned)sc->format);
 
     // Swapchain images + views.
@@ -324,7 +324,7 @@ void swapchain_present_and_acquire(Swapchain* sc) {
     {
         static int present_count = 0;
         if (present_count < 10) {
-            MITHRIL_LOG_INFO("vk", "swapchain_present_and_acquire #%d: "
+            MITHRIL_LOG_WARN("vk", "swapchain_present_and_acquire #%d: "
                               "currentImage=%d renderFinishedSignaled=%d "
                               "hasCommandsInFlight=%s",
                               present_count + 1, sc->currentImage,

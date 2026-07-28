@@ -52,7 +52,7 @@ void glClear(GLbitfield mask) {
     {
         static int clear_count = 0;
         if (clear_count < 10) {
-            MITHRIL_LOG_INFO("gl", "glClear(mask=0x%x) color=[%.3f,%.3f,%.3f,%.3f] "
+            MITHRIL_LOG_WARN("gl", "glClear(mask=0x%x) color=[%.3f,%.3f,%.3f,%.3f] "
                               "depth=%.3f stencil=%d attachments=%d size=%dx%d",
                               mask,
                               (double)g_state->clearColor[0],

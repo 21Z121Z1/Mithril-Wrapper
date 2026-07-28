@@ -323,7 +323,7 @@ void begin_render_pass(VkImageView* color_views, int color_count,
             if (e.loadClear) loadOpStr = "CLEAR";
             else if (swapchainColorWasUndefined) loadOpStr = "DONT_CARE(UNDEFINED)";
             else if (swapchainDepthWasUndefined) loadOpStr = "DONT_CARE(depth)";
-            MITHRIL_LOG_INFO("vk", "begin_render_pass #%d: loadOp=%s "
+            MITHRIL_LOG_WARN("vk", "begin_render_pass #%d: loadOp=%s "
                               "colorCount=%d depthView=%s size=%dx%d "
                               "swapchainFmt=0x%x(%s) swapchainWasUndef=%d",
                               pass_count + 1, loadOpStr,

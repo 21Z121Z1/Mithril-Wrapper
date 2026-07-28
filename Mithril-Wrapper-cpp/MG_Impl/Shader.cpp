@@ -593,7 +593,7 @@ bool glsl_to_spirv(GLenum gl_stage, const std::string& src,
             spv_opts2.disableOptimizer = false;
             glslang::GlslangToSpv(*inter2, spirv, &spv_opts2);
             if (spirv.empty()) { info = "SPIR-V generation produced no words (unwrapped retry)"; return false; }
-            MITHRIL_LOG_INFO("shader", "glsl_to_spirv (unwrapped retry) stage=0x%x -> %zu SPIR-V words",
+            MITHRIL_LOG_WARN("shader", "glsl_to_spirv (unwrapped retry) stage=0x%x -> %zu SPIR-V words",
                              (unsigned)gl_stage, spirv.size());
             return true;
         }
@@ -629,7 +629,7 @@ bool glsl_to_spirv(GLenum gl_stage, const std::string& src,
     spv_opts.disableOptimizer = false;
     glslang::GlslangToSpv(*inter, spirv, &spv_opts);
     if (spirv.empty()) { info = "SPIR-V generation produced no words"; return false; }
-    MITHRIL_LOG_INFO("shader", "glsl_to_spirv stage=0x%x -> %zu SPIR-V words",
+    MITHRIL_LOG_WARN("shader", "glsl_to_spirv stage=0x%x -> %zu SPIR-V words",
                      (unsigned)gl_stage, spirv.size());
     return true;
 }

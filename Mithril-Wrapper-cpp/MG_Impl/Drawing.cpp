@@ -53,7 +53,7 @@ static void prepare_draw(GLenum mode) {
         static std::unordered_map<GLuint, int> draw_counts;
         int& c = draw_counts[prog->id];
         if (c < 5) {
-            MITHRIL_LOG_INFO("gl", "prepare_draw: program=%u mode=0x%x draw#%d "
+            MITHRIL_LOG_WARN("gl", "prepare_draw: program=%u mode=0x%x draw#%d "
                               "(vs_spv=%zu fs_spv=%zu)",
                               prog->id, mode, c + 1,
                               prog->vertexSpirv.size(),

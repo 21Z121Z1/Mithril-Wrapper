@@ -247,7 +247,7 @@ void install_surface_on_state(EglSurface* s) {
         // Log surface state so developers can trace the swapchain format and
         // dimensions that GL commands will render into. The format is critical
         // for diagnosing BGRA vs RGBA channel-swap issues (red/blue tint).
-        MITHRIL_LOG_INFO("egl", "install_surface: size=%dx%d fmt=0x%x depth=%s "
+        MITHRIL_LOG_WARN("egl", "install_surface: size=%dx%d fmt=0x%x depth=%s "
                           "colorView=%p depthView=%p",
                           s->width, s->height,
                           (unsigned)g_state->eglDefaultColorFormat,
@@ -767,7 +767,7 @@ EGLBoolean eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
             if (swap_count < 10) {
                 int w = backend_swapchain_width(s->swapchain_state);
                 int h = backend_swapchain_height(s->swapchain_state);
-                MITHRIL_LOG_INFO("egl", "eglSwapBuffers #%d: swapchain=%dx%d "
+                MITHRIL_LOG_WARN("egl", "eglSwapBuffers #%d: swapchain=%dx%d "
                                   "firstFrame=%d",
                                   swap_count + 1, w, h, (int)s->firstFrame);
                 swap_count++;
