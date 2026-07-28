@@ -15,6 +15,10 @@
 
 #include <vulkan/vulkan.h>
 
+#include <vector>
+
+#include "Resources.h"
+
 namespace mithril {
 namespace vk {
 
@@ -92,6 +96,30 @@ struct Backend {
     VkDeviceMemory   dummyTextureMemory = VK_NULL_HANDLE;
     VkImageView      dummyTextureView = VK_NULL_HANDLE;
     VkSampler        dummyTextureSampler = VK_NULL_HANDLE;
+
+    // Tracks whether the dummy texture's layout transition barrier
+    // (UNDEFINED -> SHADER_READ_ONLY_OPTIMAL) has been RECORDED into the
+    // current command buffer AND successfully submitted. Reset to false on
+    // command buffer reset (submit failure / swapchain rebuild) so the
+    // barrier is re-recorded next time. Previously a function-level static
+    // in DescriptorSet.cpp — but static state survives vkResetCommandBuffer,
+    // leaving the flag true after a failed submit while the barrier was
+    // discarded, causing subsequent frames to reference the dummy image with
+    // SHADER_READ_ONLY_OPTIMAL layout while it was still UNDEFINED ->
+    // kIOGPUCommandBufferCallbackErrorInvalidResource.
+    bool             dummyTextureLayoutInitialized = false;
+
+    // Deferred-release queues. When a GL texture/buffer is deleted mid-frame,
+    // the underlying VkImage/VkBuffer cannot be destroyed immediately because
+    // the current command buffer may still reference them. Instead, the entry
+    // is moved here and actually destroyed after the next successful
+    // vkQueueSubmit + vkWaitForFences (commit_frame success path), or on
+    // shutdown_device / drain_and_detach_swapchain. Without this queue, the
+    // current frame's submit fails with kIOGPUCommandBufferCallbackErrorInvalidResource
+    // because the IOSurface backing the deleted image was freed while the GPU
+    // was still reading it.
+    std::vector<BufferEntry>  pendingBufferReleases;
+    std::vector<TextureEntry> pendingTextureReleases;
 
     // 持久性 GPU 故障检测。vkQueueSubmit / vkQueuePresentKHR 致命失败时自增
     // consecutiveSubmitFailures，成功时清零。≥3 时置 deviceLost=true。

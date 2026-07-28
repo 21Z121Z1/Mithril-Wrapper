@@ -305,8 +305,11 @@ void bind_program_descriptors(GLuint program) {
                         // init_device() 不再录制此命令（避免 init command buffer
                         // 混入可能引发 InvalidResource 的命令）。后续使用直接以
                         // SHADER_READ_ONLY_OPTIMAL 填充，不重复 transition。
-                        static bool dummyTextureLayoutInitialized = false;
-                        if (!dummyTextureLayoutInitialized) {
+                        // 标志存储在 Backend 成员而非 static bool，确保 command
+                        // buffer reset（submit 失败）时能被重置，否则 barrier 丢失
+                        // 后标志仍为 true，后续帧以错误 layout 引用 dummy image →
+                        // kIOGPUCommandBufferCallbackErrorInvalidResource。
+                        if (!b->dummyTextureLayoutInitialized) {
                             VkImageMemoryBarrier dbar{};
                             dbar.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
                             dbar.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -325,7 +328,7 @@ void bind_program_descriptors(GLuint program) {
                                                  VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                                                  VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
                                                  0, nullptr, 0, nullptr, 1, &dbar);
-                            dummyTextureLayoutInitialized = true;
+                            b->dummyTextureLayoutInitialized = true;
                         }
                         VkDescriptorImageInfo ii{};
                         ii.sampler = b->dummyTextureSampler;

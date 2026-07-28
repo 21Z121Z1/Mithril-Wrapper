@@ -68,21 +68,33 @@ bool create_buffer(BufferEntry& out, VkDeviceSize size,
 void destroy_buffer_entry(BufferEntry& e) {
     Backend* b = backend();
     if (!b->device) return;
+    // Unmap immediately — mappings cannot outlive the frame in MoltenVK.
     if (e.mapped) { vkUnmapMemory(b->device, e.memory); e.mapped = nullptr; }
-    if (e.buffer) { vkDestroyBuffer(b->device, e.buffer, nullptr); e.buffer = VK_NULL_HANDLE; }
-    if (e.memory) { vkFreeMemory(b->device, e.memory, nullptr); e.memory = VK_NULL_HANDLE; }
-    e.size = 0;
+    if (e.buffer == VK_NULL_HANDLE && e.memory == VK_NULL_HANDLE) {
+        e.size = 0;
+        return;
+    }
+    // Defer actual vkDestroyBuffer / vkFreeMemory until the next successful
+    // frame boundary (commit_frame success path). The current command buffer
+    // may still reference this buffer; destroying it now would cause
+    // kIOGPUCommandBufferCallbackErrorInvalidResource at submit time.
+    b->pendingBufferReleases.push_back(std::move(e));
+    e = BufferEntry{};
 }
 
 void destroy_texture_entry(TextureEntry& e) {
     Backend* b = backend();
     if (!b->device) return;
-    if (e.view)          { vkDestroyImageView(b->device, e.view, nullptr); e.view = VK_NULL_HANDLE; }
-    if (e.image)         { vkDestroyImage(b->device, e.image, nullptr); e.image = VK_NULL_HANDLE; }
-    if (e.memory)        { vkFreeMemory(b->device, e.memory, nullptr); e.memory = VK_NULL_HANDLE; }
-    if (e.stagingBuffer) { vkDestroyBuffer(b->device, e.stagingBuffer, nullptr); e.stagingBuffer = VK_NULL_HANDLE; }
-    if (e.stagingMemory) { vkFreeMemory(b->device, e.stagingMemory, nullptr); e.stagingMemory = VK_NULL_HANDLE; }
-    e.stagingSize = 0;
+    if (e.image == VK_NULL_HANDLE && e.memory == VK_NULL_HANDLE && e.view == VK_NULL_HANDLE &&
+        e.stagingBuffer == VK_NULL_HANDLE && e.stagingMemory == VK_NULL_HANDLE) {
+        return;
+    }
+    // Defer actual vkDestroy* / vkFreeMemory until the next successful frame
+    // boundary. The current command buffer may still reference this image
+    // (e.g. as a shader sampling target); destroying it now would cause
+    // kIOGPUCommandBufferCallbackErrorInvalidResource at submit time.
+    b->pendingTextureReleases.push_back(std::move(e));
+    e = TextureEntry{};
 }
 
 // ---- GL internalFormat -> VkFormat / host texel bytes / aspect mask ----

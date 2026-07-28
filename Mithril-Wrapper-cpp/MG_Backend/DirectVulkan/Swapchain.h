@@ -29,11 +29,13 @@ struct Swapchain {
     std::vector<VkImage>     images;
     std::vector<VkImageView> views;
 
-    // Depth/stencil image (VK_FORMAT_D32_SFLOAT_S8_UINT) + view. Allocated
-    // when the EGLConfig requests depth/stencil.
-    VkImage        depthImage = VK_NULL_HANDLE;
-    VkDeviceMemory depthMemory = VK_NULL_HANDLE;
-    VkImageView    depthView = VK_NULL_HANDLE;
+    // Per-swapchain-image depth/stencil images (VK_FORMAT_D32_SFLOAT_S8_UINT)
+    // + views. One per swapchain image so that render passes targeting
+    // different swapchain images do not race on a shared depth attachment.
+    // Allocated when the EGLConfig requests depth/stencil.
+    std::vector<VkImage>        depthImages;
+    std::vector<VkDeviceMemory> depthMemories;
+    std::vector<VkImageView>    depthViews;
 
     // Index of the currently-acquired image. -1 when none acquired.
     int             currentImage = -1;
@@ -83,10 +85,10 @@ struct Swapchain {
     // COLOR_ATTACHMENT_OPTIMAL and MoltenVK behaviour is undefined -> black screen.
     VkImageLayout   currentColorLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
-    // One-shot flag: depth image transitions UNDEFINED ->
-    // DEPTH_STENCIL_ATTACHMENT_OPTIMAL on first use, then stays there for the
-    // swapchain's lifetime (the depth image is never presented).
-    bool            depthLayoutInitialized = false;
+    // One-shot flag PER depth image: transitions UNDEFINED ->
+    // DEPTH_STENCIL_ATTACHMENT_OPTIMAL on first use, then stays there for
+    // the image's lifetime (depth images are never presented).
+    std::vector<bool>           depthLayoutInitialized;
 
     // Sticky error flag: set when vkAcquireNextImageKHR or vkQueuePresentKHR
     // returns a fatal error (VK_ERROR_OUT_OF_DEVICE_MEMORY,

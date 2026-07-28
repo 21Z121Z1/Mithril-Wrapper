@@ -123,7 +123,9 @@ VkFormat backend_swapchain_color_format(void* swapchain_state) {
 
 VkImage backend_swapchain_current_depth_image(void* swapchain_state) {
     auto* sc = (mithril::vk::Swapchain*)swapchain_state;
-    return sc ? sc->depthImage : VK_NULL_HANDLE;
+    if (!sc || sc->currentImage < 0 || sc->currentImage >= (int)sc->depthImages.size())
+        return VK_NULL_HANDLE;
+    return sc->depthImages[sc->currentImage];
 }
 
 VkFormat backend_swapchain_depth_format(void* swapchain_state) {

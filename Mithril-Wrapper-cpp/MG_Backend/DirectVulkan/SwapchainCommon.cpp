@@ -141,72 +141,84 @@ Swapchain* create_swapchain_post_surface(VkSurfaceKHR surface, int width, int he
     // Depth/stencil image (VK_FORMAT_D32_SFLOAT_S8_UINT).
     if (want_depth_stencil) {
         VkFormat depthFmt = VK_FORMAT_D32_SFLOAT_S8_UINT;
-        VkImageCreateInfo dici{};
-        dici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-        dici.imageType = VK_IMAGE_TYPE_2D;
-        dici.format = depthFmt;
-        dici.extent = { (uint32_t)sc->width, (uint32_t)sc->height, 1 };
-        dici.mipLevels = 1;
-        dici.arrayLayers = 1;
-        dici.samples = VK_SAMPLE_COUNT_1_BIT;
-        dici.tiling = VK_IMAGE_TILING_OPTIMAL;
-        dici.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
-        dici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-        dici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        if (vkCreateImage(b->device, &dici, nullptr, &sc->depthImage) == VK_SUCCESS) {
+        sc->depthImages.resize(imgCount2);
+        sc->depthMemories.resize(imgCount2);
+        sc->depthViews.resize(imgCount2);
+        sc->depthLayoutInitialized.assign(imgCount2, false);
+        for (uint32_t i = 0; i < imgCount2; ++i) {
+            VkImageCreateInfo dici{};
+            dici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+            dici.imageType = VK_IMAGE_TYPE_2D;
+            dici.format = depthFmt;
+            dici.extent = { (uint32_t)sc->width, (uint32_t)sc->height, 1 };
+            dici.mipLevels = 1;
+            dici.arrayLayers = 1;
+            dici.samples = VK_SAMPLE_COUNT_1_BIT;
+            dici.tiling = VK_IMAGE_TILING_OPTIMAL;
+            dici.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+            dici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+            dici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            if (vkCreateImage(b->device, &dici, nullptr, &sc->depthImages[i]) != VK_SUCCESS) {
+                MITHRIL_LOG_WARN("vk", "swapchain depth[%u]: vkCreateImage failed", i);
+                sc->depthImages[i] = VK_NULL_HANDLE;
+                continue;
+            }
             VkMemoryRequirements req{};
-            vkGetImageMemoryRequirements(b->device, sc->depthImage, &req);
+            vkGetImageMemoryRequirements(b->device, sc->depthImages[i], &req);
             uint32_t mt = find_memory_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-            // SubTask 1.1: find_memory_type failure → skip entire depth
-            // creation (no view). Without this, vkAllocateMemory would be
-            // called with memoryTypeIndex=0xFFFFFFFFu and likely fail, but
-            // the previous code still created a view on the unbound image —
-            // the root cause of kIOGPUCommandBufferCallbackErrorInvalidResource.
+            // find_memory_type failure → skip this slot (no view). Without
+            // this, vkAllocateMemory would be called with
+            // memoryTypeIndex=0xFFFFFFFFu and likely fail, but the previous
+            // code still created a view on the unbound image — the root
+            // cause of kIOGPUCommandBufferCallbackErrorInvalidResource.
             if (mt == 0xFFFFFFFFu) {
-                MITHRIL_LOG_WARN("vk", "swapchain depth: find_memory_type returned invalid "
+                MITHRIL_LOG_WARN("vk", "swapchain depth[%u]: find_memory_type invalid "
                                  "(memoryTypeBits=0x%x) — skipping depth attachment",
-                                 (unsigned)req.memoryTypeBits);
-            } else {
-                VkMemoryAllocateInfo ai{};
-                ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-                ai.allocationSize = req.size;
-                ai.memoryTypeIndex = mt;
-                // SubTask 1.2 & 1.3: only create the view after BOTH
-                // vkAllocateMemory and vkBindImageMemory succeed — a view
-                // on an unbound VkImage has no backing storage and triggers
-                // InvalidResource at submit time.
-                if (vkAllocateMemory(b->device, &ai, nullptr, &sc->depthMemory) != VK_SUCCESS) {
-                    MITHRIL_LOG_WARN("vk", "swapchain depth: vkAllocateMemory failed — "
-                                     "skipping depth view (image has no memory)");
-                } else {
-                    VkResult bindRc = vkBindImageMemory(b->device, sc->depthImage, sc->depthMemory, 0);
-                    if (bindRc != VK_SUCCESS) {
-                        MITHRIL_LOG_WARN("vk", "swapchain depth: vkBindImageMemory failed (rc=%d) "
-                                         "— skipping depth view (image has no memory)",
-                                         (int)bindRc);
-                    } else {
-                        VkImageViewCreateInfo dvci{};
-                        dvci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-                        dvci.image = sc->depthImage;
-                        dvci.viewType = VK_IMAGE_VIEW_TYPE_2D;
-                        dvci.format = depthFmt;
-                        dvci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
-                        dvci.subresourceRange.baseMipLevel = 0;
-                        dvci.subresourceRange.levelCount = 1;
-                        dvci.subresourceRange.baseArrayLayer = 0;
-                        dvci.subresourceRange.layerCount = 1;
-                        // SubTask 1.4: check view creation; on failure keep
-                        // depthView = VK_NULL_HANDLE so begin_render_pass
-                        // omits the depth attachment and renders color-only.
-                        VkResult viewRc = vkCreateImageView(b->device, &dvci, nullptr, &sc->depthView);
-                        if (viewRc != VK_SUCCESS) {
-                            MITHRIL_LOG_WARN("vk", "swapchain depth: vkCreateImageView failed (rc=%d) "
-                                             "— depthView stays VK_NULL_HANDLE",
-                                             (int)viewRc);
-                            sc->depthView = VK_NULL_HANDLE;
-                        }
-                    }
-                }
+                                 i, (unsigned)req.memoryTypeBits);
+                vkDestroyImage(b->device, sc->depthImages[i], nullptr);
+                sc->depthImages[i] = VK_NULL_HANDLE;
+                continue;
+            }
+            VkMemoryAllocateInfo ai{};
+            ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+            ai.allocationSize = req.size;
+            ai.memoryTypeIndex = mt;
+            // Only create the view after BOTH vkAllocateMemory and
+            // vkBindImageMemory succeed — a view on an unbound VkImage has
+            // no backing storage and triggers InvalidResource at submit.
+            if (vkAllocateMemory(b->device, &ai, nullptr, &sc->depthMemories[i]) != VK_SUCCESS) {
+                MITHRIL_LOG_WARN("vk", "swapchain depth[%u]: vkAllocateMemory failed — "
+                                 "skipping depth view (image has no memory)", i);
+                vkDestroyImage(b->device, sc->depthImages[i], nullptr);
+                sc->depthImages[i] = VK_NULL_HANDLE;
+                continue;
+            }
+            if (vkBindImageMemory(b->device, sc->depthImages[i], sc->depthMemories[i], 0) != VK_SUCCESS) {
+                MITHRIL_LOG_WARN("vk", "swapchain depth[%u]: vkBindImageMemory failed — "
+                                 "skipping depth view (image has no memory)", i);
+                vkFreeMemory(b->device, sc->depthMemories[i], nullptr);
+                sc->depthMemories[i] = VK_NULL_HANDLE;
+                vkDestroyImage(b->device, sc->depthImages[i], nullptr);
+                sc->depthImages[i] = VK_NULL_HANDLE;
+                continue;
+            }
+            VkImageViewCreateInfo dvci{};
+            dvci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+            dvci.image = sc->depthImages[i];
+            dvci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+            dvci.format = depthFmt;
+            dvci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
+            dvci.subresourceRange.baseMipLevel = 0;
+            dvci.subresourceRange.levelCount = 1;
+            dvci.subresourceRange.baseArrayLayer = 0;
+            dvci.subresourceRange.layerCount = 1;
+            // Check view creation; on failure keep depthViews[i] =
+            // VK_NULL_HANDLE so begin_render_pass omits the depth attachment
+            // for this slot and renders color-only.
+            if (vkCreateImageView(b->device, &dvci, nullptr, &sc->depthViews[i]) != VK_SUCCESS) {
+                MITHRIL_LOG_WARN("vk", "swapchain depth[%u]: vkCreateImageView failed — "
+                                 "depthViews[%u] stays VK_NULL_HANDLE", i, i);
+                sc->depthViews[i] = VK_NULL_HANDLE;
             }
         }
     }
@@ -219,9 +231,13 @@ void destroy_swapchain(Swapchain* sc) {
     Backend* b = backend();
     if (!b->device) { delete sc; return; }
     vkDeviceWaitIdle(b->device);
-    if (sc->depthView)   { vkDestroyImageView(b->device, sc->depthView, nullptr); sc->depthView = VK_NULL_HANDLE; }
-    if (sc->depthImage)  { vkDestroyImage(b->device, sc->depthImage, nullptr); sc->depthImage = VK_NULL_HANDLE; }
-    if (sc->depthMemory) { vkFreeMemory(b->device, sc->depthMemory, nullptr); sc->depthMemory = VK_NULL_HANDLE; }
+    for (auto& v : sc->depthViews)    if (v) vkDestroyImageView(b->device, v, nullptr);
+    for (auto& img : sc->depthImages) if (img) vkDestroyImage(b->device, img, nullptr);
+    for (auto& m : sc->depthMemories) if (m) vkFreeMemory(b->device, m, nullptr);
+    sc->depthViews.clear();
+    sc->depthImages.clear();
+    sc->depthMemories.clear();
+    sc->depthLayoutInitialized.clear();
     for (auto& v : sc->views) if (v) vkDestroyImageView(b->device, v, nullptr);
     sc->views.clear();
     sc->images.clear();
@@ -286,7 +302,9 @@ VkImageView swapchain_acquire_color(Swapchain* sc) {
 }
 
 VkImageView swapchain_acquire_depth(Swapchain* sc) {
-    return sc ? sc->depthView : VK_NULL_HANDLE;
+    if (!sc) return VK_NULL_HANDLE;
+    if (sc->currentImage < 0 || sc->currentImage >= (int)sc->depthViews.size()) return VK_NULL_HANDLE;
+    return sc->depthViews[sc->currentImage];
 }
 
 void swapchain_present_and_acquire(Swapchain* sc) {

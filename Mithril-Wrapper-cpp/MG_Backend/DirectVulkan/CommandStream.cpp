@@ -229,16 +229,21 @@ void begin_render_pass(VkImageView* color_views, int color_count,
                 sc->currentColorLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
             }
         }
-        // Depth: one-shot UNDEFINED -> DEPTH_STENCIL_ATTACHMENT_OPTIMAL.
-        if (sc->depthImage != VK_NULL_HANDLE && sc->depthView != VK_NULL_HANDLE &&
-            e.depthView == sc->depthView && !sc->depthLayoutInitialized) {
-            record_layout_barrier(b->commandBuffer,
-                                  sc->depthImage, VK_FORMAT_D32_SFLOAT_S8_UINT,
-                                  VK_IMAGE_LAYOUT_UNDEFINED,
-                                  VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-                                  /*isDepthStencil=*/true);
-            sc->depthLayoutInitialized = true;
-            swapchainDepthWasUndefined = true;
+        // Depth: one-shot UNDEFINED -> DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+        // per-swapchain-image (each swapchain image has its own depth image).
+        if (sc->currentImage >= 0 && sc->currentImage < (int)sc->depthImages.size()) {
+            VkImage depthImg = sc->depthImages[sc->currentImage];
+            VkImageView depthVw = sc->depthViews[sc->currentImage];
+            if (depthImg != VK_NULL_HANDLE && depthVw != VK_NULL_HANDLE &&
+                e.depthView == depthVw && !sc->depthLayoutInitialized[sc->currentImage]) {
+                record_layout_barrier(b->commandBuffer,
+                                      depthImg, VK_FORMAT_D32_SFLOAT_S8_UINT,
+                                      VK_IMAGE_LAYOUT_UNDEFINED,
+                                      VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                                      /*isDepthStencil=*/true);
+                sc->depthLayoutInitialized[sc->currentImage] = true;
+                swapchainDepthWasUndefined = true;
+            }
         }
     }
 
@@ -518,6 +523,13 @@ void commit_frame() {
             // failure) — correct, the next submit should still wait.
             sc->needsRebuild = true;
         }
+        // Reset the dummy texture layout flag: the command buffer is about to
+        // be reset, discarding any recorded layout-transition barrier for the
+        // dummy texture. Without this reset, the flag stays true and the next
+        // frame will skip the barrier, referencing the dummy image with
+        // SHADER_READ_ONLY_OPTIMAL layout while it is still UNDEFINED ->
+        // kIOGPUCommandBufferCallbackErrorInvalidResource.
+        b->dummyTextureLayoutInitialized = false;
         // Reset+begin so the next frame has a recording buffer.
         vkResetCommandBuffer(b->commandBuffer, 0);
         VkCommandBufferBeginInfo rbi{};
@@ -541,6 +553,27 @@ void commit_frame() {
 
     // Wait on the frame we just submitted so the command buffer is reusable.
     vkWaitForFences(b->device, 1, &fence, VK_TRUE, UINT64_MAX);
+
+    // ---- Drain deferred-release queues ----
+    // Now that vkWaitForFences has completed, the GPU is done with all
+    // command buffers from the previous frame. Any textures/buffers that
+    // were deleted mid-frame (and whose entries were moved to the pending
+    // queues by destroy_buffer_entry / destroy_texture_entry) can finally
+    // be safely destroyed — the GPU no longer references them.
+    for (auto& entry : b->pendingBufferReleases) {
+        if (entry.buffer)  { vkDestroyBuffer(b->device, entry.buffer, nullptr); }
+        if (entry.memory)  { vkFreeMemory(b->device, entry.memory, nullptr); }
+    }
+    b->pendingBufferReleases.clear();
+    for (auto& entry : b->pendingTextureReleases) {
+        if (entry.view)          { vkDestroyImageView(b->device, entry.view, nullptr); }
+        if (entry.image)         { vkDestroyImage(b->device, entry.image, nullptr); }
+        if (entry.memory)        { vkFreeMemory(b->device, entry.memory, nullptr); }
+        if (entry.stagingBuffer) { vkDestroyBuffer(b->device, entry.stagingBuffer, nullptr); }
+        if (entry.stagingMemory) { vkFreeMemory(b->device, entry.stagingMemory, nullptr); }
+    }
+    b->pendingTextureReleases.clear();
+
     b->currentFrame = (b->currentFrame + 1) % kMaxFramesInFlight;
     // Monotonic generation bump: descriptor pools are reset on first draw of
     // each generation (see DescriptorSet.cpp), so this must advance every frame
@@ -595,6 +628,23 @@ void drain_and_detach_swapchain() {
     end_render_pass();
     commit_frame();
     vkDeviceWaitIdle(b->device);
+    // Drain deferred-release queues. The GPU is now idle, so any textures/
+    // buffers deleted mid-frame (whose entries were moved to the pending
+    // queues by destroy_buffer_entry / destroy_texture_entry) can be safely
+    // destroyed before the swapchain is rebuilt/resized.
+    for (auto& entry : b->pendingBufferReleases) {
+        if (entry.buffer)  { vkDestroyBuffer(b->device, entry.buffer, nullptr); }
+        if (entry.memory)  { vkFreeMemory(b->device, entry.memory, nullptr); }
+    }
+    b->pendingBufferReleases.clear();
+    for (auto& entry : b->pendingTextureReleases) {
+        if (entry.view)          { vkDestroyImageView(b->device, entry.view, nullptr); }
+        if (entry.image)         { vkDestroyImage(b->device, entry.image, nullptr); }
+        if (entry.memory)        { vkFreeMemory(b->device, entry.memory, nullptr); }
+        if (entry.stagingBuffer) { vkDestroyBuffer(b->device, entry.stagingBuffer, nullptr); }
+        if (entry.stagingMemory) { vkFreeMemory(b->device, entry.stagingMemory, nullptr); }
+    }
+    b->pendingTextureReleases.clear();
     set_active_swapchain(nullptr);
 }
 

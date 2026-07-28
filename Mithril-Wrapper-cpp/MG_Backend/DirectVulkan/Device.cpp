@@ -416,6 +416,23 @@ void shutdown_device() {
     Backend* b = backend();
     if (!b->initialized) return;
     if (b->device) vkDeviceWaitIdle(b->device);
+    // Drain deferred-release queues before tearing down per-resource state.
+    // Any textures/buffers deleted mid-frame are still pending in these
+    // queues; the GPU is now idle (vkDeviceWaitIdle above) so they can be
+    // safely destroyed. Must run before the device is destroyed.
+    for (auto& entry : b->pendingBufferReleases) {
+        if (entry.buffer)  { vkDestroyBuffer(b->device, entry.buffer, nullptr); }
+        if (entry.memory)  { vkFreeMemory(b->device, entry.memory, nullptr); }
+    }
+    b->pendingBufferReleases.clear();
+    for (auto& entry : b->pendingTextureReleases) {
+        if (entry.view)          { vkDestroyImageView(b->device, entry.view, nullptr); }
+        if (entry.image)         { vkDestroyImage(b->device, entry.image, nullptr); }
+        if (entry.memory)        { vkFreeMemory(b->device, entry.memory, nullptr); }
+        if (entry.stagingBuffer) { vkDestroyBuffer(b->device, entry.stagingBuffer, nullptr); }
+        if (entry.stagingMemory) { vkFreeMemory(b->device, entry.stagingMemory, nullptr); }
+    }
+    b->pendingTextureReleases.clear();
     if (b->pipelineCache) { vkDestroyPipelineCache(b->device, b->pipelineCache, nullptr); b->pipelineCache = VK_NULL_HANDLE; }
     for (int i = 0; i < kMaxFramesInFlight; ++i) {
         if (b->frameFences[i]) { vkDestroyFence(b->device, b->frameFences[i], nullptr); b->frameFences[i] = VK_NULL_HANDLE; }
