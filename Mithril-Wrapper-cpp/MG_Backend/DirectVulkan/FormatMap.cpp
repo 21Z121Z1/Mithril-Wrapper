@@ -134,41 +134,51 @@ int vk_format_texel_bytes(VkFormat fmt) {
         case VK_FORMAT_B8G8R8_UNORM:
         case VK_FORMAT_B8G8R8_SNORM:
         case VK_FORMAT_B8G8R8_SRGB:
+            return 3; // 3-byte; callers expand to 4 when used as upload target
         case VK_FORMAT_R16G16B16_UNORM:
+        case VK_FORMAT_R16G16B16_SNORM:
         case VK_FORMAT_R16G16B16_SFLOAT:
-        case VK_FORMAT_R32G32B32_UNORM:
+            return 6;
+        case VK_FORMAT_R32G32B32_UINT:
+        case VK_FORMAT_R32G32B32_SINT:
         case VK_FORMAT_R32G32B32_SFLOAT:
-        case VK_FORMAT_D24_UNORM_S8_UINT:
-        case VK_FORMAT_D32_SFLOAT_S8_UINT:
-            return 3; // logical 3-byte; callers expand to 4 when used as upload target
+            return 12;
         case VK_FORMAT_R16G16B16A16_UNORM:
         case VK_FORMAT_R16G16B16A16_SNORM:
+        case VK_FORMAT_R16G16B16A16_UINT:
+        case VK_FORMAT_R16G16B16A16_SINT:
         case VK_FORMAT_R16G16B16A16_SFLOAT:
             return 8;
-        case VK_FORMAT_R32G32B32A32_UNORM:
-        case VK_FORMAT_R32G32B32A32_SNORM:
-        case VK_FORMAT_R32G32B32A32_SFLOAT:
         case VK_FORMAT_R32G32B32A32_UINT:
         case VK_FORMAT_R32G32B32A32_SINT:
+        case VK_FORMAT_R32G32B32A32_SFLOAT:
             return 16;
         case VK_FORMAT_R32_SFLOAT:
         case VK_FORMAT_R32_UINT:
         case VK_FORMAT_R32_SINT:
         case VK_FORMAT_D32_SFLOAT:
-        case VK_FORMAT_R11G11B10_UFLOAT_PACK32:
+        case VK_FORMAT_D24_UNORM_S8_UINT:
+        case VK_FORMAT_B10G11R11_UFLOAT_PACK32:
         case VK_FORMAT_A2B10G10R10_UNORM_PACK32:
         case VK_FORMAT_A2B10G10R10_UINT_PACK32:
             return 4;
+        case VK_FORMAT_D32_SFLOAT_S8_UINT:
+            return 8;
         case VK_FORMAT_BC1_RGBA_UNORM_BLOCK:
         case VK_FORMAT_BC1_RGBA_SRGB_BLOCK:
         case VK_FORMAT_BC4_UNORM_BLOCK:
         case VK_FORMAT_BC4_SNORM_BLOCK:
             return 1; // block-compressed (not used for client-side uploads)
         case VK_FORMAT_BC2_UNORM_BLOCK:
+        case VK_FORMAT_BC2_SRGB_BLOCK:
         case VK_FORMAT_BC3_UNORM_BLOCK:
+        case VK_FORMAT_BC3_SRGB_BLOCK:
         case VK_FORMAT_BC5_UNORM_BLOCK:
-        case VK_FORMAT_BC6H_UNORM_BLOCK:
+        case VK_FORMAT_BC5_SNORM_BLOCK:
+        case VK_FORMAT_BC6H_UFLOAT_BLOCK:
+        case VK_FORMAT_BC6H_SFLOAT_BLOCK:
         case VK_FORMAT_BC7_UNORM_BLOCK:
+        case VK_FORMAT_BC7_SRGB_BLOCK:
             return 2; // block-compressed (not used for client-side uploads)
         default:
             return 4;
