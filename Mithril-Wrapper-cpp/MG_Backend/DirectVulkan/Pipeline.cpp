@@ -199,8 +199,15 @@ std::vector<uint32_t> reflect_vertex_input_locations(const uint32_t* spirv, int 
             uint32_t loc = compiler.get_decoration(r.id, spv::DecorationLocation);
             out.push_back(loc);
         }
-    } catch (const std::exception&) {
+    } catch (const std::exception& e) {
         // Malformed SPIR-V — return empty; pipeline creation will fail later.
+        // Throttled diagnostic: helps distinguish "reflection failed → empty vector"
+        // from "reflection succeeded but MSL still missing attribute".
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            MITHRIL_LOG_WARN("vk", "reflect_vertex_input_locations failed: %s", e.what());
+        }
     }
     return out;
 }

@@ -581,6 +581,11 @@ bool glsl_to_spirv(GLenum gl_stage, const std::string& src,
                 info += program2.getInfoDebugLog();
                 return false;
             }
+            if (!program2.mapIO()) {
+                info = "glslang mapIO failed: " + program2.getInfoLog();
+                info += program2.getInfoDebugLog();
+                return false;
+            }
             glslang::TIntermediate* inter2 = program2.getIntermediate(stage);
             if (!inter2) { info = "no intermediate after link (unwrapped retry)"; return false; }
             glslang::SpvOptions spv_opts2;
@@ -596,6 +601,19 @@ bool glsl_to_spirv(GLenum gl_stage, const std::string& src,
     program.addShader(&shader);
     if (!program.link(messages)) {
         info = program.getInfoLog();
+        info += program.getInfoDebugLog();
+        return false;
+    }
+
+    // glslang's TProgram::link() does NOT run auto-location mapping. setAutoMapLocations(true)
+    // only takes effect when mapIO() is invoked, which calls TDefaultGlslIoResolver::
+    // resolveInOutLocation to assign locations to in/out variables lacking explicit
+    // layout(location=N). Without this, SPIR-V stage_input vars have no DecorationLocation,
+    // and MoltenVK's SPIRV-Cross emits [[stage_in]] struct fields without [[attribute(N)]],
+    // causing Metal compile errors. Mirrors MobileGL's ShaderCompiler.cpp which calls
+    // program->mapIO() after link().
+    if (!program.mapIO()) {
+        info = "glslang mapIO failed: " + program.getInfoLog();
         info += program.getInfoDebugLog();
         return false;
     }
