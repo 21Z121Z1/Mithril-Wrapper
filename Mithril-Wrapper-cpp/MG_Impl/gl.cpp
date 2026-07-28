@@ -46,6 +46,26 @@ void glClear(GLbitfield mask) {
     int w = 0, h = 0;
     int n = mithril::collect_draw_fbo_attachments(colors, &depth, &w, &h);
 
+    // Log clear operations so developers can correlate screen colors with
+    // GL state. Only log the first 10 clears per session to avoid flooding
+    // the log in apps that clear every frame.
+    {
+        static int clear_count = 0;
+        if (clear_count < 10) {
+            MITHRIL_LOG_INFO("gl", "glClear(mask=0x%x) color=[%.3f,%.3f,%.3f,%.3f] "
+                              "depth=%.3f stencil=%d attachments=%d size=%dx%d",
+                              mask,
+                              (double)g_state->clearColor[0],
+                              (double)g_state->clearColor[1],
+                              (double)g_state->clearColor[2],
+                              (double)g_state->clearColor[3],
+                              g_state->clearDepth,
+                              g_state->clearStencil,
+                              n, w, h);
+            clear_count++;
+        }
+    }
+
     // Clear uses the Clear load action for the requested buffers.
     backend_set_load_clear();
     backend_begin_render_pass(colors, n, depth, w, h, 1);

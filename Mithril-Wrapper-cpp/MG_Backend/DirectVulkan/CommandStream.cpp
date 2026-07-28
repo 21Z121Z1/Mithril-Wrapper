@@ -313,6 +313,29 @@ void begin_render_pass(VkImageView* color_views, int color_count,
     }
     if (fn) fn(b->commandBuffer, &ri);
 
+    // Log the first few render passes so developers can trace loadOp,
+    // attachment count, and format decisions — critical for diagnosing
+    // "red screen" / "black screen" / no-render issues.
+    {
+        static int pass_count = 0;
+        if (pass_count < 10) {
+            const char* loadOpStr = "LOAD";
+            if (e.loadClear) loadOpStr = "CLEAR";
+            else if (swapchainColorWasUndefined) loadOpStr = "DONT_CARE(UNDEFINED)";
+            else if (swapchainDepthWasUndefined) loadOpStr = "DONT_CARE(depth)";
+            MITHRIL_LOG_INFO("vk", "begin_render_pass #%d: loadOp=%s "
+                              "colorCount=%d depthView=%s size=%dx%d "
+                              "swapchainFmt=0x%x(%s) swapchainWasUndef=%d",
+                              pass_count + 1, loadOpStr,
+                              e.colorCount, depth_view ? "yes" : "no",
+                              width, height,
+                              (unsigned)(e.activeSwapchain ? e.activeSwapchain->format : 0u),
+                              e.activeSwapchain ? "BGRA8" : "none",
+                              (int)swapchainColorWasUndefined);
+            pass_count++;
+        }
+    }
+
     e.passActive = true;
     e.hasCommands = true;  // begin_render_pass recorded real commands
     e.loadClear = false;  // subsequent passes within the frame use LOAD

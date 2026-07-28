@@ -50,6 +50,10 @@ Swapchain* create_swapchain_post_surface(VkSurfaceKHR surface, int width, int he
             break;
         }
     }
+    MITHRIL_LOG_INFO("vk", "Swapchain format selected: 0x%x (BGRA8%s) from %zu formats",
+                     (unsigned)sc->format,
+                     sc->format == VK_FORMAT_B8G8R8A8_SRGB ? "_SRGB" : "_UNORM",
+                     fmts.size());
 
     // Surface capabilities.
     VkSurfaceCapabilitiesKHR caps{};
@@ -106,6 +110,8 @@ Swapchain* create_swapchain_post_surface(VkSurfaceKHR surface, int width, int he
     }
     sc->width = (int)extent.width;
     sc->height = (int)extent.height;
+    MITHRIL_LOG_INFO("vk", "Swapchain created: %dx%d images=%u fmt=0x%x presentMode=FIFO",
+                     sc->width, sc->height, imgCount, (unsigned)sc->format);
 
     // Swapchain images + views.
     uint32_t imgCount2 = 0;
@@ -311,7 +317,21 @@ void swapchain_present_and_acquire(Swapchain* sc) {
     if (!sc || !sc->swapchain) return;
     Backend* b = backend();
     if (b->deviceLost) {
-        return;  // 持久性故障已挂起，跳过 present
+        return;  // Persistent fault suspended, skip present
+    }
+
+    // Log first few presents so developers can trace the frame lifecycle.
+    {
+        static int present_count = 0;
+        if (present_count < 10) {
+            MITHRIL_LOG_INFO("vk", "swapchain_present_and_acquire #%d: "
+                              "currentImage=%d renderFinishedSignaled=%d "
+                              "hasCommandsInFlight=%s",
+                              present_count + 1, sc->currentImage,
+                              (int)sc->renderFinishedSignaled,
+                              sc->renderFinishedSignaled ? "yes" : "no");
+            present_count++;
+        }
     }
 
     if (sc->currentImage >= 0) {

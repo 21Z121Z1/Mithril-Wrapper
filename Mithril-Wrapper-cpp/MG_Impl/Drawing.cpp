@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <unordered_map>
 
 extern "C" {
 
@@ -42,6 +43,23 @@ static void prepare_draw(GLenum mode) {
                               prog->fragmentSpirv.size());
         }
         return;
+    }
+
+    // Log the first few draws of each program at INFO level so developers
+    // can trace which shader programs are active and how many primitives
+    // they draw. The counter is per-program and independent of the
+    // empty-SPIR-V / missing-VBO warning throttlers.
+    {
+        static std::unordered_map<GLuint, int> draw_counts;
+        int& c = draw_counts[prog->id];
+        if (c < 5) {
+            MITHRIL_LOG_INFO("gl", "prepare_draw: program=%u mode=0x%x draw#%d "
+                              "(vs_spv=%zu fs_spv=%zu)",
+                              prog->id, mode, c + 1,
+                              prog->vertexSpirv.size(),
+                              prog->fragmentSpirv.size());
+            c++;
+        }
     }
 
     // Resolve current draw FBO attachments (color + depth VkImageViews + size).

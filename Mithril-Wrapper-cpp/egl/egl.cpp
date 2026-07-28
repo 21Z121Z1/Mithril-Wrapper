@@ -244,6 +244,15 @@ void install_surface_on_state(EglSurface* s) {
         g_state->eglDefaultDepthFormat  = backend_swapchain_depth_format(s->swapchain_state);
         g_state->eglDefaultWidth  = s->width;
         g_state->eglDefaultHeight = s->height;
+        // Log surface state so developers can trace the swapchain format and
+        // dimensions that GL commands will render into. The format is critical
+        // for diagnosing BGRA vs RGBA channel-swap issues (red/blue tint).
+        MITHRIL_LOG_INFO("egl", "install_surface: size=%dx%d fmt=0x%x depth=%s "
+                          "colorView=%p depthView=%p",
+                          s->width, s->height,
+                          (unsigned)g_state->eglDefaultColorFormat,
+                          depth != VK_NULL_HANDLE ? "yes" : "no",
+                          (void*)color, (void*)depth);
         // Register the swapchain with the encoder so it can record layout
         // barriers and signal pendingRenderFinished. Only register when the
         // surface actually has an acquired color view (color != VK_NULL_HANDLE)
@@ -751,6 +760,19 @@ EGLBoolean eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
     // present the already-rendered frame against the current (still-valid)
     // swapchain, THEN tear down + recreate for the next frame.
     if (s->swapchain_state) {
+        // Log swap so developers can trace the frame lifecycle and detect
+        // stalls, missing frames, or swapchain format mismatches.
+        {
+            static int swap_count = 0;
+            if (swap_count < 10) {
+                int w = backend_swapchain_width(s->swapchain_state);
+                int h = backend_swapchain_height(s->swapchain_state);
+                MITHRIL_LOG_INFO("egl", "eglSwapBuffers #%d: swapchain=%dx%d "
+                                  "firstFrame=%d",
+                                  swap_count + 1, w, h, (int)s->firstFrame);
+                swap_count++;
+            }
+        }
         backend_present_and_acquire(s->swapchain_state);
     }
 
