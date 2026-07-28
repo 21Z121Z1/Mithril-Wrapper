@@ -582,7 +582,8 @@ bool glsl_to_spirv(GLenum gl_stage, const std::string& src,
                 return false;
             }
             if (!program2.mapIO()) {
-                info = "glslang mapIO failed: " + program2.getInfoLog();
+                info = "glslang mapIO failed: ";
+                info += program2.getInfoLog();
                 info += program2.getInfoDebugLog();
                 return false;
             }
@@ -613,7 +614,8 @@ bool glsl_to_spirv(GLenum gl_stage, const std::string& src,
     // causing Metal compile errors. Mirrors MobileGL's ShaderCompiler.cpp which calls
     // program->mapIO() after link().
     if (!program.mapIO()) {
-        info = "glslang mapIO failed: " + program.getInfoLog();
+        info = "glslang mapIO failed: ";
+        info += program.getInfoLog();
         info += program.getInfoDebugLog();
         return false;
     }
