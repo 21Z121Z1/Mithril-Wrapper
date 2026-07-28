@@ -131,6 +131,9 @@ void ensure_program_layouts(GLuint program,
 void bind_program_descriptors(GLuint program) {
     Backend* b = backend();
     if (!b->initialized || !b->commandBuffer || program == 0) return;
+    // vkCmdBindDescriptorSets on a non-recording buffer is UB (VK_NOT_READY
+    // spam under GPU fault) — same guard as the CommandStream entry points.
+    if (!b->commandBufferRecording) return;
 
     auto& tbl = program_table();
     auto it = tbl.find(program);

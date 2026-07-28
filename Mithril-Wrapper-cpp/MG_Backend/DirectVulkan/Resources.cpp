@@ -106,9 +106,16 @@ void stage_and_copy_image(TextureEntry& tex, int level, int x, int y, int z,
                           int w, int h, int d, const void* pixels,
                           int unpack_alignment, GLenum format, GLenum type) {
     Backend* b = backend();
-    if (!b->commandBuffer) {
-        MITHRIL_LOG_ERROR("vk", "stage_and_copy_image: no command buffer — "
-                          "upload of %dx%d level %d DROPPED", w, h, level);
+    if (!b->commandBuffer || !b->commandBufferRecording) {
+        // Throttled: this fires once per glTexSubImage2D while the command
+        // buffer is unusable (GPU fault) — unthrottled it becomes log spam.
+        static int no_cb_count = 0;
+        ++no_cb_count;
+        if (no_cb_count <= 4 || no_cb_count % 1000 == 0) {
+            MITHRIL_LOG_ERROR("vk", "stage_and_copy_image: command buffer "
+                              "missing/not recording — upload of %dx%d level %d "
+                              "DROPPED (occurrence #%d)", w, h, level, no_cb_count);
+        }
         return;
     }
     if (unpack_alignment <= 0) unpack_alignment = 4;  // GL default UNPACK_ALIGNMENT
@@ -161,9 +168,14 @@ void stage_and_copy_image(TextureEntry& tex, int level, int x, int y, int z,
             tex.stagingMemory = tmp.memory;
             tex.stagingSize = staging;
         } else {
-            MITHRIL_LOG_ERROR("vk", "stage_and_copy_image: staging alloc of "
-                              "%zu bytes FAILED — upload of %dx%d level %d "
-                              "DROPPED", staging, w, h, level);
+            static int alloc_fail_count = 0;
+            ++alloc_fail_count;
+            if (alloc_fail_count <= 4 || alloc_fail_count % 1000 == 0) {
+                MITHRIL_LOG_ERROR("vk", "stage_and_copy_image: staging alloc of "
+                                  "%zu bytes FAILED — upload of %dx%d level %d "
+                                  "DROPPED (occurrence #%d)", staging, w, h,
+                                  level, alloc_fail_count);
+            }
             return;
         }
     }
@@ -612,10 +624,14 @@ void backend_texture_upload(GLuint name, int level, int x, int y, int z,
     auto& tbl = mithril::vk::texture_table();
     auto it = tbl.find(name);
     if (it == tbl.end()) {
-        MITHRIL_LOG_ERROR("vk", "texture_upload: texture %u has no VkImage — "
-                          "upload of %dx%d level %d DROPPED (glTexImage2D "
-                          "not routed through backend_get_or_create_texture?)",
-                          name, w, h, level);
+        static int no_img_count = 0;
+        ++no_img_count;
+        if (no_img_count <= 4 || no_img_count % 1000 == 0) {
+            MITHRIL_LOG_ERROR("vk", "texture_upload: texture %u has no VkImage — "
+                              "upload of %dx%d level %d DROPPED (glTexImage2D "
+                              "not routed through backend_get_or_create_texture?) "
+                              "(occurrence #%d)", name, w, h, level, no_img_count);
+        }
         return;
     }
     if (!pixels) return;

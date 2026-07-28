@@ -155,6 +155,26 @@ void record_layout_barrier(VkCommandBuffer cb, VkImage image, VkFormat format,
                          0, nullptr, 0, nullptr, 1, &b);
 }
 
+// Count a vkBeginCommandBuffer failure toward the persistent-fault breaker.
+// Under GPU OOM, begin failures (VK_NOT_READY / OUT_OF_DEVICE_MEMORY /
+// DEVICE_LOST) can repeat forever while vkQueueSubmit is never even reached,
+// so the submit-failure counter alone never trips deviceLost and the render
+// thread spins recording vkCmd* into a dead buffer — MoltenVK then emits one
+// VK_NOT_READY message per command (observed: 3M+ lines, 655 MB log). Counting
+// begin failures reuses the same threshold: >= 3 consecutive failures suspend
+// rendering entirely (commit_frame / present / acquire all early-return on
+// deviceLost).
+void note_begin_failure(Backend* b, const char* where) {
+    b->consecutiveSubmitFailures++;
+    if (b->consecutiveSubmitFailures >= 3 && !b->deviceLost) {
+        b->deviceLost = true;
+        MITHRIL_LOG_ERROR("vk", "Persistent GPU fault detected after %d "
+                          "consecutive begin/submit failures (%s) — rendering "
+                          "suspended to prevent log flooding",
+                          b->consecutiveSubmitFailures, where);
+    }
+}
+
 } // namespace
 
 bool render_pass_active() { return encoder().passActive; }
@@ -176,6 +196,11 @@ void begin_render_pass(VkImageView* color_views, int color_count,
     (void)samples;
     Backend* b = backend();
     if (!b->initialized || !b->commandBuffer) return;
+    // Recording into a non-recording command buffer is UB: MoltenVK emits one
+    // VK_NOT_READY message per vkCmd* call (the 655 MB log flood). The buffer
+    // only leaves the recording state on a begin failure under GPU fault;
+    // skip the pass entirely until commit_frame recovers or trips deviceLost.
+    if (!b->commandBufferRecording || b->deviceLost) return;
     EncoderState& e = encoder();
     if (e.passActive) return;  // coalesce draws into one pass
 
@@ -415,7 +440,10 @@ void commit_frame() {
         rbi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
         rbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
         if (vkBeginCommandBuffer(b->commandBuffer, &rbi) != VK_SUCCESS) {
-            MITHRIL_LOG_ERROR("vk", "commit_frame: vkBeginCommandBuffer recovery failed");
+            note_begin_failure(b, "commit_frame recovery");
+            if (b->consecutiveSubmitFailures == 1) {
+                MITHRIL_LOG_ERROR("vk", "commit_frame: vkBeginCommandBuffer recovery failed");
+            }
             e.hasCommands = false;
             return;
         }
@@ -451,6 +479,8 @@ void commit_frame() {
         rbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
         if (vkBeginCommandBuffer(b->commandBuffer, &rbi) == VK_SUCCESS) {
             b->commandBufferRecording = true;
+        } else {
+            note_begin_failure(b, "post-end-fail begin");
         }
         e.hasCommands = false;
         if (sc) sc->needsRebuild = true;
@@ -616,8 +646,11 @@ void commit_frame() {
     if (vkBeginCommandBuffer(b->commandBuffer, &bi) == VK_SUCCESS) {
         b->commandBufferRecording = true;
     } else {
-        MITHRIL_LOG_ERROR("vk", "post-submit vkBeginCommandBuffer failed — "
-                          "command buffer unusable until next commit");
+        note_begin_failure(b, "post-submit begin");
+        if (b->consecutiveSubmitFailures == 1) {
+            MITHRIL_LOG_ERROR("vk", "post-submit vkBeginCommandBuffer failed — "
+                              "command buffer unusable until next commit");
+        }
         b->commandBufferRecording = false;
     }
 
@@ -703,16 +736,24 @@ void backend_drain_and_detach_swapchain(void) {
     mithril::vk::drain_and_detach_swapchain();
 }
 
+// Any vkCmd* on a command buffer that is not in the recording state is UB;
+// under a GPU fault (begin failure) MoltenVK emits one VK_NOT_READY message
+// per call, which flooded a field log to 655 MB. Every recording entry point
+// below must use this guard instead of checking commandBuffer alone.
+static inline bool cmd_recording_ok(mithril::vk::Backend* b) {
+    return b->commandBuffer && b->commandBufferRecording;
+}
+
 void backend_bind_pipeline(VkPipeline pipeline) {
     mithril::vk::Backend* b = mithril::vk::backend();
-    if (b->commandBuffer && pipeline) {
+    if (cmd_recording_ok(b) && pipeline) {
         vkCmdBindPipeline(b->commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
     }
 }
 
 void backend_set_viewport(int x, int y, int w, int h, double znear, double zfar) {
     mithril::vk::Backend* b = mithril::vk::backend();
-    if (!b->commandBuffer) return;
+    if (!cmd_recording_ok(b)) return;
     // Use the GL viewport directly. GL's viewport is bottom-left origin while
     // Vulkan's is top-left, but MoltenVK flips the Y axis when translating to
     // Metal, so passing the GL values through unchanged matches the on-screen
@@ -729,7 +770,7 @@ void backend_set_viewport(int x, int y, int w, int h, double znear, double zfar)
 
 void backend_set_scissor(int x, int y, int w, int h) {
     mithril::vk::Backend* b = mithril::vk::backend();
-    if (!b->commandBuffer) return;
+    if (!cmd_recording_ok(b)) return;
     VkRect2D sc{};
     sc.offset.x = x; sc.offset.y = y;
     sc.extent.width = (uint32_t)w; sc.extent.height = (uint32_t)h;
@@ -738,7 +779,7 @@ void backend_set_scissor(int x, int y, int w, int h) {
 
 void backend_set_vertex_buffer(int slot, VkBuffer buffer, VkDeviceSize offset) {
     mithril::vk::Backend* b = mithril::vk::backend();
-    if (!b->commandBuffer || !buffer) return;
+    if (!cmd_recording_ok(b) || !buffer) return;
     VkDeviceSize offsets[1] = { offset };
     vkCmdBindVertexBuffers(b->commandBuffer, (uint32_t)slot, 1, &buffer, offsets);
 }
@@ -767,20 +808,20 @@ void backend_set_blend_color(float r, float g, float b, float a) {
     // NOTE: parameter `b` is the blue blend constant (float); the backend ptr
     // is renamed to avoid shadowing it.
     mithril::vk::Backend* bk = mithril::vk::backend();
-    if (!bk->commandBuffer) return;
+    if (!cmd_recording_ok(bk)) return;
     float bc[4] = { r, g, b, a };
     vkCmdSetBlendConstants(bk->commandBuffer, bc);
 }
 
 void backend_set_depth_bias(float slope, float clamp) {
     mithril::vk::Backend* b = mithril::vk::backend();
-    if (!b->commandBuffer) return;
+    if (!cmd_recording_ok(b)) return;
     vkCmdSetDepthBias(b->commandBuffer, slope, clamp, 0.0f);
 }
 
 void backend_set_cull_mode(int mode) {
     mithril::vk::Backend* b = mithril::vk::backend();
-    if (!b->commandBuffer) return;
+    if (!cmd_recording_ok(b)) return;
     VkCullModeFlags cull = VK_CULL_MODE_NONE;
     if (mode == 1) cull = VK_CULL_MODE_FRONT_BIT;
     else if (mode == 2) cull = VK_CULL_MODE_BACK_BIT;
@@ -789,13 +830,13 @@ void backend_set_cull_mode(int mode) {
 
 void backend_set_front_face(int ccw) {
     mithril::vk::Backend* b = mithril::vk::backend();
-    if (!b->commandBuffer) return;
+    if (!cmd_recording_ok(b)) return;
     vkCmdSetFrontFace(b->commandBuffer, ccw ? VK_FRONT_FACE_COUNTER_CLOCKWISE : VK_FRONT_FACE_CLOCKWISE);
 }
 
 void backend_set_depth_test(int enabled, int write_mask, int compare_func) {
     mithril::vk::Backend* b = mithril::vk::backend();
-    if (!b->commandBuffer) return;
+    if (!cmd_recording_ok(b)) return;
     vkCmdSetDepthTestEnable(b->commandBuffer, enabled ? VK_TRUE : VK_FALSE);
     vkCmdSetDepthWriteEnable(b->commandBuffer, write_mask ? VK_TRUE : VK_FALSE);
     VkCompareOp op = VK_COMPARE_OP_LESS;
@@ -826,10 +867,21 @@ void backend_set_stencil_state(int enabled, int func, int ref, int mask,
     // Stencil dynamic state deferred (bring-up).
 }
 
+// Draws require BOTH an active pass and a recording command buffer. If the
+// buffer left the recording state (begin failure under GPU fault), recording
+// vkCmdDraw* is UB and MoltenVK spams VK_NOT_READY per call — belt-and-braces
+// with the same guard in begin_render_pass (passActive can't become true while
+// not recording, but a fault can also strike mid-pass).
+static inline bool draw_recording_ok(mithril::vk::Backend* b) {
+    return b->commandBuffer &&
+           b->commandBufferRecording &&
+           mithril::vk::render_pass_active();
+}
+
 void backend_draw_arrays(int primitive, int first, int count) {
     (void)primitive;
     mithril::vk::Backend* b = mithril::vk::backend();
-    if (!b->commandBuffer) return;
+    if (!draw_recording_ok(b)) return;
     vkCmdDraw(b->commandBuffer, (uint32_t)count, 1, (uint32_t)first, 0);
 }
 
@@ -837,7 +889,7 @@ void backend_draw_indexed(int primitive, int count, int index_type,
                           VkBuffer index_buffer, VkDeviceSize index_offset) {
     (void)primitive;
     mithril::vk::Backend* b = mithril::vk::backend();
-    if (!b->commandBuffer || !index_buffer) return;
+    if (!draw_recording_ok(b) || !index_buffer) return;
     VkIndexType t = (index_type == 1) ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16;
     vkCmdBindIndexBuffer(b->commandBuffer, index_buffer, index_offset, t);
     vkCmdDrawIndexed(b->commandBuffer, (uint32_t)count, 1, 0, 0, 0);
@@ -846,7 +898,7 @@ void backend_draw_indexed(int primitive, int count, int index_type,
 void backend_draw_arrays_instanced(int primitive, int first, int count, int primcount) {
     (void)primitive;
     mithril::vk::Backend* b = mithril::vk::backend();
-    if (!b->commandBuffer) return;
+    if (!draw_recording_ok(b)) return;
     vkCmdDraw(b->commandBuffer, (uint32_t)count, (uint32_t)primcount, (uint32_t)first, 0);
 }
 
@@ -855,7 +907,7 @@ void backend_draw_indexed_instanced(int primitive, int count, int index_type,
                                     int primcount) {
     (void)primitive;
     mithril::vk::Backend* b = mithril::vk::backend();
-    if (!b->commandBuffer || !index_buffer) return;
+    if (!draw_recording_ok(b) || !index_buffer) return;
     VkIndexType t = (index_type == 1) ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16;
     vkCmdBindIndexBuffer(b->commandBuffer, index_buffer, index_offset, t);
     vkCmdDrawIndexed(b->commandBuffer, (uint32_t)count, (uint32_t)primcount, 0, 0, 0);

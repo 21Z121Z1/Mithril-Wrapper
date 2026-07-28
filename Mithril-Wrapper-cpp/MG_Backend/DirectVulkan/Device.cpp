@@ -20,6 +20,8 @@
 #include "Resources.h"
 #include "../../MG_Impl/Log.h"
 
+#include <atomic>
+#include <cstdint>
 #include <cstring>
 #include <vector>
 
@@ -55,7 +57,42 @@ VKAPI_ATTR VkBool32 VKAPI_CALL debug_callback(VkDebugUtilsMessageSeverityFlagBit
                                               VkDebugUtilsMessageTypeFlagsEXT,
                                               const VkDebugUtilsMessengerCallbackDataEXT* data,
                                               void*) {
-    if (data && data->pMessage) {
+    if (!data || !data->pMessage) return VK_FALSE;
+
+    // Deduplicate repeated MoltenVK messages. Under a GPU fault MoltenVK can
+    // emit the SAME message once per vkCmd* call (observed in the field:
+    // 3,036,351 x "VK_NOT_READY: Command buffer cannot accept commands..."
+    // producing a 655 MB log). Print the first few occurrences of a message,
+    // then only a periodic "repeated Nx" marker; when the message changes,
+    // report how many repeats of the previous one were suppressed.
+    //
+    // Hash only a bounded prefix: identical spam differs (if at all) far past
+    // the front, and hashing 64 bytes keeps this O(1) per callback.
+    static std::atomic<uint32_t> lastHash{0};
+    static std::atomic<uint64_t> repeatCount{0};
+
+    uint32_t h = 2166136261u;  // FNV-1a over the first 64 bytes
+    const char* p = data->pMessage;
+    for (int i = 0; i < 64 && p[i]; ++i) {
+        h ^= (uint8_t)p[i];
+        h *= 16777619u;
+    }
+
+    if (h == lastHash.load(std::memory_order_relaxed)) {
+        uint64_t n = repeatCount.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (n <= 4) {
+            MITHRIL_LOG_WARN("vk", "%s", data->pMessage);
+        } else if (n % 10000 == 0) {
+            MITHRIL_LOG_WARN("vk", "(vulkan message repeated %llu times) %.64s...",
+                             (unsigned long long)n, data->pMessage);
+        }
+    } else {
+        uint64_t prev = repeatCount.exchange(1, std::memory_order_relaxed);
+        lastHash.store(h, std::memory_order_relaxed);
+        if (prev > 4) {
+            MITHRIL_LOG_WARN("vk", "(previous vulkan message repeated %llu times total)",
+                             (unsigned long long)prev);
+        }
         MITHRIL_LOG_WARN("vk", "%s", data->pMessage);
     }
     return VK_FALSE;
