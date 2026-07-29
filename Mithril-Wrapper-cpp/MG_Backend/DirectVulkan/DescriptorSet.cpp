@@ -252,7 +252,21 @@ void bind_program_descriptors(GLuint program) {
             // Stable per-(program,binding) GL name so the buffer is reused and
             // its contents updated each frame rather than reallocated.
             GLuint uname = program * 1000000u + db.binding + 1u;
-            VkBuffer ubuf = backend_get_or_create_buffer(uname, payload.data(), payload.size());
+            // Update in-place when the buffer already exists and is large
+            // enough. Destroying+recreating every frame (the old code path)
+            // floods pendingBufferReleases with thousands of entries,
+            // eventually corrupting MoltenVK's internal hash table -> SIGSEGV.
+            auto& btable = buffer_table();
+            auto bit = btable.find(uname);
+            VkBuffer ubuf = VK_NULL_HANDLE;
+            if (bit != btable.end() &&
+                bit->second.buffer != VK_NULL_HANDLE &&
+                bit->second.size >= (VkDeviceSize)payload.size()) {
+                backend_buffer_upload(uname, 0, payload.data(), payload.size());
+                ubuf = bit->second.buffer;
+            } else {
+                ubuf = backend_get_or_create_buffer(uname, payload.data(), payload.size());
+            }
             if (ubuf != VK_NULL_HANDLE) {
                 VkDescriptorBufferInfo bi{};
                 bi.buffer = ubuf;
