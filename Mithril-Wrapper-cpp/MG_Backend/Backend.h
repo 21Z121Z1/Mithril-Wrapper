@@ -116,6 +116,14 @@ void backend_drain_and_detach_swapchain(void);
 int backend_swapchain_needs_rebuild(void* swapchain_state);
 
 /*
+ * Notify the backend that the active swapchain's color image layout has been
+ * externally transitioned (e.g., by glBlitFramebuffer). The backend updates
+ * currentColorLayout so subsequent render-pass barriers use the correct
+ * oldLayout.
+ */
+void backend_update_swapchain_layout(VkImageLayout layout);
+
+/*
  * Encoder-side dynamic state setters (vkCmdSet* under dynamic rendering).
  * Each is a no-op when no render pass is active. Stage: 0 = vertex, 1 = fragment
  * (used for buffer/texture/sampler binding).

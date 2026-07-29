@@ -187,17 +187,21 @@ bool ensure_swapchain(EglSurface* s) {
     if (s->swapchain_state) {
         int cur_w = backend_swapchain_width(s->swapchain_state);
         int cur_h = backend_swapchain_height(s->swapchain_state);
-        if (cur_w == w && cur_h == h) {
+        bool needs_rebuild = (backend_swapchain_needs_rebuild(s->swapchain_state) != 0);
+        if (cur_w == w && cur_h == h && !needs_rebuild) {
             s->width  = w;
             s->height = h;
             return true;
         }
-        // Size changed: drain GPU work referencing the old swapchain, detach
-        // it from the encoder, THEN tear down + recreate. The drain is
-        // critical: it ensures the Metal driver has released the old
-        // IOSurface-backed drawables before vkDestroySwapchainKHR frees them.
-        // Skipping the drain causes IOSurfaceBindAccel UAF crashes on the
-        // next present.
+        // Size changed or swapchain marked dead (GPU OOM / surface lost):
+        // drain GPU work referencing the old swapchain, detach it from the
+        // encoder, THEN tear down + recreate. The drain is critical: it
+        // ensures the Metal driver has released the old IOSurface-backed
+        // drawables before vkDestroySwapchainKHR frees them. Skipping the
+        // drain causes IOSurfaceBindAccel UAF crashes on the next present.
+        // For the needs_rebuild path, the deferred release queues are also
+        // drained here (via vkDeviceWaitIdle inside drain_and_detach_swapchain),
+        // preventing stale resources from referencing the dead swapchain.
         if (t_currentDraw == s) {
             backend_drain_and_detach_swapchain();
         }
