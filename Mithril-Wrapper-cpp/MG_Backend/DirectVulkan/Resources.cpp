@@ -159,8 +159,19 @@ void stage_and_copy_image(TextureEntry& tex, int level, int x, int y, int z,
     size_t staging = dst_tight_row * (size_t)h * (size_t)d;
 
     if (tex.stagingSize < staging) {
-        if (tex.stagingBuffer) { vkDestroyBuffer(b->device, tex.stagingBuffer, nullptr); tex.stagingBuffer = VK_NULL_HANDLE; }
-        if (tex.stagingMemory) { vkFreeMemory(b->device, tex.stagingMemory, nullptr); tex.stagingMemory = VK_NULL_HANDLE; }
+        // Defer destruction of the old staging buffer: the current command
+        // buffer may still reference it via a prior vkCmdCopyBufferToImage.
+        // Destroying it immediately causes MoltenVK's MVKBuffer::getMTLBuffer()
+        // to dereference freed memory -> SIGSEGV.
+        if (tex.stagingBuffer) {
+            BufferEntry old;
+            old.buffer = tex.stagingBuffer;
+            old.memory = tex.stagingMemory;
+            old.size  = tex.stagingSize;
+            b->pendingBufferReleases.push_back(std::move(old));
+            tex.stagingBuffer = VK_NULL_HANDLE;
+            tex.stagingMemory = VK_NULL_HANDLE;
+        }
         BufferEntry tmp;
         if (create_buffer(tmp, staging,
                           VK_BUFFER_USAGE_TRANSFER_SRC_BIT, nullptr)) {
