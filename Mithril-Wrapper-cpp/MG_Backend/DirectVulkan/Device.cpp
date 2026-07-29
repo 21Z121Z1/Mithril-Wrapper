@@ -53,37 +53,41 @@ bool has_layer(const std::vector<VkLayerProperties>& props, const char* name) {
     return false;
 }
 
-VKAPI_ATTR VkBool32 VKAPI_CALL debug_callback(VkDebugUtilsMessageSeverityFlagBitsEXT,
+VKAPI_ATTR VkBool32 VKAPI_CALL debug_callback(VkDebugUtilsMessageSeverityFlagBitsEXT severity,
                                               VkDebugUtilsMessageTypeFlagsEXT,
                                               const VkDebugUtilsMessengerCallbackDataEXT* data,
                                               void*) {
     if (!data || !data->pMessage) return VK_FALSE;
 
-    // Deduplicate repeated MoltenVK messages. Under a GPU fault MoltenVK can
-    // emit the SAME message once per vkCmd* call (observed in the field:
-    // 3,036,351 x "VK_NOT_READY: Command buffer cannot accept commands..."
-    // producing a 655 MB log). Print the first few occurrences of a message,
-    // then only a periodic "repeated Nx" marker; when the message changes,
-    // report how many repeats of the previous one were suppressed.
-    //
-    // Hash only a bounded prefix: identical spam differs (if at all) far past
-    // the front, and hashing 64 bytes keeps this O(1) per callback.
-    static std::atomic<uint32_t> lastHash{0};
+    // ERROR 级消息永不抑制：每次都输出。这是 d2ccb1b 引入的前缀 hash 缺陷
+    // 的修复——VK_NOT_READY 消息前缀 "Command buffer cannot accept commands
+    // before vkBeginCommandBuffer()" 相同，但消息体可能含不同上下文（不同
+    // command buffer / 不同 vkCmd* 调用点），前 64 字节 hash 会把真实错误
+    // 当作重复抑制，掩盖红屏根因。
+    if (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) {
+        MITHRIL_LOG_ERROR("vk", "%s", data->pMessage);
+        return VK_FALSE;
+    }
+
+    // WARNING/PERFORMANCE 级用完整消息 hash 去重。GPU 故障时 MoltenVK 可能
+    // 对每个 vkCmd* 调用发出相同消息（实测 3M+ 次，655MB 日志）。完整消息
+    // hash 避免前缀碰撞导致的误抑制，同时仍限流。
+    static std::atomic<uint64_t> lastHash{0};
     static std::atomic<uint64_t> repeatCount{0};
 
-    uint32_t h = 2166136261u;  // FNV-1a over the first 64 bytes
+    uint64_t h = 1469598103934665603ull;  // FNV-1a 64-bit over full message
     const char* p = data->pMessage;
-    for (int i = 0; i < 64 && p[i]; ++i) {
-        h ^= (uint8_t)p[i];
-        h *= 16777619u;
+    while (*p) {
+        h ^= (uint8_t)*p++;
+        h *= 1099511628211ull;
     }
 
     if (h == lastHash.load(std::memory_order_relaxed)) {
         uint64_t n = repeatCount.fetch_add(1, std::memory_order_relaxed) + 1;
         if (n <= 4) {
             MITHRIL_LOG_WARN("vk", "%s", data->pMessage);
-        } else if (n % 10000 == 0) {
-            MITHRIL_LOG_WARN("vk", "(vulkan message repeated %llu times) %.64s...",
+        } else if (n % 1000 == 0) {
+            MITHRIL_LOG_WARN("vk", "(vulkan message repeated %llu times) %.80s...",
                              (unsigned long long)n, data->pMessage);
         }
     } else {

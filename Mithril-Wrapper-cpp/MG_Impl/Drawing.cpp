@@ -182,7 +182,21 @@ static void prepare_draw(GLenum mode) {
         g_state->blendSrcRGB,
         g_state->blendDstRGB,
         mode);
-    if (pipeline == VK_NULL_HANDLE) return;
+    if (pipeline == VK_NULL_HANDLE) {
+        // pipeline 创建失败会静默 return，导致 draw 永不执行 → 红屏。
+        // per-program 限流输出（首4+每1000），记录关键签名字段以定位失败原因。
+        static std::unordered_map<GLuint, int> program_warn_count;
+        int& count = program_warn_count[prog->id];
+        if (count < 4 || count % 1000 == 0) {
+            MITHRIL_LOG_WARN("vk", "prepare_draw: pipeline creation failed "
+                              "program=%u attrib_count=%d color_count=%d "
+                              "blend=%d mode=0x%x (count=%d)",
+                              prog->id, attrib_count, color_count,
+                              g_state->blend ? 1 : 0, mode, count);
+        }
+        count++;
+        return;
+    }
 
     // Begin render pass (Load action preserves previous contents).
     backend_set_load_load();

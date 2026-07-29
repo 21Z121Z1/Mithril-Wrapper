@@ -133,7 +133,17 @@ void bind_program_descriptors(GLuint program) {
     if (!b->initialized || !b->commandBuffer || program == 0) return;
     // vkCmdBindDescriptorSets on a non-recording buffer is UB (VK_NOT_READY
     // spam under GPU fault) — same guard as the CommandStream entry points.
-    if (!b->commandBufferRecording) return;
+    if (!b->commandBufferRecording) {
+        // d2ccb1b 守卫静默跳过时埋点，使 descriptor 未绑定导致的红屏可见。
+        static int skip_count = 0;
+        if (skip_count < 4 || skip_count % 1000 == 0) {
+            MITHRIL_LOG_WARN("vk", "bind_program_descriptors skipped: "
+                              "program=%u commandBufferRecording=false (count=%d)",
+                              program, skip_count);
+        }
+        skip_count++;
+        return;
+    }
 
     auto& tbl = program_table();
     auto it = tbl.find(program);

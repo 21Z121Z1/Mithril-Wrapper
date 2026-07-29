@@ -200,7 +200,18 @@ void begin_render_pass(VkImageView* color_views, int color_count,
     // VK_NOT_READY message per vkCmd* call (the 655 MB log flood). The buffer
     // only leaves the recording state on a begin failure under GPU fault;
     // skip the pass entirely until commit_frame recovers or trips deviceLost.
-    if (!b->commandBufferRecording || b->deviceLost) return;
+    if (!b->commandBufferRecording || b->deviceLost) {
+        // d2ccb1b 守卫：command buffer 未录制或 deviceLost 时静默跳过。
+        // 添加限流埋点使红屏根因可见——draw 由此路径被跳过会导致画面空白。
+        static int skip_count = 0;
+        if (skip_count < 4 || skip_count % 1000 == 0) {
+            MITHRIL_LOG_WARN("vk", "begin_render_pass skipped: "
+                              "commandBufferRecording=%d deviceLost=%d (count=%d)",
+                              b->commandBufferRecording, b->deviceLost, skip_count);
+        }
+        skip_count++;
+        return;
+    }
     EncoderState& e = encoder();
     if (e.passActive) return;  // coalesce draws into one pass
 
@@ -882,9 +893,23 @@ void backend_set_stencil_state(int enabled, int func, int ref, int mask,
 // with the same guard in begin_render_pass (passActive can't become true while
 // not recording, but a fault can also strike mid-pass).
 static inline bool draw_recording_ok(mithril::vk::Backend* b) {
-    return b->commandBuffer &&
-           b->commandBufferRecording &&
-           mithril::vk::render_pass_active();
+    bool ok = b->commandBuffer &&
+              b->commandBufferRecording &&
+              mithril::vk::render_pass_active();
+    if (!ok) {
+        // d2ccb1b 守卫：draw 被静默跳过时无日志，红屏根因不可见。
+        // 限流输出（首5+每1000），区分 passActive / commandBufferRecording。
+        static int skip_count = 0;
+        if (skip_count < 5 || skip_count % 1000 == 0) {
+            MITHRIL_LOG_WARN("vk", "draw skipped: passActive=%d "
+                              "commandBufferRecording=%d cmdBuf=%p (count=%d)",
+                              mithril::vk::render_pass_active() ? 1 : 0,
+                              b->commandBufferRecording ? 1 : 0,
+                              (void*)b->commandBuffer, skip_count);
+        }
+        skip_count++;
+    }
+    return ok;
 }
 
 void backend_draw_arrays(int primitive, int first, int count) {
