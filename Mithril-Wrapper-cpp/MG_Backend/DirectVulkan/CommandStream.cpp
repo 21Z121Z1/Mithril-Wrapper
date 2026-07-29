@@ -344,6 +344,7 @@ void begin_render_pass(VkImageView* color_views, int color_count,
             colorAttachs[i].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
         } else if (swapchainColorWasUndefined &&
                    e.activeSwapchain &&
+                   !e.activeSwapchain->colorRenderedThisFrame &&
                    e.colorViews[i] == e.activeSwapchain->views[e.activeSwapchain->currentImage]) {
             colorAttachs[i].loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
         } else {
@@ -415,6 +416,12 @@ void begin_render_pass(VkImageView* color_views, int color_count,
 
     e.passActive = true;
     e.hasCommands = true;  // begin_render_pass recorded real commands
+    // Mark the swapchain color image as rendered-to this acquire cycle so
+    // subsequent passes (after coalescing fails) use LOAD instead of
+    // DONT_CARE to preserve this pass's content.
+    if (e.activeSwapchain && e.colorCount > 0) {
+        e.activeSwapchain->colorRenderedThisFrame = true;
+    }
     // Consume pending clear flags — they've been applied as loadOp above.
     e.pendingClearColor = false;
     e.pendingClearDepth = false;

@@ -304,6 +304,7 @@ VkImageView swapchain_acquire_color(Swapchain* sc) {
         // the semantics of starting a new frame on a swapchain image whose
         // post-present contents are undefined anyway.
         sc->currentColorLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        sc->colorRenderedThisFrame = false;
         // imageAvailable was just signaled by vkAcquireNextImageKHR. Mark it
         // unconsumed so the next commit_frame()'s vkQueueSubmit waits on it
         // (at COLOR_ATTACHMENT_OUTPUT stage). Without that wait, the GPU

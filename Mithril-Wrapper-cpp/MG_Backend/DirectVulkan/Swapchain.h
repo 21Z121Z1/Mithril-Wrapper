@@ -85,6 +85,16 @@ struct Swapchain {
     // COLOR_ATTACHMENT_OPTIMAL and MoltenVK behaviour is undefined -> black screen.
     VkImageLayout   currentColorLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
+    // Per-acquire-cycle flag: tracks whether any render pass has already
+    // rendered to the color image in the current acquire cycle. Used by
+    // begin_render_pass to distinguish "first use of this image" (DONT_CARE
+    // is safe) from "already rendered to this frame" (must LOAD to preserve
+    // the previous pass's content). Without this, a second pass that starts
+    // after coalescing fails would see currentColorLayout == UNDEFINED (from
+    // the acquire) and wrongly pick DONT_CARE, discarding the first pass's
+    // draws — root cause of the Minecraft red screen on MoltenVK.
+    bool            colorRenderedThisFrame = false;
+
     // One-shot flag PER depth image: transitions UNDEFINED ->
     // DEPTH_STENCIL_ATTACHMENT_OPTIMAL on first use, then stays there for
     // the image's lifetime (depth images are never presented).
