@@ -198,6 +198,51 @@ static void prepare_draw(GLenum mode) {
         return;
     }
 
+    // ---- Texture layout transitions (before begin_render_pass) ----
+    // MoltenVK samples garbage when a descriptor's imageLayout doesn't match
+    // the texture's actual layout. Two transitions are needed:
+    //
+    // (1) Sampled textures -> SHADER_READ_ONLY_OPTIMAL: textures that were
+    //     recently rendered to as FBO color attachments are in
+    //     COLOR_ATTACHMENT_OPTIMAL. The descriptor (DescriptorSet.cpp) hard-
+    //     codes imageLayout=SHADER_READ_ONLY_OPTIMAL but never records the
+    //     barrier. Without this transition, MoltenVK reads garbage/transparent
+    //     texels -> only the clear color is visible ("red screen").
+    // (2) FBO attachment textures -> COLOR_ATTACHMENT_OPTIMAL /
+    //     DEPTH_STENCIL_ATTACHMENT_OPTIMAL: begin_render_pass only barriers
+    //     the swapchain image, not user-FBO attachment textures. Transition
+    //     them here so TextureEntry::currentLayout stays accurate, enabling
+    //     transition (1) to fire when the texture is later sampled.
+    //
+    // All transitions are recorded BEFORE begin_render_pass (outside the
+    // dynamic-rendering pass) to avoid MoltenVK Metal encoding issues with
+    // barriers inside a pass — consistent with the texture_upload pass-end
+    // strategy. transition_image_layout is a no-op when already in the target
+    // layout, so the common case (texture already SHADER_READ_ONLY) is cheap.
+    // Order: samplers first, then attachments — for a feedback-loop texture
+    // (both sampled and attached), the attachment layout wins, matching GL
+    // feedback-loop undefined-behavior expectations.
+    for (int i = 0; i < mithril::kMaxTextureUnits; ++i) {
+        GLuint tex_id = mithril::g_state->boundTextures[i];
+        if (tex_id) {
+            backend_transition_texture_layout(tex_id,
+                                              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        }
+    }
+    if (fbo) {
+        for (int i = 0; i < color_count && i < 8; ++i) {
+            GLuint t = fbo->colors[i].texture;
+            if (t) {
+                backend_transition_texture_layout(t,
+                                                  VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+            }
+        }
+        if (fbo->depth.texture) {
+            backend_transition_texture_layout(fbo->depth.texture,
+                                              VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+        }
+    }
+
     // Begin render pass. loadOp is determined by pending clear flags
     // (set by deferred glClear). backend_set_load_load is a no-op now.
     backend_set_load_load();
