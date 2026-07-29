@@ -120,14 +120,15 @@ void glClear(GLbitfield mask) {
         return;
     }
 
-    // No active render pass — fall back to begin/end/commit. This clears
-    // all attachments (loadOp=CLEAR applies to the whole attachment); since
-    // no draw is in-flight there is nothing to preserve. This matches the
-    // previous behavior for the non-active-pass case.
-    backend_set_load_clear();
-    backend_begin_render_pass(colors, n, depth, w, h, 1);
-    backend_end_render_pass();
-    backend_commit();
+    // No active render pass — defer the clear. Instead of executing
+    // begin/end/commit immediately (which triggers a vkQueueSubmit +
+    // vkWaitForFences per glClear, fragmenting the frame into multiple
+    // command buffers and causing MoltenVK to lose draw content), store
+    // the clear request as per-attachment pending flags. The next draw's
+    // begin_render_pass will consume them as LOAD_OP_CLEAR, folding the
+    // clear into the same render pass as the draw — matching MobileGL's
+    // VkClearManager deferred-clear approach.
+    backend_set_pending_clear(mask);
 }
 
 /* ---- Enable / Disable ---- */

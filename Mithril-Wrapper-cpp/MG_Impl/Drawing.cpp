@@ -198,7 +198,8 @@ static void prepare_draw(GLenum mode) {
         return;
     }
 
-    // Begin render pass (Load action preserves previous contents).
+    // Begin render pass. loadOp is determined by pending clear flags
+    // (set by deferred glClear). backend_set_load_load is a no-op now.
     backend_set_load_load();
     backend_begin_render_pass(colors, color_count, depth_view, w, h, 1);
 
@@ -277,12 +278,12 @@ static void prepare_draw(GLenum mode) {
 }
 
 static void end_draw(void) {
-    // End the render pass but DON'T commit the command buffer here.
-    // The command buffer is committed once per frame in eglSwapBuffers,
-    // which presents the swapchain image. Committing per-draw would flush
-    // the Vulkan pipeline hundreds of times per frame, causing severe perf
-    // loss and present timing issues.
-    backend_end_render_pass();
+    // Do NOT end the render pass here. Keeping the pass active allows
+    // subsequent draws to the same target to coalesce into a single
+    // dynamic-rendering pass (matching MobileGL's approach). The pass
+    // is ended by: (a) begin_render_pass when attachments change,
+    // (b) commit_frame/eglSwapBuffers at frame end, or (c) texture
+    // upload / glBlitFramebuffer which need the pass ended.
 }
 
 static int index_type_to_int(GLenum type) {

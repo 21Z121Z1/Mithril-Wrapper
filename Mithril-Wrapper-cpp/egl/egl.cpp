@@ -765,6 +765,21 @@ EGLBoolean eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
     // currently-acquired swapchain image before we present. commit_frame()'s
     // empty-submit defense skips the submit if no commands were recorded
     // since the last commit (e.g. eglWaitClient already flushed this frame).
+    // Execute any deferred glClear that wasn't consumed by a draw this frame
+    // (e.g. the app only called glClear with no subsequent draw). Without this,
+    // the clear would be lost and the frame would present stale content.
+    if (backend_has_pending_clear() && !backend_render_pass_active()) {
+        VkImageView colors[8] = {VK_NULL_HANDLE};
+        VkImageView depth = VK_NULL_HANDLE;
+        int w = 0, h = 0;
+        int n = mithril::collect_draw_fbo_attachments(colors, &depth, &w, &h);
+        if (n > 0 || depth != VK_NULL_HANDLE) {
+            backend_set_load_clear();
+            backend_begin_render_pass(colors, n, depth, w, h, 1);
+            backend_end_render_pass();
+        }
+    }
+
     backend_end_render_pass();
     backend_commit();
 

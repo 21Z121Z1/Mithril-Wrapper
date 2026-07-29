@@ -24,7 +24,12 @@ struct EncoderState {
     float clearColor[4] = {0, 0, 0, 0};
     double clearDepth = 1.0;
     GLint clearStencil = 0;
-    bool loadClear = false;   // true = CLEAR (glClear), false = LOAD (draw pass)
+    // Per-attachment pending clear flags (set by deferred glClear, consumed
+    // by begin_render_pass). Replaces the single loadClear flag so that
+    // glClear(COLOR) only clears color, glClear(DEPTH) only clears depth, etc.
+    bool pendingClearColor = false;
+    bool pendingClearDepth = false;
+    bool pendingClearStencil = false;
 
     // Color/depth attachment views for the active pass.
     VkImageView colorViews[8] = {};
@@ -185,7 +190,26 @@ void set_clear_color(float r, float g, float b, float a) {
 }
 void set_clear_depth(double d) { encoder().clearDepth = d; }
 void set_clear_stencil(int s)  { encoder().clearStencil = s; }
-void set_load_clear(bool clear){ encoder().loadClear = clear; }
+void set_load_clear(bool clear){ (void)clear; }
+
+void set_pending_clear(unsigned int mask) {
+    auto& e = encoder();
+    if (mask & GL_COLOR_BUFFER_BIT)   e.pendingClearColor = true;
+    if (mask & GL_DEPTH_BUFFER_BIT)   e.pendingClearDepth = true;
+    if (mask & GL_STENCIL_BUFFER_BIT) e.pendingClearStencil = true;
+}
+
+void set_all_pending_clear() {
+    auto& e = encoder();
+    e.pendingClearColor = true;
+    e.pendingClearDepth = true;
+    e.pendingClearStencil = true;
+}
+
+bool has_pending_clear() {
+    auto& e = encoder();
+    return e.pendingClearColor || e.pendingClearDepth || e.pendingClearStencil;
+}
 
 void set_active_swapchain(Swapchain* sc) {
     encoder().activeSwapchain = sc;
@@ -213,7 +237,24 @@ void begin_render_pass(VkImageView* color_views, int color_count,
         return;
     }
     EncoderState& e = encoder();
-    if (e.passActive) return;  // coalesce draws into one pass
+    if (e.passActive) {
+        // Coalesce: if attachments are the same, skip beginning a new pass.
+        // If attachments changed (different FBO), end the current pass and
+        // begin a new one. This mirrors MobileGL's approach of keeping the
+        // render pass active for multiple draws to the same target.
+        bool same = (e.colorCount == color_count &&
+                     e.depthView == depth_view &&
+                     e.width == width &&
+                     e.height == height);
+        if (same) {
+            for (int i = 0; i < e.colorCount && same; ++i) {
+                if (e.colorViews[i] != (color_views ? color_views[i] : VK_NULL_HANDLE))
+                    same = false;
+            }
+        }
+        if (same) return;  // coalesce into existing pass
+        end_render_pass();  // attachments changed, end current and begin new
+    }
 
     // The command buffer is already in the recording state — either begun by
     // init_device() (first frame) or by commit_frame() (subsequent frames).
@@ -299,7 +340,7 @@ void begin_render_pass(VkImageView* color_views, int color_count,
         //   * LOAD       — draw passes where the swapchain image came back
         //                  from present (PRESENT_SRC_KHR) or against a user
         //                  FBO whose attachment already has valid contents.
-        if (e.loadClear) {
+        if (e.pendingClearColor) {
             colorAttachs[i].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
         } else if (swapchainColorWasUndefined &&
                    e.activeSwapchain &&
@@ -318,7 +359,7 @@ void begin_render_pass(VkImageView* color_views, int color_count,
     depthAttach.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR;
     depthAttach.imageView = e.depthView;
     depthAttach.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-    if (e.loadClear) {
+    if (e.pendingClearDepth) {
         depthAttach.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
     } else if (swapchainDepthWasUndefined) {
         depthAttach.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
@@ -356,7 +397,7 @@ void begin_render_pass(VkImageView* color_views, int color_count,
         static int pass_count = 0;
         if (pass_count < 10) {
             const char* loadOpStr = "LOAD";
-            if (e.loadClear) loadOpStr = "CLEAR";
+            if (e.pendingClearColor) loadOpStr = "CLEAR";
             else if (swapchainColorWasUndefined) loadOpStr = "DONT_CARE(UNDEFINED)";
             else if (swapchainDepthWasUndefined) loadOpStr = "DONT_CARE(depth)";
             MITHRIL_LOG_WARN("vk", "begin_render_pass #%d: loadOp=%s "
@@ -374,7 +415,10 @@ void begin_render_pass(VkImageView* color_views, int color_count,
 
     e.passActive = true;
     e.hasCommands = true;  // begin_render_pass recorded real commands
-    e.loadClear = false;  // subsequent passes within the frame use LOAD
+    // Consume pending clear flags — they've been applied as loadOp above.
+    e.pendingClearColor = false;
+    e.pendingClearDepth = false;
+    e.pendingClearStencil = false;
 }
 
 void end_render_pass() {
@@ -728,8 +772,10 @@ void backend_set_clear_color(float r, float g, float b, float a) {
 }
 void backend_set_clear_depth(double d) { mithril::vk::set_clear_depth(d); }
 void backend_set_clear_stencil(int s)  { mithril::vk::set_clear_stencil(s); }
-void backend_set_load_clear(void)      { mithril::vk::set_load_clear(true); }
-void backend_set_load_load(void)       { mithril::vk::set_load_clear(false); }
+void backend_set_load_clear(void)      { mithril::vk::set_all_pending_clear(); }
+void backend_set_load_load(void)       { /* no-op: loadOp now determined by pending clear flags */ }
+void backend_set_pending_clear(unsigned int mask) { mithril::vk::set_pending_clear(mask); }
+int  backend_has_pending_clear(void)   { return mithril::vk::has_pending_clear() ? 1 : 0; }
 
 void backend_begin_render_pass(VkImageView* color_views, int color_count,
                                VkImageView depth_view, int width, int height, int samples) {

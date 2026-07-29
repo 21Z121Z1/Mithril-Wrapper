@@ -54,6 +54,10 @@ void backend_set_clear_stencil(int s);
 void backend_set_load_clear(void);
 void backend_set_load_load(void);
 
+/* Set per-attachment pending clear flags (deferred glClear). */
+void backend_set_pending_clear(unsigned int mask);
+int  backend_has_pending_clear(void);
+
 /*
  * Begin a dynamic-rendering pass against the given attachments.
  *   color_views : array of VkImageView (VK_NULL_HANDLE entries allowed)
@@ -61,7 +65,7 @@ void backend_set_load_load(void);
  *   depth_view  : VkImageView for depth/stencil (may be VK_NULL_HANDLE)
  *   width/height: render area
  *   samples     : 1 for now
- * If a pass is already active, this is a no-op (coalesce draws into one pass).
+ * If a pass is already active with the same attachments, this is a no-op (coalesce draws into one pass). If attachments changed, the current pass is ended and a new one begins.
  */
 void backend_begin_render_pass(VkImageView* color_views, int color_count,
                                VkImageView depth_view, int width, int height,
