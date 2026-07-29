@@ -124,11 +124,13 @@ void glClear(GLbitfield mask) {
     // begin/end/commit immediately (which triggers a vkQueueSubmit +
     // vkWaitForFences per glClear, fragmenting the frame into multiple
     // command buffers and causing MoltenVK to lose draw content), store
-    // the clear request as per-attachment pending flags. The next draw's
-    // begin_render_pass will consume them as LOAD_OP_CLEAR, folding the
-    // clear into the same render pass as the draw — matching MobileGL's
-    // VkClearManager deferred-clear approach.
-    backend_set_pending_clear(mask);
+    // the clear request as per-attachment pending entries keyed by
+    // VkImageView. The next draw's begin_render_pass will consume the
+    // entry matching its attachment views as LOAD_OP_CLEAR — matching
+    // MobileGL's VkClearManager per-texture PendingClearKey approach.
+    // Per-attachment keying ensures a clear for FBO 0 is NOT consumed by
+    // a subsequent render pass targeting a user FBO.
+    backend_set_pending_clear_for_views(colors, n, depth, mask);
 }
 
 /* ---- Enable / Disable ---- */

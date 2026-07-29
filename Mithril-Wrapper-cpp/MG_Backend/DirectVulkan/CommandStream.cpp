@@ -9,11 +9,24 @@
 
 #include <cstring>
 #include <vector>
+#include <unordered_map>
 
 namespace mithril {
 namespace vk {
 
 namespace {
+
+// Deferred glClear request, stored per-VkImageView. Mirrors MobileGL's
+// VkClearManager per-texture PendingClearKey approach: a clear meant for the
+// swapchain (FBO 0) is keyed on the swapchain's color/depth views, so it is
+// only consumed by a begin_render_pass that actually begins a pass against
+// those views — not by the next user-FBO pass.
+struct ClearRequest {
+    unsigned int mask = 0;   // GLbitfield (GL_COLOR_BUFFER_BIT=0x4000, GL_DEPTH_BUFFER_BIT=0x100, GL_STENCIL_BUFFER_BIT=0x400)
+    float color[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    double depth = 1.0;
+    int stencil = 0;
+};
 
 // Encoder state carried between begin_render_pass() and the draw calls.
 struct EncoderState {
@@ -24,12 +37,15 @@ struct EncoderState {
     float clearColor[4] = {0, 0, 0, 0};
     double clearDepth = 1.0;
     GLint clearStencil = 0;
-    // Per-attachment pending clear flags (set by deferred glClear, consumed
-    // by begin_render_pass). Replaces the single loadClear flag so that
-    // glClear(COLOR) only clears color, glClear(DEPTH) only clears depth, etc.
-    bool pendingClearColor = false;
-    bool pendingClearDepth = false;
-    bool pendingClearStencil = false;
+
+    // Per-attachment deferred clear requests, keyed by VkImageView.
+    // Replaces the old global per-pass clear flags (a clear meant for the
+    // swapchain could leak into the next user-FBO pass; keying by view
+    // ensures a clear is consumed only by a pass that begins with that view).
+    // glClear (no active pass) stores a request for each attachment view
+    // of the current draw FBO. begin_render_pass consumes (query+remove)
+    // the request for each attachment it begins a pass with.
+    std::unordered_map<VkImageView, ClearRequest> pendingClears;
 
     // Color/depth attachment views for the active pass.
     VkImageView colorViews[8] = {};
@@ -53,6 +69,54 @@ struct EncoderState {
     // races — can submit against a destroyed swapchain's semaphore, triggering
     // MoltenVK / IOSurface UAF crashes).
     bool hasCommands = false;
+
+    // Store/merge a pending clear for a specific attachment view.
+    void set_pending_clear_for_view(VkImageView view, unsigned int mask,
+                                    const float color[4], double depth, int stencil) {
+        if (view == VK_NULL_HANDLE) return;
+        auto it = pendingClears.find(view);
+        if (it != pendingClears.end()) {
+            // Merge: OR the mask, overwrite values
+            it->second.mask |= mask;
+            if (mask & 0x4000) { // GL_COLOR_BUFFER_BIT
+                it->second.color[0] = color[0]; it->second.color[1] = color[1];
+                it->second.color[2] = color[2]; it->second.color[3] = color[3];
+            }
+            if (mask & 0x100) { // GL_DEPTH_BUFFER_BIT
+                it->second.depth = depth;
+            }
+            if (mask & 0x400) { // GL_STENCIL_BUFFER_BIT
+                it->second.stencil = stencil;
+            }
+        } else {
+            ClearRequest req;
+            req.mask = mask;
+            req.color[0] = color[0]; req.color[1] = color[1];
+            req.color[2] = color[2]; req.color[3] = color[3];
+            req.depth = depth;
+            req.stencil = stencil;
+            pendingClears[view] = req;
+        }
+    }
+
+    // Query + remove a pending clear for a specific view. Returns true if hit.
+    bool consume_pending_clear_for_view(VkImageView view, ClearRequest* out) {
+        if (view == VK_NULL_HANDLE) return false;
+        auto it = pendingClears.find(view);
+        if (it == pendingClears.end()) return false;
+        if (out) *out = it->second;
+        pendingClears.erase(it);
+        return true;
+    }
+
+    // Query without removing. Returns true if hit.
+    bool has_pending_clear_for_view(VkImageView view) const {
+        if (view == VK_NULL_HANDLE) return false;
+        return pendingClears.find(view) != pendingClears.end();
+    }
+
+    // Is the map non-empty? (for eglSwapBuffers fallback quick check)
+    bool has_any_pending_clear() const { return !pendingClears.empty(); }
 };
 
 EncoderState& encoder() {
@@ -193,22 +257,20 @@ void set_clear_stencil(int s)  { encoder().clearStencil = s; }
 void set_load_clear(bool clear){ (void)clear; }
 
 void set_pending_clear(unsigned int mask) {
-    auto& e = encoder();
-    if (mask & GL_COLOR_BUFFER_BIT)   e.pendingClearColor = true;
-    if (mask & GL_DEPTH_BUFFER_BIT)   e.pendingClearDepth = true;
-    if (mask & GL_STENCIL_BUFFER_BIT) e.pendingClearStencil = true;
+    // Legacy entry: the per-view deferred clear is now stored via
+    // backend_set_pending_clear_for_views -> EncoderState::set_pending_clear_for_view.
+    // Kept as a no-op for any stray caller; the mask is ignored.
+    (void)mask;
 }
 
 void set_all_pending_clear() {
-    auto& e = encoder();
-    e.pendingClearColor = true;
-    e.pendingClearDepth = true;
-    e.pendingClearStencil = true;
+    // Legacy entry (backend_set_load_clear): no-op. Per-view pending clears
+    // are keyed on attachment VkImageViews, so a global "set all" without a
+    // target view is meaningless.
 }
 
 bool has_pending_clear() {
-    auto& e = encoder();
-    return e.pendingClearColor || e.pendingClearDepth || e.pendingClearStencil;
+    return encoder().has_any_pending_clear();
 }
 
 void set_active_swapchain(Swapchain* sc) {
@@ -305,6 +367,12 @@ void begin_render_pass(VkImageView* color_views, int color_count,
                                       /*isDepthStencil=*/false);
                 sc->currentColorLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
             }
+            // Mark the swapchain color image as rendered-to this acquire cycle
+            // so subsequent passes use LOAD instead of DONT_CARE. Only set when
+            // the swapchain view is actually bound (not for user-FBO passes).
+            if (swapchainBound) {
+                sc->colorRenderedThisFrame = true;
+            }
         }
         // Depth: one-shot UNDEFINED -> DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
         // per-swapchain-image (each swapchain image has its own depth image).
@@ -331,7 +399,8 @@ void begin_render_pass(VkImageView* color_views, int color_count,
         colorAttachs[i].imageView = e.colorViews[i];
         colorAttachs[i].imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         // loadOp:
-        //   * CLEAR      — glClear passes (loadClear).
+        //   * CLEAR      — a deferred glClear targeted this attachment view
+        //                  (per-view pending clear, consumed here).
         //   * DONT_CARE  — draw passes where the swapchain colour image was
         //                  just acquired (UNDEFINED -> COLOR_ATTACHMENT_OPTIMAL
         //                  this frame). The previous contents were discarded
@@ -340,8 +409,14 @@ void begin_render_pass(VkImageView* color_views, int color_count,
         //   * LOAD       — draw passes where the swapchain image came back
         //                  from present (PRESENT_SRC_KHR) or against a user
         //                  FBO whose attachment already has valid contents.
-        if (e.pendingClearColor) {
+        ClearRequest viewClear;
+        bool hasViewClear = e.consume_pending_clear_for_view(e.colorViews[i], &viewClear);
+        if (hasViewClear && (viewClear.mask & 0x4000)) { // GL_COLOR_BUFFER_BIT
             colorAttachs[i].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+            colorAttachs[i].clearValue.color.float32[0] = viewClear.color[0];
+            colorAttachs[i].clearValue.color.float32[1] = viewClear.color[1];
+            colorAttachs[i].clearValue.color.float32[2] = viewClear.color[2];
+            colorAttachs[i].clearValue.color.float32[3] = viewClear.color[3];
         } else if (swapchainColorWasUndefined &&
                    e.activeSwapchain &&
                    !e.activeSwapchain->colorRenderedThisFrame &&
@@ -351,25 +426,40 @@ void begin_render_pass(VkImageView* color_views, int color_count,
             colorAttachs[i].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
         }
         colorAttachs[i].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-        colorAttachs[i].clearValue.color.float32[0] = e.clearColor[0];
-        colorAttachs[i].clearValue.color.float32[1] = e.clearColor[1];
-        colorAttachs[i].clearValue.color.float32[2] = e.clearColor[2];
-        colorAttachs[i].clearValue.color.float32[3] = e.clearColor[3];
+        // Only set the fallback clearValue from e.clearColor when there is no
+        // per-view clear. When loadOp=CLEAR (from a per-view clear), the
+        // clearValue was already set above from the per-view ClearRequest and
+        // must NOT be overwritten (the per-view value may differ from the
+        // current e.clearColor if glClearColor changed between glClear and the
+        // draw). When loadOp is DONT_CARE/LOAD, clearValue is unused per the
+        // Vulkan spec, so the fallback is harmless.
+        if (!hasViewClear || !(viewClear.mask & 0x4000)) {
+            colorAttachs[i].clearValue.color.float32[0] = e.clearColor[0];
+            colorAttachs[i].clearValue.color.float32[1] = e.clearColor[1];
+            colorAttachs[i].clearValue.color.float32[2] = e.clearColor[2];
+            colorAttachs[i].clearValue.color.float32[3] = e.clearColor[3];
+        }
     }
     VkRenderingAttachmentInfoKHR depthAttach{};
     depthAttach.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR;
     depthAttach.imageView = e.depthView;
     depthAttach.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-    if (e.pendingClearDepth) {
-        depthAttach.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    } else if (swapchainDepthWasUndefined) {
-        depthAttach.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-    } else {
-        depthAttach.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-    }
     depthAttach.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     depthAttach.clearValue.depthStencil.depth = (float)e.clearDepth;
     depthAttach.clearValue.depthStencil.stencil = (uint32_t)e.clearStencil;
+    {
+        ClearRequest depthViewClear;
+        bool hasDepthViewClear = e.consume_pending_clear_for_view(e.depthView, &depthViewClear);
+        if (hasDepthViewClear && (depthViewClear.mask & 0x100)) { // GL_DEPTH_BUFFER_BIT
+            depthAttach.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+            depthAttach.clearValue.depthStencil.depth = (float)depthViewClear.depth;
+            depthAttach.clearValue.depthStencil.stencil = (uint32_t)((depthViewClear.mask & 0x400) ? depthViewClear.stencil : e.clearStencil);
+        } else if (swapchainDepthWasUndefined) {
+            depthAttach.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        } else {
+            depthAttach.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+        }
+    }
 
     VkRenderingInfoKHR ri{};
     ri.sType = VK_STRUCTURE_TYPE_RENDERING_INFO_KHR;
@@ -397,35 +487,37 @@ void begin_render_pass(VkImageView* color_views, int color_count,
     {
         static int pass_count = 0;
         if (pass_count < 10) {
+            // Reflect actual loadOp of the first color attachment.
             const char* loadOpStr = "LOAD";
-            if (e.pendingClearColor) loadOpStr = "CLEAR";
-            else if (swapchainColorWasUndefined) loadOpStr = "DONT_CARE(UNDEFINED)";
-            else if (swapchainDepthWasUndefined) loadOpStr = "DONT_CARE(depth)";
+            // Peek without consuming — consume already happened above
+            bool hadClear = false; // already consumed; reconstruct from what we set
+            // Simpler: just report based on the loadOp we actually set
+            // (colorAttachs[0].loadOp is the source of truth)
+            if (e.colorCount > 0) {
+                if (colorAttachs[0].loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR) loadOpStr = "CLEAR";
+                else if (colorAttachs[0].loadOp == VK_ATTACHMENT_LOAD_OP_DONT_CARE) loadOpStr = "DONT_CARE";
+                else loadOpStr = "LOAD";
+            }
             MITHRIL_LOG_WARN("vk", "begin_render_pass #%d: loadOp=%s "
                               "colorCount=%d depthView=%s size=%dx%d "
-                              "swapchainFmt=0x%x(%s) swapchainWasUndef=%d",
+                              "swapchainFmt=0x%x(%s) swapchainWasUndef=%d renderedThisFrame=%d",
                               pass_count + 1, loadOpStr,
                               e.colorCount, depth_view ? "yes" : "no",
                               width, height,
                               (unsigned)(e.activeSwapchain ? e.activeSwapchain->format : 0u),
                               e.activeSwapchain ? "BGRA8" : "none",
-                              (int)swapchainColorWasUndefined);
+                              (int)swapchainColorWasUndefined,
+                              e.activeSwapchain ? (int)e.activeSwapchain->colorRenderedThisFrame : 0);
             pass_count++;
         }
     }
 
     e.passActive = true;
     e.hasCommands = true;  // begin_render_pass recorded real commands
-    // Mark the swapchain color image as rendered-to this acquire cycle so
-    // subsequent passes (after coalescing fails) use LOAD instead of
-    // DONT_CARE to preserve this pass's content.
-    if (e.activeSwapchain && e.colorCount > 0) {
-        e.activeSwapchain->colorRenderedThisFrame = true;
-    }
-    // Consume pending clear flags — they've been applied as loadOp above.
-    e.pendingClearColor = false;
-    e.pendingClearDepth = false;
-    e.pendingClearStencil = false;
+    // Per-view pending clears were consumed above (consume_pending_clear_for_view)
+    // while setting colorAttachs[i].loadOp / depthAttach.loadOp. No global
+    // pending-clear reset is needed: the per-view map is drained per
+    // attachment as each pass begins.
 }
 
 void end_render_pass() {
@@ -779,10 +871,49 @@ void backend_set_clear_color(float r, float g, float b, float a) {
 }
 void backend_set_clear_depth(double d) { mithril::vk::set_clear_depth(d); }
 void backend_set_clear_stencil(int s)  { mithril::vk::set_clear_stencil(s); }
-void backend_set_load_clear(void)      { mithril::vk::set_all_pending_clear(); }
-void backend_set_load_load(void)       { /* no-op: loadOp now determined by pending clear flags */ }
-void backend_set_pending_clear(unsigned int mask) { mithril::vk::set_pending_clear(mask); }
-int  backend_has_pending_clear(void)   { return mithril::vk::has_pending_clear() ? 1 : 0; }
+void backend_set_load_clear(void)      { /* no-op: per-view deferred clears are set via backend_set_pending_clear_for_views */ }
+void backend_set_load_load(void)       { /* no-op: loadOp now determined by per-view pending clear flags */ }
+/* Set per-attachment pending clear for the given attachment views (deferred glClear). */
+void backend_set_pending_clear_for_views(VkImageView* color_views, int color_count,
+                                         VkImageView depth_view, unsigned int mask) {
+    auto& e = mithril::vk::encoder();
+    // Color attachments
+    for (int i = 0; i < color_count && i < 8; ++i) {
+        if (color_views && color_views[i] != VK_NULL_HANDLE) {
+            e.set_pending_clear_for_view(color_views[i], mask,
+                                         e.clearColor, e.clearDepth, e.clearStencil);
+        }
+    }
+    // Depth attachment
+    if (depth_view != VK_NULL_HANDLE) {
+        e.set_pending_clear_for_view(depth_view, mask,
+                                     e.clearColor, e.clearDepth, e.clearStencil);
+    }
+}
+
+/* Consume (query + remove) pending clear for a specific view. Returns 1 if hit. */
+int backend_consume_pending_clear_for_view(VkImageView view, unsigned int* out_mask,
+                                            float out_color[4], double* out_depth, int* out_stencil) {
+    mithril::vk::ClearRequest req;
+    if (mithril::vk::encoder().consume_pending_clear_for_view(view, &req)) {
+        if (out_mask) *out_mask = req.mask;
+        if (out_color) { out_color[0]=req.color[0]; out_color[1]=req.color[1]; out_color[2]=req.color[2]; out_color[3]=req.color[3]; }
+        if (out_depth) *out_depth = req.depth;
+        if (out_stencil) *out_stencil = req.stencil;
+        return 1;
+    }
+    return 0;
+}
+
+/* Query (without removing) pending clear for a specific view. Returns 1 if hit. */
+int backend_has_pending_clear_for_view(VkImageView view) {
+    return mithril::vk::encoder().has_pending_clear_for_view(view) ? 1 : 0;
+}
+
+/* Is there any pending clear at all? (eglSwapBuffers fallback quick check) */
+int backend_has_any_pending_clear(void) {
+    return mithril::vk::encoder().has_any_pending_clear() ? 1 : 0;
+}
 
 void backend_begin_render_pass(VkImageView* color_views, int color_count,
                                VkImageView depth_view, int width, int height, int samples) {

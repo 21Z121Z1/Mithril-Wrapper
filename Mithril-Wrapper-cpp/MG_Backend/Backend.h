@@ -54,9 +54,16 @@ void backend_set_clear_stencil(int s);
 void backend_set_load_clear(void);
 void backend_set_load_load(void);
 
-/* Set per-attachment pending clear flags (deferred glClear). */
-void backend_set_pending_clear(unsigned int mask);
-int  backend_has_pending_clear(void);
+/* Set per-attachment pending clear for the given attachment views (deferred glClear). */
+void backend_set_pending_clear_for_views(VkImageView* color_views, int color_count,
+                                         VkImageView depth_view, unsigned int mask);
+/* Consume (query + remove) pending clear for a specific view. Returns 1 if hit. */
+int  backend_consume_pending_clear_for_view(VkImageView view, unsigned int* out_mask,
+                                            float out_color[4], double* out_depth, int* out_stencil);
+/* Query (without removing) pending clear for a specific view. Returns 1 if hit. */
+int  backend_has_pending_clear_for_view(VkImageView view);
+/* Is there any pending clear at all? (eglSwapBuffers fallback quick check) */
+int  backend_has_any_pending_clear(void);
 
 /*
  * Begin a dynamic-rendering pass against the given attachments.

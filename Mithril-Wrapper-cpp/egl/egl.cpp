@@ -765,16 +765,33 @@ EGLBoolean eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
     // currently-acquired swapchain image before we present. commit_frame()'s
     // empty-submit defense skips the submit if no commands were recorded
     // since the last commit (e.g. eglWaitClient already flushed this frame).
-    // Execute any deferred glClear that wasn't consumed by a draw this frame
-    // (e.g. the app only called glClear with no subsequent draw). Without this,
-    // the clear would be lost and the frame would present stale content.
-    if (backend_has_pending_clear() && !backend_render_pass_active()) {
+    // Execute any deferred glClear that wasn't consumed by a draw this
+    // frame (e.g. the app only called glClear with no subsequent draw).
+    // Check per-attachment (per-VkImageView) pending clears for the
+    // current draw FBO's attachments — only clear the specific views
+    // that have a pending clear, not a global flag. This matches
+    // MobileGL's per-texture VkClearManager approach and ensures a
+    // clear for FBO 0 is not wrongly applied to a user FBO.
+    if (!backend_render_pass_active()) {
         VkImageView colors[8] = {VK_NULL_HANDLE};
         VkImageView depth = VK_NULL_HANDLE;
         int w = 0, h = 0;
         int n = mithril::collect_draw_fbo_attachments(colors, &depth, &w, &h);
-        if (n > 0 || depth != VK_NULL_HANDLE) {
-            backend_set_load_clear();
+        bool anyPending = false;
+        for (int i = 0; i < n && i < 8; ++i) {
+            if (colors[i] != VK_NULL_HANDLE &&
+                backend_has_pending_clear_for_view(colors[i])) {
+                anyPending = true;
+                break;
+            }
+        }
+        if (!anyPending && depth != VK_NULL_HANDLE &&
+            backend_has_pending_clear_for_view(depth)) {
+            anyPending = true;
+        }
+        if (anyPending && (n > 0 || depth != VK_NULL_HANDLE)) {
+            // begin_render_pass will consume per-view pending clears
+            // for matching attachment views and set loadOp=CLEAR.
             backend_begin_render_pass(colors, n, depth, w, h, 1);
             backend_end_render_pass();
         }
