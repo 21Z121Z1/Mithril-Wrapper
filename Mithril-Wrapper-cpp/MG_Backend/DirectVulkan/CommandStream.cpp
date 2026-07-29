@@ -728,6 +728,15 @@ void backend_begin_render_pass(VkImageView* color_views, int color_count,
 void backend_end_render_pass(void) { mithril::vk::end_render_pass(); }
 void backend_commit(void)          { mithril::vk::commit_frame(); }
 
+int backend_render_pass_active(void) {
+    return mithril::vk::render_pass_active() ? 1 : 0;
+}
+
+VkCommandBuffer backend_get_command_buffer(void) {
+    mithril::vk::Backend* b = mithril::vk::backend();
+    return b->commandBuffer;
+}
+
 void backend_set_active_swapchain(void* swapchain_state) {
     mithril::vk::set_active_swapchain((mithril::vk::Swapchain*)swapchain_state);
 }

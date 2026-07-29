@@ -69,6 +69,8 @@ void backend_begin_render_pass(VkImageView* color_views, int color_count,
 
 /* End + commit the active render pass / command buffer. */
 void backend_end_render_pass(void);
+int backend_render_pass_active(void);
+VkCommandBuffer backend_get_command_buffer(void);
 void backend_commit(void);
 
 /*

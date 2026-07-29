@@ -66,15 +66,68 @@ void glClear(GLbitfield mask) {
         }
     }
 
-    // Clear uses the Clear load action for the requested buffers.
+    // If a render pass is currently active, clear selectively via
+    // vkCmdClearAttachments so that glClear(GL_DEPTH_BUFFER_BIT) does not
+    // also wipe the color attachment (which overwrites rendered content
+    // with the clear color — root cause of the Minecraft red screen).
+    // MobileGL uses the same vkCmdClearAttachments approach
+    // (VulkanRenderer.cpp:4783). When no pass is active, fall back to the
+    // begin/end/commit path (no draws are in-flight to lose).
+    if (backend_render_pass_active()) {
+        VkClearAttachment attachments[8 + 1];
+        uint32_t attachmentCount = 0;
+
+        if (mask & GL_COLOR_BUFFER_BIT) {
+            // Clear every color attachment bound to the current FBO.
+            for (int i = 0; i < n && i < 8; ++i) {
+                VkClearAttachment& a = attachments[attachmentCount++];
+                a.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+                a.colorAttachment = (uint32_t)i;
+                a.clearValue.color.float32[0] = g_state->clearColor[0];
+                a.clearValue.color.float32[1] = g_state->clearColor[1];
+                a.clearValue.color.float32[2] = g_state->clearColor[2];
+                a.clearValue.color.float32[3] = g_state->clearColor[3];
+            }
+        }
+        if (mask & GL_DEPTH_BUFFER_BIT) {
+            VkClearAttachment& a = attachments[attachmentCount++];
+            a.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+            a.colorAttachment = 0;
+            a.clearValue.depthStencil.depth = (float)g_state->clearDepth;
+            a.clearValue.depthStencil.stencil = 0;
+        }
+        if (mask & GL_STENCIL_BUFFER_BIT) {
+            VkClearAttachment& a = attachments[attachmentCount++];
+            a.aspectMask = VK_IMAGE_ASPECT_STENCIL_BIT;
+            a.colorAttachment = 0;
+            a.clearValue.depthStencil.depth = 0.0f;
+            a.clearValue.depthStencil.stencil = (uint32_t)g_state->clearStencil;
+        }
+
+        if (attachmentCount > 0) {
+            VkClearRect rect{};
+            rect.rect.offset.x = 0;
+            rect.rect.offset.y = 0;
+            rect.rect.extent.width = (uint32_t)(w > 0 ? w : 1);
+            rect.rect.extent.height = (uint32_t)(h > 0 ? h : 1);
+            rect.baseArrayLayer = 0;
+            rect.layerCount = 1;
+            VkCommandBuffer cmd = backend_get_command_buffer();
+            if (cmd) {
+                vkCmdClearAttachments(cmd, attachmentCount, attachments, 1, &rect);
+            }
+        }
+        return;
+    }
+
+    // No active render pass — fall back to begin/end/commit. This clears
+    // all attachments (loadOp=CLEAR applies to the whole attachment); since
+    // no draw is in-flight there is nothing to preserve. This matches the
+    // previous behavior for the non-active-pass case.
     backend_set_load_clear();
     backend_begin_render_pass(colors, n, depth, w, h, 1);
-    // Respect the mask: if only depth/stencil, the color attachment load
-    // action is irrelevant (we still need a pass to clear depth). End
-    // immediately — there is nothing to encode.
     backend_end_render_pass();
     backend_commit();
-    (void)mask;
 }
 
 /* ---- Enable / Disable ---- */
