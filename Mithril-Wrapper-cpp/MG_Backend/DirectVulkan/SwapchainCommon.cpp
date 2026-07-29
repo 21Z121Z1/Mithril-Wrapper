@@ -95,7 +95,16 @@ Swapchain* create_swapchain_post_surface(VkSurfaceKHR surface, int width, int he
     scci.imageColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
     scci.imageExtent = extent;
     scci.imageArrayLayers = 1;
-    scci.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    // TRANSFER_SRC_BIT is required for glBlitFramebuffer (FBO 0 as source)
+    // and glReadPixels (reading from the default framebuffer). Without it,
+    // vkCmdBlitImage / vkCmdCopyImageToBuffer using the swapchain image as
+    // source triggers a GPU Page Fault on MoltenVK/Metal
+    // (kIOGPUCommandBufferCallbackErrorPageFault), which causes
+    // VK_ERROR_OUT_OF_DEVICE_MEMORY, swapchain rebuild loops, and eventual
+    // OOM from unbounded deferred-release queues.
+    scci.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+                      VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                      VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     scci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
     scci.preTransform = caps.currentTransform;
     scci.compositeAlpha = compAlpha;

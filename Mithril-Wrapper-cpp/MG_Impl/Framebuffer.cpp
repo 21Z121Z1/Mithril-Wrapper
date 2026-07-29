@@ -231,6 +231,14 @@ void glBlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1,
                         srcX0, srcY0, srcX1, srcY1,
                         dstX0, dstY0, dstX1, dstY1,
                         mask, filter);
+
+    // If the blit involved the swapchain image (FBO 0), update the backend's
+    // layout tracking. backend_blit_images transitions the swapchain image
+    // back to COLOR_ATTACHMENT_OPTIMAL, but the Swapchain::currentColorLayout
+    // tracking variable is not aware of this external transition.
+    if (g_state->currentReadFBO == 0 || g_state->currentDrawFBO == 0) {
+        backend_update_swapchain_layout(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    }
 }
 
 /* Renderbuffers are minimally supported (used rarely by MC Java). */

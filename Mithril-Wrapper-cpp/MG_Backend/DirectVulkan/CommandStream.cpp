@@ -756,6 +756,13 @@ void backend_drain_and_detach_swapchain(void) {
     mithril::vk::drain_and_detach_swapchain();
 }
 
+void backend_update_swapchain_layout(VkImageLayout layout) {
+    mithril::vk::Swapchain* sc = mithril::vk::encoder().activeSwapchain;
+    if (sc) {
+        sc->currentColorLayout = layout;
+    }
+}
+
 // Any vkCmd* on a command buffer that is not in the recording state is UB;
 // under a GPU fault (begin failure) MoltenVK emits one VK_NOT_READY message
 // per call, which flooded a field log to 655 MB. Every recording entry point
