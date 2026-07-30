@@ -28,6 +28,13 @@ struct ClearRequest {
     int stencil = 0;
 };
 
+// Inline clear request = VkClearAttachment (aspectMask + colorAttachment + clearValue).
+// Used when a pending clear targets an already-rendered attachment: instead of
+// loadOp=CLEAR (which wipes content), we use loadOp=LOAD and execute
+// vkCmdClearAttachments after the pass begins. This matches MobileGL's
+// ClearAttachmentsOnActiveRenderPass approach (VulkanRenderer.cpp:8726).
+using InlineClearRequest = VkClearAttachment;
+
 // Encoder state carried between begin_render_pass() and the draw calls.
 struct EncoderState {
     bool passActive = false;
@@ -46,6 +53,16 @@ struct EncoderState {
     // of the current draw FBO. begin_render_pass consumes (query+remove)
     // the request for each attachment it begins a pass with.
     std::unordered_map<VkImageView, ClearRequest> pendingClears;
+
+    // Per-attachment "rendered this frame" tracking. When a render pass begins
+    // on an attachment that was already rendered to this frame, we use LOAD
+    // instead of CLEAR to preserve the previous pass's content. Pending clears
+    // for already-rendered attachments are converted to inline vkCmdClearAttachments.
+    std::unordered_map<VkImageView, bool> renderedThisFrame;
+
+    // Inline clears to execute after begin_render_pass completes. Populated when
+    // a pending clear targets an already-rendered attachment (loadOp=LOAD path).
+    std::vector<InlineClearRequest> pendingInlineClears;
 
     // Color/depth attachment views for the active pass.
     VkImageView colorViews[8] = {};
@@ -117,6 +134,21 @@ struct EncoderState {
 
     // Is the map non-empty? (for eglSwapBuffers fallback quick check)
     bool has_any_pending_clear() const { return !pendingClears.empty(); }
+
+    // Mark an attachment view as rendered-to this frame.
+    void mark_attachment_rendered(VkImageView view) {
+        if (view != VK_NULL_HANDLE) renderedThisFrame[view] = true;
+    }
+
+    // Has this attachment view been rendered to this frame?
+    bool is_attachment_rendered(VkImageView view) const {
+        if (view == VK_NULL_HANDLE) return false;
+        auto it = renderedThisFrame.find(view);
+        return it != renderedThisFrame.end() && it->second;
+    }
+
+    // Clear all per-frame rendered tracking (called at frame boundaries).
+    void clear_rendered_this_frame() { renderedThisFrame.clear(); }
 };
 
 EncoderState& encoder() {
@@ -394,29 +426,60 @@ void begin_render_pass(VkImageView* color_views, int color_count,
 
     // Begin dynamic rendering.
     VkRenderingAttachmentInfoKHR colorAttachs[8] = {};
+    // Captured for the diagnostic log below (consumed clears are no longer
+    // queryable via has_pending_clear_for_view once begin_render_pass runs).
+    bool logHasViewClear = false;
+    bool logAlreadyRendered = false;
     for (int i = 0; i < e.colorCount; ++i) {
         colorAttachs[i].sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR;
         colorAttachs[i].imageView = e.colorViews[i];
         colorAttachs[i].imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         // loadOp:
         //   * CLEAR      — a deferred glClear targeted this attachment view
-        //                  (per-view pending clear, consumed here).
+        //                  (per-view pending clear, consumed here) AND the
+        //                  attachment was NOT already rendered this frame.
+        //   * LOAD       — either no pending clear, or a pending clear on an
+        //                  attachment that was ALREADY rendered this frame.
+        //                  In the latter case loadOp=CLEAR would wipe the
+        //                  previous pass's content (red-screen root cause),
+        //                  so we LOAD to preserve it and apply the clear inline
+        //                  via vkCmdClearAttachments after the pass begins
+        //                  (MobileGL ClearAttachmentsOnActiveRenderPass).
         //   * DONT_CARE  — draw passes where the swapchain colour image was
         //                  just acquired (UNDEFINED -> COLOR_ATTACHMENT_OPTIMAL
         //                  this frame). The previous contents were discarded
         //                  by the UNDEFINED source layout, so LOAD would read
         //                  garbage and waste bandwidth.
-        //   * LOAD       — draw passes where the swapchain image came back
-        //                  from present (PRESENT_SRC_KHR) or against a user
-        //                  FBO whose attachment already has valid contents.
         ClearRequest viewClear;
         bool hasViewClear = e.consume_pending_clear_for_view(e.colorViews[i], &viewClear);
+        bool alreadyRendered = e.is_attachment_rendered(e.colorViews[i]);
+        if (i == 0) {
+            logHasViewClear = hasViewClear;
+            logAlreadyRendered = alreadyRendered;
+        }
         if (hasViewClear && (viewClear.mask & 0x4000)) { // GL_COLOR_BUFFER_BIT
-            colorAttachs[i].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-            colorAttachs[i].clearValue.color.float32[0] = viewClear.color[0];
-            colorAttachs[i].clearValue.color.float32[1] = viewClear.color[1];
-            colorAttachs[i].clearValue.color.float32[2] = viewClear.color[2];
-            colorAttachs[i].clearValue.color.float32[3] = viewClear.color[3];
+            if (alreadyRendered) {
+                // Attachment already has content from a previous pass this frame.
+                // Using loadOp=CLEAR would wipe it (root cause of red screen).
+                // Use LOAD to preserve content, and apply the clear inline via
+                // vkCmdClearAttachments after the pass begins — matching MobileGL's
+                // ClearAttachmentsOnActiveRenderPass approach.
+                colorAttachs[i].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+                InlineClearRequest req;
+                req.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+                req.colorAttachment = (uint32_t)i;
+                req.clearValue.color.float32[0] = viewClear.color[0];
+                req.clearValue.color.float32[1] = viewClear.color[1];
+                req.clearValue.color.float32[2] = viewClear.color[2];
+                req.clearValue.color.float32[3] = viewClear.color[3];
+                e.pendingInlineClears.push_back(req);
+            } else {
+                colorAttachs[i].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+                colorAttachs[i].clearValue.color.float32[0] = viewClear.color[0];
+                colorAttachs[i].clearValue.color.float32[1] = viewClear.color[1];
+                colorAttachs[i].clearValue.color.float32[2] = viewClear.color[2];
+                colorAttachs[i].clearValue.color.float32[3] = viewClear.color[3];
+            }
         } else if (swapchainColorWasUndefined &&
                    e.activeSwapchain &&
                    !e.activeSwapchain->colorRenderedThisFrame &&
@@ -450,10 +513,37 @@ void begin_render_pass(VkImageView* color_views, int color_count,
     {
         ClearRequest depthViewClear;
         bool hasDepthViewClear = e.consume_pending_clear_for_view(e.depthView, &depthViewClear);
+        bool depthAlreadyRendered = e.is_attachment_rendered(e.depthView);
         if (hasDepthViewClear && (depthViewClear.mask & 0x100)) { // GL_DEPTH_BUFFER_BIT
-            depthAttach.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-            depthAttach.clearValue.depthStencil.depth = (float)depthViewClear.depth;
-            depthAttach.clearValue.depthStencil.stencil = (uint32_t)((depthViewClear.mask & 0x400) ? depthViewClear.stencil : e.clearStencil);
+            if (depthAlreadyRendered) {
+                // Depth attachment already rendered this frame: CLEAR would
+                // wipe it. Use LOAD and apply the clear inline via
+                // vkCmdClearAttachments after the pass begins.
+                depthAttach.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+                InlineClearRequest req;
+                req.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+                if (depthViewClear.mask & 0x400) { // GL_STENCIL_BUFFER_BIT
+                    req.aspectMask |= VK_IMAGE_ASPECT_STENCIL_BIT;
+                }
+                req.colorAttachment = 0;
+                req.clearValue.depthStencil.depth = (float)depthViewClear.depth;
+                req.clearValue.depthStencil.stencil = (uint32_t)((depthViewClear.mask & 0x400) ? depthViewClear.stencil : e.clearStencil);
+                e.pendingInlineClears.push_back(req);
+            } else {
+                depthAttach.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+                depthAttach.clearValue.depthStencil.depth = (float)depthViewClear.depth;
+                depthAttach.clearValue.depthStencil.stencil = (uint32_t)((depthViewClear.mask & 0x400) ? depthViewClear.stencil : e.clearStencil);
+            }
+        } else if (hasDepthViewClear && !(depthViewClear.mask & 0x100) &&
+                   (depthViewClear.mask & 0x400) && depthAlreadyRendered) {
+            // Stencil-only clear on an already-rendered depth attachment.
+            depthAttach.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+            InlineClearRequest req;
+            req.aspectMask = VK_IMAGE_ASPECT_STENCIL_BIT;
+            req.colorAttachment = 0;
+            req.clearValue.depthStencil.depth = (float)e.clearDepth;
+            req.clearValue.depthStencil.stencil = (uint32_t)depthViewClear.stencil;
+            e.pendingInlineClears.push_back(req);
         } else if (swapchainDepthWasUndefined) {
             depthAttach.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
         } else {
@@ -486,13 +576,9 @@ void begin_render_pass(VkImageView* color_views, int color_count,
     // "red screen" / "black screen" / no-render issues.
     {
         static int pass_count = 0;
-        if (pass_count < 10) {
+        if (pass_count < 20) {
             // Reflect actual loadOp of the first color attachment.
             const char* loadOpStr = "LOAD";
-            // Peek without consuming — consume already happened above
-            bool hadClear = false; // already consumed; reconstruct from what we set
-            // Simpler: just report based on the loadOp we actually set
-            // (colorAttachs[0].loadOp is the source of truth)
             if (e.colorCount > 0) {
                 if (colorAttachs[0].loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR) loadOpStr = "CLEAR";
                 else if (colorAttachs[0].loadOp == VK_ATTACHMENT_LOAD_OP_DONT_CARE) loadOpStr = "DONT_CARE";
@@ -500,14 +586,19 @@ void begin_render_pass(VkImageView* color_views, int color_count,
             }
             MITHRIL_LOG_WARN("vk", "begin_render_pass #%d: loadOp=%s "
                               "colorCount=%d depthView=%s size=%dx%d "
-                              "swapchainFmt=0x%x(%s) swapchainWasUndef=%d renderedThisFrame=%d",
+                              "swapchainFmt=0x%x(%s) swapchainWasUndef=%d renderedThisFrame=%d "
+                              "view=0x%x hasViewClear=%d alreadyRendered=%d inlineClears=%zu",
                               pass_count + 1, loadOpStr,
                               e.colorCount, depth_view ? "yes" : "no",
                               width, height,
                               (unsigned)(e.activeSwapchain ? e.activeSwapchain->format : 0u),
                               e.activeSwapchain ? "BGRA8" : "none",
                               (int)swapchainColorWasUndefined,
-                              e.activeSwapchain ? (int)e.activeSwapchain->colorRenderedThisFrame : 0);
+                              e.activeSwapchain ? (int)e.activeSwapchain->colorRenderedThisFrame : 0,
+                              e.colorCount > 0 ? (unsigned)(uintptr_t)e.colorViews[0] : 0u,
+                              (int)logHasViewClear,
+                              (int)logAlreadyRendered,
+                              e.pendingInlineClears.size());
             pass_count++;
         }
     }
@@ -518,6 +609,52 @@ void begin_render_pass(VkImageView* color_views, int color_count,
     // while setting colorAttachs[i].loadOp / depthAttach.loadOp. No global
     // pending-clear reset is needed: the per-view map is drained per
     // attachment as each pass begins.
+
+    // Mark all attachments as rendered-to this frame so subsequent passes on
+    // the same attachment use LOAD instead of CLEAR (preserving content).
+    for (int i = 0; i < e.colorCount; ++i) {
+        e.mark_attachment_rendered(e.colorViews[i]);
+    }
+    if (e.depthView != VK_NULL_HANDLE) {
+        e.mark_attachment_rendered(e.depthView);
+    }
+
+    // Execute any inline clears (from pending clears on already-rendered
+    // attachments). These are vkCmdClearAttachments calls that clear the
+    // entire render area, applied AFTER the pass begins with loadOp=LOAD
+    // so existing content is preserved except where the clear applies.
+    // NOTE: cmd_recording_ok() is a static helper defined later in the
+    // extern "C" section, so it cannot be called from this namespace
+    // scope. Inline the same guard (commandBuffer + commandBufferRecording).
+    if (!e.pendingInlineClears.empty() && b->commandBuffer && b->commandBufferRecording) {
+        // The clear rect covers the entire render area.
+        VkClearRect clearRect{};
+        clearRect.rect.offset.x = 0;
+        clearRect.rect.offset.y = 0;
+        clearRect.rect.extent.width = (uint32_t)width;
+        clearRect.rect.extent.height = (uint32_t)height;
+        clearRect.baseArrayLayer = 0;
+        clearRect.layerCount = 1;
+
+        vkCmdClearAttachments(b->commandBuffer,
+                             (uint32_t)e.pendingInlineClears.size(),
+                             e.pendingInlineClears.data(),
+                             1, &clearRect);
+
+        // Throttled logging for inline clears.
+        {
+            static int inline_clear_count = 0;
+            if (inline_clear_count < 20) {
+                for (const auto& req : e.pendingInlineClears) {
+                    MITHRIL_LOG_WARN("vk", "inline_clear: aspect=0x%x colorAttachment=%u "
+                                      "(rendered attachment preserved via LOAD+inline)",
+                                      (unsigned)req.aspectMask, req.colorAttachment);
+                }
+                inline_clear_count++;
+            }
+        }
+        e.pendingInlineClears.clear();
+    }
 }
 
 void end_render_pass() {
@@ -760,6 +897,9 @@ void commit_frame() {
 
     // Wait on the frame we just submitted so the command buffer is reusable.
     vkWaitForFences(b->device, 1, &fence, VK_TRUE, UINT64_MAX);
+
+    // Reset per-attachment "rendered this frame" tracking for the next frame.
+    e.clear_rendered_this_frame();
 
     // ---- Drain deferred-release queues ----
     // Now that vkWaitForFences has completed, the GPU is done with all
