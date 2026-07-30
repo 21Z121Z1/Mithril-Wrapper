@@ -22,6 +22,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -108,6 +109,20 @@ bool init_device() {
     Backend* b = backend();
     if (b->initialized) return true;
 
+    // ---- MoltenVK 环境变量（代码层面配置，不依赖启动器）----
+    // 必须在 vkCreateInstance 之前设置：MoltenVK 在 vkCreateInstance 内部
+    // 通过 getenv 读取这些配置。overwrite=1 表示即使启动器已设过也以代码
+    // 为准——保证诊断日志在所有部署环境下生效。
+    //   MVK_CONFIG_DEBUG=1        启用 MoltenVK 调试模式
+    //   MVK_CONFIG_LOG_LEVEL=info info 级日志（不用 verbose 避免逐 draw 刷屏）
+    //   MVK_CONFIG_TRACE_VULKAN=0 显式关闭逐 API 调用 trace（否则日志直接爆）
+    //   MITHRIL_INFO=1            让 Mithril Log.cpp 的 LogLevelInit 拾取 Info
+    //                             级别，使本文件的关键路径诊断日志默认可见
+    setenv("MVK_CONFIG_DEBUG", "1", 1);
+    setenv("MVK_CONFIG_LOG_LEVEL", "info", 1);
+    setenv("MVK_CONFIG_TRACE_VULKAN", "0", 1);
+    setenv("MITHRIL_INFO", "1", 1);
+
     // ---- Instance ----
     std::vector<VkExtensionProperties> instExtProps;
     uint32_t extCount = 0;
@@ -147,6 +162,34 @@ bool init_device() {
     // vkEnumeratePhysicalDevices returns the MoltenVK ICD.
     instCI.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
 
+    // ---- 条件式启用 Vulkan Validation Layer ----
+    // 查询可用 layer；若 VK_LAYER_KHRONOS_validation 存在则启用，使违规
+    // (layout 错误、descriptor 缺失、render-pass 状态机错误等) 通过
+    // debug_callback 报告。若 layer 不可用 (如 Release 包 MoltenVK 未带
+    // layer) 则降级为仅依赖 MoltenVK 自身日志，绝不因 layer 缺失而使
+    // 初始化失败——避免在用户设备上因 layer 缺失导致整个后端无法启动。
+    {
+        std::vector<VkLayerProperties> layerProps;
+        uint32_t layerCount = 0;
+        vkEnumerateInstanceLayerProperties(&layerCount, nullptr);
+        layerProps.resize(layerCount);
+        if (layerCount > 0) {
+            vkEnumerateInstanceLayerProperties(&layerCount, layerProps.data());
+        }
+        if (has_layer(layerProps, "VK_LAYER_KHRONOS_validation")) {
+            static const char* validationLayers[] = { "VK_LAYER_KHRONOS_validation" };
+            instCI.enabledLayerCount = 1;
+            instCI.ppEnabledLayerNames = validationLayers;
+            MITHRIL_LOG_INFO("vk", "Vulkan Validation Layer enabled (VK_LAYER_KHRONOS_validation)");
+        } else {
+            MITHRIL_LOG_WARN("vk", "VK_LAYER_KHRONOS_validation not available; "
+                              "relying on MoltenVK logs only. Enumerated layers:");
+            for (const auto& l : layerProps) {
+                MITHRIL_LOG_WARN("vk", "  %s", l.layerName);
+            }
+        }
+    }
+
     if (vkCreateInstance(&instCI, nullptr, &b->instance) != VK_SUCCESS) {
         MITHRIL_LOG_ERROR("vk", "vkCreateInstance failed");
         return false;
@@ -159,7 +202,11 @@ bool init_device() {
         if (fn) {
             VkDebugUtilsMessengerCreateInfoEXT mic{};
             mic.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
-            mic.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
+            // 监听 INFO | WARNING | ERROR 三档：INFO 用于 validation 的
+            // best-practice 提示 (走 debug_callback 内的 hash 去重逻辑)，
+            // ERROR 永不抑制，WARNING/INFO 走 hash 去重避免洪水。
+            mic.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT |
+                                  VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
                                   VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
             mic.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
                               VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |

@@ -237,6 +237,31 @@ static void prepare_draw(GLenum mode) {
         backend_end_render_pass();
     }
 
+    // ---- 节流诊断快照（每 60 帧一次，约 1 秒 1 次）----
+    // 避免每 draw 刷屏。仅在采样帧打印 boundTextures + FBO attachments
+    // 的当前布局，用于定位红屏/黑屏根因（纹理布局错误会导致 MoltenVK
+    // 采样到垃圾数据 -> 只显示 clear color）。
+    {
+        static uint64_t frameCounter = 0;
+        frameCounter++;
+        if (frameCounter % 60 == 1) {
+            GLuint t0 = mithril::g_state->boundTextures[0];
+            GLuint t1 = mithril::g_state->boundTextures[1];
+            GLuint t2 = mithril::g_state->boundTextures[2];
+            GLuint t3 = mithril::g_state->boundTextures[3];
+            MITHRIL_LOG_INFO("draw", "prepare_draw snapshot #%llu: fbo=%s color_count=%d "
+                              "need_pass_end=%d | tex[0]=%u(layout=%u) tex[1]=%u(layout=%u) "
+                              "tex[2]=%u(layout=%u) tex[3]=%u(layout=%u)",
+                              (unsigned long long)frameCounter,
+                              fbo ? "yes" : "no", color_count,
+                              (int)need_pass_end_for_transition,
+                              t0, (unsigned)backend_get_texture_layout(t0),
+                              t1, (unsigned)backend_get_texture_layout(t1),
+                              t2, (unsigned)backend_get_texture_layout(t2),
+                              t3, (unsigned)backend_get_texture_layout(t3));
+        }
+    }
+
     // ---- Texture layout transitions (before begin_render_pass) ----
     // MoltenVK samples garbage when a descriptor's imageLayout doesn't match
     // the texture's actual layout. Two transitions are needed:

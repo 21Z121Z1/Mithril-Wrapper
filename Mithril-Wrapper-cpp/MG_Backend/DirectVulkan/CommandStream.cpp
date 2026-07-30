@@ -350,6 +350,22 @@ void begin_render_pass(VkImageView* color_views, int color_count,
         end_render_pass();  // attachments changed, end current and begin new
     }
 
+    // ---- 节流诊断：仅在实际启动新 Pass 时打印（非 coalescing 复用）----
+    // coalescing 复用路径在上面 if(same) return 处直接返回，不会到这里。
+    // 每 60 次实际启动打印一次，避免日志洪水，同时持续可见 Pass 重启事件。
+    {
+        static uint64_t passStartCounter = 0;
+        passStartCounter++;
+        if (passStartCounter % 60 == 1) {
+            MITHRIL_LOG_INFO("vk", "begin_render_pass (pass started) #%llu: "
+                              "color_count=%d depth=%s size=%dx%d",
+                              (unsigned long long)passStartCounter,
+                              color_count,
+                              depth_view ? "yes" : "no",
+                              width, height);
+        }
+    }
+
     // The command buffer is already in the recording state — either begun by
     // init_device() (first frame) or by commit_frame() (subsequent frames).
     // Pre-frame commands (layout transitions, texture uploads, etc.) recorded
@@ -889,6 +905,9 @@ void commit_frame() {
     // Success: a clean submit clears the consecutive-failure counter (only
     // persistent faults should keep it climbing toward the deviceLost threshold).
     b->consecutiveSubmitFailures = 0;
+
+    MITHRIL_LOG_INFO("vk", "commit_frame: submitted ok (frameGen=%llu)",
+                     (unsigned long long)b->frameGeneration);
 
     // Submit succeeded: imageAvailable is now consumed (the wait was honored).
     if (sc) {
