@@ -198,6 +198,19 @@ static void prepare_draw(GLenum mode) {
         return;
     }
 
+    // End any active render pass BEFORE recording texture layout transitions.
+    // VK_KHR_dynamic_rendering forbids transitioning an attachment image to
+    // a different layout while it is being used as an attachment in an active
+    // render pass. Without this, MoltenVK does not properly execute the
+    // barrier (the attachment stays in COLOR_ATTACHMENT_OPTIMAL instead of
+    // transitioning to SHADER_READ_ONLY_OPTIMAL), and the subsequent draw
+    // samples garbage/transparent texels — root cause of the red screen when
+    // the composite pass samples a user-FBO texture that was just rendered to.
+    // The next backend_begin_render_pass() will start a fresh pass; the
+    // renderedThisFrame tracking ensures it uses LOAD op to preserve content
+    // from the pass we just ended.
+    backend_end_render_pass();
+
     // ---- Texture layout transitions (before begin_render_pass) ----
     // MoltenVK samples garbage when a descriptor's imageLayout doesn't match
     // the texture's actual layout. Two transitions are needed:
