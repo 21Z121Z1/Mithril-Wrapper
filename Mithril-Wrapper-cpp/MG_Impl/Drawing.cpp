@@ -16,8 +16,10 @@
 // encoders.
 #include "includes.h"
 #include "Framebuffer.h"
+#include "../MG_Backend/DirectVulkan/Pipeline.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <unordered_map>
 
@@ -245,20 +247,115 @@ static void prepare_draw(GLenum mode) {
         static uint64_t frameCounter = 0;
         frameCounter++;
         if (frameCounter % 60 == 1) {
-            GLuint t0 = mithril::g_state->boundTextures[0];
-            GLuint t1 = mithril::g_state->boundTextures[1];
-            GLuint t2 = mithril::g_state->boundTextures[2];
-            GLuint t3 = mithril::g_state->boundTextures[3];
-            MITHRIL_LOG_INFO("draw", "prepare_draw snapshot #%llu: fbo=%s color_count=%d "
-                              "need_pass_end=%d | tex[0]=%u(layout=%u) tex[1]=%u(layout=%u) "
-                              "tex[2]=%u(layout=%u) tex[3]=%u(layout=%u)",
+            // Summary 行
+            MITHRIL_LOG_INFO("draw", "prepare_draw snapshot #%llu: fbo=%s color_count=%d need_pass_end=%d",
                               (unsigned long long)frameCounter,
                               fbo ? "yes" : "no", color_count,
-                              (int)need_pass_end_for_transition,
-                              t0, (unsigned)backend_get_texture_layout(t0),
-                              t1, (unsigned)backend_get_texture_layout(t1),
-                              t2, (unsigned)backend_get_texture_layout(t2),
-                              t3, (unsigned)backend_get_texture_layout(t3));
+                              (int)need_pass_end_for_transition);
+            // Trigger 行：明确列出触发 need_pass_end 的 slot/attachment
+            if (need_pass_end_for_transition) {
+                for (int i = 0; i < mithril::kMaxTextureUnits; ++i) {
+                    GLuint tex_id = mithril::g_state->boundTextures[i];
+                    if (tex_id && backend_get_texture_layout(tex_id) != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+                        MITHRIL_LOG_INFO("draw", "  trigger: tex[%d]=%u layout=%u (expect SHADER_READ_ONLY=5)",
+                                          i, tex_id, (unsigned)backend_get_texture_layout(tex_id));
+                    }
+                }
+                if (fbo) {
+                    for (int i = 0; i < color_count && i < 8; ++i) {
+                        GLuint t = fbo->colors[i].texture;
+                        if (t && backend_get_texture_layout(t) != VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
+                            MITHRIL_LOG_INFO("draw", "  trigger: fbo.color[%d]=%u layout=%u (expect COLOR_ATTACHMENT=2)",
+                                              i, t, (unsigned)backend_get_texture_layout(t));
+                        }
+                    }
+                    if (fbo->depth.texture && backend_get_texture_layout(fbo->depth.texture) != VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL) {
+                        MITHRIL_LOG_INFO("draw", "  trigger: fbo.depth=%u layout=%u (expect DEPTH_STENCIL=3)",
+                                          fbo->depth.texture, (unsigned)backend_get_texture_layout(fbo->depth.texture));
+                    }
+                }
+            }
+            // 全 slot 摘要行：列出所有非零纹理的 (slot, name, layout)
+            for (int i = 0; i < mithril::kMaxTextureUnits; ++i) {
+                GLuint tex_id = mithril::g_state->boundTextures[i];
+                if (tex_id) {
+                    MITHRIL_LOG_INFO("draw", "  tex[%d]=%u layout=%u",
+                                      i, tex_id, (unsigned)backend_get_texture_layout(tex_id));
+                }
+            }
+            // fbo attachments 摘要
+            if (fbo) {
+                for (int i = 0; i < color_count && i < 8; ++i) {
+                    GLuint t = fbo->colors[i].texture;
+                    if (t) {
+                        MITHRIL_LOG_INFO("draw", "  fbo.color[%d]=%u layout=%u",
+                                          i, t, (unsigned)backend_get_texture_layout(t));
+                    }
+                }
+                if (fbo->depth.texture) {
+                    MITHRIL_LOG_INFO("draw", "  fbo.depth=%u layout=%u",
+                                      fbo->depth.texture, (unsigned)backend_get_texture_layout(fbo->depth.texture));
+                }
+            }
+        }
+    }
+
+    // ---- A1 代码级 validation: 纹理布局与 sampler 用途匹配 ----
+    // 遍历当前 program 反射出的 sampled-image bindings，检查其绑定的纹理
+    // layout 是否为 SHADER_READ_ONLY_OPTIMAL。MoltenVK 在 layout 不匹配时
+    // 采样到垃圾数据 -> 只显示 clear color (红屏根因)。
+    // 因 libMoltenVK.dylib 无 Vulkan Loader，无法用 Khronos validation layer，
+    // 此检查作为代码级 validation 让违规可见。
+    {
+        auto& tbl = mithril::vk::program_table();
+        auto pit = tbl.find(g_state->currentProgram);
+        if (pit != tbl.end()) {
+            for (const auto& db : pit->second.bindings) {
+                if (db.type != VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) continue;
+                GLuint tex_id = (db.binding < (uint32_t)mithril::kMaxTextureUnits)
+                                ? mithril::g_state->boundTextures[db.binding] : 0;
+                if (!tex_id) continue;
+                VkImageLayout layout = backend_get_texture_layout(tex_id);
+                if (layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+                    // FNV-1a hash 去重：前 4 次全输出，之后每 1000 次摘要
+                    static std::atomic<uint64_t> lastViolHash{0};
+                    static std::atomic<uint64_t> violCount{0};
+                    uint64_t h = 1469598103934665603ull;
+                    h ^= (uint64_t)db.binding; h *= 1099511628211ull;
+                    h ^= (uint64_t)tex_id; h *= 1099511628211ull;
+                    h ^= (uint64_t)layout; h *= 1099511628211ull;
+                    if (h == lastViolHash.load(std::memory_order_relaxed)) {
+                        uint64_t n = violCount.fetch_add(1, std::memory_order_relaxed) + 1;
+                        if (n <= 4) {
+                            MITHRIL_LOG_ERROR("draw", "validation: sampler binding %d tex=%u layout=%u (expect 5 SHADER_READ_ONLY_OPTIMAL) — MoltenVK will sample garbage",
+                                              db.binding, tex_id, (unsigned)layout);
+                        } else if (n % 1000 == 0) {
+                            MITHRIL_LOG_ERROR("draw", "validation: sampler binding %d tex=%u layout=%u (expect 5 SHADER_READ_ONLY) [repeated %llu times]",
+                                              db.binding, tex_id, (unsigned)layout, (unsigned long long)n);
+                        }
+                    } else {
+                        uint64_t prev = violCount.exchange(1, std::memory_order_relaxed);
+                        lastViolHash.store(h, std::memory_order_relaxed);
+                        if (prev > 4) {
+                            MITHRIL_LOG_ERROR("draw", "validation: previous sampler layout violation repeated %llu times total",
+                                              (unsigned long long)prev);
+                        }
+                        MITHRIL_LOG_ERROR("draw", "validation: sampler binding %d tex=%u layout=%u (expect 5 SHADER_READ_ONLY_OPTIMAL) — MoltenVK will sample garbage",
+                                          db.binding, tex_id, (unsigned)layout);
+                    }
+                }
+                // Feedback loop 检查：纹理同时是 fbo attachment
+                if (fbo && layout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
+                    bool isAttachment = false;
+                    for (int i = 0; i < color_count && i < 8 && !isAttachment; ++i) {
+                        if (fbo->colors[i].texture == tex_id) isAttachment = true;
+                    }
+                    if (isAttachment) {
+                        MITHRIL_LOG_WARN("draw", "validation: tex %u is both sampler binding %d and fbo color attachment (feedback loop)",
+                                          tex_id, db.binding);
+                    }
+                }
+            }
         }
     }
 

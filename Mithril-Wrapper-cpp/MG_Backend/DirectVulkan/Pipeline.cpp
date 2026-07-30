@@ -459,10 +459,29 @@ VkPipeline get_or_create_pipeline(GLuint program,
     VkResult r = vkCreateGraphicsPipelines(b->device, b->pipelineCache, 1, &gi,
                                            nullptr, &pipeline);
     if (r != VK_SUCCESS) {
-        MITHRIL_LOG_WARN("vk", "vkCreateGraphicsPipelines failed (rc=%d)", (int)r);
+        unsigned cf0 = (color_count > 0) ? (unsigned)color_formats[0] : 0;
+        MITHRIL_LOG_ERROR("vk",
+            "vkCreateGraphicsPipelines failed (rc=%d program=%u vertex_attrs=%d "
+            "color_fmt0=0x%x color_count=%d blend=%d vs_words=%d fs_words=%d)",
+            (int)r, (unsigned)program,
+            (int)gi.pVertexInputState->vertexAttributeDescriptionCount,
+            cf0, (int)color_count, (int)blend_enabled,
+            (int)vertex_word_count, (int)fragment_word_count);
         return VK_NULL_HANDLE;
     }
     pr.pipelines[sig] = pipeline;
+    static int successCount = 0;
+    if (successCount < 5) {
+        unsigned cf0 = (color_count > 0) ? (unsigned)color_formats[0] : 0;
+        MITHRIL_LOG_INFO("vk",
+            "pipeline created ok: program=%u vertex_attrs=%d color_fmt0=0x%x "
+            "blend=%d vs_words=%d fs_words=%d",
+            (unsigned)program,
+            (int)gi.pVertexInputState->vertexAttributeDescriptionCount,
+            cf0, (int)blend_enabled,
+            (int)vertex_word_count, (int)fragment_word_count);
+        successCount++;
+    }
     return pipeline;
 }
 

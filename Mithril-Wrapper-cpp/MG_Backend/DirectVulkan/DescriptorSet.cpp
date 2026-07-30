@@ -25,6 +25,7 @@
 #include "../../MG_Impl/Log.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <unordered_map>
 #include <vector>
@@ -202,13 +203,16 @@ void bind_program_descriptors(GLuint program) {
     dsai.descriptorSetCount = 1;
     dsai.pSetLayouts = &pr.descriptorSetLayout;
     VkDescriptorSet set = VK_NULL_HANDLE;
-    if (vkAllocateDescriptorSets(b->device, &dsai, &set) != VK_SUCCESS) {
+    VkResult rc = vkAllocateDescriptorSets(b->device, &dsai, &set);
+    if (rc != VK_SUCCESS) {
         // Pool exhausted mid-frame (more than 256 distinct sets this frame):
         // reset and retry once. Acceptable for bring-up; a fully correct impl
         // would grow the pool or pool-set per frame.
         vkResetDescriptorPool(b->device, pr.descriptorPool, 0);
-        if (vkAllocateDescriptorSets(b->device, &dsai, &set) != VK_SUCCESS) {
-            MITHRIL_LOG_WARN("vk", "vkAllocateDescriptorSets failed (program %u)", program);
+        rc = vkAllocateDescriptorSets(b->device, &dsai, &set);
+        if (rc != VK_SUCCESS) {
+            MITHRIL_LOG_ERROR("vk", "vkAllocateDescriptorSets failed (program %u rc=%d bindings=%zu)",
+                              program, (int)rc, pr.bindings.size());
             return;
         }
     }
@@ -381,8 +385,95 @@ void bind_program_descriptors(GLuint program) {
         vkUpdateDescriptorSets(b->device, static_cast<uint32_t>(writes.size()),
                                writes.data(), 0, nullptr);
     }
+
+    // ---- Binding completeness validation (diagnostic only; does not block draw).
+    // Mirrors the write loop's sourcing logic to flag bindings whose backing
+    // resource is absent at draw time: an unbound/deleted texture unit, or a
+    // UBO whose uniform data was never provided (buffer will be zero-filled).
+    // The write loop substitutes fallbacks (first bound texture / dummy view /
+    // zero UBO) so the descriptor set stays valid; this pass just makes those
+    // substitutions visible. Hash-deduped (FNV-1a over program+binding+type)
+    // so a persistently missing binding doesn't flood the log: first 4
+    // occurrences logged in full, then a summary every 1000th repeat — same
+    // pattern as the vulkan debug messenger in Device.cpp.
+    static std::atomic<uint64_t> missLastHash{0};
+    static std::atomic<uint64_t> missRepCount{0};
+    for (const auto& db : pr.bindings) {
+        bool missing = false;
+        if (db.type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
+            GLuint tex_id = 0;
+            if (db.binding < mithril::kMaxTextureUnits) {
+                tex_id = mithril::g_state->boundTextures[db.binding];
+            }
+            if (!tex_id) {
+                // No texture bound at this unit — write loop falls back to the
+                // first bound texture or the dummy view.
+                missing = true;
+            } else {
+                VkImageView view = backend_get_texture_view(tex_id);
+                if (view == VK_NULL_HANDLE) {
+                    // Texture was deleted (VkImageView gone) but the shader
+                    // still references this binding — write loop will fill it
+                    // with the dummy texture view.
+                    missing = true;
+                }
+            }
+        } else if (db.type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER) {
+            // Reuse the write loop's uniform lookup: direct name match first,
+            // then aggregated-block member matches.
+            auto uit = prog->uniforms.find(db.name);
+            bool found = (uit != prog->uniforms.end() && !uit->second.value.empty());
+            if (!found) {
+                for (const auto& m : db.members) {
+                    auto mit = prog->uniforms.find(m.name);
+                    if (mit != prog->uniforms.end() && !mit->second.value.empty()) {
+                        found = true;
+                        break;
+                    }
+                }
+            }
+            if (!found) missing = true;
+        }
+        if (!missing) continue;
+
+        uint64_t h = 1469598103934665603ull;  // FNV-1a 64-bit over (program,binding,type)
+        h ^= (uint64_t)program; h *= 1099511628211ull;
+        h ^= (uint64_t)db.binding; h *= 1099511628211ull;
+        h ^= (uint64_t)db.type; h *= 1099511628211ull;
+
+        if (h == missLastHash.load(std::memory_order_relaxed)) {
+            uint64_t n = missRepCount.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (n <= 4) {
+                MITHRIL_LOG_ERROR("vk", "missing descriptor binding: program=%u binding=%u type=%d",
+                                  program, db.binding, (int)db.type);
+            } else if (n % 1000 == 0) {
+                MITHRIL_LOG_ERROR("vk", "missing descriptor binding repeated %llu times: program=%u binding=%u type=%d",
+                                  (unsigned long long)n, program, db.binding, (int)db.type);
+            }
+        } else {
+            uint64_t prev = missRepCount.exchange(1, std::memory_order_relaxed);
+            missLastHash.store(h, std::memory_order_relaxed);
+            if (prev > 4) {
+                MITHRIL_LOG_ERROR("vk", "(previous missing binding repeated %llu times total)",
+                                  (unsigned long long)prev);
+            }
+            MITHRIL_LOG_ERROR("vk", "missing descriptor binding: program=%u binding=%u type=%d",
+                              program, db.binding, (int)db.type);
+        }
+    }
+
     vkCmdBindDescriptorSets(b->commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
                             pr.pipelineLayout, 0, 1, &set, 0, nullptr);
+
+    // One-shot-per-boot summary of the first few successful binds, so the
+    // program id / binding count / set index reach the log at least once
+    // per session for sanity-checking the reflection + bind path.
+    static int bindCount = 0;
+    if (bindCount < 5) {
+        MITHRIL_LOG_INFO("vk", "descriptor set bound: program=%u bindings=%zu setIndex=0",
+                         program, pr.bindings.size());
+        bindCount++;
+    }
 }
 
 } // namespace vk

@@ -114,12 +114,14 @@ bool init_device() {
     // 通过 getenv 读取这些配置。overwrite=1 表示即使启动器已设过也以代码
     // 为准——保证诊断日志在所有部署环境下生效。
     //   MVK_CONFIG_DEBUG=1        启用 MoltenVK 调试模式
-    //   MVK_CONFIG_LOG_LEVEL=info info 级日志（不用 verbose 避免逐 draw 刷屏）
+    //   MVK_CONFIG_LOG_LEVEL=debug debug 级日志，输出 Metal pipeline 创建、
+    //                            descriptor 绑定、image layout 转换等运行时细节
+    //                            （不用 verbose/trace 避免逐 API 调用洪水）
     //   MVK_CONFIG_TRACE_VULKAN=0 显式关闭逐 API 调用 trace（否则日志直接爆）
     //   MITHRIL_INFO=1            让 Mithril Log.cpp 的 LogLevelInit 拾取 Info
     //                             级别，使本文件的关键路径诊断日志默认可见
     setenv("MVK_CONFIG_DEBUG", "1", 1);
-    setenv("MVK_CONFIG_LOG_LEVEL", "info", 1);
+    setenv("MVK_CONFIG_LOG_LEVEL", "debug", 1);
     setenv("MVK_CONFIG_TRACE_VULKAN", "0", 1);
     setenv("MITHRIL_INFO", "1", 1);
 
@@ -187,6 +189,10 @@ bool init_device() {
             for (const auto& l : layerProps) {
                 MITHRIL_LOG_WARN("vk", "  %s", l.layerName);
             }
+            MITHRIL_LOG_INFO("vk", "Code-level validation enabled in mithril. "
+                              "For full Khronos validation, need Vulkan Loader "
+                              "(libvulkan.dylib) + libVkLayer_khronos_validation.dylib "
+                              "(not bundled in this libMoltenVK.dylib build)");
         }
     }
 

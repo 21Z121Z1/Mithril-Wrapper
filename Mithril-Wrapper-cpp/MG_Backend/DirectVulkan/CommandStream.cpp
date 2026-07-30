@@ -7,6 +7,7 @@
 #include "../Backend.h"
 #include "../../MG_Impl/Log.h"
 
+#include <atomic>
 #include <cstring>
 #include <vector>
 #include <unordered_map>
@@ -173,6 +174,42 @@ void record_layout_barrier(VkCommandBuffer cb, VkImage image, VkFormat format,
                            VkImageLayout oldLayout, VkImageLayout newLayout,
                            bool isDepthStencil) {
     if (image == VK_NULL_HANDLE || oldLayout == newLayout) return;
+
+    // Validation: VK_KHR_dynamic_rendering forbids image-memory barriers
+    // inside an active render pass. We do NOT block the call — MoltenVK will
+    // still process it, but we make the violation visible. Hash-dedup the
+    // message so a hot-loop violation can't flood the log (mirrors Device.cpp
+    // debug_callback: first 4 occurrences full, then every 1000th summary).
+    if (encoder().passActive) {
+        static std::atomic<uint64_t> lastHash{0};
+        static std::atomic<uint64_t> repCount{0};
+
+        uint64_t h = 1469598103934665603ull;  // FNV-1a 64-bit offset basis
+        h ^= (uint64_t)(uintptr_t)image; h *= 1099511628211ull;
+        h ^= (uint64_t)oldLayout;             h *= 1099511628211ull;
+        h ^= (uint64_t)newLayout;             h *= 1099511628211ull;
+
+        if (h == lastHash.load(std::memory_order_relaxed)) {
+            uint64_t n = repCount.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (n <= 4) {
+                MITHRIL_LOG_ERROR("vk", "validation: barrier recorded inside active render pass (VK_KHR_dynamic_rendering forbids image-memory barriers inside pass) image=%p oldLayout=%u newLayout=%u",
+                                  (void*)image, (unsigned)oldLayout, (unsigned)newLayout);
+            } else if (n % 1000 == 0) {
+                MITHRIL_LOG_ERROR("vk", "validation: barrier recorded inside active render pass (VK_KHR_dynamic_rendering forbids image-memory barriers inside pass) image=%p oldLayout=%u newLayout=%u [repeated %llu times]",
+                                  (void*)image, (unsigned)oldLayout, (unsigned)newLayout,
+                                  (unsigned long long)n);
+            }
+        } else {
+            uint64_t prev = repCount.exchange(1, std::memory_order_relaxed);
+            lastHash.store(h, std::memory_order_relaxed);
+            if (prev > 4) {
+                MITHRIL_LOG_ERROR("vk", "validation: previous barrier-in-pass violation repeated %llu times",
+                                  (unsigned long long)prev);
+            }
+            MITHRIL_LOG_ERROR("vk", "validation: barrier recorded inside active render pass (VK_KHR_dynamic_rendering forbids image-memory barriers inside pass) image=%p oldLayout=%u newLayout=%u",
+                              (void*)image, (unsigned)oldLayout, (unsigned)newLayout);
+        }
+    }
 
     VkImageMemoryBarrier b{};
     b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
