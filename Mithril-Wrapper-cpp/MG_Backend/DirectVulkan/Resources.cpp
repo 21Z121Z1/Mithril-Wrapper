@@ -690,6 +690,13 @@ void backend_transition_texture_layout(GLuint name, VkImageLayout target_layout)
     mithril::vk::transition_image_layout(it->second, target_layout);
 }
 
+VkImageLayout backend_get_texture_layout(GLuint name) {
+    auto& tbl = mithril::vk::texture_table();
+    auto it = tbl.find(name);
+    if (it == tbl.end()) return VK_IMAGE_LAYOUT_UNDEFINED;
+    return it->second.currentLayout;
+}
+
 VkSampler backend_get_or_create_sampler(GLuint name, GLint min_filter, GLint mag_filter,
                                         GLint wrap_s, GLint wrap_t, GLint wrap_r,
                                         const float* border_color) {

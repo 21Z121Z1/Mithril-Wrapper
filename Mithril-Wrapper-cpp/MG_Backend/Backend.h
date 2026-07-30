@@ -188,6 +188,14 @@ VkImage     backend_get_texture_image(GLuint name);
 void        backend_delete_texture(GLuint name);
 
 /*
+ * Query the named texture's current VkImageLayout without transitioning it.
+ * Returns VK_IMAGE_LAYOUT_UNDEFINED if the texture doesn't exist. Used by
+ * prepare_draw to decide whether a layout transition is needed (and thus
+ * whether the active render pass must be ended before recording the barrier).
+ */
+VkImageLayout backend_get_texture_layout(GLuint name);
+
+/*
  * Transition the named texture's image into `target_layout` if it is not
  * already in that layout. Records an image-memory barrier on the active
  * command buffer (caller is responsible for committing). Used by glTexStorage*

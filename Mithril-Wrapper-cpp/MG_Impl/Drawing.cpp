@@ -198,18 +198,44 @@ static void prepare_draw(GLenum mode) {
         return;
     }
 
-    // End any active render pass BEFORE recording texture layout transitions.
-    // VK_KHR_dynamic_rendering forbids transitioning an attachment image to
-    // a different layout while it is being used as an attachment in an active
-    // render pass. Without this, MoltenVK does not properly execute the
-    // barrier (the attachment stays in COLOR_ATTACHMENT_OPTIMAL instead of
-    // transitioning to SHADER_READ_ONLY_OPTIMAL), and the subsequent draw
-    // samples garbage/transparent texels — root cause of the red screen when
-    // the composite pass samples a user-FBO texture that was just rendered to.
-    // The next backend_begin_render_pass() will start a fresh pass; the
-    // renderedThisFrame tracking ensures it uses LOAD op to preserve content
-    // from the pass we just ended.
-    backend_end_render_pass();
+    // End the active render pass ONLY when a texture layout transition is
+    // actually needed. VK_KHR_dynamic_rendering forbids recording image-
+    // memory barriers (layout transitions) inside an active pass. But ending
+    // and re-beginning the pass for every draw breaks Draw Coalescing —
+    // MoltenVK translates each begin/end into a separate Metal encoder, and
+    // rapid end/begin cycles prevent draw content from accumulating correctly
+    // (root cause of red/black screen: only the clear color survives).
+    //
+    // MobileGL keeps the pass active across multiple draws to the same target
+    // and only ends it when attachments change or a layout transition is
+    // required. We match that here: check whether any bound sampler texture
+    // is NOT in SHADER_READ_ONLY_OPTIMAL, or any FBO attachment is NOT in its
+    // attachment-optimal layout. If so, end the pass before the barrier;
+    // otherwise leave it active so begin_render_pass's coalescing logic can
+    // reuse it (no end/begin, content accumulates in one Metal encoder).
+    bool need_pass_end_for_transition = false;
+    for (int i = 0; i < mithril::kMaxTextureUnits && !need_pass_end_for_transition; ++i) {
+        GLuint tex_id = mithril::g_state->boundTextures[i];
+        if (tex_id && backend_get_texture_layout(tex_id) != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+            need_pass_end_for_transition = true;
+        }
+    }
+    if (fbo && !need_pass_end_for_transition) {
+        for (int i = 0; i < color_count && i < 8 && !need_pass_end_for_transition; ++i) {
+            GLuint t = fbo->colors[i].texture;
+            if (t && backend_get_texture_layout(t) != VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
+                need_pass_end_for_transition = true;
+            }
+        }
+        if (!need_pass_end_for_transition && fbo->depth.texture) {
+            if (backend_get_texture_layout(fbo->depth.texture) != VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL) {
+                need_pass_end_for_transition = true;
+            }
+        }
+    }
+    if (need_pass_end_for_transition) {
+        backend_end_render_pass();
+    }
 
     // ---- Texture layout transitions (before begin_render_pass) ----
     // MoltenVK samples garbage when a descriptor's imageLayout doesn't match
