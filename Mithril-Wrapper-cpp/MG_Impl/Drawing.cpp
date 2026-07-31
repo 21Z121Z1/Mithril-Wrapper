@@ -83,27 +83,56 @@ static void prepare_draw(GLenum mode) {
     // Compute color attachment VkFormats.
     VkFormat color_formats[8] = {VK_FORMAT_UNDEFINED};
     mithril::Framebuffer* fbo = mithril::state_get_framebuffer(g_state->currentDrawFBO);
-    if (fbo) {
+
+    // EGL default framebuffer: read the swapchain's actual color format
+    // from g_state->eglDefaultColorFormat (set by install_surface_on_state
+    // after each acquire). Hardcoding VK_FORMAT_B8G8R8A8_UNORM would
+    // mismatch if MoltenVK picked a different surface format (e.g. RGBA8
+    // or an sRGB variant), causing a pipeline-creation failure on the
+    // first draw and a black screen.
+    //
+    // IMPORTANT: detect the default framebuffer via `currentDrawFBO == 0`,
+    // NOT via state_get_framebuffer() returning null. A sentinel Framebuffer
+    // entry for id=0 always exists (State.cpp init + glBindFramebuffer(0)
+    // re-insert it), so the user-FBO branch would otherwise run for the
+    // default framebuffer, find fbo->colors[0].texture == 0 ->
+    // state_get_texture(0) == null, and leave color_formats[0] ==
+    // VK_FORMAT_UNDEFINED. The pipeline would then be created with
+    // color_fmt0=0x0 (UNDEFINED), which MoltenVK accepts but silently
+    // disables color writes -> the scene blit writes nothing and only the
+    // swapchain clear color shows (red/black screen). This matches how
+    // collect_draw_fbo_attachments detects the default framebuffer
+    // (Framebuffer.cpp: currentDrawFBO == 0).
+    VkFormat swapchainFmt = g_state->eglDefaultColorFormat;
+    if (swapchainFmt == VK_FORMAT_UNDEFINED) {
+        // Fallback for headless / surfaceless mode where no swapchain is
+        // attached. BGRA8Unorm matches MoltenVK's most common default.
+        swapchainFmt = VK_FORMAT_B8G8R8A8_UNORM;
+    }
+    if (g_state->currentDrawFBO == 0) {
+        for (int i = 0; i < color_count; ++i) {
+            if (colors[i] != VK_NULL_HANDLE) {
+                color_formats[i] = swapchainFmt;
+            }
+        }
+        static int default_fbo_log_count = 0;
+        if (default_fbo_log_count < 3) {
+            default_fbo_log_count++;
+            MITHRIL_LOG_INFO("draw", "default-fbo color fmt resolved: "
+                              "currentDrawFBO=0 color_fmt=0x%x color_count=%d",
+                              (unsigned)swapchainFmt, color_count);
+        }
+    } else if (fbo) {
         for (int i = 0; i < color_count; ++i) {
             GLuint t = fbo->colors[i].texture;
             mithril::Texture* tex = mithril::state_get_texture(t);
-            if (tex) color_formats[i] = backend_vk_format_for_gl((GLenum)tex->internalFormat);
-        }
-    } else {
-        // EGL default framebuffer: read the swapchain's actual color format
-        // from g_state->eglDefaultColorFormat (set by install_surface_on_state
-        // after each acquire). Hardcoding VK_FORMAT_B8G8R8A8_UNORM would
-        // mismatch if MoltenVK picked a different surface format (e.g. RGBA8
-        // or an sRGB variant), causing a pipeline-creation failure on the
-        // first draw and a black screen.
-        VkFormat swapchainFmt = g_state->eglDefaultColorFormat;
-        if (swapchainFmt == VK_FORMAT_UNDEFINED) {
-            // Fallback for headless / surfaceless mode where no swapchain is
-            // attached. BGRA8Unorm matches MoltenVK's most common default.
-            swapchainFmt = VK_FORMAT_B8G8R8A8_UNORM;
-        }
-        for (int i = 0; i < color_count; ++i) {
-            if (colors[i] != VK_NULL_HANDLE) {
+            if (tex) {
+                color_formats[i] = backend_vk_format_for_gl((GLenum)tex->internalFormat);
+            } else if (colors[i] != VK_NULL_HANDLE) {
+                // Defensive: attachment texture missing from the GL texture
+                // table. Fall back to the swapchain format so the pipeline
+                // never receives VK_FORMAT_UNDEFINED (which disables color
+                // writes on MoltenVK).
                 color_formats[i] = swapchainFmt;
             }
         }
