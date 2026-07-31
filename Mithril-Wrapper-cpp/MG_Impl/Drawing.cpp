@@ -491,6 +491,21 @@ static void prepare_draw(GLenum mode) {
     if (g_state->scissorTest) {
         backend_set_scissor(g_state->scissorX, g_state->scissorY,
                             g_state->scissorW, g_state->scissorH);
+    } else {
+        // GL scissor test off = no clipping. Vulkan has no "scissor off"
+        // mode — the dynamic scissor (VK_DYNAMIC_STATE_SCISSOR) must be set
+        // explicitly or it stays undefined. MoltenVK treats an unset scissor
+        // as {0,0,0,0}, clipping ALL fragments so only the clear color is
+        // visible (root cause of red/black screen). Set a full-framebuffer
+        // scissor to match GL "no clipping" semantics. (MobileGL sets a
+        // full-screen scissor when GL scissor test is disabled.)
+        backend_set_scissor(0, 0, w, h);
+        static int fs_scissor_log_count = 0;
+        if (fs_scissor_log_count < 3) {
+            fs_scissor_log_count++;
+            MITHRIL_LOG_INFO("draw", "scissor full-screen: program=%u (scissorTest=0) w=%d h=%d",
+                              prog->id, w, h);
+        }
     }
     if (g_state->cullFace) {
         int mode_cull = 0;
