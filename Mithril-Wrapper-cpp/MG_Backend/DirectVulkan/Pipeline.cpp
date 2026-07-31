@@ -176,7 +176,11 @@ VkPipelineLayout empty_pipeline_layout() {
     if (layout == VK_NULL_HANDLE) {
         VkPipelineLayoutCreateInfo plci{};
         plci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-        vkCreatePipelineLayout(b->device, &plci, nullptr, &layout);
+        VkResult rc = vkCreatePipelineLayout(b->device, &plci, nullptr, &layout);
+        if (rc != VK_SUCCESS) {
+            MITHRIL_LOG_ERROR("vk", "vkCreatePipelineLayout (empty) failed (rc=%d)", rc);
+            layout = VK_NULL_HANDLE;  // don't cache failure; retry next call
+        }
     }
     return layout;
 }

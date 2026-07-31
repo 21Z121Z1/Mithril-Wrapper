@@ -74,12 +74,21 @@ void end_one_shot(OneShotCtx& c) {
         if (c.cmd)   { vkFreeCommandBuffers(b->device, b->commandPool, 1, &c.cmd); c.cmd = VK_NULL_HANDLE; }
         return;
     }
-    vkEndCommandBuffer(c.cmd);
+    VkResult rc = vkEndCommandBuffer(c.cmd);
+    if (rc != VK_SUCCESS) {
+        MITHRIL_LOG_ERROR("vk", "end_one_shot: vkEndCommandBuffer failed (rc=%d)", rc);
+        if (c.fence) { vkDestroyFence(b->device, c.fence, nullptr); c.fence = VK_NULL_HANDLE; }
+        if (c.cmd)   { vkFreeCommandBuffers(b->device, b->commandPool, 1, &c.cmd); c.cmd = VK_NULL_HANDLE; }
+        return;
+    }
     VkSubmitInfo si{};
     si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     si.commandBufferCount = 1;
     si.pCommandBuffers = &c.cmd;
-    vkQueueSubmit(b->graphicsQueue, 1, &si, c.fence);
+    VkResult src = vkQueueSubmit(b->graphicsQueue, 1, &si, c.fence);
+    if (src != VK_SUCCESS) {
+        MITHRIL_LOG_ERROR("vk", "end_one_shot: vkQueueSubmit failed (rc=%d)", src);
+    }
     vkWaitForFences(b->device, 1, &c.fence, VK_TRUE, UINT64_MAX);
     vkDestroyFence(b->device, c.fence, nullptr);
     vkFreeCommandBuffers(b->device, b->commandPool, 1, &c.cmd);
@@ -341,7 +350,11 @@ int read_pixels(int x, int y, int w, int h, GLenum format, GLenum type, void* ou
 
     // Map the staging buffer and convert/copy into out_pixels.
     void* mapped = nullptr;
-    vkMapMemory(b->device, staging.memory, 0, staging_size, 0, &mapped);
+    if (vkMapMemory(b->device, staging.memory, 0, staging_size, 0, &mapped) != VK_SUCCESS) {
+        MITHRIL_LOG_ERROR("vk", "texture_upload: vkMapMemory (staging) failed");
+        destroy_buffer_entry(staging);
+        return 0;
+    }
     if (!mapped) {
         destroy_buffer_entry(staging);
         return 0;

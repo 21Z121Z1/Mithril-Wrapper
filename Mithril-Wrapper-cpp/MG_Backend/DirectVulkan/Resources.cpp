@@ -56,7 +56,12 @@ bool create_buffer(BufferEntry& out, VkDeviceSize size,
         out.buffer = VK_NULL_HANDLE;
         return false;
     }
-    vkBindBufferMemory(b->device, out.buffer, out.memory, 0);
+    if (vkBindBufferMemory(b->device, out.buffer, out.memory, 0) != VK_SUCCESS) {
+        MITHRIL_LOG_ERROR("vk", "vkBindBufferMemory (UBO) failed");
+        vkDestroyBuffer(b->device, out.buffer, nullptr); out.buffer = VK_NULL_HANDLE;
+        vkFreeMemory(b->device, out.memory, nullptr); out.memory = VK_NULL_HANDLE;
+        return false;
+    }
     if (data) {
         void* dst = nullptr;
         vkMapMemory(b->device, out.memory, 0, size, 0, &dst);
@@ -602,7 +607,12 @@ VkImage backend_get_or_create_texture(GLuint name, int width, int height, int de
         vkDestroyImage(b->device, e.image, nullptr);
         return VK_NULL_HANDLE;
     }
-    vkBindImageMemory(b->device, e.image, e.memory, 0);
+    if (vkBindImageMemory(b->device, e.image, e.memory, 0) != VK_SUCCESS) {
+        MITHRIL_LOG_ERROR("vk", "vkBindImageMemory (texture) failed");
+        vkDestroyImage(b->device, e.image, nullptr); e.image = VK_NULL_HANDLE;
+        vkFreeMemory(b->device, e.memory, nullptr); e.memory = VK_NULL_HANDLE;
+        return VK_NULL_HANDLE;
+    }
 
     VkImageViewCreateInfo vci{};
     vci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
@@ -623,7 +633,10 @@ VkImage backend_get_or_create_texture(GLuint name, int width, int height, int de
     vci.subresourceRange.layerCount = ici.arrayLayers;
     vci.components = { VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
                        VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY };
-    vkCreateImageView(b->device, &vci, nullptr, &e.view);
+    if (vkCreateImageView(b->device, &vci, nullptr, &e.view) != VK_SUCCESS) {
+        MITHRIL_LOG_ERROR("vk", "vkCreateImageView (texture) failed");
+        e.view = VK_NULL_HANDLE;
+    }
 
     tbl[name] = e;
     return e.image;
