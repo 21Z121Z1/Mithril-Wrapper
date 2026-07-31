@@ -20,8 +20,23 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstring>
 #include <unordered_map>
+
+// Resolve the GL texture unit a sampler binding reads from (glUniform1i value,
+// fallback to SPIR-V binding). Must match DescriptorSet.cpp resolve_sampler_unit.
+static int resolve_sampler_unit(const mithril::Program* prog,
+                                uint32_t db_binding, const std::string& db_name) {
+    if (prog) {
+        auto it = prog->uniforms.find(db_name);
+        if (it != prog->uniforms.end() && !it->second.value.empty()) {
+            int u = (int)std::lround(it->second.value[0]);
+            if (u >= 0 && u < mithril::kMaxTextureUnits) return u;
+        }
+    }
+    return (int)db_binding;
+}
 
 extern "C" {
 
@@ -393,6 +408,7 @@ static void prepare_draw(GLenum mode) {
         auto& tbl = mithril::vk::program_table();
         auto pit = tbl.find(g_state->currentProgram);
         if (pit != tbl.end()) {
+            mithril::Program* prog = mithril::state_get_program(g_state->currentProgram);
             // 每 program 首 3 帧输出 post-transition 确认日志，证明 sampled binding
             // 的纹理已到达 SHADER_READ_ONLY(5)。tex=19 (场景 blit) 应显示 layout=5。
             static std::unordered_map<GLuint, int> confirmCount;
@@ -400,8 +416,9 @@ static void prepare_draw(GLenum mode) {
             bool doConfirm = (cc < 3);
             for (const auto& db : pit->second.bindings) {
                 if (db.type != VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) continue;
-                GLuint tex_id = (db.binding < (uint32_t)mithril::kMaxTextureUnits)
-                                ? mithril::g_state->boundTextures[db.binding] : 0;
+                int unit = resolve_sampler_unit(prog, db.binding, db.name);
+                GLuint tex_id = (unit >= 0 && unit < mithril::kMaxTextureUnits)
+                                ? mithril::g_state->boundTextures[unit] : 0;
                 if (!tex_id) continue;
                 VkImageLayout layout = backend_get_texture_layout(tex_id);
                 if (doConfirm) {

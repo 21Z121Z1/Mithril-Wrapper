@@ -26,6 +26,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstring>
 #include <unordered_map>
 #include <vector>
@@ -127,6 +128,24 @@ void ensure_program_layouts(GLuint program,
         MITHRIL_LOG_WARN("vk", "vkCreateDescriptorPool failed (program %u)", program);
         // Layout is still valid; bind_program_descriptors will no-op without a pool.
     }
+}
+
+// Resolve the GL texture unit a sampler binding reads from. Per GL semantics
+// the unit is set by the app via glUniform1i(samplerLoc, unit) and cached in
+// Program::uniforms[name].value[0] (as float). glslang's auto-assigned SPIR-V
+// binding number is NOT guaranteed to equal that unit, so prefer the uniform
+// value and fall back to db.binding only when no value was set / out of range.
+// (Matches MobileGL's lastAssignedUnit semantics.) Returns the unit index.
+static int resolve_sampler_unit(const mithril::Program* prog,
+                                const mithril::vk::DescriptorBinding& db) {
+    if (prog) {
+        auto it = prog->uniforms.find(db.name);
+        if (it != prog->uniforms.end() && !it->second.value.empty()) {
+            int u = (int)std::lround(it->second.value[0]);
+            if (u >= 0 && u < mithril::kMaxTextureUnits) return u;
+        }
+    }
+    return (int)db.binding;
 }
 
 void bind_program_descriptors(GLuint program) {
@@ -289,9 +308,19 @@ void bind_program_descriptors(GLuint program) {
             }
         } else if (db.type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
             // Sampler binding B maps to GL texture unit B.
+            int unit = resolve_sampler_unit(prog, db);
             GLuint tex_id = 0;
-            if (db.binding < mithril::kMaxTextureUnits) {
-                tex_id = mithril::g_state->boundTextures[db.binding];
+            if (unit >= 0 && unit < mithril::kMaxTextureUnits) {
+                tex_id = mithril::g_state->boundTextures[unit];
+            }
+            if (unit != (int)db.binding) {
+                static std::unordered_map<GLuint, int> remapCount;
+                int& rc = remapCount[program];
+                if (rc < 3) {
+                    rc++;
+                    MITHRIL_LOG_INFO("vk", "sampler unit remap: program=%u binding=%u name=%s unit=%d (binding!=unit)",
+                                     program, db.binding, db.name.c_str(), unit);
+                }
             }
             if (!tex_id) {
                 // Fallback: first bound texture, so the descriptor stays valid
@@ -401,9 +430,10 @@ void bind_program_descriptors(GLuint program) {
     for (const auto& db : pr.bindings) {
         bool missing = false;
         if (db.type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
+            int unit = resolve_sampler_unit(prog, db);
             GLuint tex_id = 0;
-            if (db.binding < mithril::kMaxTextureUnits) {
-                tex_id = mithril::g_state->boundTextures[db.binding];
+            if (unit >= 0 && unit < mithril::kMaxTextureUnits) {
+                tex_id = mithril::g_state->boundTextures[unit];
             }
             if (!tex_id) {
                 // No texture bound at this unit — write loop falls back to the
