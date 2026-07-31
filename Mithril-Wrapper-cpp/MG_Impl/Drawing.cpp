@@ -329,64 +329,12 @@ static void prepare_draw(GLenum mode) {
         }
     }
 
-    // ---- A1 代码级 validation: 纹理布局与 sampler 用途匹配 ----
-    // 遍历当前 program 反射出的 sampled-image bindings，检查其绑定的纹理
-    // layout 是否为 SHADER_READ_ONLY_OPTIMAL。MoltenVK 在 layout 不匹配时
-    // 采样到垃圾数据 -> 只显示 clear color (红屏根因)。
-    // 因 libMoltenVK.dylib 无 Vulkan Loader，无法用 Khronos validation layer，
-    // 此检查作为代码级 validation 让违规可见。
-    {
-        auto& tbl = mithril::vk::program_table();
-        auto pit = tbl.find(g_state->currentProgram);
-        if (pit != tbl.end()) {
-            for (const auto& db : pit->second.bindings) {
-                if (db.type != VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) continue;
-                GLuint tex_id = (db.binding < (uint32_t)mithril::kMaxTextureUnits)
-                                ? mithril::g_state->boundTextures[db.binding] : 0;
-                if (!tex_id) continue;
-                VkImageLayout layout = backend_get_texture_layout(tex_id);
-                if (layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
-                    // FNV-1a hash 去重：前 4 次全输出，之后每 1000 次摘要
-                    static std::atomic<uint64_t> lastViolHash{0};
-                    static std::atomic<uint64_t> violCount{0};
-                    uint64_t h = 1469598103934665603ull;
-                    h ^= (uint64_t)db.binding; h *= 1099511628211ull;
-                    h ^= (uint64_t)tex_id; h *= 1099511628211ull;
-                    h ^= (uint64_t)layout; h *= 1099511628211ull;
-                    if (h == lastViolHash.load(std::memory_order_relaxed)) {
-                        uint64_t n = violCount.fetch_add(1, std::memory_order_relaxed) + 1;
-                        if (n <= 4) {
-                            MITHRIL_LOG_ERROR("draw", "validation: sampler binding %d tex=%u layout=%u (expect 5 SHADER_READ_ONLY_OPTIMAL) — MoltenVK will sample garbage",
-                                              db.binding, tex_id, (unsigned)layout);
-                        } else if (n % 1000 == 0) {
-                            MITHRIL_LOG_ERROR("draw", "validation: sampler binding %d tex=%u layout=%u (expect 5 SHADER_READ_ONLY) [repeated %llu times]",
-                                              db.binding, tex_id, (unsigned)layout, (unsigned long long)n);
-                        }
-                    } else {
-                        uint64_t prev = violCount.exchange(1, std::memory_order_relaxed);
-                        lastViolHash.store(h, std::memory_order_relaxed);
-                        if (prev > 4) {
-                            MITHRIL_LOG_ERROR("draw", "validation: previous sampler layout violation repeated %llu times total",
-                                              (unsigned long long)prev);
-                        }
-                        MITHRIL_LOG_ERROR("draw", "validation: sampler binding %d tex=%u layout=%u (expect 5 SHADER_READ_ONLY_OPTIMAL) — MoltenVK will sample garbage",
-                                          db.binding, tex_id, (unsigned)layout);
-                    }
-                }
-                // Feedback loop 检查：纹理同时是 fbo attachment
-                if (fbo && layout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
-                    bool isAttachment = false;
-                    for (int i = 0; i < color_count && i < 8 && !isAttachment; ++i) {
-                        if (fbo->colors[i].texture == tex_id) isAttachment = true;
-                    }
-                    if (isAttachment) {
-                        MITHRIL_LOG_WARN("draw", "validation: tex %u is both sampler binding %d and fbo color attachment (feedback loop)",
-                                          tex_id, db.binding);
-                    }
-                }
-            }
-        }
-    }
+    // ---- A1 代码级 validation 已移至 transition 之后（见下方 post-transition 块）----
+    // 原先在此处（pre-transition）读取 layout，导致每帧误报 tex=19 layout=2：
+    // 该纹理本就会被下方 transition 块转成 SHADER_READ_ONLY，pre-transition 读数
+    // 是转换前的中间态，并非 draw 时的真实 layout。移到 post-transition 后，
+    // validation 只在转换真正失败（draw 时 layout 仍非 SHADER_READ_ONLY）时才报错。
+
 
     // ---- Texture layout transitions (before begin_render_pass) ----
     // MoltenVK samples garbage when a descriptor's imageLayout doesn't match
@@ -430,6 +378,81 @@ static void prepare_draw(GLenum mode) {
         if (fbo->depth.texture) {
             backend_transition_texture_layout(fbo->depth.texture,
                                               VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+        }
+    }
+
+    // ---- A1 代码级 validation (POST-transition): 纹理布局与 sampler 用途匹配 ----
+    // 在 transition 块之后、begin_render_pass 之前读取 layout，得到 draw 时的真实
+    // layout。这样 validation 只在转换真正失败（draw 时 layout 仍非
+    // SHADER_READ_ONLY_OPTIMAL）时才报 ERROR，消除 pre-transition 的假阳性误报
+    // （之前每帧误报 tex=19 layout=2，实际已被上方 transition 转成 5）。
+    // transition 的 stage/access 已与 MobileGL VkTextureManager::TransitionImageLayout
+    // 对齐（COLOR_ATTACHMENT_OUTPUT_BIT + COLOR_ATTACHMENT_WRITE_BIT -> sampled），
+    // 故此处无需额外强化，只做准确的 post-transition 检查。
+    {
+        auto& tbl = mithril::vk::program_table();
+        auto pit = tbl.find(g_state->currentProgram);
+        if (pit != tbl.end()) {
+            // 每 program 首 3 帧输出 post-transition 确认日志，证明 sampled binding
+            // 的纹理已到达 SHADER_READ_ONLY(5)。tex=19 (场景 blit) 应显示 layout=5。
+            static std::unordered_map<GLuint, int> confirmCount;
+            int& cc = confirmCount[g_state->currentProgram];
+            bool doConfirm = (cc < 3);
+            for (const auto& db : pit->second.bindings) {
+                if (db.type != VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) continue;
+                GLuint tex_id = (db.binding < (uint32_t)mithril::kMaxTextureUnits)
+                                ? mithril::g_state->boundTextures[db.binding] : 0;
+                if (!tex_id) continue;
+                VkImageLayout layout = backend_get_texture_layout(tex_id);
+                if (doConfirm) {
+                    MITHRIL_LOG_INFO("draw", "post-transition: program=%u sampler binding %d tex=%u layout=%u (expect 5 SHADER_READ_ONLY)",
+                                      g_state->currentProgram, db.binding, tex_id, (unsigned)layout);
+                }
+                if (layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+                    // FNV-1a hash 去重：前 4 次全输出，之后每 1000 次摘要。
+                    // post-transition 仍非 SHADER_READ_ONLY = 真实转换失败，MoltenVK
+                    // 会采样到垃圾数据 -> 只显示 clear color (红屏/黑屏根因)。
+                    static std::atomic<uint64_t> lastViolHash{0};
+                    static std::atomic<uint64_t> violCount{0};
+                    uint64_t h = 1469598103934665603ull;
+                    h ^= (uint64_t)db.binding; h *= 1099511628211ull;
+                    h ^= (uint64_t)tex_id; h *= 1099511628211ull;
+                    h ^= (uint64_t)layout; h *= 1099511628211ull;
+                    if (h == lastViolHash.load(std::memory_order_relaxed)) {
+                        uint64_t n = violCount.fetch_add(1, std::memory_order_relaxed) + 1;
+                        if (n <= 4) {
+                            MITHRIL_LOG_ERROR("draw", "validation(post): sampler binding %d tex=%u layout=%u (expect 5 SHADER_READ_ONLY_OPTIMAL) — transition failed, MoltenVK will sample garbage",
+                                              db.binding, tex_id, (unsigned)layout);
+                        } else if (n % 1000 == 0) {
+                            MITHRIL_LOG_ERROR("draw", "validation(post): sampler binding %d tex=%u layout=%u (expect 5 SHADER_READ_ONLY) [repeated %llu times]",
+                                              db.binding, tex_id, (unsigned)layout, (unsigned long long)n);
+                        }
+                    } else {
+                        uint64_t prev = violCount.exchange(1, std::memory_order_relaxed);
+                        lastViolHash.store(h, std::memory_order_relaxed);
+                        if (prev > 4) {
+                            MITHRIL_LOG_ERROR("draw", "validation(post): previous sampler layout violation repeated %llu times total",
+                                              (unsigned long long)prev);
+                        }
+                        MITHRIL_LOG_ERROR("draw", "validation(post): sampler binding %d tex=%u layout=%u (expect 5 SHADER_READ_ONLY_OPTIMAL) — transition failed, MoltenVK will sample garbage",
+                                          db.binding, tex_id, (unsigned)layout);
+                    }
+                }
+                // Feedback loop 检查：纹理同时是 fbo attachment。
+                // post-transition 下，feedback-loop 纹理会被 attachment transition
+                // 覆盖回 COLOR_ATTACHMENT_OPTIMAL(2)，故 layout==2 仍能识别。
+                if (fbo && layout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
+                    bool isAttachment = false;
+                    for (int i = 0; i < color_count && i < 8 && !isAttachment; ++i) {
+                        if (fbo->colors[i].texture == tex_id) isAttachment = true;
+                    }
+                    if (isAttachment) {
+                        MITHRIL_LOG_WARN("draw", "validation(post): tex %u is both sampler binding %d and fbo color attachment (feedback loop)",
+                                          tex_id, db.binding);
+                    }
+                }
+            }
+            if (doConfirm) cc++;
         }
     }
 
