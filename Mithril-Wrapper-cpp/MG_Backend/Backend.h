@@ -179,7 +179,8 @@ VkImage     backend_get_or_create_texture(GLuint name, int width, int height, in
                                           int samples);
 void        backend_texture_upload(GLuint name, int level, int x, int y, int z,
                                    int w, int h, int d, GLenum format, GLenum type,
-                                   const void* pixels, int unpack_alignment);
+                                   const void* pixels, int unpack_alignment,
+                                   int row_length);
 void        backend_texture_set_params(GLuint name, GLint min_filter, GLint mag_filter,
                                        GLint wrap_s, GLint wrap_t, GLint wrap_r,
                                        const float* border_color);

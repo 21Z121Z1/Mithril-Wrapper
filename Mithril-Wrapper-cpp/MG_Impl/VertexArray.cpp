@@ -63,6 +63,30 @@ void glDisableVertexAttribArray(GLuint index) {
     vao->attribs[index].enabled = false;
 }
 
+// Bytes per element for a GL vertex attrib type. Used to compute the tight
+// (default) stride when the app passes stride==0, which in GL means "tightly
+// packed" (size * sizeof(type)) — NOT Vulkan's stride==0 meaning "all vertices
+// share one element". Returning the tight stride here prevents Vulkan from
+// collapsing every vertex onto vertex 0.
+static int attrib_element_bytes(GLenum type) {
+    switch (type) {
+        case GL_BYTE:
+        case GL_UNSIGNED_BYTE:           return 1;
+        case GL_SHORT:
+        case GL_UNSIGNED_SHORT:
+        case GL_HALF_FLOAT:              return 2;
+        case GL_INT:
+        case GL_UNSIGNED_INT:
+        case GL_FLOAT:
+        case GL_FIXED:
+        case GL_INT_2_10_10_10_REV:
+        case GL_UNSIGNED_INT_2_10_10_10_REV:
+        case GL_UNSIGNED_INT_10F_11F_11F_REV: return 4;
+        case GL_DOUBLE:                  return 8;
+        default:                         return 4; // safe fallback
+    }
+}
+
 void glVertexAttribPointer(GLuint index, GLint size, GLenum type,
                            GLboolean normalized, GLsizei stride, const void* pointer) {
     MITHRIL_ENSURE_INIT();
@@ -77,7 +101,10 @@ void glVertexAttribPointer(GLuint index, GLint size, GLenum type,
     a.type         = type;
     a.normalized   = (normalized != 0);
     a.integer      = false;
-    a.stride       = stride;
+    // GL stride==0 means "tightly packed" (size * sizeof(type)); Vulkan
+    // stride==0 means "all vertices share one element". Convert stride==0
+    // to the GL tight stride so Vulkan receives correct per-vertex data.
+    a.stride       = (stride > 0) ? stride : (size * attrib_element_bytes(type));
     a.pointer      = pointer;
     a.boundBuffer  = g_state->currentArrayBuffer;
     a.divisor      = a.divisor; // preserve
@@ -94,7 +121,7 @@ void glVertexAttribIPointer(GLuint index, GLint size, GLenum type,
     a.type         = type;
     a.normalized   = false;
     a.integer      = true;
-    a.stride       = stride;
+    a.stride       = (stride > 0) ? stride : (size * attrib_element_bytes(type));
     a.pointer      = pointer;
     a.boundBuffer  = g_state->currentArrayBuffer;
 }

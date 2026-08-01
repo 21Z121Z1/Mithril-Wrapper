@@ -99,7 +99,8 @@ void glTexImage2D(GLenum target, GLint level, GLint internalFormat,
                                   internalFormat, target, 1);
     if (pixels) {
         backend_texture_upload(t->id, level, 0, 0, 0, width, height, 1,
-                               format, type, pixels, g_state->unpackAlignment);
+                               format, type, pixels, g_state->unpackAlignment,
+                               g_state->unpackRowLength);
     }
 }
 
@@ -122,7 +123,8 @@ void glTexImage3D(GLenum target, GLint level, GLint internalFormat,
                                   internalFormat, target, 1);
     if (pixels) {
         backend_texture_upload(t->id, level, 0, 0, 0, width, height, depth,
-                               format, type, pixels, g_state->unpackAlignment);
+                               format, type, pixels, g_state->unpackAlignment,
+                               g_state->unpackRowLength);
     }
 }
 
@@ -186,7 +188,7 @@ void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset,
     if (!t || !pixels) return;
     backend_texture_upload(t->id, level, xoffset, yoffset, 0,
                            width, height, 1, format, type, pixels,
-                           g_state->unpackAlignment);
+                           g_state->unpackAlignment, g_state->unpackRowLength);
 }
 
 void glTexSubImage3D(GLenum target, GLint level,
@@ -199,7 +201,7 @@ void glTexSubImage3D(GLenum target, GLint level,
     if (!t || !pixels) return;
     backend_texture_upload(t->id, level, xoffset, yoffset, zoffset,
                            width, height, depth, format, type, pixels,
-                           g_state->unpackAlignment);
+                           g_state->unpackAlignment, g_state->unpackRowLength);
 }
 
 void glTexImage2DMultisample(GLenum target, GLsizei samples, GLenum internalformat,

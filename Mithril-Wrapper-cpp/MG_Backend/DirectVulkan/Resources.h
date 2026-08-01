@@ -78,7 +78,8 @@ void destroy_texture_entry(TextureEntry& e);
 // honour GL_UNPACK_ALIGNMENT row padding).
 void stage_and_copy_image(TextureEntry& tex, int level, int x, int y, int z,
                           int w, int h, int d, const void* pixels,
-                          int unpack_alignment, GLenum format, GLenum type);
+                          int unpack_alignment, GLenum format, GLenum type,
+                          int row_length);
 
 // Record an image-memory barrier transitioning `tex` from its current layout
 // (tex.currentLayout) to `newLayout`. No-op if already in `newLayout`. Updates

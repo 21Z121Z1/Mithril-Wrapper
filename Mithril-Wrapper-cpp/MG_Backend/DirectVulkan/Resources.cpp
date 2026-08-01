@@ -109,7 +109,8 @@ void destroy_texture_entry(TextureEntry& e) {
 
 void stage_and_copy_image(TextureEntry& tex, int level, int x, int y, int z,
                           int w, int h, int d, const void* pixels,
-                          int unpack_alignment, GLenum format, GLenum type) {
+                          int unpack_alignment, GLenum format, GLenum type,
+                          int row_length) {
     Backend* b = backend();
     if (!b->commandBuffer || !b->commandBufferRecording) {
         // Throttled: this fires once per glTexSubImage2D while the command
@@ -157,10 +158,16 @@ void stage_and_copy_image(TextureEntry& tex, int level, int x, int y, int z,
     bool expand = (src_bpp != dst_bpp);
     if (dst_bpp == 3) { dst_bpp = 4; expand = true; } // never emit 3ch transfers
 
+    // GL_UNPACK_ROW_LENGTH (if > 0) defines the source row pitch in pixels;
+    // otherwise the row pitch equals the region width w. src_tight_row is the
+    // bytes actually copied per row (region width w); src_stride is the advance
+    // per source row (row_pixels * src_bpp, aligned up to UNPACK_ALIGNMENT).
+    int row_pixels = (row_length > 0) ? row_length : w;
     size_t src_tight_row = (size_t)w * (size_t)src_bpp;
+    size_t src_row_bytes = (size_t)row_pixels * (size_t)src_bpp;
     size_t dst_tight_row = (size_t)w * (size_t)dst_bpp;
     size_t mask = (size_t)unpack_alignment - 1;
-    size_t src_stride = (src_tight_row + mask) & ~mask;
+    size_t src_stride = (src_row_bytes + mask) & ~mask;
     size_t staging = dst_tight_row * (size_t)h * (size_t)d;
 
     if (tex.stagingSize < staging) {
@@ -340,11 +347,13 @@ void stage_and_copy_image(TextureEntry& tex, int level, int x, int y, int z,
         if (upload_count < 8) {
             MITHRIL_LOG_WARN("vk", "texture_upload #%d: %dx%d level=%d "
                               "fmt=0x%x type=0x%x -> VkFormat=0x%x "
-                              "expand=%d passEnded=%d",
+                              "expand=%d passEnded=%d "
+                              "rowLen=%d align=%d rowStride=%zu",
                               upload_count + 1, w, h, level,
                               (unsigned)format, (unsigned)type,
                               (unsigned)tex.format, (int)expand,
-                              (int)wasInPass);
+                              (int)wasInPass,
+                              row_length, unpack_alignment, src_stride);
             upload_count++;
         }
     }
@@ -644,7 +653,8 @@ VkImage backend_get_or_create_texture(GLuint name, int width, int height, int de
 
 void backend_texture_upload(GLuint name, int level, int x, int y, int z,
                             int w, int h, int d, GLenum format, GLenum type,
-                            const void* pixels, int unpack_alignment) {
+                            const void* pixels, int unpack_alignment,
+                            int row_length) {
     auto& tbl = mithril::vk::texture_table();
     auto it = tbl.find(name);
     if (it == tbl.end()) {
@@ -660,7 +670,8 @@ void backend_texture_upload(GLuint name, int level, int x, int y, int z,
     }
     if (!pixels) return;
     mithril::vk::stage_and_copy_image(it->second, level, x, y, z, w, h, d,
-                                      pixels, unpack_alignment, format, type);
+                                      pixels, unpack_alignment, format, type,
+                                      row_length);
 }
 
 void backend_texture_set_params(GLuint name, GLint min_filter, GLint mag_filter,

@@ -541,6 +541,27 @@ static void prepare_draw(GLenum mode) {
                               g_state->depthTest ? 1 : 0);
         }
     }
+    // Throttled viewport + vertex-attribute diagnostic (first 3 draws per
+    // program). Viewport had no logging before; vertex attrib stride/offset
+    // are needed to diagnose garbled/diagonal rendering from mis-bound VBOs.
+    {
+        static std::unordered_map<GLuint, int> vp_log_count;
+        int& vc = vp_log_count[prog->id];
+        if (vc < 3) {
+            vc++;
+            MITHRIL_LOG_INFO("draw", "viewport: program=%u x=%d y=%d w=%d h=%d znear=%g zfar=%g",
+                              prog->id,
+                              g_state->viewportX, g_state->viewportY,
+                              g_state->viewportW, g_state->viewportH,
+                              g_state->depthNear, g_state->depthFar);
+            for (int i = 0; i < attrib_count; ++i) {
+                const MGVertexAttrib& a = attribs[i];
+                MITHRIL_LOG_INFO("draw", "  attrib loc=%d size=%d type=0x%x stride=%d off=%d buf=%u",
+                                  a.location, a.size, (unsigned)a.type,
+                                  a.stride, a.offset, (unsigned)a.buffer_name);
+            }
+        }
+    }
     backend_set_color_write_mask(
         g_state->colorMask[0], g_state->colorMask[1],
         g_state->colorMask[2], g_state->colorMask[3]);
