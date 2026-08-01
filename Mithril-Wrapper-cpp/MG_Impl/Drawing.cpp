@@ -507,12 +507,39 @@ static void prepare_draw(GLenum mode) {
                               prog->id, w, h);
         }
     }
+    // Cull mode + front face: ALWAYS set both, even when cullFace is off.
+    // Vulkan dynamic state persists across pipeline binds, so skipping
+    // backend_set_cull_mode when cullFace=false would inherit the previous
+    // draw's cullMode (e.g. BACK) and erroneously cull geometry.
+    //
+    // frontFace is INVERTED to compensate for MoltenVK's shader Y-flip:
+    // SPIRV-Cross injects gl_Position.y = -gl_Position.y to adapt Vulkan's
+    // top-left origin to Metal's bottom-left origin. This Y-flip reverses
+    // winding order (GL CCW -> Vulkan CW), so GL's CCW front faces would be
+    // treated as back faces and culled when cullMode=BACK. Flipping frontFace
+    // (CCW->CW, CW->CCW) restores correct front/back identification.
+    int mode_cull = 0;  // 0=NONE, 1=FRONT, 2=BACK, 3=FRONT_AND_BACK
     if (g_state->cullFace) {
-        int mode_cull = 0;
         if (g_state->cullMode == GL_FRONT) mode_cull = 1;
         else if (g_state->cullMode == GL_BACK) mode_cull = 2;
-        backend_set_cull_mode(mode_cull);
-        backend_set_front_face(g_state->frontFace == GL_CCW ? 1 : 0);
+        else if (g_state->cullMode == GL_FRONT_AND_BACK) mode_cull = 3;
+    }
+    backend_set_cull_mode(mode_cull);
+    // Invert frontFace to compensate MoltenVK Y-flip winding reversal.
+    backend_set_front_face(g_state->frontFace == GL_CCW ? 0 : 1);
+
+    // Throttled cull-state diagnostic (first 3 draws per program).
+    {
+        static std::unordered_map<GLuint, int> cull_log_count;
+        int& cc = cull_log_count[prog->id];
+        if (cc < 3) {
+            cc++;
+            MITHRIL_LOG_INFO("draw", "cull state: program=%u cullFace=%d cullMode=%d frontFace=%d(inverted, GL=%s) depthTest=%d",
+                              prog->id, g_state->cullFace ? 1 : 0, mode_cull,
+                              g_state->frontFace == GL_CCW ? 0 : 1,
+                              g_state->frontFace == GL_CCW ? "CCW" : "CW",
+                              g_state->depthTest ? 1 : 0);
+        }
     }
     backend_set_color_write_mask(
         g_state->colorMask[0], g_state->colorMask[1],

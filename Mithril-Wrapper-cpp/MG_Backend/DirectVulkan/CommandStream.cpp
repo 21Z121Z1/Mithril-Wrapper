@@ -1232,6 +1232,7 @@ void backend_set_cull_mode(int mode) {
     VkCullModeFlags cull = VK_CULL_MODE_NONE;
     if (mode == 1) cull = VK_CULL_MODE_FRONT_BIT;
     else if (mode == 2) cull = VK_CULL_MODE_BACK_BIT;
+    else if (mode == 3) cull = VK_CULL_MODE_FRONT_AND_BACK;
     vkCmdSetCullMode(b->commandBuffer, cull);
 }
 
