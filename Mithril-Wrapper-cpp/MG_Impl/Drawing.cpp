@@ -62,23 +62,6 @@ static void prepare_draw(GLenum mode) {
         return;
     }
 
-    // Log the first few draws of each program at INFO level so developers
-    // can trace which shader programs are active and how many primitives
-    // they draw. The counter is per-program and independent of the
-    // empty-SPIR-V / missing-VBO warning throttlers.
-    {
-        static std::unordered_map<GLuint, int> draw_counts;
-        int& c = draw_counts[prog->id];
-        if (c < 5) {
-            MITHRIL_LOG_WARN("gl", "prepare_draw: program=%u mode=0x%x draw#%d "
-                              "(vs_spv=%zu fs_spv=%zu)",
-                              prog->id, mode, c + 1,
-                              prog->vertexSpirv.size(),
-                              prog->fragmentSpirv.size());
-            c++;
-        }
-    }
-
     // Resolve current draw FBO attachments (color + depth VkImageViews + size).
     VkImageView colors[8] = {VK_NULL_HANDLE};
     VkImageView depth_view = VK_NULL_HANDLE;
@@ -485,21 +468,9 @@ static void prepare_draw(GLenum mode) {
     // the upcoming draw. The set is built per-draw from Program.uniforms +
     // g_state->boundTextures by DescriptorSet.cpp.
     backend_bind_program_descriptors(prog->id);
-    // Viewport by render target: off-screen FBO uses negative height to
-    // cancel MoltenVK's vertex Y-flip (so FBO texture content matches GL's
-    // texCoord(0,0)=bottom convention); swapchain keeps default viewport
-    // (MoltenVK flip alone renders upright). Negative viewport height is
-    // Vulkan 1.1+ core (VK_KHR_maintenance1), enabled by API=1.2.
-    const bool offscreen = (g_state->currentDrawFBO != 0);
-    if (offscreen) {
-        backend_set_viewport(g_state->viewportX, g_state->viewportH,
-                             g_state->viewportW, -g_state->viewportH,
-                             g_state->depthNear, g_state->depthFar);
-    } else {
-        backend_set_viewport(g_state->viewportX, g_state->viewportY,
-                             g_state->viewportW, g_state->viewportH,
-                             g_state->depthNear, g_state->depthFar);
-    }
+    backend_set_viewport(g_state->viewportX, g_state->viewportY,
+                         g_state->viewportW, g_state->viewportH,
+                         g_state->depthNear, g_state->depthFar);
     if (g_state->scissorTest) {
         backend_set_scissor(g_state->scissorX, g_state->scissorY,
                             g_state->scissorW, g_state->scissorH);
@@ -512,12 +483,6 @@ static void prepare_draw(GLenum mode) {
         // scissor to match GL "no clipping" semantics. (MobileGL sets a
         // full-screen scissor when GL scissor test is disabled.)
         backend_set_scissor(0, 0, w, h);
-        static int fs_scissor_log_count = 0;
-        if (fs_scissor_log_count < 3) {
-            fs_scissor_log_count++;
-            MITHRIL_LOG_INFO("draw", "scissor full-screen: program=%u (scissorTest=0) w=%d h=%d",
-                              prog->id, w, h);
-        }
     }
     // Cull mode + front face: ALWAYS set both, even when cullFace is off.
     // Vulkan dynamic state persists across pipeline binds, so skipping
@@ -537,80 +502,11 @@ static void prepare_draw(GLenum mode) {
         else if (g_state->cullMode == GL_FRONT_AND_BACK) mode_cull = 3;
     }
     backend_set_cull_mode(mode_cull);
-    // frontFace by render target: off-screen has MoltenVK flip + negative
-    // viewport = two winding reversals = no net reversal, so pass through
-    // (GL CCW -> VK_CCW). swapchain has only MoltenVK flip = one reversal,
-    // so invert (GL CCW -> VK_CW) to keep bec6a14 behaviour (no regression).
-    int ccw_vk;
-    const char* ff_mode;
-    if (offscreen) {
-        ccw_vk = (g_state->frontFace == GL_CCW) ? 1 : 0;  // pass-through
-        ff_mode = "pass-through";
-    } else {
-        ccw_vk = (g_state->frontFace == GL_CCW) ? 0 : 1;  // inverted
-        ff_mode = "inverted";
-    }
-    backend_set_front_face(ccw_vk);
-
-    // Throttled cull-state diagnostic (first 3 draws per program).
-    {
-        static std::unordered_map<GLuint, int> cull_log_count;
-        int& cc = cull_log_count[prog->id];
-        if (cc < 3) {
-            cc++;
-            MITHRIL_LOG_INFO("draw", "cull state: program=%u target=%s cullFace=%d cullMode=%d frontFace=%d(%s, GL=%s) depthTest=%d",
-                              prog->id, offscreen ? "off-screen" : "swapchain",
-                              g_state->cullFace ? 1 : 0, mode_cull,
-                              ccw_vk, ff_mode,
-                              g_state->frontFace == GL_CCW ? "CCW" : "CW",
-                              g_state->depthTest ? 1 : 0);
-        }
-    }
-    // Throttled viewport + vertex-attribute diagnostic (first 3 draws per
-    // program). Viewport had no logging before; vertex attrib stride/offset
-    // are needed to diagnose garbled/diagonal rendering from mis-bound VBOs.
-    {
-        static std::unordered_map<GLuint, int> vp_log_count;
-        int& vc = vp_log_count[prog->id];
-        if (vc < 3) {
-            vc++;
-            MITHRIL_LOG_INFO("draw", "viewport: program=%u x=%d y=%d w=%d h=%d znear=%g zfar=%g",
-                              prog->id,
-                              g_state->viewportX, g_state->viewportY,
-                              g_state->viewportW, g_state->viewportH,
-                              g_state->depthNear, g_state->depthFar);
-            MITHRIL_LOG_INFO("draw", "viewport mode: program=%u target=%s vpY=%d vpH=%d -> vkY=%d vkH=%d",
-                              prog->id, offscreen ? "off-screen" : "swapchain",
-                              g_state->viewportY, g_state->viewportH,
-                              offscreen ? g_state->viewportH : g_state->viewportY,
-                              offscreen ? -g_state->viewportH : g_state->viewportH);
-            for (int i = 0; i < attrib_count; ++i) {
-                const MGVertexAttrib& a = attribs[i];
-                MITHRIL_LOG_INFO("draw", "  attrib loc=%d size=%d type=0x%x stride=%d off=%d buf=%u",
-                                  a.location, a.size, (unsigned)a.type,
-                                  a.stride, a.offset, (unsigned)a.buffer_name);
-            }
-        }
-    }
+    // Invert frontFace to compensate MoltenVK Y-flip winding reversal.
+    backend_set_front_face(g_state->frontFace == GL_CCW ? 0 : 1);
     backend_set_color_write_mask(
         g_state->colorMask[0], g_state->colorMask[1],
         g_state->colorMask[2], g_state->colorMask[3]);
-    // Throttled blend/colorMask diagnostic (first 3 draws per program) to
-    // diagnose red screen: confirm draw writes visible pixels (colorMask
-    // not all-zero, blend factors not zeroing output).
-    {
-        static std::unordered_map<GLuint, int> blend_log_count;
-        int& bc = blend_log_count[prog->id];
-        if (bc < 3) {
-            bc++;
-            MITHRIL_LOG_INFO("draw", "state: program=%u blend=%d srcRGB=0x%x dstRGB=0x%x srcA=0x%x dstA=0x%x colorMask=[%d,%d,%d,%d]",
-                              prog->id, g_state->blend ? 1 : 0,
-                              (unsigned)g_state->blendSrcRGB, (unsigned)g_state->blendDstRGB,
-                              (unsigned)g_state->blendSrcA, (unsigned)g_state->blendDstA,
-                              g_state->colorMask[0], g_state->colorMask[1],
-                              g_state->colorMask[2], g_state->colorMask[3]);
-        }
-    }
     backend_set_depth_test(
         g_state->depthTest ? 1 : 0,
         g_state->depthMask ? 1 : 0,

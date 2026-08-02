@@ -5,7 +5,6 @@
 #include "Device.h"
 #include "Swapchain.h"
 #include "../Backend.h"
-#include "../../MG_State/State.h"
 #include "../../MG_Impl/Log.h"
 
 #include <atomic>
@@ -1305,16 +1304,6 @@ void backend_draw_arrays(int primitive, int first, int count) {
     (void)primitive;
     mithril::vk::Backend* b = mithril::vk::backend();
     if (!draw_recording_ok(b)) return;
-    {
-        static std::unordered_map<GLuint, int> drawCount;
-        int& cc = drawCount[mithril::g_state->currentProgram];
-        bool doLog = (cc < 3);
-        if (doLog) {
-            MITHRIL_LOG_INFO("draw", "draw cmd: program=%u mode=%d first=%d count=%d",
-                              mithril::g_state->currentProgram, primitive, first, count);
-            cc++;
-        }
-    }
     vkCmdDraw(b->commandBuffer, (uint32_t)count, 1, (uint32_t)first, 0);
 }
 
@@ -1323,16 +1312,6 @@ void backend_draw_indexed(int primitive, int count, int index_type,
     (void)primitive;
     mithril::vk::Backend* b = mithril::vk::backend();
     if (!draw_recording_ok(b) || !index_buffer) return;
-    {
-        static std::unordered_map<GLuint, int> drawCount;
-        int& cc = drawCount[mithril::g_state->currentProgram];
-        bool doLog = (cc < 3);
-        if (doLog) {
-            MITHRIL_LOG_INFO("draw", "draw cmd: program=%u mode=%d first=%d count=%d indexType=%d",
-                              mithril::g_state->currentProgram, primitive, 0, count, index_type);
-            cc++;
-        }
-    }
     VkIndexType t = (index_type == 1) ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16;
     vkCmdBindIndexBuffer(b->commandBuffer, index_buffer, index_offset, t);
     vkCmdDrawIndexed(b->commandBuffer, (uint32_t)count, 1, 0, 0, 0);
