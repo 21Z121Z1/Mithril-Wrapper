@@ -13,6 +13,8 @@ jobs:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Configure (macOS arm64 Release)
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -70,6 +72,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Configure (Linux)
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -81,6 +85,7 @@ jobs:
         run: |
           gcc -o tests/contract_smoke tests/contract_smoke.c -ldl
           gcc -o tests/state_smoke   tests/state_smoke.c   -ldl
+          gcc -o tests/shader_smoke  tests/shader_smoke.c  -ldl
 
       - name: Run EGL contract smoke
         run: |
@@ -93,6 +98,12 @@ jobs:
           output=$(./tests/state_smoke)
           echo "$output"
           echo "$output" | grep -q "STATE SMOKE ALL PASSED"
+
+      - name: Run shader pipeline smoke
+        run: |
+          output=$(./tests/shader_smoke)
+          echo "$output"
+          echo "$output" | grep -q "SHADER SMOKE ALL PASSED"
 
       - name: Verify GL symbol table (Linux .so)
         run: |

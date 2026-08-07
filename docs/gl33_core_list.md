@@ -2,6 +2,8 @@
 
 来源：MobileGL include/GL/glcorearb.h（Khronos 官方），GL_VERSION_1_0..3_3 累计。
 
+> 实现状态（M2-S2）：S1 状态机 51 函数、S2 着色器/程序/Uniform 约 60 函数已真实现（`src/gl/gl_impl.cpp` + `src/shader/`）。其余为 stub（返回 `GL_INVALID_OPERATION` + 日志）。
+
 ## S1 状态/使能/基础查询 — 55
 
 ```

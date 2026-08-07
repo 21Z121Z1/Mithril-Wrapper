@@ -12,12 +12,25 @@ endif()
 option(MITHRIL_IOS "Build for iOS instead of macOS when APPLE is set" OFF)
 set(MITHRIL_VULKAN_LIBRARY "" CACHE FILEPATH "Vulkan loader/MoltenVK library to link (iOS)")
 
+# ---- third-party: glslang (GLSL -> SPIR-V) and SPIRV-Cross (reflection) ----
+set(ENABLE_HLSL OFF CACHE BOOL "No HLSL support needed (GLES/GL only)")
+set(ENABLE_OPT OFF CACHE BOOL "No spirv-opt: keep the dependency graph small")
+set(ENABLE_GLSLANG_BINARIES OFF CACHE BOOL "Skip glslangValidator CLI")
+set(GLSLANG_TESTS OFF CACHE BOOL "Skip glslang unit tests")
+set(SPIRV_CROSS_EXCEPTIONS_TO_ASSERTIONS OFF CACHE BOOL "")
+set(SPIRV_CROSS_FORCE_PIC ON CACHE BOOL "Build SPIRV-Cross static libs with -fPIC for inclusion in libmithril.dylib/.so")
+
+add_subdirectory(third_party/SPIRV-Headers EXCLUDE_FROM_ALL)
+add_subdirectory(third_party/SPIRV-Cross EXCLUDE_FROM_ALL)
+add_subdirectory(third_party/glslang EXCLUDE_FROM_ALL)
+
 add_library(mithril SHARED
     src/egl/egl_impl.cpp
     src/egl/egl_exports.cpp
     src/gl/gl_exports.cpp
     src/gl/gl_impl.cpp
     src/gl/gl_stub.cpp
+    src/shader/shader.cpp
     src/state/state.cpp
     src/util/log.cpp
 )
@@ -25,6 +38,13 @@ add_library(mithril SHARED
 target_include_directories(mithril PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party
+)
+
+target_link_libraries(mithril PRIVATE
+    glslang::glslang
+    glslang::SPIRV
+    glslang::glslang-default-resource-limits
+    spirv-cross-core
 )
 
 set_target_properties(mithril PROPERTIES

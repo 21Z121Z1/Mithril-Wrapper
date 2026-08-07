@@ -12,10 +12,6 @@ extern "C" {
     mithril::GlStubCalled("glActiveTexture");
   }
 
-  void APIENTRY glAttachShader(GLuint program, GLuint shader) {
-    mithril::GlStubCalled("glAttachShader");
-  }
-
   void APIENTRY glBeginConditionalRender(GLuint id, GLenum mode) {
     mithril::GlStubCalled("glBeginConditionalRender");
   }
@@ -26,10 +22,6 @@ extern "C" {
 
   void APIENTRY glBeginTransformFeedback(GLenum primitiveMode) {
     mithril::GlStubCalled("glBeginTransformFeedback");
-  }
-
-  void APIENTRY glBindAttribLocation(GLuint program, GLuint index, const GLchar *name) {
-    mithril::GlStubCalled("glBindAttribLocation");
   }
 
   void APIENTRY glBindBuffer(GLenum target, GLuint buffer) {
@@ -110,10 +102,6 @@ extern "C" {
     return 0;
   }
 
-  void APIENTRY glCompileShader(GLuint shader) {
-    mithril::GlStubCalled("glCompileShader");
-  }
-
   void APIENTRY glCompressedTexImage1D(GLenum target, GLint level, GLenum internalformat, GLsizei width, GLint border, GLsizei imageSize, const void *data) {
     mithril::GlStubCalled("glCompressedTexImage1D");
   }
@@ -162,26 +150,12 @@ extern "C" {
     mithril::GlStubCalled("glCopyTexSubImage3D");
   }
 
-  GLuint APIENTRY glCreateProgram(void) {
-    mithril::GlStubCalled("glCreateProgram");
-    return 0;
-  }
-
-  GLuint APIENTRY glCreateShader(GLenum type) {
-    mithril::GlStubCalled("glCreateShader");
-    return 0;
-  }
-
   void APIENTRY glDeleteBuffers(GLsizei n, const GLuint *buffers) {
     mithril::GlStubCalled("glDeleteBuffers");
   }
 
   void APIENTRY glDeleteFramebuffers(GLsizei n, const GLuint *framebuffers) {
     mithril::GlStubCalled("glDeleteFramebuffers");
-  }
-
-  void APIENTRY glDeleteProgram(GLuint program) {
-    mithril::GlStubCalled("glDeleteProgram");
   }
 
   void APIENTRY glDeleteQueries(GLsizei n, const GLuint *ids) {
@@ -196,10 +170,6 @@ extern "C" {
     mithril::GlStubCalled("glDeleteSamplers");
   }
 
-  void APIENTRY glDeleteShader(GLuint shader) {
-    mithril::GlStubCalled("glDeleteShader");
-  }
-
   void APIENTRY glDeleteSync(GLsync sync) {
     mithril::GlStubCalled("glDeleteSync");
   }
@@ -210,10 +180,6 @@ extern "C" {
 
   void APIENTRY glDeleteVertexArrays(GLsizei n, const GLuint *arrays) {
     mithril::GlStubCalled("glDeleteVertexArrays");
-  }
-
-  void APIENTRY glDetachShader(GLuint program, GLuint shader) {
-    mithril::GlStubCalled("glDetachShader");
   }
 
   void APIENTRY glDisableVertexAttribArray(GLuint index) {
@@ -341,14 +307,6 @@ extern "C" {
     mithril::GlStubCalled("glGenerateMipmap");
   }
 
-  void APIENTRY glGetActiveAttrib(GLuint program, GLuint index, GLsizei bufSize, GLsizei *length, GLint *size, GLenum *type, GLchar *name) {
-    mithril::GlStubCalled("glGetActiveAttrib");
-  }
-
-  void APIENTRY glGetActiveUniform(GLuint program, GLuint index, GLsizei bufSize, GLsizei *length, GLint *size, GLenum *type, GLchar *name) {
-    mithril::GlStubCalled("glGetActiveUniform");
-  }
-
   void APIENTRY glGetActiveUniformBlockName(GLuint program, GLuint uniformBlockIndex, GLsizei bufSize, GLsizei *length, GLchar *uniformBlockName) {
     mithril::GlStubCalled("glGetActiveUniformBlockName");
   }
@@ -363,15 +321,6 @@ extern "C" {
 
   void APIENTRY glGetActiveUniformsiv(GLuint program, GLsizei uniformCount, const GLuint *uniformIndices, GLenum pname, GLint *params) {
     mithril::GlStubCalled("glGetActiveUniformsiv");
-  }
-
-  void APIENTRY glGetAttachedShaders(GLuint program, GLsizei maxCount, GLsizei *count, GLuint *shaders) {
-    mithril::GlStubCalled("glGetAttachedShaders");
-  }
-
-  GLint APIENTRY glGetAttribLocation(GLuint program, const GLchar *name) {
-    mithril::GlStubCalled("glGetAttribLocation");
-    return 0;
   }
 
   void APIENTRY glGetBufferParameteri64v(GLenum target, GLenum pname, GLint64 *params) {
@@ -412,14 +361,6 @@ extern "C" {
     mithril::GlStubCalled("glGetMultisamplefv");
   }
 
-  void APIENTRY glGetProgramInfoLog(GLuint program, GLsizei bufSize, GLsizei *length, GLchar *infoLog) {
-    mithril::GlStubCalled("glGetProgramInfoLog");
-  }
-
-  void APIENTRY glGetProgramiv(GLuint program, GLenum pname, GLint *params) {
-    mithril::GlStubCalled("glGetProgramiv");
-  }
-
   void APIENTRY glGetQueryObjecti64v(GLuint id, GLenum pname, GLint64 *params) {
     mithril::GlStubCalled("glGetQueryObjecti64v");
   }
@@ -458,18 +399,6 @@ extern "C" {
 
   void APIENTRY glGetSamplerParameteriv(GLuint sampler, GLenum pname, GLint *params) {
     mithril::GlStubCalled("glGetSamplerParameteriv");
-  }
-
-  void APIENTRY glGetShaderInfoLog(GLuint shader, GLsizei bufSize, GLsizei *length, GLchar *infoLog) {
-    mithril::GlStubCalled("glGetShaderInfoLog");
-  }
-
-  void APIENTRY glGetShaderSource(GLuint shader, GLsizei bufSize, GLsizei *length, GLchar *source) {
-    mithril::GlStubCalled("glGetShaderSource");
-  }
-
-  void APIENTRY glGetShaderiv(GLuint shader, GLenum pname, GLint *params) {
-    mithril::GlStubCalled("glGetShaderiv");
   }
 
   void APIENTRY glGetSynciv(GLsync sync, GLenum pname, GLsizei count, GLsizei *length, GLint *values) {
@@ -517,23 +446,6 @@ extern "C" {
     mithril::GlStubCalled("glGetUniformIndices");
   }
 
-  GLint APIENTRY glGetUniformLocation(GLuint program, const GLchar *name) {
-    mithril::GlStubCalled("glGetUniformLocation");
-    return 0;
-  }
-
-  void APIENTRY glGetUniformfv(GLuint program, GLint location, GLfloat *params) {
-    mithril::GlStubCalled("glGetUniformfv");
-  }
-
-  void APIENTRY glGetUniformiv(GLuint program, GLint location, GLint *params) {
-    mithril::GlStubCalled("glGetUniformiv");
-  }
-
-  void APIENTRY glGetUniformuiv(GLuint program, GLint location, GLuint *params) {
-    mithril::GlStubCalled("glGetUniformuiv");
-  }
-
   void APIENTRY glGetVertexAttribIiv(GLuint index, GLenum pname, GLint *params) {
     mithril::GlStubCalled("glGetVertexAttribIiv");
   }
@@ -568,11 +480,6 @@ extern "C" {
     return 0;
   }
 
-  GLboolean APIENTRY glIsProgram(GLuint program) {
-    mithril::GlStubCalled("glIsProgram");
-    return 0;
-  }
-
   GLboolean APIENTRY glIsQuery(GLuint id) {
     mithril::GlStubCalled("glIsQuery");
     return 0;
@@ -585,11 +492,6 @@ extern "C" {
 
   GLboolean APIENTRY glIsSampler(GLuint sampler) {
     mithril::GlStubCalled("glIsSampler");
-    return 0;
-  }
-
-  GLboolean APIENTRY glIsShader(GLuint shader) {
-    mithril::GlStubCalled("glIsShader");
     return 0;
   }
 
@@ -606,10 +508,6 @@ extern "C" {
   GLboolean APIENTRY glIsVertexArray(GLuint array) {
     mithril::GlStubCalled("glIsVertexArray");
     return 0;
-  }
-
-  void APIENTRY glLinkProgram(GLuint program) {
-    mithril::GlStubCalled("glLinkProgram");
   }
 
   void * APIENTRY glMapBuffer(GLenum target, GLenum access) {
@@ -706,10 +604,6 @@ extern "C" {
     mithril::GlStubCalled("glSamplerParameteriv");
   }
 
-  void APIENTRY glShaderSource(GLuint shader, GLsizei count, const GLchar *const*string, const GLint *length) {
-    mithril::GlStubCalled("glShaderSource");
-  }
-
   void APIENTRY glTexBuffer(GLenum target, GLenum internalformat, GLuint buffer) {
     mithril::GlStubCalled("glTexBuffer");
   }
@@ -774,153 +668,13 @@ extern "C" {
     mithril::GlStubCalled("glTransformFeedbackVaryings");
   }
 
-  void APIENTRY glUniform1f(GLint location, GLfloat v0) {
-    mithril::GlStubCalled("glUniform1f");
-  }
-
-  void APIENTRY glUniform1fv(GLint location, GLsizei count, const GLfloat *value) {
-    mithril::GlStubCalled("glUniform1fv");
-  }
-
-  void APIENTRY glUniform1i(GLint location, GLint v0) {
-    mithril::GlStubCalled("glUniform1i");
-  }
-
-  void APIENTRY glUniform1iv(GLint location, GLsizei count, const GLint *value) {
-    mithril::GlStubCalled("glUniform1iv");
-  }
-
-  void APIENTRY glUniform1ui(GLint location, GLuint v0) {
-    mithril::GlStubCalled("glUniform1ui");
-  }
-
-  void APIENTRY glUniform1uiv(GLint location, GLsizei count, const GLuint *value) {
-    mithril::GlStubCalled("glUniform1uiv");
-  }
-
-  void APIENTRY glUniform2f(GLint location, GLfloat v0, GLfloat v1) {
-    mithril::GlStubCalled("glUniform2f");
-  }
-
-  void APIENTRY glUniform2fv(GLint location, GLsizei count, const GLfloat *value) {
-    mithril::GlStubCalled("glUniform2fv");
-  }
-
-  void APIENTRY glUniform2i(GLint location, GLint v0, GLint v1) {
-    mithril::GlStubCalled("glUniform2i");
-  }
-
-  void APIENTRY glUniform2iv(GLint location, GLsizei count, const GLint *value) {
-    mithril::GlStubCalled("glUniform2iv");
-  }
-
-  void APIENTRY glUniform2ui(GLint location, GLuint v0, GLuint v1) {
-    mithril::GlStubCalled("glUniform2ui");
-  }
-
-  void APIENTRY glUniform2uiv(GLint location, GLsizei count, const GLuint *value) {
-    mithril::GlStubCalled("glUniform2uiv");
-  }
-
-  void APIENTRY glUniform3f(GLint location, GLfloat v0, GLfloat v1, GLfloat v2) {
-    mithril::GlStubCalled("glUniform3f");
-  }
-
-  void APIENTRY glUniform3fv(GLint location, GLsizei count, const GLfloat *value) {
-    mithril::GlStubCalled("glUniform3fv");
-  }
-
-  void APIENTRY glUniform3i(GLint location, GLint v0, GLint v1, GLint v2) {
-    mithril::GlStubCalled("glUniform3i");
-  }
-
-  void APIENTRY glUniform3iv(GLint location, GLsizei count, const GLint *value) {
-    mithril::GlStubCalled("glUniform3iv");
-  }
-
-  void APIENTRY glUniform3ui(GLint location, GLuint v0, GLuint v1, GLuint v2) {
-    mithril::GlStubCalled("glUniform3ui");
-  }
-
-  void APIENTRY glUniform3uiv(GLint location, GLsizei count, const GLuint *value) {
-    mithril::GlStubCalled("glUniform3uiv");
-  }
-
-  void APIENTRY glUniform4f(GLint location, GLfloat v0, GLfloat v1, GLfloat v2, GLfloat v3) {
-    mithril::GlStubCalled("glUniform4f");
-  }
-
-  void APIENTRY glUniform4fv(GLint location, GLsizei count, const GLfloat *value) {
-    mithril::GlStubCalled("glUniform4fv");
-  }
-
-  void APIENTRY glUniform4i(GLint location, GLint v0, GLint v1, GLint v2, GLint v3) {
-    mithril::GlStubCalled("glUniform4i");
-  }
-
-  void APIENTRY glUniform4iv(GLint location, GLsizei count, const GLint *value) {
-    mithril::GlStubCalled("glUniform4iv");
-  }
-
-  void APIENTRY glUniform4ui(GLint location, GLuint v0, GLuint v1, GLuint v2, GLuint v3) {
-    mithril::GlStubCalled("glUniform4ui");
-  }
-
-  void APIENTRY glUniform4uiv(GLint location, GLsizei count, const GLuint *value) {
-    mithril::GlStubCalled("glUniform4uiv");
-  }
-
   void APIENTRY glUniformBlockBinding(GLuint program, GLuint uniformBlockIndex, GLuint uniformBlockBinding) {
     mithril::GlStubCalled("glUniformBlockBinding");
-  }
-
-  void APIENTRY glUniformMatrix2fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value) {
-    mithril::GlStubCalled("glUniformMatrix2fv");
-  }
-
-  void APIENTRY glUniformMatrix2x3fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value) {
-    mithril::GlStubCalled("glUniformMatrix2x3fv");
-  }
-
-  void APIENTRY glUniformMatrix2x4fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value) {
-    mithril::GlStubCalled("glUniformMatrix2x4fv");
-  }
-
-  void APIENTRY glUniformMatrix3fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value) {
-    mithril::GlStubCalled("glUniformMatrix3fv");
-  }
-
-  void APIENTRY glUniformMatrix3x2fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value) {
-    mithril::GlStubCalled("glUniformMatrix3x2fv");
-  }
-
-  void APIENTRY glUniformMatrix3x4fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value) {
-    mithril::GlStubCalled("glUniformMatrix3x4fv");
-  }
-
-  void APIENTRY glUniformMatrix4fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value) {
-    mithril::GlStubCalled("glUniformMatrix4fv");
-  }
-
-  void APIENTRY glUniformMatrix4x2fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value) {
-    mithril::GlStubCalled("glUniformMatrix4x2fv");
-  }
-
-  void APIENTRY glUniformMatrix4x3fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value) {
-    mithril::GlStubCalled("glUniformMatrix4x3fv");
   }
 
   GLboolean APIENTRY glUnmapBuffer(GLenum target) {
     mithril::GlStubCalled("glUnmapBuffer");
     return 0;
-  }
-
-  void APIENTRY glUseProgram(GLuint program) {
-    mithril::GlStubCalled("glUseProgram");
-  }
-
-  void APIENTRY glValidateProgram(GLuint program) {
-    mithril::GlStubCalled("glValidateProgram");
   }
 
   void APIENTRY glVertexAttrib1d(GLuint index, GLdouble x) {

@@ -1,8 +1,10 @@
 # Mithril-Wrapper 实现清单（CHECKLIST）
 
-> 状态：**M1 完成**（状态引擎 + S1 真实现 48 函数，Linux 双冒烟测试通过）。
+> 状态：**M2-S2 着色器层完成**（glslang GLSL→SPIR-V + SPIRV-Cross 反射，S2 组约 60 函数真实现；Linux 三冒烟测试通过）。
 > 配套文档：`docs/gl33_core_list.md`（GL 3.3 core 342 函数分组）、`docs/egl_list.md`（EGL 符号清单）。
-> 测试：`tests/contract_smoke.c`（EGL 契约）、`tests/state_smoke.c`（GL 状态机）。
+> 测试：`tests/contract_smoke.c`（EGL 契约）、`tests/state_smoke.c`（GL 状态机）、`tests/shader_smoke.c`（着色器管线）。
+> M2-S2 已完成：`src/shader/`（Shader/Program 对象表、glslang 编译缓存 .glsl→SPIR-V、SPIRV-Cross 反射 uniform/attrib）、GLSL 150 自动升级到 330 core、`gl_VertexID/gl_InstanceID` 重写、松散 uniform 折入合成 UBO（ANGLE 模式）、`glUniform*` 全系 + 矩阵 setter/getter。
+> 待办：M2-Vulkan（SPIR-V→vkShaderModule + 离屏渲染三角）+ M3 顶点输入。
 
 ---
 
@@ -140,7 +142,7 @@ Vulkan 后端（src/vk/，经 MoltenVK → Metal → CAMetalLayer）
 |---|---|---|
 | **M0 基建** | CMake 双分支工程；EGL 44 符号骨架 + config 契约；GL 342 stub 分发表；CI build.yml（macOS runner + MoltenVK + glslang）；Linux 编 .so 验证；iOS 分支 CAMetalLayer→swapchain 纯色 | Linux .so 可加载、EGL 契约通过、CI 产出 dylib |
 | **M1 注入与 Context** | eglMakeCurrent 语义完整；glClear/glViewport/glClearColor 实现；GL_VERSION="3.3 Core Profile" 字符串 | 真机 demo 背景色正确 |
-| **M2 Shader 管线** | glShaderSource→glslang→SPIR-V→vkShaderModule；UBO 管理；glDrawArrays 三角形 | 带色三角形 |
+| **M2 Shader 管线** | glShaderSource→glslang→SPIR-V→vkShaderModule；UBO 管理；glDrawArrays 三角形 | 带色三角形 | 🔄 S2 着色器/程序/Uniform 层完成（glslang+SPIRV-Cross 已集成，shader_smoke 通过）；待接 Vulkan |
 | **M3 顶点数据** | VAO/VBO、stride/offset 规整、glDrawElements | 用 App 数据绘制 |
 | **M4 纹理** | glTexImage2D 上传、格式/swizzle、采样器、mipmap | 贴图正确 |
 | **M5 状态与管线** | depth/stencil/blend/cull/FBO/MSAA → pipeline 缓存 | 完整三维画面 |

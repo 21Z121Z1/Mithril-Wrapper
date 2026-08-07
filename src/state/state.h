@@ -107,6 +107,7 @@ struct GLState {
     PixelStore pixels;
     ErrorQueue errors;
     GLenum active_texture = GL_TEXTURE0;
+    GLuint current_program = 0;   // set by glUseProgram; uniform setters target it
 };
 
 // The global context instance.

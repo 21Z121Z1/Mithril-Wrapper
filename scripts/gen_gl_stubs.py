@@ -30,6 +30,23 @@ MGL_IMPL = frozenset({
     "glStencilFunc", "glStencilFuncSeparate", "glStencilMask",
     "glStencilMaskSeparate", "glStencilOp", "glStencilOpSeparate", "glViewport",
     "glGetPointerv", "glClampColor",
+    # S2 shaders/programs/uniforms implemented in gl_impl.cpp.
+    "glAttachShader", "glBindAttribLocation", "glCompileShader", "glCreateProgram",
+    "glCreateShader", "glDeleteProgram", "glDeleteShader", "glDetachShader",
+    "glGetActiveAttrib", "glGetActiveUniform", "glGetAttachedShaders",
+    "glGetAttribLocation", "glGetProgramInfoLog", "glGetProgramiv",
+    "glGetShaderInfoLog", "glGetShaderSource", "glGetShaderiv",
+    "glGetUniformLocation", "glGetUniformfv", "glGetUniformiv", "glGetUniformuiv",
+    "glIsProgram", "glIsShader", "glLinkProgram", "glShaderSource",
+    "glUniform1f", "glUniform1fv", "glUniform1i", "glUniform1iv", "glUniform1ui",
+    "glUniform1uiv", "glUniform2f", "glUniform2fv", "glUniform2i", "glUniform2iv",
+    "glUniform2ui", "glUniform2uiv", "glUniform3f", "glUniform3fv", "glUniform3i",
+    "glUniform3iv", "glUniform3ui", "glUniform3uiv", "glUniform4f", "glUniform4fv",
+    "glUniform4i", "glUniform4iv", "glUniform4ui", "glUniform4uiv",
+    "glUniformMatrix2fv", "glUniformMatrix2x3fv", "glUniformMatrix2x4fv",
+    "glUniformMatrix3fv", "glUniformMatrix3x2fv", "glUniformMatrix3x4fv",
+    "glUniformMatrix4fv", "glUniformMatrix4x2fv", "glUniformMatrix4x3fv",
+    "glUseProgram", "glValidateProgram",
 })
 
 
