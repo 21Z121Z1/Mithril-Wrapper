@@ -1,0 +1,104 @@
+name: build-mithril
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  # ---- macOS: produce the deliverable libmithril.dylib --------------------
+  build-macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure (macOS arm64 Release)
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build -j$(sysctl -n hw.ncpu)
+
+      - name: Locate dylib
+        id: locate
+        run: |
+          [ -f output/libmithril.dylib ] || (echo "dylib not found in output/" && exit 1)
+          echo "path=output/libmithril.dylib" >> "$GITHUB_OUTPUT"
+          file output/libmithril.dylib
+
+      - name: Verify exported EGL symbols (contract set)
+        run: |
+          NM_OUT=$(nm -gU "${{ steps.locate.outputs.path }}")
+          missing=0
+          for sym in eglBindAPI eglChooseConfig eglCreateContext eglCreateWindowSurface \
+                     eglDestroyContext eglDestroySurface eglGetConfigAttrib \
+                     eglGetCurrentContext eglGetCurrentSurface eglGetDisplay eglGetError \
+                     eglGetPlatformDisplay eglInitialize eglMakeCurrent eglReleaseThread \
+                     eglSwapBuffers eglSwapInterval eglTerminate; do
+            if echo "$NM_OUT" | grep -qE " T _?${sym}$"; then
+              echo "ok  $sym"
+            else
+              echo "MISS $sym"
+              missing=1
+            fi
+          done
+          [ "$missing" -eq 0 ]
+          echo "egl* symbols:"
+          echo "$NM_OUT" | grep -cE ' _egl'
+
+      - name: Verify GL symbol table (3.3 core exports)
+        run: |
+          NM_OUT=$(nm -gU "${{ steps.locate.outputs.path }}")
+          GL_COUNT=$(echo "$NM_OUT" | grep -cE ' T _?gl[A-Z0-9]')
+          echo "gl* defined exports: $GL_COUNT"
+          [ "$GL_COUNT" -ge 342 ]
+
+      - name: Ad-hoc codesign
+        run: codesign -s - "${{ steps.locate.outputs.path }}" || \
+             echo "codesign skipped (best-effort)"
+
+      - name: Upload dylib
+        uses: actions/upload-artifact@v4
+        with:
+          name: libmithril-macos-arm64
+          path: ${{ steps.locate.outputs.path }}
+          if-no-files-found: error
+
+  # ---- Linux: run the contract + state machine smoke tests ----------------
+  test-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure (Linux)
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build -j$(nproc)
+
+      - name: Build smoke test binaries
+        run: |
+          gcc -o tests/contract_smoke tests/contract_smoke.c -ldl
+          gcc -o tests/state_smoke   tests/state_smoke.c   -ldl
+
+      - name: Run EGL contract smoke
+        run: |
+          output=$(./tests/contract_smoke)
+          echo "$output"
+          echo "$output" | grep -q "ALL CONTRACT CHECKS PASSED"
+
+      - name: Run GL state machine smoke
+        run: |
+          output=$(./tests/state_smoke)
+          echo "$output"
+          echo "$output" | grep -q "STATE SMOKE ALL PASSED"
+
+      - name: Verify GL symbol table (Linux .so)
+        run: |
+          GL_COUNT=$(nm -D --defined-only output/libmithril.so | awk '{print $3}' | grep -cE '^gl[A-Z0-9]')
+          echo "GL* defined exports: $GL_COUNT"
+          [ "$GL_COUNT" -ge 342 ]
+          EGL_COUNT=$(nm -D --defined-only output/libmithril.so | awk '{print $3}' | grep -c '^egl')
+          echo "egl* defined exports: $EGL_COUNT"
+          [ "$EGL_COUNT" -ge 40 ]
