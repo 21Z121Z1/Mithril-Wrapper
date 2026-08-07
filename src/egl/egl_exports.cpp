@@ -17,7 +17,7 @@ extern "C" {
 // ---- Display / error ----------------------------------------------------
 
 EGLDisplay eglGetDisplay(EGLNativeDisplayType display_id) {
-    ML_LOG_DEBUG("eglGetDisplay(%p)", display_id);
+    ML_LOG_DEBUG("eglGetDisplay(%p)", (void*)(intptr_t)display_id);
     if (display_id != EGL_DEFAULT_DISPLAY) {
         SetError(EGL_BAD_PARAMETER);
         return EGL_NO_DISPLAY;
@@ -31,7 +31,9 @@ EGLDisplay eglGetPlatformDisplay(EGLenum platform, void* native_display,
     (void)platform;
     (void)attrib_list;
     ML_LOG_DEBUG("eglGetPlatformDisplay(0x%x, %p)", (unsigned)platform, native_display);
-    if (native_display != EGL_DEFAULT_DISPLAY && native_display != nullptr) {
+    // EGL_DEFAULT_DISPLAY == ((EGLNativeDisplayType)0) on every platform, so a
+    // non-null native_display is always an error here.
+    if (native_display != nullptr) {
         SetError(EGL_BAD_PARAMETER);
         return EGL_NO_DISPLAY;
     }
@@ -209,7 +211,7 @@ EGLSurface eglCreateWindowSurface(EGLDisplay dpy, EGLConfig config,
     globals().surface.native_window = (void*)win;
     globals().surface.is_window = true;
     globals().surface.swap_interval = 1;
-    ML_LOG_DEBUG("eglCreateWindowSurface(win=%p)", win);
+    ML_LOG_DEBUG("eglCreateWindowSurface(win=%p)", (void*)win);
     SetError(EGL_SUCCESS);
     return reinterpret_cast<EGLSurface>(&globals().surface);
 }

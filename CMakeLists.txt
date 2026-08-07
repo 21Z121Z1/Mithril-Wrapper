@@ -59,4 +59,8 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
     # unused-parameter noise there so real warnings stay visible.
     set_source_files_properties(src/gl/gl_exports.cpp PROPERTIES
         COMPILE_OPTIONS "-Wno-unused-parameter")
+    # EGL placeholder surface/context routines validate the caller via EGL
+    # error codes; the placeholder parameters are unused by design.
+    set_source_files_properties(src/egl/egl_exports.cpp PROPERTIES
+        COMPILE_OPTIONS "-Wno-unused-parameter")
 endif()
