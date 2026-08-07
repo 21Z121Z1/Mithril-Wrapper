@@ -1,0 +1,9 @@
+# Mithril-Wrapper public ABI symbols (macOS -exported_symbols_list).
+# Pattern rules mirror MobileGL ExportedSymbols.txt: keep EGL + OpenGL/GLX
+# entry points visible, hide glslang/SPIRV-Cross/stl internals.
+
+_CGL*
+_egl*
+_gl[A-Z0-9]*
+_glX*
+_mithril*

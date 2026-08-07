@@ -1,2 +1,14 @@
+# build artifacts
+build/
+output/
+*.o
+*.so
+*.dylib
+
+# compiled test binaries (sources are tracked)
+tests/contract_smoke
+tests/state_smoke
+
+# legacy / tooling
 .trae/
 latestlog.txt
