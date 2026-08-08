@@ -437,7 +437,7 @@ int main(void) {
         texImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 8, 8, 0, GL_RGBA,
                    GL_UNSIGNED_BYTE, NULL);
         copyTexSub2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, 4, 4);
-        unsigned char back[4 * 4 * 4];
+        unsigned char back[8 * 8 * 4];
         getTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, back);
         CHECK(px_match(back, 102, 128, 153, 255),
               "glCopyTexSubImage2D copies the framebuffer region (r=%d g=%d b=%d)",
