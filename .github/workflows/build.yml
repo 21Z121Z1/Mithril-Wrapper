@@ -81,11 +81,18 @@ jobs:
       - name: Build
         run: cmake --build build -j$(nproc)
 
+      - name: Install Vulkan runtime (lavapipe)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libvulkan1 mesa-vulkan-drivers
+          vulkaninfo --summary 2>/dev/null | head -10 || true
+
       - name: Build smoke test binaries
         run: |
           gcc -o tests/contract_smoke tests/contract_smoke.c -ldl
           gcc -o tests/state_smoke   tests/state_smoke.c   -ldl
           gcc -o tests/shader_smoke  tests/shader_smoke.c  -ldl
+          gcc -o tests/draw_smoke    tests/draw_smoke.c    -ldl
 
       - name: Run EGL contract smoke
         run: |
@@ -104,6 +111,12 @@ jobs:
           output=$(./tests/shader_smoke)
           echo "$output"
           echo "$output" | grep -q "SHADER SMOKE ALL PASSED"
+
+      - name: Run GL->Vulkan draw smoke (lavapipe)
+        run: |
+          output=$(./tests/draw_smoke)
+          echo "$output"
+          echo "$output" | grep -q "DRAW SMOKE ALL PASSED"
 
       - name: Verify GL symbol table (Linux .so)
         run: |
