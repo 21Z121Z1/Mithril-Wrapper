@@ -9,6 +9,7 @@ output/
 tests/contract_smoke
 tests/state_smoke
 tests/shader_smoke
+tests/draw_smoke
 
 # legacy / tooling
 .trae/

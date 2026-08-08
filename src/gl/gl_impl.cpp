@@ -7,13 +7,22 @@
 #include <shader/shader.h>
 #include <state/state.h>
 #include <util/log.h>
+#include <vk/vk_engine.h>
 
 #include <algorithm>
+#include <array>
 #include <cstring>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace s = mithril::state;
+namespace v = mithril::vk;
+
+// GL program id -> Vulkan program handle (lazily created at first draw).
+namespace {
+std::unordered_map<GLuint, uint64_t> g_vk_programs;
+}  // namespace
 
 #define PUSH_ERROR(e) s::GetState().errors.Push((e))
 
@@ -85,8 +94,8 @@ GLboolean APIENTRY glIsEnabledi(GLenum cap, GLuint index) {
 
 // ---- noise cancellers -------------------------------------------------------
 
-void APIENTRY glFinish() {}   // nothing to flush in a stub renderer
-void APIENTRY glFlush() {}
+void APIENTRY glFinish() { v::SubmitFlush(); }
+void APIENTRY glFlush() { v::SubmitFlush(); }
 
 // ---- viewport / scissor ----------------------------------------------------
 
@@ -94,6 +103,8 @@ void APIENTRY glViewport(GLint x, GLint y, GLsizei width, GLsizei height) {
     auto& st = s::GetState();
     st.viewport.x = x; st.viewport.y = y;
     st.viewport.w = width; st.viewport.h = height;
+    if (v::IsInitialized())
+        v::SetViewport((float)x, (float)y, (float)width, (float)height);
 }
 
 void APIENTRY glScissor(GLint x, GLint y, GLsizei width, GLsizei height) {
@@ -108,6 +119,8 @@ void APIENTRY glClearColor(GLfloat r, GLfloat g, GLfloat b, GLfloat a) {
     auto& st = s::GetState();
     st.clear_color[0] = r; st.clear_color[1] = g;
     st.clear_color[2] = b; st.clear_color[3] = a;
+    if (v::IsInitialized())
+        v::SetClearColor(r, g, b, a);
 }
 
 void APIENTRY glClearDepth(GLdouble depth) { s::GetState().clear_depth = depth; }
@@ -117,7 +130,14 @@ void APIENTRY glClearStencil(GLint sval) { s::GetState().clear_stencil = sval; }
 void APIENTRY glClear(GLbitfield mask) {
     const GLbitfield valid = GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT;
     if (mask & ~valid) { PUSH_ERROR(GL_INVALID_VALUE); return; }
-    // Actual fills happen in the Vulkan backend (M2+); here we only validate.
+    if (mask & GL_COLOR_BUFFER_BIT) {
+        v::EnsureInit();
+        auto& st = s::GetState();
+        v::SetClearColor(st.clear_color[0], st.clear_color[1], st.clear_color[2],
+                         st.clear_color[3]);
+        v::MarkClear();
+    }
+    // Depth/stencil bits are accepted but have no Vulkan attachments yet.
 }
 
 // ---- face / polygon --------------------------------------------------------
@@ -576,6 +596,11 @@ GLuint APIENTRY glCreateProgram(void) {
 
 void APIENTRY glDeleteProgram(GLuint program) {
     if (program && sh::GetProgram(program) == nullptr) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+    auto it = g_vk_programs.find(program);
+    if (it != g_vk_programs.end()) {
+        v::DestroyProgram(it->second);
+        g_vk_programs.erase(it);
+    }
     sh::DeleteProgram(program);
 }
 
@@ -925,6 +950,256 @@ void APIENTRY glUniformMatrix3x4fv(GLint location, GLsizei count, GLboolean tran
 void APIENTRY glUniformMatrix4x3fv(GLint location, GLsizei count, GLboolean transpose,
                                    const GLfloat* value) {
     (void)transpose; StoreUniform(GL_FLOAT_MAT4x3, location, value, count, 12);
+}
+
+// ---- vertex arrays / buffers / draw (milestone M2-VK) -----------------------
+
+namespace {
+constexpr GLuint kMaxAttribs = 16;
+
+struct AttribData {
+    bool enabled = false;
+    GLint size = 0;            // 1..4 components
+    GLenum type = GL_FLOAT;
+    GLboolean normalized = GL_FALSE;
+    GLsizei stride = 0;
+    GLsizeiptr offset = 0;
+    GLuint buffer = 0;         // GL_ARRAY_BUFFER bound at glVertexAttribPointer
+};
+
+struct VAOData {
+    std::array<AttribData, kMaxAttribs> attribs{};
+};
+
+struct BufferData {
+    std::vector<uint8_t> data;
+};
+
+std::unordered_map<GLuint, VAOData> g_vaos;
+std::unordered_map<GLuint, BufferData> g_buffers;
+GLuint g_next_vao = 1, g_next_buffer = 1;
+GLuint g_bound_vao = 0;          // default VAO is 0
+GLuint g_bound_array_buffer = 0;
+GLuint g_bound_element_buffer = 0;
+
+GLuint NewName(std::unordered_map<GLuint, VAOData>& table, GLuint& next) {
+    while (table.count(next)) ++next;
+    table.emplace(next, VAOData{});
+    return next++;
+}
+} // namespace
+
+void APIENTRY glGenVertexArrays(GLsizei n, GLuint* arrays) {
+    if (n < 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+    for (GLsizei i = 0; i < n; ++i) arrays[i] = NewName(g_vaos, g_next_vao);
+}
+
+void APIENTRY glDeleteVertexArrays(GLsizei n, const GLuint* arrays) {
+    if (n < 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+    for (GLsizei i = 0; i < n; ++i) {
+        auto it = g_vaos.find(arrays[i]);
+        if (it == g_vaos.end()) continue;
+        if (g_bound_vao == arrays[i]) g_bound_vao = 0;
+        g_vaos.erase(it);
+    }
+}
+
+void APIENTRY glBindVertexArray(GLuint array) {
+    if (array != 0 && !g_vaos.count(array)) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
+    g_bound_vao = array;
+}
+
+GLboolean APIENTRY glIsVertexArray(GLuint array) {
+    return g_vaos.count(array) ? GL_TRUE : GL_FALSE;
+}
+
+void APIENTRY glGenBuffers(GLsizei n, GLuint* buffers) {
+    if (n < 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+    for (GLsizei i = 0; i < n; ++i) {
+        while (g_buffers.count(g_next_buffer)) ++g_next_buffer;
+        buffers[i] = g_next_buffer++;
+        g_buffers.emplace(buffers[i], BufferData{});
+    }
+}
+
+void APIENTRY glDeleteBuffers(GLsizei n, const GLuint* buffers) {
+    if (n < 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+    for (GLsizei i = 0; i < n; ++i) {
+        auto it = g_buffers.find(buffers[i]);
+        if (it == g_buffers.end()) continue;
+        if (g_bound_array_buffer == buffers[i]) g_bound_array_buffer = 0;
+        if (g_bound_element_buffer == buffers[i]) g_bound_element_buffer = 0;
+        g_buffers.erase(it);
+    }
+}
+
+GLboolean APIENTRY glIsBuffer(GLuint buffer) {
+    return g_buffers.count(buffer) ? GL_TRUE : GL_FALSE;
+}
+
+void APIENTRY glBindBuffer(GLenum target, GLuint buffer) {
+    if (buffer != 0 && !g_buffers.count(buffer)) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+    switch (target) {
+        case GL_ARRAY_BUFFER: g_bound_array_buffer = buffer; break;
+        case GL_ELEMENT_ARRAY_BUFFER: g_bound_element_buffer = buffer; break;
+        default:
+            PUSH_ERROR(GL_INVALID_ENUM);
+            return;
+    }
+}
+
+void APIENTRY glBufferData(GLenum target, GLsizeiptr size, const void* data, GLenum usage) {
+    (void)usage;
+    GLuint* bound = nullptr;
+    switch (target) {
+        case GL_ARRAY_BUFFER: bound = &g_bound_array_buffer; break;
+        case GL_ELEMENT_ARRAY_BUFFER: bound = &g_bound_element_buffer; break;
+        default: PUSH_ERROR(GL_INVALID_ENUM); return;
+    }
+    if (*bound == 0) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
+    if (size < 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+    auto it = g_buffers.find(*bound);
+    if (data) {
+        it->second.data.assign((const uint8_t*)data, (const uint8_t*)data + size);
+    } else {
+        it->second.data.assign((size_t)size, 0);
+    }
+}
+
+void APIENTRY glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, const void* data) {
+    GLuint* bound = nullptr;
+    switch (target) {
+        case GL_ARRAY_BUFFER: bound = &g_bound_array_buffer; break;
+        case GL_ELEMENT_ARRAY_BUFFER: bound = &g_bound_element_buffer; break;
+        default: PUSH_ERROR(GL_INVALID_ENUM); return;
+    }
+    if (*bound == 0) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
+    if (offset < 0 || size < 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+    auto it = g_buffers.find(*bound);
+    if (offset + size > (GLintptr)it->second.data.size()) {
+        PUSH_ERROR(GL_INVALID_VALUE);
+        return;
+    }
+    std::memcpy(it->second.data.data() + offset, data, size);
+}
+
+void APIENTRY glEnableVertexAttribArray(GLuint index) {
+    if (index >= kMaxAttribs) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+    g_vaos[g_bound_vao].attribs[index].enabled = true;
+}
+
+void APIENTRY glDisableVertexAttribArray(GLuint index) {
+    if (index >= kMaxAttribs) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+    g_vaos[g_bound_vao].attribs[index].enabled = false;
+}
+
+void APIENTRY glVertexAttribPointer(GLuint index, GLint size, GLenum type,
+                                    GLboolean normalized, GLsizei stride,
+                                    const void* pointer) {
+    if (index >= kMaxAttribs) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+    if (size < 1 || size > 4) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+    if (type != GL_FLOAT && type != GL_HALF_FLOAT && type != GL_DOUBLE &&
+        type != GL_BYTE && type != GL_UNSIGNED_BYTE && type != GL_SHORT &&
+        type != GL_UNSIGNED_SHORT && type != GL_INT && type != GL_UNSIGNED_INT) {
+        PUSH_ERROR(GL_INVALID_ENUM);
+        return;
+    }
+    if (stride < 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+    AttribData& a = g_vaos[g_bound_vao].attribs[index];
+    a.enabled = true;
+    a.size = size;
+    a.type = type;
+    a.normalized = normalized;
+    a.stride = stride;
+    a.offset = (GLsizeiptr)pointer;
+    a.buffer = g_bound_array_buffer;
+}
+
+void APIENTRY glDrawArrays(GLenum mode, GLint first, GLsizei count) {
+    if (count < 0 || first < 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+    if (mode != GL_TRIANGLES) {
+        // Only triangles for the milestone; other modes are forwarded as-is
+        // to the Vulkan backend which maps them to a triangle list.
+        PUSH_ERROR(GL_INVALID_ENUM);
+        return;
+    }
+    if (count == 0) return;
+
+    sh::Program* prog = sh::GetProgram(s::GetState().current_program);
+    if (!prog || !prog->linked) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
+    if (!v::EnsureInit()) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
+
+    // Interleave enabled attribute payloads into one CPU buffer.
+    std::vector<GLuint> enabled_slots;
+    std::vector<uint32_t> attr_counts, attr_offsets;
+    uint32_t pack_off = 0;
+    const VAOData& vao = g_vaos[g_bound_vao];
+
+    for (GLuint slot = 0; slot < kMaxAttribs; ++slot) {
+        const AttribData& a = vao.attribs[slot];
+        if (!a.enabled) continue;
+        if (a.type != GL_FLOAT) {
+            PUSH_ERROR(GL_INVALID_OPERATION);  // integer attribs unsupported yet
+            return;
+        }
+        auto bit = g_buffers.find(a.buffer);
+        if (bit == g_buffers.end()) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
+        GLsizei src_stride = a.stride ? a.stride : a.size * 4;
+        GLsizeiptr need = a.offset + (GLsizeiptr)(first + count - 1) * src_stride +
+                          a.size * 4;
+        if (need > (GLsizeiptr)bit->second.data.size()) {
+            PUSH_ERROR(GL_INVALID_OPERATION);
+            return;
+        }
+        enabled_slots.push_back(slot);
+        attr_counts.push_back((uint32_t)a.size);
+        attr_offsets.push_back(pack_off);
+        pack_off += (uint32_t)a.size * 4;
+    }
+    if (attr_counts.empty()) return;
+
+    uint32_t stride = pack_off;
+    std::vector<GLfloat> verts((size_t)count * stride / 4);
+    for (size_t k = 0; k < enabled_slots.size(); ++k) {
+        const AttribData& a = vao.attribs[enabled_slots[k]];
+        GLsizei src_stride = a.stride ? a.stride : a.size * 4;
+        const uint8_t* src = g_buffers[a.buffer].data.data() + a.offset;
+        uint32_t dst_off = attr_offsets[k];
+        for (GLsizei i = 0; i < count; ++i) {
+            std::memcpy(verts.data() + (size_t)i * stride / 4 + dst_off / 4,
+                        src + (size_t)(first + i) * src_stride, (size_t)a.size * 4);
+        }
+    }
+
+    // vk program handle, created lazily from the linked SPIR-V.
+    auto vit = g_vk_programs.find(prog->id);
+    uint64_t vprog = 0;
+    if (vit == g_vk_programs.end()) {
+        vprog = v::CreateProgram(prog->vertex_spirv, prog->fragment_spirv);
+        if (!vprog) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
+        g_vk_programs.emplace(prog->id, vprog);
+    } else {
+        vprog = vit->second;
+    }
+
+    // uniform values by name (empty vectors are skipped downstream).
+    std::unordered_map<std::string, std::vector<float>> uniforms;
+    for (const auto& u : prog->uniforms)
+        uniforms[u.name] = u.value;
+
+    v::DrawInterleaved(vprog, verts, stride, attr_counts, attr_offsets, uniforms);
+}
+
+void APIENTRY glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height,
+                           GLenum format, GLenum type, void* pixels) {
+    if (format != GL_RGBA || type != GL_UNSIGNED_BYTE || width < 0 || height < 0) {
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return;
+    }
+    if (!pixels) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
+    if (!v::EnsureInit()) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
+    v::SubmitFlush();
+    v::ReadPixels(x, y, width, height, pixels);
 }
 
 } // extern "C"

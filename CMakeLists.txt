@@ -23,6 +23,7 @@ set(SPIRV_CROSS_FORCE_PIC ON CACHE BOOL "Build SPIRV-Cross static libs with -fPI
 add_subdirectory(third_party/SPIRV-Headers EXCLUDE_FROM_ALL)
 add_subdirectory(third_party/SPIRV-Cross EXCLUDE_FROM_ALL)
 add_subdirectory(third_party/glslang EXCLUDE_FROM_ALL)
+add_subdirectory(third_party/Vulkan-Headers EXCLUDE_FROM_ALL)
 
 add_library(mithril SHARED
     src/egl/egl_impl.cpp
@@ -33,6 +34,7 @@ add_library(mithril SHARED
     src/shader/shader.cpp
     src/state/state.cpp
     src/util/log.cpp
+    src/vk/vk_engine.cpp
 )
 
 target_include_directories(mithril PRIVATE
@@ -45,6 +47,7 @@ target_link_libraries(mithril PRIVATE
     glslang::SPIRV
     glslang::glslang-default-resource-limits
     spirv-cross-core
+    Vulkan::Headers
 )
 
 set_target_properties(mithril PROPERTIES

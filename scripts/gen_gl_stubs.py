@@ -47,6 +47,14 @@ MGL_IMPL = frozenset({
     "glUniformMatrix3fv", "glUniformMatrix3x2fv", "glUniformMatrix3x4fv",
     "glUniformMatrix4fv", "glUniformMatrix4x2fv", "glUniformMatrix4x3fv",
     "glUseProgram", "glValidateProgram",
+    # S3 subset (M2-VK): buffer objects / VAOs / vertex attrib / draw.
+    "glGenBuffers", "glDeleteBuffers", "glBindBuffer", "glIsBuffer",
+    "glBufferData", "glBufferSubData",
+    "glGenVertexArrays", "glDeleteVertexArrays", "glBindVertexArray",
+    "glIsVertexArray",
+    "glEnableVertexAttribArray", "glDisableVertexAttribArray",
+    "glVertexAttribPointer", "glDrawArrays",
+    "glReadPixels",
 })
 
 
