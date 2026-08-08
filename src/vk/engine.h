@@ -2,7 +2,7 @@
 //
 // Owns the Vulkan device (loaded through dlopen so the dylib never exports
 // vk* symbols), an offscreen render target, and the pipeline/descriptor
-// machinery the GL layer feeds from gl_impl.cpp. The offscreen target is the
+// machinery the GL layer feeds through src/gl/. The offscreen target is the
 // seam where a swapchain (CAMetalLayer on iOS) lands later.
 //
 // The GL layer resolves VAO/VBO/vertex-attrib state into interleaved CPU

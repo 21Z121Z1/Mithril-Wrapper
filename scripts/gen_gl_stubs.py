@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Regenerate src/gl/gl_exports.cpp (GL 3.3 core stub exports).
+"""Regenerate src/gl/exports.cpp (GL 3.3 core stub exports).
 
 Reads docs/gl33_core_list.md for the function set and real prototypes from
 third_party/GL/glcorearb.h. Functions listed in MGL_IMPL are implemented for
-real in src/gl/gl_impl.cpp and are skipped here.
+real in src/gl/ and are skipped here.
 
 Run: python3 scripts/gen_gl_stubs.py
 """
@@ -14,9 +14,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 HDR = ROOT / "third_party" / "GL" / "glcorearb.h"
 GL_LIST = ROOT / "docs" / "gl33_core_list.md"
-OUT = ROOT / "src" / "gl" / "gl_exports.cpp"
+OUT = ROOT / "src" / "gl" / "exports.cpp"
 
-# Functions that have real implementations in src/gl/gl_impl.cpp.
+# Functions that have real implementations in src/gl/.
 MGL_IMPL = frozenset({
     "glBlendColor", "glBlendEquation", "glBlendEquationSeparate", "glBlendFunc",
     "glBlendFuncSeparate", "glClear", "glClearColor", "glClearDepth", "glClearStencil",
@@ -30,7 +30,7 @@ MGL_IMPL = frozenset({
     "glStencilFunc", "glStencilFuncSeparate", "glStencilMask",
     "glStencilMaskSeparate", "glStencilOp", "glStencilOpSeparate", "glViewport",
     "glGetPointerv", "glClampColor",
-    # S2 shaders/programs/uniforms implemented in gl_impl.cpp.
+    # S2 shaders/programs/uniforms implemented in src/gl/.
     "glAttachShader", "glBindAttribLocation", "glCompileShader", "glCreateProgram",
     "glCreateShader", "glDeleteProgram", "glDeleteShader", "glDetachShader",
     "glGetActiveAttrib", "glGetActiveUniform", "glGetAttachedShaders",
@@ -162,7 +162,7 @@ def main():
     lines.append('} // extern "C"')
     OUT.write_text("\n".join(lines) + "\n")
     print(f"wrote {OUT}: {len(emit)} stubs, "
-          f"{len(wanted) - len(emit)} implemented in gl_impl.cpp")
+          f"{len(wanted) - len(emit)} implemented in src/gl/")
 
 
 if __name__ == "__main__":

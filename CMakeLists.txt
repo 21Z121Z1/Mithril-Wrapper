@@ -26,15 +26,24 @@ add_subdirectory(third_party/glslang EXCLUDE_FROM_ALL)
 add_subdirectory(third_party/Vulkan-Headers EXCLUDE_FROM_ALL)
 
 add_library(mithril SHARED
-    src/egl/egl_impl.cpp
-    src/egl/egl_exports.cpp
-    src/gl/gl_exports.cpp
-    src/gl/gl_impl.cpp
-    src/gl/gl_stub.cpp
-    src/shader/shader.cpp
+    src/egl/impl.cpp
+    src/egl/exports.cpp
+    src/gl/exports.cpp
+    src/gl/state.cpp
+    src/gl/shader.cpp
+    src/gl/vertex.cpp
+    src/gl/draw.cpp
+    src/gl/stub.cpp
+    src/shader/glsl.cpp
+    src/shader/reflect.cpp
+    src/shader/registry.cpp
     src/state/state.cpp
     src/util/log.cpp
-    src/vk/vk_engine.cpp
+    src/vk/dispatch.cpp
+    src/vk/target.cpp
+    src/vk/pipeline.cpp
+    src/vk/draw.cpp
+    src/vk/engine.cpp
 )
 
 target_include_directories(mithril PRIVATE
@@ -80,10 +89,10 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
     target_compile_options(mithril PRIVATE -Wall -Wextra)
     # Generated stub table intentionally ignores its parameters; silence the
     # unused-parameter noise there so real warnings stay visible.
-    set_source_files_properties(src/gl/gl_exports.cpp PROPERTIES
+    set_source_files_properties(src/gl/exports.cpp PROPERTIES
         COMPILE_OPTIONS "-Wno-unused-parameter")
     # EGL placeholder surface/context routines validate the caller via EGL
     # error codes; the placeholder parameters are unused by design.
-    set_source_files_properties(src/egl/egl_exports.cpp PROPERTIES
+    set_source_files_properties(src/egl/exports.cpp PROPERTIES
         COMPILE_OPTIONS "-Wno-unused-parameter")
 endif()

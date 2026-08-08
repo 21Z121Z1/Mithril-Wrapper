@@ -1,33 +1,19 @@
-// Mithril-Wrapper shader module implementation (milestone M2-S2).
-//
-// GLSL (desktop Core Profile) -> Vulkan SPIR-V via glslang, following the
-// proven pipeline from the retired renderer:
-//   1. Upgrade GLSL versions below 330 (the Vulkan GLSL minimum) so desktop
-//      GLSL 150 shaders like Minecraft's blit_screen compile.
-//   2. Rewrite desktop-GLSL builtins Vulkan GLSL renames (gl_VertexID ->
-//      gl_VertexIndex, gl_InstanceID -> gl_InstanceIndex).
-//   3. Fold loose non-opaque uniforms into a synthetic `mithril_GlobalBlock`
-//      UBO so glslang emits Vulkan-conformant SPIR-V deterministically.
-//   4. Compile with EShClientOpenGL + EShMsgVulkanRules, mapIO for automatic
-//      locations, then GlslangToSpv.
-// Results are cached by (stage, source hash) -- the Vulkan backend consumes
-// the cached SPIR-V directly at vkCreateShaderModule time.
-//
-// SPIRV-Cross reflects linked programs: uniform names/locations (from the
-// global block + samplers) and attribute locations, so glGetUniformLocation
-// / glGetAttribLocation answer honestly.
+// Mithril-Wrapper shader module -- GLSL -> SPIR-V compilation (M2-S2).
+// glslang compiles desktop GLSL (Core Profile) to Vulkan SPIR-V:
+//   1. GLSL versions below 330 are upgraded (the Vulkan GLSL minimum).
+//   2. Desktop builtins Vulkan GLSL renames (gl_VertexID etc.).
+//   3. Loose non-opaque uniforms fold into a synthetic mithril_GlobalBlock
+//      UBO (ANGLE-style).
+//   4. EShClientOpenGL + EShMsgVulkanRules + mapIO, then GlslangToSpv.
+// Results are cached by (stage, source hash).
 
 #include <shader/shader.h>
 
 #include <GL/glcorearb.h>
 
-#include <state/state.h>
-
 #include <glslang/Public/ShaderLang.h>
 #include <glslang/Public/ResourceLimits.h>
 #include <SPIRV/GlslangToSpv.h>
-
-#include <spirv_cross.hpp>
 
 #include <util/log.h>
 
@@ -363,111 +349,6 @@ bool CompileStage(GLenum stage, const std::string& src,
         cache().entries[key] = spirv;
     }
     return true;
-}
-
-void ReflectProgram(Program& prog) {
-    prog.uniforms.clear();
-    prog.uniform_by_name.clear();
-    prog.uniform_by_location.clear();
-    prog.attrib_locations.clear();
-
-    auto reflect_stage = [&](const std::vector<uint32_t>& words) {
-        if (words.empty()) return;
-        try {
-            spirv_cross::Compiler compiler(words.data(), words.size());
-            spirv_cross::ShaderResources res = compiler.get_shader_resources();
-
-            // Uniform block members ($Global wrap -> original GL uniform names).
-            for (auto& r : res.uniform_buffers) {
-                const spirv_cross::SPIRType& t = compiler.get_type(r.base_type_id);
-                for (uint32_t i = 0; i < t.member_types.size(); ++i) {
-                    std::string name = compiler.get_member_name(r.base_type_id, i);
-                    if (name.empty()) continue;
-                    prog.uniform_by_name[name] = -1;  // placeholder; location below
-                }
-            }
-            // Samplers / standalone uniforms.
-            auto add_sampler = [&](spirv_cross::Resource& r) {
-                std::string name = r.name;
-                if (name.empty()) return;
-                if (prog.uniform_by_name.find(name) == prog.uniform_by_name.end())
-                    prog.uniform_by_name[name] = -1;
-            };
-            for (auto& r : res.sampled_images) add_sampler(r);
-            for (auto& r : res.separate_images) add_sampler(r);
-            for (auto& r : res.separate_samplers) add_sampler(r);
-
-            // Attributes: location + name.
-            for (auto& r : res.stage_inputs) {
-                if (r.name.empty()) continue;
-                int loc = static_cast<int>(compiler.get_decoration(r.id, spv::DecorationLocation));
-                prog.attrib_locations[r.name] = loc;
-            }
-        } catch (const std::exception& e) {
-            ML_LOG_WARN("SPIRV-Cross reflection failed: %s", e.what());
-        }
-    };
-
-    reflect_stage(prog.vertex_spirv);
-    reflect_stage(prog.fragment_spirv);
-
-    // Assign stable locations in a deterministic order (alphabetical).
-    std::vector<std::string> names;
-    names.reserve(prog.uniform_by_name.size());
-    for (auto& kv : prog.uniform_by_name) names.push_back(kv.first);
-    std::sort(names.begin(), names.end());
-    for (size_t i = 0; i < names.size(); ++i) {
-        Uniform u;
-        u.name = names[i];
-        u.location = static_cast<GLint>(i);
-        prog.uniform_by_location[static_cast<GLint>(i)] = prog.uniforms.size();
-        prog.uniform_by_name[names[i]] = static_cast<GLint>(i);
-        prog.uniforms.push_back(std::move(u));
-    }
-}
-
-// ---- object tables ----------------------------------------------------------
-
-struct Registry {
-    std::unordered_map<GLuint, Shader> shaders;
-    std::unordered_map<GLuint, Program> programs;
-    GLuint next_name = 1;
-};
-Registry& reg() { static Registry r; return r; }
-
-Shader* GetShader(GLuint id) {
-    auto it = reg().shaders.find(id);
-    return it == reg().shaders.end() ? nullptr : &it->second;
-}
-
-Program* GetProgram(GLuint id) {
-    auto it = reg().programs.find(id);
-    return it == reg().programs.end() ? nullptr : &it->second;
-}
-
-GLuint NewShader(GLenum type) {
-    GLuint id = reg().next_name++;
-    Shader s;
-    s.id = id;
-    s.type = type;
-    reg().shaders[id] = std::move(s);
-    return id;
-}
-
-GLuint NewProgram() {
-    GLuint id = reg().next_name++;
-    Program p;
-    p.id = id;
-    reg().programs[id] = std::move(p);
-    return id;
-}
-
-void DeleteShader(GLuint id) { reg().shaders.erase(id); }
-
-void DeleteProgram(GLuint id) {
-    auto& st = mithril::state::GetState();
-    if (st.current_program == id) st.current_program = 0;
-    reg().programs.erase(id);
 }
 
 } // namespace mithril::shader

@@ -7,7 +7,7 @@
 
 #include <cstring>
 
-#include <egl/egl_internal.h>
+#include <egl/internal.h>
 #include <util/log.h>
 
 using namespace mithril::egl;

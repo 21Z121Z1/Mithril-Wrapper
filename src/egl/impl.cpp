@@ -1,4 +1,4 @@
-#include "egl/egl_internal.h"
+#include "egl/internal.h"
 
 #include <util/log.h>
 

@@ -2,7 +2,7 @@
 
 来源：MobileGL include/GL/glcorearb.h（Khronos 官方），GL_VERSION_1_0..3_3 累计。
 
-> 实现状态（M3）：S1 51/55、S2 60/71、S3 76/114 已真实现（`src/gl/gl_impl.cpp` + `src/shader/` + `src/vk/`），合计 189 真导出；其余为 stub（返回 `GL_INVALID_OPERATION` + 日志）。M3 验收 `draw_smoke`（GL→Vulkan 全链，含顶点数据扩展断言）已通过。
+> 实现状态（M3）：S1 51/55、S2 60/71、S3 76/114 已真实现（`src/gl/state.cpp`/`shader.cpp`/`vertex.cpp`/`draw.cpp` + `src/shader/`（glsl/reflect/registry 三 TU）+ `src/vk/`（engine/dispatch/target/pipeline/draw 五 TU）），合计 189 真导出；其余为 stub（返回 `GL_INVALID_OPERATION` + 日志）。M3 验收 `draw_smoke`（GL→Vulkan 全链，含顶点数据扩展断言）已通过。
 > S3 剩余 38 个 stub（无绘制影响）：TransformFeedback 系 5（Begin/End/GetVarying/BindBufferBase/Range）、glPointParameter* 4、整型属性 setter 系 20（glVertexAttribI1..I4 各变体）、打包 setter 系 8（glVertexAttribP*）、glVertexAttrib4Nub。
 
 ## S1 状态/使能/基础查询 — 55
