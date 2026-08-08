@@ -11,8 +11,13 @@
 
 #pragma once
 
+// glcorearb.h hides the APIENTRY prototypes behind GL_GLEXT_PROTOTYPES;
+// every GL-layer TU defines and calls gl* entry points, so expose them.
+#define GL_GLEXT_PROTOTYPES 1
+
 #include <GL/glcorearb.h>
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <unordered_map>
@@ -71,15 +76,40 @@ extern std::unordered_map<GLuint, uint64_t> g_vk_programs;
 constexpr GLuint kMaxTexUnits = 16;
 
 // CPU-side image of one GL texture object (M4). Pixels are kept as an RGBA8
-// mip chain so TexSubImage2D/GenerateMipmap can rebuild the upload cheaply.
+// mip chain so TexSubImage/GenerateMipmap can rebuild the upload cheaply.
+// Layered targets concatenate their slices inside each level buffer in the
+// same order vk::TexUpload expects (3D: z; array: layers; cube: 6 faces).
 struct TexState {
     GLenum target = GL_TEXTURE_2D;       // target bound at creation
     GLenum min_filter = GL_LINEAR;       // sampler state (GL enums)
     GLenum mag_filter = GL_LINEAR;
     GLenum wrap_s = GL_REPEAT, wrap_t = GL_REPEAT, wrap_r = GL_REPEAT;
-    uint32_t width = 0, height = 0;
-    std::vector<std::vector<uint8_t>> mip;   // RGBA8, mip[level]
-    bool has_image = false;                  // level 0 present
+    uint32_t width = 0, height = 0, depth = 1;  // depth: 3D z / array layers
+    std::vector<std::vector<uint8_t>> mip;      // [level] slices concatenated
+    bool has_image = false;                    // level 0 present
+    // Compressed mirror: raw S3TC bytes per level (kept for GetCompressedTexImage).
+    std::vector<std::vector<uint8_t>> comp;    // comp[level], empty = none
+    bool has_comp = false;
+    GLint comp_format = 0;
+    // glTexBuffer attachment (buffer texture; mirror holds a 1xN 2D image).
+    bool has_tex_buffer = false;
+    GLuint tex_buffer = 0;
+    GLenum tex_buffer_format = 0;
+
+    bool IsCube() const { return target == GL_TEXTURE_CUBE_MAP; }
+    bool Is3D() const { return target == GL_TEXTURE_3D; }
+    size_t SliceCount() const {
+        if (IsCube()) return 6;
+        if (Is3D() || target == GL_TEXTURE_2D_ARRAY ||
+            target == GL_TEXTURE_1D_ARRAY)
+            return depth;
+        return 1;
+    }
+    size_t SliceBytes(uint32_t level) const {
+        uint32_t w = std::max<uint32_t>(1, width >> level);
+        uint32_t h = std::max<uint32_t>(1, height >> level);
+        return (size_t)w * h * 4;
+    }
 };
 
 extern std::unordered_map<GLuint, TexState> g_textures;

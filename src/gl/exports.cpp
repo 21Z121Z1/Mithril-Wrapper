@@ -78,50 +78,6 @@ extern "C" {
     return 0;
   }
 
-  void APIENTRY glCompressedTexImage1D(GLenum target, GLint level, GLenum internalformat, GLsizei width, GLint border, GLsizei imageSize, const void *data) {
-    mithril::GlStubCalled("glCompressedTexImage1D");
-  }
-
-  void APIENTRY glCompressedTexImage2D(GLenum target, GLint level, GLenum internalformat, GLsizei width, GLsizei height, GLint border, GLsizei imageSize, const void *data) {
-    mithril::GlStubCalled("glCompressedTexImage2D");
-  }
-
-  void APIENTRY glCompressedTexImage3D(GLenum target, GLint level, GLenum internalformat, GLsizei width, GLsizei height, GLsizei depth, GLint border, GLsizei imageSize, const void *data) {
-    mithril::GlStubCalled("glCompressedTexImage3D");
-  }
-
-  void APIENTRY glCompressedTexSubImage1D(GLenum target, GLint level, GLint xoffset, GLsizei width, GLenum format, GLsizei imageSize, const void *data) {
-    mithril::GlStubCalled("glCompressedTexSubImage1D");
-  }
-
-  void APIENTRY glCompressedTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height, GLenum format, GLsizei imageSize, const void *data) {
-    mithril::GlStubCalled("glCompressedTexSubImage2D");
-  }
-
-  void APIENTRY glCompressedTexSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLsizei imageSize, const void *data) {
-    mithril::GlStubCalled("glCompressedTexSubImage3D");
-  }
-
-  void APIENTRY glCopyTexImage1D(GLenum target, GLint level, GLenum internalformat, GLint x, GLint y, GLsizei width, GLint border) {
-    mithril::GlStubCalled("glCopyTexImage1D");
-  }
-
-  void APIENTRY glCopyTexImage2D(GLenum target, GLint level, GLenum internalformat, GLint x, GLint y, GLsizei width, GLsizei height, GLint border) {
-    mithril::GlStubCalled("glCopyTexImage2D");
-  }
-
-  void APIENTRY glCopyTexSubImage1D(GLenum target, GLint level, GLint xoffset, GLint x, GLint y, GLsizei width) {
-    mithril::GlStubCalled("glCopyTexSubImage1D");
-  }
-
-  void APIENTRY glCopyTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint x, GLint y, GLsizei width, GLsizei height) {
-    mithril::GlStubCalled("glCopyTexSubImage2D");
-  }
-
-  void APIENTRY glCopyTexSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLint x, GLint y, GLsizei width, GLsizei height) {
-    mithril::GlStubCalled("glCopyTexSubImage3D");
-  }
-
   void APIENTRY glDeleteFramebuffers(GLsizei n, const GLuint *framebuffers) {
     mithril::GlStubCalled("glDeleteFramebuffers");
   }
@@ -223,10 +179,6 @@ extern "C" {
     mithril::GlStubCalled("glGetActiveUniformsiv");
   }
 
-  void APIENTRY glGetCompressedTexImage(GLenum target, GLint level, void *img) {
-    mithril::GlStubCalled("glGetCompressedTexImage");
-  }
-
   GLint APIENTRY glGetFragDataIndex(GLuint program, const GLchar *name) {
     mithril::GlStubCalled("glGetFragDataIndex");
     return 0;
@@ -289,10 +241,6 @@ extern "C" {
     mithril::GlStubCalled("glGetSynciv");
   }
 
-  void APIENTRY glGetTexImage(GLenum target, GLint level, GLenum format, GLenum type, void *pixels) {
-    mithril::GlStubCalled("glGetTexImage");
-  }
-
   void APIENTRY glGetTransformFeedbackVarying(GLuint program, GLuint index, GLsizei bufSize, GLsizei *length, GLsizei *size, GLenum *type, GLchar *name) {
     mithril::GlStubCalled("glGetTransformFeedbackVarying");
   }
@@ -329,10 +277,6 @@ extern "C" {
   GLboolean APIENTRY glIsSync(GLsync sync) {
     mithril::GlStubCalled("glIsSync");
     return 0;
-  }
-
-  void APIENTRY glPixelStoref(GLenum pname, GLfloat param) {
-    mithril::GlStubCalled("glPixelStoref");
   }
 
   void APIENTRY glPointParameterf(GLenum pname, GLfloat param) {
@@ -399,24 +343,12 @@ extern "C" {
     mithril::GlStubCalled("glSamplerParameteriv");
   }
 
-  void APIENTRY glTexBuffer(GLenum target, GLenum internalformat, GLuint buffer) {
-    mithril::GlStubCalled("glTexBuffer");
-  }
-
   void APIENTRY glTexImage2DMultisample(GLenum target, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height, GLboolean fixedsamplelocations) {
     mithril::GlStubCalled("glTexImage2DMultisample");
   }
 
-  void APIENTRY glTexImage3D(GLenum target, GLint level, GLint internalformat, GLsizei width, GLsizei height, GLsizei depth, GLint border, GLenum format, GLenum type, const void *pixels) {
-    mithril::GlStubCalled("glTexImage3D");
-  }
-
   void APIENTRY glTexImage3DMultisample(GLenum target, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height, GLsizei depth, GLboolean fixedsamplelocations) {
     mithril::GlStubCalled("glTexImage3DMultisample");
-  }
-
-  void APIENTRY glTexSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLenum type, const void *pixels) {
-    mithril::GlStubCalled("glTexSubImage3D");
   }
 
   void APIENTRY glTransformFeedbackVaryings(GLuint program, GLsizei count, const GLchar *const*varyings, GLenum bufferMode) {

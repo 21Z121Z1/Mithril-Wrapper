@@ -26,6 +26,11 @@
 #define GL_ELEMENT_ARRAY_BUFFER 0x8893
 #define GL_TEXTURE0           0x84C0
 #define GL_TEXTURE_2D         0x0DE1
+#define GL_TEXTURE_3D         0x806F
+#define GL_TEXTURE_2D_ARRAY   0x8C1A
+#define GL_TEXTURE_CUBE_MAP   0x8513
+#define GL_TEXTURE_CUBE_MAP_POSITIVE_X 0x8515
+#define GL_TEXTURE_BUFFER     0x8C2A
 #define GL_RGBA               0x1908
 #define GL_RGBA8              0x8058
 #define GL_RGB                0x1907
@@ -43,6 +48,10 @@
 #define GL_TEXTURE_WRAP_T     0x2803
 #define GL_CLAMP_TO_EDGE      0x812F
 #define GL_REPEAT             0x2901
+#define GL_TEXTURE_DEPTH      0x8071
+#define GL_TEXTURE_COMPRESSED 0x86A1
+#define GL_TEXTURE_COMPRESSED_IMAGE_SIZE 0x86A0
+#define GL_COMPRESSED_RGB_S3TC_DXT1_EXT 0x83F0
 
 typedef unsigned int GLuint;
 typedef unsigned int GLenum;
@@ -81,9 +90,16 @@ typedef GLboolean (*fn_glIsTexture)(GLuint);
 typedef void (*fn_glBindTexture)(GLenum, GLuint);
 typedef void (*fn_glActiveTexture)(GLenum);
 typedef void (*fn_glTexImage2D)(GLenum, GLint, GLint, GLsizei, GLsizei, GLint, GLenum, GLenum, const void*);
+typedef void (*fn_glTexImage3D)(GLenum, GLint, GLint, GLsizei, GLsizei, GLsizei, GLint, GLenum, GLenum, const void*);
 typedef void (*fn_glTexParameteri)(GLenum, GLenum, GLint);
 typedef void (*fn_glGetTexParameteriv)(GLenum, GLenum, GLint*);
+typedef void (*fn_glGetTexLevelParameteriv)(GLenum, GLint, GLenum, GLint*);
 typedef void (*fn_glGenerateMipmap)(GLenum);
+typedef void (*fn_glGetTexImage)(GLenum, GLint, GLenum, GLenum, void*);
+typedef void (*fn_glCompressedTexImage2D)(GLenum, GLint, GLenum, GLsizei, GLsizei, GLint, GLsizei, const void*);
+typedef void (*fn_glGetCompressedTexImage)(GLenum, GLint, void*);
+typedef void (*fn_glCopyTexSubImage2D)(GLenum, GLint, GLint, GLint, GLint, GLint, GLsizei, GLsizei);
+typedef void (*fn_glTexBuffer)(GLenum, GLenum, GLuint);
 
 static int failures = 0;
 
@@ -150,9 +166,16 @@ int main(void) {
     fn_glBindTexture       bindTexture  = (fn_glBindTexture)dlsym(h, "glBindTexture");
     fn_glActiveTexture     activeTexture= (fn_glActiveTexture)dlsym(h, "glActiveTexture");
     fn_glTexImage2D        texImage2D   = (fn_glTexImage2D)dlsym(h, "glTexImage2D");
+    fn_glTexImage3D        texImage3D   = (fn_glTexImage3D)dlsym(h, "glTexImage3D");
     fn_glTexParameteri     texParameteri= (fn_glTexParameteri)dlsym(h, "glTexParameteri");
     fn_glGetTexParameteriv getTexParam  = (fn_glGetTexParameteriv)dlsym(h, "glGetTexParameteriv");
+    fn_glGetTexLevelParameteriv getLevelParam = (fn_glGetTexLevelParameteriv)dlsym(h, "glGetTexLevelParameteriv");
     fn_glGenerateMipmap    generateMipmap=(fn_glGenerateMipmap)dlsym(h, "glGenerateMipmap");
+    fn_glGetTexImage       getTexImage  = (fn_glGetTexImage)dlsym(h, "glGetTexImage");
+    fn_glCompressedTexImage2D compTexImage2D = (fn_glCompressedTexImage2D)dlsym(h, "glCompressedTexImage2D");
+    fn_glGetCompressedTexImage getCompTexImage = (fn_glGetCompressedTexImage)dlsym(h, "glGetCompressedTexImage");
+    fn_glCopyTexSubImage2D copyTexSub2D = (fn_glCopyTexSubImage2D)dlsym(h, "glCopyTexSubImage2D");
+    fn_glTexBuffer         texBuffer    = (fn_glTexBuffer)dlsym(h, "glTexBuffer");
 
     CHECK(clearColor && clear && createShader && shaderSource && compileShader &&
           createProgram && attachShader && linkProgram && useProgram &&
@@ -161,7 +184,8 @@ int main(void) {
           vertexAttribPtr && drawArrays && finish && readPixels &&
           genTextures && deleteTextures && isTexture && bindTexture &&
           activeTexture && texImage2D && texParameteri && getTexParam &&
-          generateMipmap,
+          generateMipmap && texImage3D && getTexImage && getLevelParam &&
+          compTexImage2D && getCompTexImage && copyTexSub2D && texBuffer,
           "all required texture symbols resolved");
 
     clearColor(0.10f, 0.20f, 0.30f, 1.0f);
@@ -270,6 +294,178 @@ int main(void) {
     readPixels(256, 256, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
     CHECK(px_match(px, 255, 255, 255, 255),
           "unbound texture samples the white dummy (r=%d g=%d b=%d)", px[0], px[1], px[2]);
+
+    /* -- glGetTexImage round-trips the CPU mirror -------------------- */
+    bindTexture(GL_TEXTURE_2D, tex);
+    getTexParam(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, &got);
+    {
+        unsigned char back[4 * 4 * 4];
+        getTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, back);
+        CHECK(px_match(back, 255, 30, 0, 255),
+              "glGetTexImage returns the level-0 pixels (r=%d g=%d b=%d)",
+              back[0], back[1], back[2]);
+    }
+
+    /* -- compressed S3TC (DXT1) 4x4 red block ------------------------ */
+    {
+        GLuint ctex = 0;
+        genTextures(1, &ctex);
+        bindTexture(GL_TEXTURE_2D, ctex);
+        /* 4x4 DXT1 block: c0 = 565(0xF8E0) = (255,28,0), c1 = 0xF000,
+           all index bits 0 -> block decodes to the c0 color. */
+        unsigned char dxt1[8] = {0xE0, 0xF8, 0x00, 0xF0,
+                                 0x00, 0x00, 0x00, 0x00};
+        compTexImage2D(GL_TEXTURE_2D, 0, GL_COMPRESSED_RGB_S3TC_DXT1_EXT,
+                       4, 4, 0, 8, dxt1);
+        GLint is_comp = 0, comp_size = 0;
+        getLevelParam(GL_TEXTURE_2D, 0, GL_TEXTURE_COMPRESSED, &is_comp);
+        CHECK(is_comp == GL_TRUE, "compressed texture reports GL_TEXTURE_COMPRESSED");
+        getLevelParam(GL_TEXTURE_2D, 0, GL_TEXTURE_COMPRESSED_IMAGE_SIZE, &comp_size);
+        CHECK(comp_size == 8, "GL_TEXTURE_COMPRESSED_IMAGE_SIZE == 8 (got %d)", comp_size);
+        unsigned char raw[8] = {0};
+        getCompTexImage(GL_TEXTURE_2D, 0, raw);
+        CHECK(memcmp(raw, dxt1, 8) == 0,
+              "glGetCompressedTexImage returns the original S3TC bytes");
+        unsigned char dec[4 * 4 * 4];
+        getTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, dec);
+        CHECK(px_match(dec, 255, 28, 0, 255),
+              "DXT1 block decodes to its c0 color (r=%d g=%d b=%d)",
+              dec[0], dec[1], dec[2]);
+        bindTexture(GL_TEXTURE_2D, 0);
+        deleteTextures(1, &ctex);
+    }
+
+    /* -- 3D texture: two 4x4 slices (blue z0, green z1) -------------- */
+    {
+        GLuint t3 = 0;
+        genTextures(1, &t3);
+        bindTexture(GL_TEXTURE_3D, t3);
+        unsigned char vol[4 * 4 * 2 * 4];
+        for (int i = 0; i < 16; i++)
+            vol[i * 4 + 0] = 0, vol[i * 4 + 1] = 0, vol[i * 4 + 2] = 255, vol[i * 4 + 3] = 255;
+        for (int i = 16; i < 32; i++)
+            vol[i * 4 + 0] = 0, vol[i * 4 + 1] = 255, vol[i * 4 + 2] = 0, vol[i * 4 + 3] = 255;
+        texImage3D(GL_TEXTURE_3D, 0, GL_RGBA8, 4, 4, 2, 0, GL_RGBA,
+                   GL_UNSIGNED_BYTE, vol);
+        GLint depth = 0;
+        getLevelParam(GL_TEXTURE_3D, 0, GL_TEXTURE_DEPTH, &depth);
+        CHECK(depth == 2, "GL_TEXTURE_3D reports GL_TEXTURE_DEPTH == 2 (got %d)", depth);
+        unsigned char back[4 * 4 * 2 * 4];
+        getTexImage(GL_TEXTURE_3D, 0, GL_RGBA, GL_UNSIGNED_BYTE, back);
+        CHECK(px_match(back, 0, 0, 255, 255) && px_match(back + 16 * 4, 0, 255, 0, 255),
+              "glGetTexImage reads both 3D slices (z0=%d,%d,%d z1=%d,%d,%d)",
+              back[0], back[1], back[2], back[16 * 4 + 0], back[16 * 4 + 1], back[16 * 4 + 2]);
+        bindTexture(GL_TEXTURE_3D, 0);
+    }
+
+    /* -- 2D array texture --------------------------------------------- */
+    {
+        GLuint tex = 0;
+        genTextures(1, &tex);
+        bindTexture(GL_TEXTURE_2D_ARRAY, tex);
+        unsigned char arr[4 * 4 * 2 * 4];
+        for (int i = 0; i < 16; ++i)
+            arr[i * 4 + 0] = 255, arr[i * 4 + 1] = 0, arr[i * 4 + 2] = 0, arr[i * 4 + 3] = 255;
+        for (int i = 16; i < 32; ++i)
+            arr[i * 4 + 0] = 0, arr[i * 4 + 1] = 0, arr[i * 4 + 2] = 0, arr[i * 4 + 3] = 255;
+        texImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_RGBA8, 4, 4, 2, 0, GL_RGBA,
+                   GL_UNSIGNED_BYTE, arr);
+        GLint depth = 0;
+        getLevelParam(GL_TEXTURE_2D_ARRAY, 0, GL_TEXTURE_DEPTH, &depth);
+        CHECK(depth == 2, "GL_TEXTURE_2D_ARRAY reports GL_TEXTURE_DEPTH == 2 (got %d)", depth);
+        unsigned char back[4 * 4 * 2 * 4];
+        getTexImage(GL_TEXTURE_2D_ARRAY, 0, GL_RGBA, GL_UNSIGNED_BYTE, back);
+        CHECK(px_match(back, 255, 0, 0, 255) && px_match(back + 16 * 4, 0, 0, 0, 255),
+              "glGetTexImage reads both array layers (l0=%d,%d,%d l1=%d,%d,%d)",
+              back[0], back[1], back[2], back[16 * 4 + 0], back[16 * 4 + 1], back[16 * 4 + 2]);
+        bindTexture(GL_TEXTURE_2D_ARRAY, 0);
+    }
+
+    /* -- cubemap: six faces + per-face mip generation ----------------- */
+    {
+        GLuint ctex = 0;
+        genTextures(1, &ctex);
+        bindTexture(GL_TEXTURE_CUBE_MAP, ctex);
+        static const unsigned char facecol[6][4] = {
+            {255, 0, 0, 255}, {0, 255, 0, 255}, {0, 0, 255, 255},
+            {255, 255, 0, 255}, {255, 0, 255, 255}, {0, 255, 255, 255},
+        };
+        for (int f = 0; f < 6; ++f) {
+            unsigned char face[2 * 2 * 4];
+            for (int i = 0; i < 4; ++i)
+                memcpy(face + i * 4, facecol[f], 4);
+            texImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + f, 0, GL_RGBA8, 2, 2, 0,
+                       GL_RGBA, GL_UNSIGNED_BYTE, face);
+        }
+        GLint depth = 0;
+        getLevelParam(GL_TEXTURE_CUBE_MAP, 0, GL_TEXTURE_DEPTH, &depth);
+        CHECK(depth == 6, "cubemap reports GL_TEXTURE_DEPTH == 6 (got %d)", depth);
+        unsigned char face0[2 * 2 * 4];
+        getTexImage(GL_TEXTURE_CUBE_MAP_POSITIVE_X, 0, GL_RGBA,
+                    GL_UNSIGNED_BYTE, face0);
+        CHECK(px_match(face0, 255, 0, 0, 255),
+              "glGetTexImage(POSITIVE_X) reads the red face (%d,%d,%d)",
+              face0[0], face0[1], face0[2]);
+        generateMipmap(GL_TEXTURE_CUBE_MAP);
+        unsigned char mip1[1 * 1 * 4];
+        getTexImage(GL_TEXTURE_CUBE_MAP_POSITIVE_X, 1, GL_RGBA,
+                    GL_UNSIGNED_BYTE, mip1);
+        CHECK(px_match(mip1, 255, 0, 0, 255),
+              "cubemap glGenerateMipmap filters each face (r=%d g=%d b=%d)",
+              mip1[0], mip1[1], mip1[2]);
+        bindTexture(GL_TEXTURE_CUBE_MAP, 0);
+    }
+
+    /* -- glCopyTexSubImage2D: framebuffer region -> texture -------- */
+    {
+        /* redraw a known-clear frame, then copy its corner */
+        clearColor(0.4f, 0.5f, 0.6f, 1.0f);
+        clear(GL_COLOR_BUFFER_BIT);
+        {
+            struct { float x, y, u, v; } tiny[3] = {
+                {0.9f, 0.9f, 0, 0}, {0.95f, 0.9f, 0, 0}, {0.92f, 0.95f, 0, 0},
+            };
+            bindBuffer(GL_ARRAY_BUFFER, vbo);
+            bufferData(GL_ARRAY_BUFFER, (GLsizeiptr)sizeof(tiny), tiny, 0x88E4);
+            drawArrays(GL_TRIANGLES, 0, 3);
+        }
+        finish();
+        GLuint ctex = 0;
+        genTextures(1, &ctex);
+        bindTexture(GL_TEXTURE_2D, ctex);
+        texImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 8, 8, 0, GL_RGBA,
+                   GL_UNSIGNED_BYTE, NULL);
+        copyTexSub2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, 4, 4);
+        unsigned char back[4 * 4 * 4];
+        getTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, back);
+        CHECK(px_match(back, 102, 128, 153, 255),
+              "glCopyTexSubImage2D copies the framebuffer region (r=%d g=%d b=%d)",
+              back[0], back[1], back[2]);
+        bindTexture(GL_TEXTURE_2D, 0);
+    }
+
+    /* -- glTexBuffer: buffer object becomes a 1xN texture --------- */
+    {
+        GLuint b = 0, btex = 0;
+        genBuffers(1, &b);
+        bindBuffer(GL_ARRAY_BUFFER, b);
+        unsigned char texels[4 * 4];
+        for (int i = 0; i < 4; ++i)
+            texels[i * 4 + 0] = 255, texels[i * 4 + 1] = 0, texels[i * 4 + 2] = 0,
+            texels[i * 4 + 3] = 255;
+        bufferData(GL_ARRAY_BUFFER, sizeof(texels), texels, 0x88E4);
+        genTextures(1, &btex);
+        bindTexture(GL_TEXTURE_BUFFER, btex);
+        texBuffer(GL_TEXTURE_BUFFER, GL_RGBA8, b);
+        unsigned char back[4 * 4];
+        getTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, back);
+        CHECK(px_match(back, 255, 0, 0, 255),
+              "glTexBuffer mirror uploads the buffer texels (r=%d g=%d b=%d)",
+              back[0], back[1], back[2]);
+        bindTexture(GL_TEXTURE_BUFFER, 0);
+    }
+
+    clearColor(0.10f, 0.20f, 0.30f, 1.0f);
 
     deleteTextures(1, &tex);
     CHECK(isTexture(tex) == GL_FALSE, "glDeleteTextures releases the name");

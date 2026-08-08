@@ -91,6 +91,14 @@ MGL_IMPL = frozenset({
     "glTexParameterIiv", "glTexParameterIuiv",
     "glGetTexParameteriv", "glGetTexParameterfv", "glGetTexParameterIiv",
     "glGetTexParameterIuiv", "glGetTexLevelParameteriv", "glGetTexLevelParameterfv",
+    # S4 (M4 remainder): 3D / arrays / cubemap / compressed / copy / readback.
+    "glTexImage3D", "glTexSubImage3D", "glGetTexImage",
+    "glCompressedTexImage1D", "glCompressedTexImage2D", "glCompressedTexImage3D",
+    "glCompressedTexSubImage1D", "glCompressedTexSubImage2D",
+    "glCompressedTexSubImage3D", "glGetCompressedTexImage",
+    "glCopyTexImage1D", "glCopyTexImage2D", "glCopyTexSubImage1D",
+    "glCopyTexSubImage2D", "glCopyTexSubImage3D", "glTexBuffer",
+    "glPixelStoref",
 })
 
 

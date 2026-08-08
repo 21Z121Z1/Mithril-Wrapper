@@ -67,9 +67,17 @@ struct DrawParams {
 
 // GL texture mip chain ready for upload (M4). Each level is R8G8B8A8
 // row-major, bottom-up (GL convention); mip[0] is the base level.
+// Layered textures (3D / 2D array / cubemap) concatenate every "slice" of
+// the level into one buffer: 3D stores z in order, arrays store the layers
+// in order, cubemaps store the six faces in VkCubeMapFace order
+// (POSITIVE_X, NEGATIVE_X, POSITIVE_Y, NEGATIVE_Y, POSITIVE_Z, NEGATIVE_Z).
+// Each slice is `width*height*4` bytes; slice 0 starts at buffer offset 0.
 struct TexUpload {
     uint32_t width = 0;
     uint32_t height = 0;
+    uint32_t depth = 1;    // 3D thickness / array layer count (1 for 2D/cube)
+    bool is_3d = false;    // image type 3D (slices are the z axis)
+    bool is_cube = false;  // six face slices, cube-compatible 2D array
     std::vector<std::vector<uint8_t>> mip;   // mip[level] pixels
 };
 
@@ -81,7 +89,7 @@ struct TexSamplerInfo {
     TexFilter mag = TexFilter::Linear;
     TexFilter min = TexFilter::Linear;
     bool mip = false;              // use mipmapped min filter
-    GLenum wrap_s = GL_REPEAT, wrap_t = GL_REPEAT;
+    GLenum wrap_s = GL_REPEAT, wrap_t = GL_REPEAT, wrap_r = GL_REPEAT;
 };
 void UploadTexture(uint64_t gl_id, const TexUpload& img,
                    const TexSamplerInfo& sampler);

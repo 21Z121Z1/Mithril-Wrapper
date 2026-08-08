@@ -35,6 +35,8 @@ void UploadImageData(VkImage image, const TexUpload& img) {
     uint32_t mips = (uint32_t)img.mip.size();
     if (mips == 0) return;
 
+    uint32_t slices = img.is_cube ? 6 : img.depth;
+
     VkDeviceSize total = 0;
     for (const auto& lv : img.mip) total += lv.size();
 
@@ -74,7 +76,8 @@ void UploadImageData(VkImage image, const TexUpload& img) {
         barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         barrier.image = image;
-        barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, mips, 0, 1};
+        barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, mips, 0,
+                                    slices};
         barrier.srcAccessMask = 0;
         barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
         g.fn.CmdPipelineBarrier(g.cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
@@ -82,17 +85,34 @@ void UploadImageData(VkImage image, const TexUpload& img) {
                                 0, nullptr, 1, &barrier);
     }
 
-    std::vector<VkBufferImageCopy> copies(mips);
+    // One copy per (level, slice); the whole volume for 3D images.
+    std::vector<VkBufferImageCopy> copies;
     VkDeviceSize offset = 0;
     for (uint32_t l = 0; l < mips; ++l) {
         uint32_t w = std::max<uint32_t>(1, img.width >> l);
         uint32_t h = std::max<uint32_t>(1, img.height >> l);
-        copies[l].bufferOffset = offset;
-        copies[l].bufferRowLength = 0;
-        copies[l].bufferImageHeight = 0;
-        copies[l].imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, l, 0, 1};
-        copies[l].imageOffset = {0, 0, 0};
-        copies[l].imageExtent = {w, h, 1};
+        VkDeviceSize slice_bytes = (VkDeviceSize)w * h * 4;
+        if (img.is_3d) {
+            copies.push_back({});
+            VkBufferImageCopy& c = copies.back();
+            c.bufferOffset = offset;
+            c.bufferRowLength = 0;
+            c.bufferImageHeight = 0;
+            c.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, l, 0, 1};
+            c.imageOffset = {0, 0, 0};
+            c.imageExtent = {w, h, img.depth};
+        } else {
+            for (uint32_t s = 0; s < slices; ++s) {
+                copies.push_back({});
+                VkBufferImageCopy& c = copies.back();
+                c.bufferOffset = offset + (VkDeviceSize)s * slice_bytes;
+                c.bufferRowLength = 0;
+                c.bufferImageHeight = 0;
+                c.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, l, s, 1};
+                c.imageOffset = {0, 0, 0};
+                c.imageExtent = {w, h, 1};
+            }
+        }
         offset += (VkDeviceSize)img.mip[l].size();
     }
     g.fn.CmdCopyBufferToImage(g.cmd, staging, image,
@@ -108,7 +128,8 @@ void UploadImageData(VkImage image, const TexUpload& img) {
         barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         barrier.image = image;
-        barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, mips, 0, 1};
+        barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, mips, 0,
+                                    slices};
         barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
         barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
         g.fn.CmdPipelineBarrier(g.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
@@ -154,15 +175,18 @@ void UploadTexture(uint64_t gl_id, const TexUpload& img,
         it = g.textures.emplace(gl_id, TexObj{}).first;
 
     uint32_t mips = (uint32_t)img.mip.size();
+    uint32_t slices = img.is_cube ? 6 : img.depth;
 
     VkImageCreateInfo ii{};
     ii.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-    ii.imageType = VK_IMAGE_TYPE_2D;
+    ii.imageType = img.is_3d ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D;
+    ii.flags = img.is_cube ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0;
     ii.format = VK_FORMAT_R8G8B8A8_UNORM;
     ii.extent = {std::max<uint32_t>(1, img.width),
-                 std::max<uint32_t>(1, img.height), 1};
+                 std::max<uint32_t>(1, img.height),
+                 img.is_3d ? std::max<uint32_t>(1, img.depth) : 1u};
     ii.mipLevels = mips;
-    ii.arrayLayers = 1;
+    ii.arrayLayers = img.is_3d ? 1 : slices;
     ii.samples = VK_SAMPLE_COUNT_1_BIT;
     ii.tiling = VK_IMAGE_TILING_OPTIMAL;
     ii.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
@@ -210,9 +234,16 @@ void UploadTexture(uint64_t gl_id, const TexUpload& img,
     VkImageViewCreateInfo vi{};
     vi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
     vi.image = it->second.image;
-    vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    if (img.is_cube)
+        vi.viewType = VK_IMAGE_VIEW_TYPE_CUBE;
+    else if (img.is_3d)
+        vi.viewType = VK_IMAGE_VIEW_TYPE_3D;
+    else if (slices > 1)
+        vi.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+    else
+        vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
     vi.format = VK_FORMAT_R8G8B8A8_UNORM;
-    vi.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, mips, 0, 1};
+    vi.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, mips, 0, slices};
     if (g.fn.CreateImageView(g.device, &vi, nullptr, &it->second.view) !=
         VK_SUCCESS) {
         ML_LOG_ERROR("vk: texture image view creation failed");
@@ -229,7 +260,7 @@ void UploadTexture(uint64_t gl_id, const TexUpload& img,
                                 : VK_SAMPLER_MIPMAP_MODE_NEAREST;
     si.addressModeU = ToVkWrap(sampler.wrap_s);
     si.addressModeV = ToVkWrap(sampler.wrap_t);
-    si.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    si.addressModeW = ToVkWrap(sampler.wrap_r);
     si.mipLodBias = 0.0f;
     si.anisotropyEnable = VK_FALSE;
     si.maxAnisotropy = 1.0f;
