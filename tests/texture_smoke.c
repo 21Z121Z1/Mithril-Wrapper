@@ -134,6 +134,7 @@ static const char* FS =
     "}\n";
 
 int main(void) {
+    setvbuf(stdout, NULL, _IONBF, 0);   /* CI crash logs keep every CHECK row */
     setvbuf(stdout, NULL, _IONBF, 0);
     void* h = dlopen("./output/libmithril.so", RTLD_NOW | RTLD_GLOBAL);
     if (!h) { printf("dlopen: %s\n", dlerror()); return 2; }
