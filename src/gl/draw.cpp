@@ -168,6 +168,8 @@ void DrawCommon(GLenum mode, const std::vector<uint32_t>& idx, GLint first,
     sh::Program* prog = sh::GetProgram(s::GetState().current_program);
     if (!prog || !prog->linked) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
     if (!v::EnsureInit()) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
+    // Replay texture uploads that happened before the backend came up.
+    if (!g_dirty_textures.empty()) FlushDirtyTextureUploads();
     if (!CreateVProgram(prog)) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
 
     const VAOData& vao = g_vaos[g_bound_vao];
@@ -274,6 +276,19 @@ void DrawCommon(GLenum mode, const std::vector<uint32_t>& idx, GLint first,
     dp.instance_count = (uint32_t)instance_count;
     dp.topology = (v::Topology)topo;
     dp.uniforms = ComposeUniforms(prog);
+    // Resolve each sampler uniform to the texture bound at its GL unit
+    // (the framebelike value glUniform1i wrote; absent -> unit 0).
+    dp.sampler_binds.clear();
+    for (const auto& smp : prog->samplers) {
+        GLint unit = 0;
+        auto uit = prog->uniform_by_location.find(smp.location);
+        if (uit != prog->uniform_by_location.end() &&
+            !prog->uniforms[uit->second].value.empty())
+            unit = (GLint)prog->uniforms[uit->second].value[0];
+        GLuint tex =
+            (unit >= 0 && (GLuint)unit < kMaxTexUnits) ? g_texture_units[unit] : 0;
+        dp.sampler_binds.push_back({smp.binding, tex});
+    }
     if (!dp.vertex_stream.data.empty()) v::Draw(dp);
 }
 

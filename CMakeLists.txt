@@ -32,6 +32,7 @@ add_library(mithril SHARED
     src/gl/state.cpp
     src/gl/shader.cpp
     src/gl/vertex.cpp
+    src/gl/texture.cpp
     src/gl/draw.cpp
     src/gl/stub.cpp
     src/shader/glsl.cpp
@@ -44,6 +45,7 @@ add_library(mithril SHARED
     src/vk/pipeline.cpp
     src/vk/draw.cpp
     src/vk/engine.cpp
+    src/vk/texture.cpp
 )
 
 target_include_directories(mithril PRIVATE

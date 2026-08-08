@@ -89,6 +89,9 @@ struct FnTable {
     ML_FN(DestroyPipelineLayout);
     ML_FN(CreateGraphicsPipelines);
     ML_FN(DestroyPipeline);
+    ML_FN(CreateSampler);
+    ML_FN(DestroySampler);
+    ML_FN(CmdCopyBufferToImage);
     ML_FN(CmdBindPipeline);
     ML_FN(CmdBindVertexBuffers);
     ML_FN(CmdBindIndexBuffer);
@@ -121,6 +124,22 @@ struct Program {
     std::vector<UboMember> members;
     VkDeviceSize ubo_size = 0;
     bool has_ubo = false;
+    // Sampler uniforms (descriptor binding mirrors the GLSL layout() we
+    // inject in assign_sampler_bindings: binding = program listing).
+    struct SamplerBind {
+        std::string name;
+        uint32_t binding = 0;   // descriptor binding (index into set 0)
+    };
+    std::vector<SamplerBind> samplers;
+};
+
+// Resident GPU texture (uploaded via UploadTexture).
+struct TexObj {
+    VkImage image = VK_NULL_HANDLE;
+    VkDeviceMemory mem = VK_NULL_HANDLE;
+    VkImageView view = VK_NULL_HANDLE;
+    VkSampler sampler = VK_NULL_HANDLE;
+    uint32_t levels = 1;
 };
 
 struct DrawOp {
@@ -143,6 +162,8 @@ struct DrawOp {
     VkDescriptorSet desc_set = VK_NULL_HANDLE;
     VkDeviceSize ubo_offset = 0;
     VkDeviceSize ubo_range = 0;
+    // Sampler descriptor images for this draw (one per samper bound).
+    std::vector<std::pair<uint32_t, VkDescriptorImageInfo>> tex_binds;
 };
 
 struct Engine {
@@ -170,6 +191,10 @@ struct Engine {
     VkDescriptorSetLayout set_layout = VK_NULL_HANDLE;
     VkDescriptorPool desc_pool = VK_NULL_HANDLE;
     VkPipelineLayout pipeline_layout = VK_NULL_HANDLE;
+
+    // M4 textures: gl texture id -> resident GPU image.
+    std::unordered_map<uint64_t, TexObj> textures;
+    TexObj dummy_tex;             // 1x1 white fallback for unbound units
 
     VkBuffer ubo = VK_NULL_HANDLE;
     VkDeviceMemory ubo_mem = VK_NULL_HANDLE;
@@ -212,6 +237,12 @@ void TransitionLayout(VkCommandBuffer cb, VkImage image,
 bool CreateRenderPass();
 
 bool CreateTarget();
+
+void CreateDummyTexture();
+
+// ---- texture helpers (defined in texture.cpp) ----------------------------
+
+TexObj* GetTexObj(uint64_t gl_id);
 
 // ---- pipeline helpers (defined in pipeline.cpp) --------------------------
 

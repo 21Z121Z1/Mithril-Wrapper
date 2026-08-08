@@ -36,6 +36,16 @@ struct Uniform {
     std::vector<float> value;
 };
 
+// A sampled-image uniform: the sampler's Vulkan binding (assigned by
+// assign_sampler_bindings during compilation, 1-based) and the GL texture
+// unit value written by glUniform1i.
+struct SamplerRef {
+    std::string name;
+    GLenum type = GL_SAMPLER_2D;
+    uint32_t binding = 0;      // Vulkan descriptor binding for this sampler
+    GLint location = -1;
+};
+
 struct Program {
     GLuint id = 0;
     std::vector<GLuint> attached;          // attached shader ids
@@ -45,6 +55,7 @@ struct Program {
     std::unordered_map<std::string, GLint> uniform_by_name;    // name -> location
     std::unordered_map<GLint, size_t> uniform_by_location;     // location -> uniforms idx
     std::unordered_map<std::string, GLint> attrib_locations;   // name -> location
+    std::vector<SamplerRef> samplers;      // M4: active sampler uniforms
     std::vector<uint32_t> vertex_spirv;    // linked stage SPIR-V
     std::vector<uint32_t> fragment_spirv;
 };

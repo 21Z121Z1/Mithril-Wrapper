@@ -133,6 +133,7 @@ void Draw(const DrawParams& params) {
     VkDescriptorBufferInfo dbi{};
     dbi.buffer = g.ubo;
     dbi.range = op.ubo_range;
+    std::vector<VkWriteDescriptorSet> writes;
     VkWriteDescriptorSet w{};
     w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
     w.dstSet = op.desc_set;
@@ -140,7 +141,30 @@ void Draw(const DrawParams& params) {
     w.descriptorCount = 1;
     w.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
     w.pBufferInfo = &dbi;
-    g.fn.UpdateDescriptorSets(g.device, 1, &w, 0, nullptr);
+    writes.push_back(w);
+
+    // Combined image samplers: one per (binding, gl texture id) handed over
+    // by the GL layer; unbound units resolve to the 1x1 white dummy.
+    std::vector<VkDescriptorImageInfo> tis;
+    for (const auto& sb : params.sampler_binds) {
+        TexObj* tex = GetTexObj(sb.second);
+        if (!tex) continue;
+        VkDescriptorImageInfo di{};
+        di.sampler = tex->sampler;
+        di.imageView = tex->view;
+        di.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        tis.push_back(di);
+        VkWriteDescriptorSet ws{};
+        ws.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        ws.dstSet = op.desc_set;
+        ws.dstBinding = sb.first;
+        ws.descriptorCount = 1;
+        ws.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        ws.pImageInfo = &tis.back();
+        writes.push_back(ws);
+    }
+    g.fn.UpdateDescriptorSets(g.device, (uint32_t)writes.size(), writes.data(),
+                              0, nullptr);
 
     g.frame_draws.push_back(std::move(op));
     g.frame_dirty = true;

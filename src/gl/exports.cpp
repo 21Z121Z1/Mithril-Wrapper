@@ -8,10 +8,6 @@ void GlStubCalled(const char* name);
 
 extern "C" {
 
-  void APIENTRY glActiveTexture(GLenum texture) {
-    mithril::GlStubCalled("glActiveTexture");
-  }
-
   void APIENTRY glBeginConditionalRender(GLuint id, GLenum mode) {
     mithril::GlStubCalled("glBeginConditionalRender");
   }
@@ -50,10 +46,6 @@ extern "C" {
 
   void APIENTRY glBindSampler(GLuint unit, GLuint sampler) {
     mithril::GlStubCalled("glBindSampler");
-  }
-
-  void APIENTRY glBindTexture(GLenum target, GLuint texture) {
-    mithril::GlStubCalled("glBindTexture");
   }
 
   void APIENTRY glBlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1, GLint dstX0, GLint dstY0, GLint dstX1, GLint dstY1, GLbitfield mask, GLenum filter) {
@@ -150,10 +142,6 @@ extern "C" {
     mithril::GlStubCalled("glDeleteSync");
   }
 
-  void APIENTRY glDeleteTextures(GLsizei n, const GLuint *textures) {
-    mithril::GlStubCalled("glDeleteTextures");
-  }
-
   void APIENTRY glDrawBuffer(GLenum buf) {
     mithril::GlStubCalled("glDrawBuffer");
   }
@@ -217,14 +205,6 @@ extern "C" {
 
   void APIENTRY glGenSamplers(GLsizei count, GLuint *samplers) {
     mithril::GlStubCalled("glGenSamplers");
-  }
-
-  void APIENTRY glGenTextures(GLsizei n, GLuint *textures) {
-    mithril::GlStubCalled("glGenTextures");
-  }
-
-  void APIENTRY glGenerateMipmap(GLenum target) {
-    mithril::GlStubCalled("glGenerateMipmap");
   }
 
   void APIENTRY glGetActiveUniformBlockName(GLuint program, GLuint uniformBlockIndex, GLsizei bufSize, GLsizei *length, GLchar *uniformBlockName) {
@@ -313,30 +293,6 @@ extern "C" {
     mithril::GlStubCalled("glGetTexImage");
   }
 
-  void APIENTRY glGetTexLevelParameterfv(GLenum target, GLint level, GLenum pname, GLfloat *params) {
-    mithril::GlStubCalled("glGetTexLevelParameterfv");
-  }
-
-  void APIENTRY glGetTexLevelParameteriv(GLenum target, GLint level, GLenum pname, GLint *params) {
-    mithril::GlStubCalled("glGetTexLevelParameteriv");
-  }
-
-  void APIENTRY glGetTexParameterIiv(GLenum target, GLenum pname, GLint *params) {
-    mithril::GlStubCalled("glGetTexParameterIiv");
-  }
-
-  void APIENTRY glGetTexParameterIuiv(GLenum target, GLenum pname, GLuint *params) {
-    mithril::GlStubCalled("glGetTexParameterIuiv");
-  }
-
-  void APIENTRY glGetTexParameterfv(GLenum target, GLenum pname, GLfloat *params) {
-    mithril::GlStubCalled("glGetTexParameterfv");
-  }
-
-  void APIENTRY glGetTexParameteriv(GLenum target, GLenum pname, GLint *params) {
-    mithril::GlStubCalled("glGetTexParameteriv");
-  }
-
   void APIENTRY glGetTransformFeedbackVarying(GLuint program, GLuint index, GLsizei bufSize, GLsizei *length, GLsizei *size, GLenum *type, GLchar *name) {
     mithril::GlStubCalled("glGetTransformFeedbackVarying");
   }
@@ -372,11 +328,6 @@ extern "C" {
 
   GLboolean APIENTRY glIsSync(GLsync sync) {
     mithril::GlStubCalled("glIsSync");
-    return 0;
-  }
-
-  GLboolean APIENTRY glIsTexture(GLuint texture) {
-    mithril::GlStubCalled("glIsTexture");
     return 0;
   }
 
@@ -452,14 +403,6 @@ extern "C" {
     mithril::GlStubCalled("glTexBuffer");
   }
 
-  void APIENTRY glTexImage1D(GLenum target, GLint level, GLint internalformat, GLsizei width, GLint border, GLenum format, GLenum type, const void *pixels) {
-    mithril::GlStubCalled("glTexImage1D");
-  }
-
-  void APIENTRY glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei width, GLsizei height, GLint border, GLenum format, GLenum type, const void *pixels) {
-    mithril::GlStubCalled("glTexImage2D");
-  }
-
   void APIENTRY glTexImage2DMultisample(GLenum target, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height, GLboolean fixedsamplelocations) {
     mithril::GlStubCalled("glTexImage2DMultisample");
   }
@@ -470,38 +413,6 @@ extern "C" {
 
   void APIENTRY glTexImage3DMultisample(GLenum target, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height, GLsizei depth, GLboolean fixedsamplelocations) {
     mithril::GlStubCalled("glTexImage3DMultisample");
-  }
-
-  void APIENTRY glTexParameterIiv(GLenum target, GLenum pname, const GLint *params) {
-    mithril::GlStubCalled("glTexParameterIiv");
-  }
-
-  void APIENTRY glTexParameterIuiv(GLenum target, GLenum pname, const GLuint *params) {
-    mithril::GlStubCalled("glTexParameterIuiv");
-  }
-
-  void APIENTRY glTexParameterf(GLenum target, GLenum pname, GLfloat param) {
-    mithril::GlStubCalled("glTexParameterf");
-  }
-
-  void APIENTRY glTexParameterfv(GLenum target, GLenum pname, const GLfloat *params) {
-    mithril::GlStubCalled("glTexParameterfv");
-  }
-
-  void APIENTRY glTexParameteri(GLenum target, GLenum pname, GLint param) {
-    mithril::GlStubCalled("glTexParameteri");
-  }
-
-  void APIENTRY glTexParameteriv(GLenum target, GLenum pname, const GLint *params) {
-    mithril::GlStubCalled("glTexParameteriv");
-  }
-
-  void APIENTRY glTexSubImage1D(GLenum target, GLint level, GLint xoffset, GLsizei width, GLenum format, GLenum type, const void *pixels) {
-    mithril::GlStubCalled("glTexSubImage1D");
-  }
-
-  void APIENTRY glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height, GLenum format, GLenum type, const void *pixels) {
-    mithril::GlStubCalled("glTexSubImage2D");
   }
 
   void APIENTRY glTexSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLenum type, const void *pixels) {

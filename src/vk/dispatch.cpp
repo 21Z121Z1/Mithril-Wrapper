@@ -73,6 +73,9 @@ void LoadDeviceFunctions() {
     LOAD_DEV(CmdClearColorImage);
     LOAD_DEV(CmdPipelineBarrier);
     LOAD_DEV(CmdCopyImageToBuffer);
+    LOAD_DEV(CmdCopyBufferToImage);
+    LOAD_DEV(CreateSampler);
+    LOAD_DEV(DestroySampler);
     LOAD_DEV(CmdSetViewport);
     LOAD_DEV(CmdSetScissor);
 #undef LOAD_DEV
@@ -195,30 +198,39 @@ bool EnsureInit() {
         return false;
     }
 
-    // One dynamic UBO binding shared by every pipeline.
-    VkDescriptorSetLayoutBinding dslb{};
-    dslb.binding = 0;
-    dslb.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
-    dslb.descriptorCount = 1;
-    dslb.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    // One dynamic UBO binding (0) + one combined image sampler per GL unit
+    // (bindings 1..kMaxUnits) shared by every pipeline.
+    std::array<VkDescriptorSetLayoutBinding, 1 + kMaxUnits> dslb{};
+    dslb[0].binding = 0;
+    dslb[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+    dslb[0].descriptorCount = 1;
+    dslb[0].stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    for (uint32_t i = 1; i <= kMaxUnits; ++i) {
+        dslb[i].binding = i;
+        dslb[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        dslb[i].descriptorCount = 1;
+        dslb[i].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    }
     VkDescriptorSetLayoutCreateInfo dsli{};
     dsli.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    dsli.bindingCount = 1;
-    dsli.pBindings = &dslb;
+    dsli.bindingCount = dslb.size();
+    dsli.pBindings = dslb.data();
     if (g.fn.CreateDescriptorSetLayout(g.device, &dsli, nullptr,
                                        &g.set_layout) != VK_SUCCESS) {
         ML_LOG_ERROR("vk: CreateDescriptorSetLayout failed");
         return false;
     }
 
-    VkDescriptorPoolSize dps{};
-    dps.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
-    dps.descriptorCount = 256;
+    std::array<VkDescriptorPoolSize, 2> dps{};
+    dps[0].type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+    dps[0].descriptorCount = 256;
+    dps[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    dps[1].descriptorCount = 256 * kMaxUnits;
     VkDescriptorPoolCreateInfo dpci{};
     dpci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     dpci.maxSets = 256;
-    dpci.poolSizeCount = 1;
-    dpci.pPoolSizes = &dps;
+    dpci.poolSizeCount = dps.size();
+    dpci.pPoolSizes = dps.data();
     if (g.fn.CreateDescriptorPool(g.device, &dpci, nullptr, &g.desc_pool) !=
         VK_SUCCESS) {
         ML_LOG_ERROR("vk: CreateDescriptorPool failed");
@@ -293,6 +305,11 @@ bool EnsureInit() {
     }
 
     g.initialized = true;
+
+    // The 1x1 white fallback image; now that initialization is complete the
+    // texture path (which early-outs on !g.initialized) can upload it.
+    CreateDummyTexture();
+
     ML_LOG_INFO("vk: engine ready (%ux%u offscreen)", g.width, g.height);
     return true;
 }

@@ -14,6 +14,7 @@
 
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <string>
 #include <unordered_map>
@@ -22,6 +23,9 @@
 #include <GL/glcorearb.h>
 
 namespace mithril::vk {
+
+// GL 3.3 core guarantees 16 fragment texture units; the engine mirrors that.
+constexpr uint32_t kMaxUnits = 16;
 
 // GL primitive modes we translate to Vulkan topology (GL_TRIANGLES/STRIP/FAN).
 enum class Topology {
@@ -47,7 +51,9 @@ struct VertexStream {
 };
 
 // Everything one GL draw call needs. `uniforms` maps mithril_GlobalBlock
-// member name -> flat float values.
+// member name -> flat float values. `sampler_binds` holds the active
+// sampler assignments for this program: Vulkan descriptor binding ->
+// GL texture id (0 = nothing bound, resolved to a 1x1 white fallback).
 struct DrawParams {
     uint64_t program = 0;
     VertexStream vertex_stream;                    // binding 0 (per-vertex)
@@ -56,7 +62,33 @@ struct DrawParams {
     uint32_t instance_count = 1;
     Topology topology = Topology::Triangles;
     std::unordered_map<std::string, std::vector<float>> uniforms;
+    std::vector<std::pair<uint32_t, uint64_t>> sampler_binds; // (binding, gl id)
 };
+
+// GL texture mip chain ready for upload (M4). Each level is R8G8B8A8
+// row-major, bottom-up (GL convention); mip[0] is the base level.
+struct TexUpload {
+    uint32_t width = 0;
+    uint32_t height = 0;
+    std::vector<std::vector<uint8_t>> mip;   // mip[level] pixels
+};
+
+// Upload (or replace) the image of texture `gl_id` from CPU pixels. The
+// engine keeps the image resident until the next upload or teardown; sampler
+// state (wrap/filter/mip mode) comes with it.
+enum class TexFilter { Nearest = 0, Linear = 1 };
+struct TexSamplerInfo {
+    TexFilter mag = TexFilter::Linear;
+    TexFilter min = TexFilter::Linear;
+    bool mip = false;              // use mipmapped min filter
+    GLenum wrap_s = GL_REPEAT, wrap_t = GL_REPEAT;
+};
+void UploadTexture(uint64_t gl_id, const TexUpload& img,
+                   const TexSamplerInfo& sampler);
+
+// Drop the resident GPU image of `gl_id` (glDeleteTextures path). The next
+// UploadTexture rebuilds it from scratch.
+void DestroyResidentTexture(uint64_t gl_id);
 
 // Lazily create loader + instance + device + offscreen target. Idempotent.
 bool EnsureInit();

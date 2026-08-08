@@ -83,6 +83,14 @@ MGL_IMPL = frozenset({
     "glDrawElementsInstanced", "glDrawElementsInstancedBaseVertex",
     "glDrawRangeElementsBaseVertex",
     "glMultiDrawArrays", "glMultiDrawElements", "glMultiDrawElementsBaseVertex",
+    # S4 textures (M4): object table + 2D upload + sampler parameters + mips.
+    "glActiveTexture", "glBindTexture", "glDeleteTextures", "glGenTextures",
+    "glIsTexture", "glTexImage1D", "glTexImage2D", "glTexSubImage1D",
+    "glTexSubImage2D", "glGenerateMipmap",
+    "glTexParameteri", "glTexParameteriv", "glTexParameterf", "glTexParameterfv",
+    "glTexParameterIiv", "glTexParameterIuiv",
+    "glGetTexParameteriv", "glGetTexParameterfv", "glGetTexParameterIiv",
+    "glGetTexParameterIuiv", "glGetTexLevelParameteriv", "glGetTexLevelParameterfv",
 })
 
 

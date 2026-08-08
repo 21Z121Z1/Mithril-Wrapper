@@ -16,6 +16,7 @@
 #include <array>
 #include <cstdint>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <shader/shader.h>
@@ -62,6 +63,33 @@ extern GLuint g_bound_element_buffer;
 
 // GL program id -> Vulkan program handle (lazily created at first draw).
 extern std::unordered_map<GLuint, uint64_t> g_vk_programs;
+
+// ---- shared texture state (texture.cpp owns the storage) ------------------
+
+// Mirrors the engine's texture-unit count (v::kMaxUnits); GL uses units
+// beyond this only as a no-op.
+constexpr GLuint kMaxTexUnits = 16;
+
+// CPU-side image of one GL texture object (M4). Pixels are kept as an RGBA8
+// mip chain so TexSubImage2D/GenerateMipmap can rebuild the upload cheaply.
+struct TexState {
+    GLenum target = GL_TEXTURE_2D;       // target bound at creation
+    GLenum min_filter = GL_LINEAR;       // sampler state (GL enums)
+    GLenum mag_filter = GL_LINEAR;
+    GLenum wrap_s = GL_REPEAT, wrap_t = GL_REPEAT, wrap_r = GL_REPEAT;
+    uint32_t width = 0, height = 0;
+    std::vector<std::vector<uint8_t>> mip;   // RGBA8, mip[level]
+    bool has_image = false;                  // level 0 present
+};
+
+extern std::unordered_map<GLuint, TexState> g_textures;
+extern std::array<GLuint, kMaxTexUnits> g_texture_units;  // unit -> texture id
+extern GLuint g_next_texture;
+
+// Texture ids whose CPU mirror changed while the Vulkan backend was not yet
+// initialized; flushed to the engine at the next draw (see DrawCommon).
+extern std::unordered_set<GLuint> g_dirty_textures;
+void FlushDirtyTextureUploads();   // defined in texture.cpp
 
 // ---- draw-time attribute fetch helpers (defined in draw.cpp) ------------
 

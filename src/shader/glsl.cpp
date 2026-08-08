@@ -56,6 +56,22 @@ int get_glsl_version(const std::string& src) {
     return -1;
 }
 
+// Rewrite `src` to declare GLSL version `v` (floor): layout(binding=...)
+// needs GLSL 420+.
+void bump_glsl_version(std::string& src, int v) {
+    if (get_glsl_version(src) >= v) return;
+    std::string line = "#version " + std::to_string(v) + " core";
+    int cur = get_glsl_version(src);
+    if (cur == -1) {
+        src.insert(0, line + "\n");
+        return;
+    }
+    size_t pos = src.find("#version");
+    size_t line_end = src.find('\n', pos);
+    if (line_end == std::string::npos) line_end = src.length();
+    src.replace(pos, line_end - pos, line);
+}
+
 // Vulkan GLSL requires #version 330 minimum; upgrade anything below.
 int ensure_glsl_version(std::string& src) {
     int ver = get_glsl_version(src);
@@ -126,6 +142,44 @@ bool is_in_comment(const std::string& s, size_t off) {
         else if (i + 1 < off && s[i] == '*' && s[i + 1] == '/') { if (depth) --depth; ++i; }
     }
     return depth > 0;
+}
+
+// Vulkan GLSL needs explicit sampler bindings; assign each sampler a fixed
+// binding in declaration order (1-based), leaving binding 0 for the folded
+// mithril_GlobalBlock UBO. The engine mirrors these bindings 1:1 when it
+// builds the descriptor set layout.
+void assign_sampler_bindings(std::string& source) {
+    static const std::regex re(
+        R"((layout\s*\([^)]*\))?\s*uniform\s+(sampler(?:2D|2DArray|3D|Cube|CubeArray|2DRect|1D|1DArray))\s+(\w+)\s*;)");
+    struct Edit { size_t pos; size_t len; std::string text; };
+    std::vector<Edit> edits;
+    {
+        auto cur = source.cbegin(), end = source.cend();
+        std::smatch m;
+        int slot = 0;
+        while (std::regex_search(cur, end, m, re)) {
+            size_t off = m.position(0) + (cur - source.cbegin());
+            if (!is_in_comment(source, off)) {
+                ++slot;
+                if (m[1].matched) {
+                    edits.push_back({off, m[1].str().size(),
+                                     "layout(binding=" + std::to_string(slot) + ")"});
+                } else {
+                    edits.push_back({off, 0, "\nlayout(binding=" +
+                                                 std::to_string(slot) + ") "});
+                }
+            }
+            cur = m.suffix().first;
+        }
+    }
+    // Apply from the tail so earlier offsets stay valid.
+    for (auto it = edits.rbegin(); it != edits.rend(); ++it) {
+        if (it->len == 0) {
+            source.insert(it->pos + it->len, it->text);
+        } else {
+            source.replace(it->pos, it->len, it->text);
+        }
+    }
 }
 
 void split_declarators(const std::string& list, std::vector<std::string>& out) {
@@ -283,6 +337,13 @@ bool CompileStage(GLenum stage, const std::string& src,
         ML_LOG_WARN("wrap_loose_uniforms threw (%s); using unwrapped source", e.what());
         source = unwrapped;
     }
+    assign_sampler_bindings(source);
+    assign_sampler_bindings(unwrapped);
+    // layout(binding=...) requires GLSL 420+; bump only when injected.
+    if (source.find("layout(binding=") != std::string::npos)
+        bump_glsl_version(source, 450);
+    if (unwrapped.find("layout(binding=") != std::string::npos)
+        bump_glsl_version(unwrapped, 450);
 
     int version = get_glsl_version(source);
     if (version < 330) version = 330;

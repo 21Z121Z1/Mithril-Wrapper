@@ -22,6 +22,7 @@ void ReflectProgram(Program& prog) {
     prog.uniform_by_name.clear();
     prog.uniform_by_location.clear();
     prog.attrib_locations.clear();
+    prog.samplers.clear();
 
     auto reflect_stage = [&](const std::vector<uint32_t>& words) {
         if (words.empty()) return;
@@ -44,6 +45,12 @@ void ReflectProgram(Program& prog) {
                 if (name.empty()) return;
                 if (prog.uniform_by_name.find(name) == prog.uniform_by_name.end())
                     prog.uniform_by_name[name] = -1;
+                uint32_t binding = compiler.get_decoration(r.id, spv::DecorationBinding);
+                bool dup = false;
+                for (auto& s : prog.samplers)
+                    if (s.name == name) { dup = true; break; }
+                if (!dup)
+                    prog.samplers.push_back({name, GL_SAMPLER_2D, binding, -1});
             };
             for (auto& r : res.sampled_images) add_sampler(r);
             for (auto& r : res.separate_images) add_sampler(r);
@@ -75,6 +82,12 @@ void ReflectProgram(Program& prog) {
         prog.uniform_by_location[static_cast<GLint>(i)] = prog.uniforms.size();
         prog.uniform_by_name[names[i]] = static_cast<GLint>(i);
         prog.uniforms.push_back(std::move(u));
+    }
+    for (auto& s : prog.samplers) {
+        auto it = prog.uniform_by_name.find(s.name);
+        s.location = it == prog.uniform_by_name.end() ? -1 : it->second;
+        for (auto& u : prog.uniforms)
+            if (u.name == s.name) u.type = s.type;
     }
 }
 

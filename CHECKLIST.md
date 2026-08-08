@@ -1,11 +1,12 @@
 # Mithril-Wrapper 实现清单（CHECKLIST）
 
-> 状态：**M3 完成**（S3 顶点数据层 76/114 + S2 着色器层 + S1 状态机；Linux 四冒烟测试通过，含 GL→Vulkan 全链 draw_smoke）。
+> 状态：**M4 纹理进行中（Vk 端 + S4 核心完成）**；M3 及以前全部完成（Linux 五冒烟测试通过，含 GL→Vulkan 全链 draw_smoke + texture_smoke）。
 > 配套文档：`docs/gl33_core_list.md`（GL 3.3 core 342 函数分组）、`docs/egl_list.md`（EGL 符号清单）。
-> 测试：`tests/contract_smoke.c`（EGL 契约）、`tests/state_smoke.c`（GL 状态机）、`tests/shader_smoke.c`（着色器管线）、`tests/draw_smoke.c`（GL→Vulkan→读回全链，需 lavapipe/llvmpipe）。
-> M2 已完成：`src/shader/`（Shader/Program 对象表、glslang 编译缓存 .glsl→SPIR-V、SPIRV-Cross 反射 uniform/attrib）、GLSL 150 自动升级到 330 core、`gl_VertexID/gl_InstanceID` 重写、松散 uniform 折入合成 UBO（ANGLE 模式）、`glUniform*` 全系 + 矩阵 setter/getter；`src/vk/`（dlsym 动态加载 Vulkan loader/ICD、instance 级函数经真实 instance 句柄解析、UBO 反射 VS+FS 双阶段合并 + 动态 UBO 池、staging 顶点缓冲、renderpass + 清屏 + 帧读回）；`draw_smoke` 全链通过。
+> 测试：`tests/contract_smoke.c`（EGL 契约）、`tests/state_smoke.c`（GL 状态机）、`tests/shader_smoke.c`（着色器管线）、`tests/draw_smoke.c`（GL→Vulkan→读回全链）、`tests/texture_smoke.c`（M4 纹理全链，需 lavapipe/llvmpipe）。
+> M2 已完成：`src/shader/`（Shader/Program 对象表、glslang 编译缓存 .glsl→SPIR-V、SPIRV-Cross 反射 uniform/attrib）、GLSL 150 自动升级到 330 core（含采样器存在时自动升 450 以启用 layout(binding=...) 注入，声明序 1 起绑定）、`gl_VertexID/gl_InstanceID` 重写、松散 uniform 折入合成 UBO（ANGLE 模式）、`glUniform*` 全系 + 矩阵 setter/getter；`src/vk/`（dlsym 动态加载 Vulkan loader/ICD、instance 级函数经真实 instance 句柄解析、UBO 反射 VS+FS 双阶段合并 + 动态 UBO 池、staging 顶点缓冲、renderpass + 清屏 + 帧读回）；`draw_smoke` 全链通过。
 > M3 已完成：S3 组 76/114 真实现——顶点属性全家族（glVertexAttribPointer/IPointer、常量系 1-4、Divisor、Enable/Disable）、attribute 查询（fv/dv/iv/Iiv/Iuiv/Pointerv）、buffer 映射/查询家族（MapBuffer/Range、Unmap、FlushMapped、GetBufferParameteriv/i64v/Pointerv/SubData、CopyBufferSubData）、全部 10 个 draw 入口（DrawArrays/Instanced、DrawElements/BaseVertex/Instanced/InstancedBaseVertex、DrawRangeElements/BaseVertex、MultiDrawArrays/Elements/BaseVertex）；引擎新增双顶点流（VERTEX+INSTANCE binding）、索引缓冲（UBYTE/USHORT/UINT 统一扩 UINT32 staging）、TriangleStrip/Fan 拓扑、实例化（CPU 按 divisor 复制行，无需 EXT）；非 4 字节对齐 stride/offset 由 CPU 打包规整；`glGetVertexAttrib*` 单值查询仅写 params[0]（修先栈溢出 bug）；draw_smoke 扩展 8 断言通过。
-> 待办：M4 纹理（S4 组 glTexImage2D）+ M5 状态管线。
+> **M4 进行中**：`src/vk/` 新增纹理上传路径（texture.cpp：CreateHostBuffer staging → CmdCopyBufferToImage 全 mip 上传 → SHADER_READ_ONLY 布局）、常驻 TexObj 表（image/view/sampler 按 GL id 复用，重复上传先销毁重建）、CreateSampler（GL wrap/filter/mip 状态映射）、1x1 白色 dummy 纹理兜底（EnsureInit 末尾创建）；描述符集 layout 预置 binding 1..16 为 COMBINED_IMAGE_SAMPLER，Draw() 按程序反射的采样器 binding 写 VkDescriptorImageInfo（未绑定单元回落 dummy）。`src/gl/texture.cpp` S4 核心 23 函数真实现（Gen/Delete/Is/Bind/Active/TexImage1D/2D/TexSub1D/2D/TexParameter i/f/iv/fv/Iiv/Iuiv/Get*Parameter*/GetTexLevel* 与 GenerateMipmap 盒式滤波），CPU RGBA8 mip 镜像 + UNPACK 对齐，先于引擎初始化的上传由 g_dirty_textures 在首次 draw 重放；**texture_smoke 全链通过**（lavapipe：红色纹理四边形采样 + 采样器状态回读 + GenerateMipmap + dummy 白 + 清屏色）。CI 已接 texture_smoke。
+> 待办：M4 余下（TexImage3D/压缩格式/CopyTex/GetTexImage 与 2D 数组/cubemap 上传）+ M5 状态管线。
 
 ---
 
@@ -75,7 +76,7 @@
     - S1 状态/使能/基础查询：55（glEnable/glClear/glViewport/glBlend/glDepth/glStencil/glGet*…）
     - S2 着色器/程序/Uniform：71（glCreateShader→glUseProgram、glUniform* 全系、程序反射）
     - S3 Buffer/VAO/顶点/Draw：114（glGenBuffers→glDrawArrays/glDrawElements 全系、glVertexAttrib* 全系）
-    - S4 纹理：42（glGenTextures→glTexImage2D/glTexSubImage2D/glGenerateMipmap）
+    - S4 纹理：42（glGenTextures→glTexImage2D/glTexSubImage2D/glGenerateMipmap；核心 23 + 采样器绑定已真实现，texture_smoke 通过）
     - S5 FBO/渲染缓冲：24（glGenFramebuffers→glReadPixels/glBlitFramebuffer）
     - S6 同步/Query/Sampler：36（glGenQueries/glFenceSync/glSamplerParameter 系）
   - 342 全部归入以上六组，无遗漏
