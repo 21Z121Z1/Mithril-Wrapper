@@ -110,10 +110,6 @@ extern "C" {
     mithril::GlStubCalled("glCompressedTexSubImage3D");
   }
 
-  void APIENTRY glCopyBufferSubData(GLenum readTarget, GLenum writeTarget, GLintptr readOffset, GLintptr writeOffset, GLsizeiptr size) {
-    mithril::GlStubCalled("glCopyBufferSubData");
-  }
-
   void APIENTRY glCopyTexImage1D(GLenum target, GLint level, GLenum internalformat, GLint x, GLint y, GLsizei width, GLint border) {
     mithril::GlStubCalled("glCopyTexImage1D");
   }
@@ -158,40 +154,12 @@ extern "C" {
     mithril::GlStubCalled("glDeleteTextures");
   }
 
-  void APIENTRY glDrawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLsizei instancecount) {
-    mithril::GlStubCalled("glDrawArraysInstanced");
-  }
-
   void APIENTRY glDrawBuffer(GLenum buf) {
     mithril::GlStubCalled("glDrawBuffer");
   }
 
   void APIENTRY glDrawBuffers(GLsizei n, const GLenum *bufs) {
     mithril::GlStubCalled("glDrawBuffers");
-  }
-
-  void APIENTRY glDrawElements(GLenum mode, GLsizei count, GLenum type, const void *indices) {
-    mithril::GlStubCalled("glDrawElements");
-  }
-
-  void APIENTRY glDrawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, const void *indices, GLint basevertex) {
-    mithril::GlStubCalled("glDrawElementsBaseVertex");
-  }
-
-  void APIENTRY glDrawElementsInstanced(GLenum mode, GLsizei count, GLenum type, const void *indices, GLsizei instancecount) {
-    mithril::GlStubCalled("glDrawElementsInstanced");
-  }
-
-  void APIENTRY glDrawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLenum type, const void *indices, GLsizei instancecount, GLint basevertex) {
-    mithril::GlStubCalled("glDrawElementsInstancedBaseVertex");
-  }
-
-  void APIENTRY glDrawRangeElements(GLenum mode, GLuint start, GLuint end, GLsizei count, GLenum type, const void *indices) {
-    mithril::GlStubCalled("glDrawRangeElements");
-  }
-
-  void APIENTRY glDrawRangeElementsBaseVertex(GLenum mode, GLuint start, GLuint end, GLsizei count, GLenum type, const void *indices, GLint basevertex) {
-    mithril::GlStubCalled("glDrawRangeElementsBaseVertex");
   }
 
   void APIENTRY glEndConditionalRender(void) {
@@ -209,10 +177,6 @@ extern "C" {
   GLsync APIENTRY glFenceSync(GLenum condition, GLbitfield flags) {
     mithril::GlStubCalled("glFenceSync");
     return nullptr;
-  }
-
-  void APIENTRY glFlushMappedBufferRange(GLenum target, GLintptr offset, GLsizeiptr length) {
-    mithril::GlStubCalled("glFlushMappedBufferRange");
   }
 
   void APIENTRY glFramebufferRenderbuffer(GLenum target, GLenum attachment, GLenum renderbuffertarget, GLuint renderbuffer) {
@@ -277,22 +241,6 @@ extern "C" {
 
   void APIENTRY glGetActiveUniformsiv(GLuint program, GLsizei uniformCount, const GLuint *uniformIndices, GLenum pname, GLint *params) {
     mithril::GlStubCalled("glGetActiveUniformsiv");
-  }
-
-  void APIENTRY glGetBufferParameteri64v(GLenum target, GLenum pname, GLint64 *params) {
-    mithril::GlStubCalled("glGetBufferParameteri64v");
-  }
-
-  void APIENTRY glGetBufferParameteriv(GLenum target, GLenum pname, GLint *params) {
-    mithril::GlStubCalled("glGetBufferParameteriv");
-  }
-
-  void APIENTRY glGetBufferPointerv(GLenum target, GLenum pname, void **params) {
-    mithril::GlStubCalled("glGetBufferPointerv");
-  }
-
-  void APIENTRY glGetBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, void *data) {
-    mithril::GlStubCalled("glGetBufferSubData");
   }
 
   void APIENTRY glGetCompressedTexImage(GLenum target, GLint level, void *img) {
@@ -402,30 +350,6 @@ extern "C" {
     mithril::GlStubCalled("glGetUniformIndices");
   }
 
-  void APIENTRY glGetVertexAttribIiv(GLuint index, GLenum pname, GLint *params) {
-    mithril::GlStubCalled("glGetVertexAttribIiv");
-  }
-
-  void APIENTRY glGetVertexAttribIuiv(GLuint index, GLenum pname, GLuint *params) {
-    mithril::GlStubCalled("glGetVertexAttribIuiv");
-  }
-
-  void APIENTRY glGetVertexAttribPointerv(GLuint index, GLenum pname, void **pointer) {
-    mithril::GlStubCalled("glGetVertexAttribPointerv");
-  }
-
-  void APIENTRY glGetVertexAttribdv(GLuint index, GLenum pname, GLdouble *params) {
-    mithril::GlStubCalled("glGetVertexAttribdv");
-  }
-
-  void APIENTRY glGetVertexAttribfv(GLuint index, GLenum pname, GLfloat *params) {
-    mithril::GlStubCalled("glGetVertexAttribfv");
-  }
-
-  void APIENTRY glGetVertexAttribiv(GLuint index, GLenum pname, GLint *params) {
-    mithril::GlStubCalled("glGetVertexAttribiv");
-  }
-
   GLboolean APIENTRY glIsFramebuffer(GLuint framebuffer) {
     mithril::GlStubCalled("glIsFramebuffer");
     return 0;
@@ -454,28 +378,6 @@ extern "C" {
   GLboolean APIENTRY glIsTexture(GLuint texture) {
     mithril::GlStubCalled("glIsTexture");
     return 0;
-  }
-
-  void * APIENTRY glMapBuffer(GLenum target, GLenum access) {
-    mithril::GlStubCalled("glMapBuffer");
-    return nullptr;
-  }
-
-  void * APIENTRY glMapBufferRange(GLenum target, GLintptr offset, GLsizeiptr length, GLbitfield access) {
-    mithril::GlStubCalled("glMapBufferRange");
-    return nullptr;
-  }
-
-  void APIENTRY glMultiDrawArrays(GLenum mode, const GLint *first, const GLsizei *count, GLsizei drawcount) {
-    mithril::GlStubCalled("glMultiDrawArrays");
-  }
-
-  void APIENTRY glMultiDrawElements(GLenum mode, const GLsizei *count, GLenum type, const void *const*indices, GLsizei drawcount) {
-    mithril::GlStubCalled("glMultiDrawElements");
-  }
-
-  void APIENTRY glMultiDrawElementsBaseVertex(GLenum mode, const GLsizei *count, GLenum type, const void *const*indices, GLsizei drawcount, const GLint *basevertex) {
-    mithril::GlStubCalled("glMultiDrawElementsBaseVertex");
   }
 
   void APIENTRY glPixelStoref(GLenum pname, GLfloat param) {
@@ -614,159 +516,6 @@ extern "C" {
     mithril::GlStubCalled("glUniformBlockBinding");
   }
 
-  GLboolean APIENTRY glUnmapBuffer(GLenum target) {
-    mithril::GlStubCalled("glUnmapBuffer");
-    return 0;
-  }
-
-  void APIENTRY glVertexAttrib1d(GLuint index, GLdouble x) {
-    mithril::GlStubCalled("glVertexAttrib1d");
-  }
-
-  void APIENTRY glVertexAttrib1dv(GLuint index, const GLdouble *v) {
-    mithril::GlStubCalled("glVertexAttrib1dv");
-  }
-
-  void APIENTRY glVertexAttrib1f(GLuint index, GLfloat x) {
-    mithril::GlStubCalled("glVertexAttrib1f");
-  }
-
-  void APIENTRY glVertexAttrib1fv(GLuint index, const GLfloat *v) {
-    mithril::GlStubCalled("glVertexAttrib1fv");
-  }
-
-  void APIENTRY glVertexAttrib1s(GLuint index, GLshort x) {
-    mithril::GlStubCalled("glVertexAttrib1s");
-  }
-
-  void APIENTRY glVertexAttrib1sv(GLuint index, const GLshort *v) {
-    mithril::GlStubCalled("glVertexAttrib1sv");
-  }
-
-  void APIENTRY glVertexAttrib2d(GLuint index, GLdouble x, GLdouble y) {
-    mithril::GlStubCalled("glVertexAttrib2d");
-  }
-
-  void APIENTRY glVertexAttrib2dv(GLuint index, const GLdouble *v) {
-    mithril::GlStubCalled("glVertexAttrib2dv");
-  }
-
-  void APIENTRY glVertexAttrib2f(GLuint index, GLfloat x, GLfloat y) {
-    mithril::GlStubCalled("glVertexAttrib2f");
-  }
-
-  void APIENTRY glVertexAttrib2fv(GLuint index, const GLfloat *v) {
-    mithril::GlStubCalled("glVertexAttrib2fv");
-  }
-
-  void APIENTRY glVertexAttrib2s(GLuint index, GLshort x, GLshort y) {
-    mithril::GlStubCalled("glVertexAttrib2s");
-  }
-
-  void APIENTRY glVertexAttrib2sv(GLuint index, const GLshort *v) {
-    mithril::GlStubCalled("glVertexAttrib2sv");
-  }
-
-  void APIENTRY glVertexAttrib3d(GLuint index, GLdouble x, GLdouble y, GLdouble z) {
-    mithril::GlStubCalled("glVertexAttrib3d");
-  }
-
-  void APIENTRY glVertexAttrib3dv(GLuint index, const GLdouble *v) {
-    mithril::GlStubCalled("glVertexAttrib3dv");
-  }
-
-  void APIENTRY glVertexAttrib3f(GLuint index, GLfloat x, GLfloat y, GLfloat z) {
-    mithril::GlStubCalled("glVertexAttrib3f");
-  }
-
-  void APIENTRY glVertexAttrib3fv(GLuint index, const GLfloat *v) {
-    mithril::GlStubCalled("glVertexAttrib3fv");
-  }
-
-  void APIENTRY glVertexAttrib3s(GLuint index, GLshort x, GLshort y, GLshort z) {
-    mithril::GlStubCalled("glVertexAttrib3s");
-  }
-
-  void APIENTRY glVertexAttrib3sv(GLuint index, const GLshort *v) {
-    mithril::GlStubCalled("glVertexAttrib3sv");
-  }
-
-  void APIENTRY glVertexAttrib4Nbv(GLuint index, const GLbyte *v) {
-    mithril::GlStubCalled("glVertexAttrib4Nbv");
-  }
-
-  void APIENTRY glVertexAttrib4Niv(GLuint index, const GLint *v) {
-    mithril::GlStubCalled("glVertexAttrib4Niv");
-  }
-
-  void APIENTRY glVertexAttrib4Nsv(GLuint index, const GLshort *v) {
-    mithril::GlStubCalled("glVertexAttrib4Nsv");
-  }
-
-  void APIENTRY glVertexAttrib4Nub(GLuint index, GLubyte x, GLubyte y, GLubyte z, GLubyte w) {
-    mithril::GlStubCalled("glVertexAttrib4Nub");
-  }
-
-  void APIENTRY glVertexAttrib4Nubv(GLuint index, const GLubyte *v) {
-    mithril::GlStubCalled("glVertexAttrib4Nubv");
-  }
-
-  void APIENTRY glVertexAttrib4Nuiv(GLuint index, const GLuint *v) {
-    mithril::GlStubCalled("glVertexAttrib4Nuiv");
-  }
-
-  void APIENTRY glVertexAttrib4Nusv(GLuint index, const GLushort *v) {
-    mithril::GlStubCalled("glVertexAttrib4Nusv");
-  }
-
-  void APIENTRY glVertexAttrib4bv(GLuint index, const GLbyte *v) {
-    mithril::GlStubCalled("glVertexAttrib4bv");
-  }
-
-  void APIENTRY glVertexAttrib4d(GLuint index, GLdouble x, GLdouble y, GLdouble z, GLdouble w) {
-    mithril::GlStubCalled("glVertexAttrib4d");
-  }
-
-  void APIENTRY glVertexAttrib4dv(GLuint index, const GLdouble *v) {
-    mithril::GlStubCalled("glVertexAttrib4dv");
-  }
-
-  void APIENTRY glVertexAttrib4f(GLuint index, GLfloat x, GLfloat y, GLfloat z, GLfloat w) {
-    mithril::GlStubCalled("glVertexAttrib4f");
-  }
-
-  void APIENTRY glVertexAttrib4fv(GLuint index, const GLfloat *v) {
-    mithril::GlStubCalled("glVertexAttrib4fv");
-  }
-
-  void APIENTRY glVertexAttrib4iv(GLuint index, const GLint *v) {
-    mithril::GlStubCalled("glVertexAttrib4iv");
-  }
-
-  void APIENTRY glVertexAttrib4s(GLuint index, GLshort x, GLshort y, GLshort z, GLshort w) {
-    mithril::GlStubCalled("glVertexAttrib4s");
-  }
-
-  void APIENTRY glVertexAttrib4sv(GLuint index, const GLshort *v) {
-    mithril::GlStubCalled("glVertexAttrib4sv");
-  }
-
-  void APIENTRY glVertexAttrib4ubv(GLuint index, const GLubyte *v) {
-    mithril::GlStubCalled("glVertexAttrib4ubv");
-  }
-
-  void APIENTRY glVertexAttrib4uiv(GLuint index, const GLuint *v) {
-    mithril::GlStubCalled("glVertexAttrib4uiv");
-  }
-
-  void APIENTRY glVertexAttrib4usv(GLuint index, const GLushort *v) {
-    mithril::GlStubCalled("glVertexAttrib4usv");
-  }
-
-  void APIENTRY glVertexAttribDivisor(GLuint index, GLuint divisor) {
-    mithril::GlStubCalled("glVertexAttribDivisor");
-  }
-
   void APIENTRY glVertexAttribI1i(GLuint index, GLint x) {
     mithril::GlStubCalled("glVertexAttribI1i");
   }
@@ -845,10 +594,6 @@ extern "C" {
 
   void APIENTRY glVertexAttribI4usv(GLuint index, const GLushort *v) {
     mithril::GlStubCalled("glVertexAttribI4usv");
-  }
-
-  void APIENTRY glVertexAttribIPointer(GLuint index, GLint size, GLenum type, GLsizei stride, const void *pointer) {
-    mithril::GlStubCalled("glVertexAttribIPointer");
   }
 
   void APIENTRY glVertexAttribP1ui(GLuint index, GLenum type, GLboolean normalized, GLuint value) {

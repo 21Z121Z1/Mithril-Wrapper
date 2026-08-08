@@ -93,8 +93,10 @@ struct FnTable {
     ML_FN(DestroyPipeline);
     ML_FN(CmdBindPipeline);
     ML_FN(CmdBindVertexBuffers);
+    ML_FN(CmdBindIndexBuffer);
     ML_FN(CmdBindDescriptorSets);
     ML_FN(CmdDraw);
+    ML_FN(CmdDrawIndexed);
     ML_FN(CmdBeginRenderPass);
     ML_FN(CmdEndRenderPass);
     ML_FN(CmdClearColorImage);
@@ -127,10 +129,19 @@ struct DrawOp {
     uint64_t program = 0;
     VkBuffer vertex_buffer = VK_NULL_HANDLE;
     VkDeviceMemory vertex_mem = VK_NULL_HANDLE;
+    VkBuffer instance_buffer = VK_NULL_HANDLE;
+    VkDeviceMemory instance_mem = VK_NULL_HANDLE;
+    VkBuffer index_buffer = VK_NULL_HANDLE;
+    VkDeviceMemory index_mem = VK_NULL_HANDLE;
     uint32_t vertex_count = 0;
-    uint32_t stride = 0;
-    std::vector<uint32_t> attr_counts;
-    std::vector<uint32_t> attr_offsets;
+    uint32_t index_count = 0;
+    uint32_t instance_count = 1;
+    uint32_t topology = 0;         // Topology index
+    uint32_t v_stride = 0;         // per-vertex record bytes
+    uint32_t i_stride = 0;         // per-instance record bytes
+    std::vector<VertexAttr> v_attrs;
+    std::vector<VertexAttr> i_attrs;
+    std::string pipeline_key;
     VkDescriptorSet desc_set = VK_NULL_HANDLE;
     VkDeviceSize ubo_offset = 0;
     VkDeviceSize ubo_range = 0;
@@ -357,8 +368,10 @@ void LoadDeviceFunctions() {
     LOAD_DEV(DestroyPipeline);
     LOAD_DEV(CmdBindPipeline);
     LOAD_DEV(CmdBindVertexBuffers);
+    LOAD_DEV(CmdBindIndexBuffer);
     LOAD_DEV(CmdBindDescriptorSets);
     LOAD_DEV(CmdDraw);
+    LOAD_DEV(CmdDrawIndexed);
     LOAD_DEV(CmdBeginRenderPass);
     LOAD_DEV(CmdEndRenderPass);
     LOAD_DEV(CmdClearColorImage);
@@ -442,47 +455,86 @@ bool CreateTarget() {
 // Pipelines
 // ---------------------------------------------------------------------------
 
-VkPipeline GetOrCreatePipeline(const Program& prog, uint64_t hash_key,
-                               const std::vector<uint32_t>& attr_counts,
-                               const std::vector<uint32_t>& attr_offsets,
-                               uint32_t stride) {
-    std::string key = std::to_string(hash_key) + "|" + std::to_string(stride);
-    for (size_t i = 0; i < attr_counts.size(); ++i)
-        key += "|" + std::to_string(attr_counts[i]) + "@" +
-               std::to_string(attr_offsets[i]);
-    auto it = g_pipelines.find(key);
+std::string BuildPipelineKey(uint64_t program, uint32_t topology,
+                             const std::vector<VertexAttr>& v_attrs,
+                             uint32_t v_stride,
+                             const std::vector<VertexAttr>& i_attrs,
+                             uint32_t i_stride) {
+    std::string key = std::to_string(program) + "|T" + std::to_string(topology) +
+                      "|V" + std::to_string(v_stride);
+    for (const auto& a : v_attrs)
+        key += "|" + std::to_string(a.location) + "@" +
+               std::to_string(a.offset) + ":" + std::to_string(a.components);
+    if (!i_attrs.empty()) {
+        key += "|I" + std::to_string(i_stride);
+        for (const auto& a : i_attrs)
+            key += "|" + std::to_string(a.location) + "@" +
+                   std::to_string(a.offset) + ":" + std::to_string(a.components);
+    }
+    return key;
+}
+
+VkFormat AttrFormat(uint32_t components) {
+    switch (components) {
+        case 1: return VK_FORMAT_R32_SFLOAT;
+        case 2: return VK_FORMAT_R32G32_SFLOAT;
+        case 3: return VK_FORMAT_R32G32B32_SFLOAT;
+        default: return VK_FORMAT_R32G32B32A32_SFLOAT;
+    }
+}
+
+VkPipeline GetOrCreatePipeline(const Program& prog, const DrawOp& op) {
+    auto it = g_pipelines.find(op.pipeline_key);
     if (it != g_pipelines.end()) return it->second;
 
-    VkVertexInputBindingDescription vb{};
-    vb.binding = 0;
-    vb.stride = stride;
-    vb.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+    // Binding 0: per-vertex stream; binding 1: per-instance stream.
+    std::vector<VkVertexInputBindingDescription> vb;
+    VkVertexInputBindingDescription v0{};
+    v0.binding = 0;
+    v0.stride = op.v_stride;
+    v0.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+    vb.push_back(v0);
+    if (!op.i_attrs.empty()) {
+        VkVertexInputBindingDescription v1{};
+        v1.binding = 1;
+        v1.stride = op.i_stride;
+        v1.inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
+        vb.push_back(v1);
+    }
 
     std::vector<VkVertexInputAttributeDescription> fa;
-    for (size_t i = 0; i < attr_counts.size(); ++i) {
-        VkVertexInputAttributeDescription a{};
-        a.location = (uint32_t)i;
-        a.binding = 0;
-        switch (attr_counts[i]) {
-            case 1: a.format = VK_FORMAT_R32_SFLOAT; break;
-            case 2: a.format = VK_FORMAT_R32G32_SFLOAT; break;
-            case 3: a.format = VK_FORMAT_R32G32B32_SFLOAT; break;
-            default: a.format = VK_FORMAT_R32G32B32A32_SFLOAT; break;
-        }
-        a.offset = attr_offsets[i];
-        fa.push_back(a);
+    for (const auto& a : op.v_attrs) {
+        VkVertexInputAttributeDescription d{};
+        d.location = a.location;
+        d.binding = 0;
+        d.format = AttrFormat(a.components);
+        d.offset = a.offset;
+        fa.push_back(d);
+    }
+    for (const auto& a : op.i_attrs) {
+        VkVertexInputAttributeDescription d{};
+        d.location = a.location;
+        d.binding = 1;
+        d.format = AttrFormat(a.components);
+        d.offset = a.offset;
+        fa.push_back(d);
     }
 
     VkPipelineVertexInputStateCreateInfo vi{};
     vi.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-    vi.vertexBindingDescriptionCount = 1;
-    vi.pVertexBindingDescriptions = &vb;
+    vi.vertexBindingDescriptionCount = (uint32_t)vb.size();
+    vi.pVertexBindingDescriptions = vb.data();
     vi.vertexAttributeDescriptionCount = (uint32_t)fa.size();
     vi.pVertexAttributeDescriptions = fa.data();
 
+    static const VkPrimitiveTopology kTopologyMap[] = {
+        VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+        VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP,
+        VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN,
+    };
     VkPipelineInputAssemblyStateCreateInfo ia{};
     ia.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
-    ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    ia.topology = kTopologyMap[op.topology % 3];
 
     VkPipelineViewportStateCreateInfo vp{};
     vp.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
@@ -544,7 +596,7 @@ VkPipeline GetOrCreatePipeline(const Program& prog, uint64_t hash_key,
         ML_LOG_ERROR("vk: CreateGraphicsPipelines failed");
         return VK_NULL_HANDLE;
     }
-    g_pipelines.emplace(key, pipe);
+    g_pipelines.emplace(op.pipeline_key, pipe);
     return pipe;
 }
 
@@ -892,40 +944,79 @@ void DestroyProgram(uint64_t program) {
 // Draw path
 // ---------------------------------------------------------------------------
 
-void DrawInterleaved(
-    uint64_t program, const std::vector<float>& vertices, uint32_t stride,
-    const std::vector<uint32_t>& attr_counts,
-    const std::vector<uint32_t>& attr_offsets,
-    const std::unordered_map<std::string, std::vector<float>>& uniforms) {
-    if (!g.initialized || vertices.empty()) return;
-    auto prog_it = g_programs.find(program);
-    if (prog_it == g_programs.end()) return;
-    const Program& prog = prog_it->second;
+namespace {
 
-    DrawOp op;
-    op.program = program;
-    op.stride = stride;
-    op.attr_counts = attr_counts;
-    op.attr_offsets = attr_offsets;
-    op.vertex_count = (uint32_t)(vertices.size() * sizeof(float) / stride);
-
-    // Copy the interleaved payload into a per-draw host-visible buffer.
-    VkBuffer vb = VK_NULL_HANDLE;
-    VkDeviceMemory vbm = VK_NULL_HANDLE;
-    if (CreateHostBuffer(vertices.size() * sizeof(float),
-                         VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, &vb, &vbm) !=
-        VK_SUCCESS) {
-        ML_LOG_ERROR("vk: vertex staging allocation failed");
-        return;
+// Create a host-visible staging buffer of `size` bytes and copy `data` in.
+bool StageBytes(const void* data, VkDeviceSize size, VkBufferUsageFlags usage,
+                VkBuffer* buf, VkDeviceMemory* mem) {
+    if (CreateHostBuffer(size, usage, buf, mem) != VK_SUCCESS) {
+        ML_LOG_ERROR("vk: draw staging allocation failed");
+        return false;
     }
     void* map = nullptr;
-    if (g.fn.MapMemory(g.device, vbm, 0, VK_WHOLE_SIZE, 0, &map) ==
+    if (g.fn.MapMemory(g.device, *mem, 0, VK_WHOLE_SIZE, 0, &map) ==
         VK_SUCCESS) {
-        std::memcpy(map, vertices.data(), vertices.size() * sizeof(float));
-        g.fn.UnmapMemory(g.device, vbm);
+        std::memcpy(map, data, (size_t)size);
+        g.fn.UnmapMemory(g.device, *mem);
     }
-    op.vertex_buffer = vb;
-    op.vertex_mem = vbm;
+    return true;
+}
+
+// Stage a float32 stream into buf/mem (no-op for an empty stream).
+bool StageStream(const VertexStream& stream, VkBuffer* buf,
+                 VkDeviceMemory* mem) {
+    if (stream.data.empty() || stream.stride == 0) return true;
+    return StageBytes(stream.data.data(), stream.data.size() * sizeof(float),
+                      VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, buf, mem);
+}
+
+} // namespace
+
+void Draw(const DrawParams& params) {
+    if (!g.initialized) return;
+    auto prog_it = g_programs.find(params.program);
+    if (prog_it == g_programs.end()) return;
+    const Program& prog = prog_it->second;
+    if (params.vertex_stream.data.empty()) return;
+
+    DrawOp op;
+    op.program = params.program;
+    op.topology = (uint32_t)params.topology;
+    op.v_stride = params.vertex_stream.stride;
+    op.v_attrs = params.vertex_stream.attrs;
+    op.i_stride = params.instance_stream.stride;
+    op.i_attrs = params.instance_stream.attrs;
+    op.instance_count = std::max<uint32_t>(params.instance_count, 1);
+    op.vertex_count =
+        (uint32_t)(params.vertex_stream.data.size() * sizeof(float) /
+                   op.v_stride);
+    op.index_count = (uint32_t)params.indices.size();
+    op.pipeline_key =
+        BuildPipelineKey(params.program, op.topology, op.v_attrs, op.v_stride,
+                         op.i_attrs, op.i_stride);
+
+    if (!StageStream(params.vertex_stream, &op.vertex_buffer,
+                     &op.vertex_mem))
+        return;
+    if (!op.i_attrs.empty() &&
+        !StageStream(params.instance_stream, &op.instance_buffer,
+                     &op.instance_mem)) {
+        g.fn.DestroyBuffer(g.device, op.vertex_buffer, nullptr);
+        g.fn.FreeMemory(g.device, op.vertex_mem, nullptr);
+        return;
+    }
+    if (op.index_count &&
+        !StageBytes(params.indices.data(), op.index_count * sizeof(uint32_t),
+                    VK_BUFFER_USAGE_INDEX_BUFFER_BIT, &op.index_buffer,
+                    &op.index_mem)) {
+        g.fn.DestroyBuffer(g.device, op.vertex_buffer, nullptr);
+        g.fn.FreeMemory(g.device, op.vertex_mem, nullptr);
+        if (op.instance_buffer) {
+            g.fn.DestroyBuffer(g.device, op.instance_buffer, nullptr);
+            g.fn.FreeMemory(g.device, op.instance_mem, nullptr);
+        }
+        return;
+    }
 
     // Compose the UBO from the reflected members + current uniform values.
     VkDeviceSize range = prog.has_ubo ? prog.ubo_size : 16;
@@ -939,8 +1030,8 @@ void DrawInterleaved(
     if (prog.has_ubo) {
         std::vector<uint8_t> bytes((size_t)prog.ubo_size, 0);
         for (const auto& m : prog.members) {
-            auto it = uniforms.find(m.name);
-            if (it == uniforms.end()) continue;
+            auto it = params.uniforms.find(m.name);
+            if (it == params.uniforms.end()) continue;
             size_t n = std::min<size_t>(m.size, it->second.size() * sizeof(float));
             std::memcpy(bytes.data() + m.offset, it->second.data(), n);
         }
@@ -958,8 +1049,16 @@ void DrawInterleaved(
     if (g.fn.AllocateDescriptorSets(g.device, &dsa, &op.desc_set) !=
         VK_SUCCESS) {
         ML_LOG_ERROR("vk: AllocateDescriptorSets failed");
-        g.fn.DestroyBuffer(g.device, vb, nullptr);
-        g.fn.FreeMemory(g.device, vbm, nullptr);
+        g.fn.DestroyBuffer(g.device, op.vertex_buffer, nullptr);
+        g.fn.FreeMemory(g.device, op.vertex_mem, nullptr);
+        if (op.instance_buffer) {
+            g.fn.DestroyBuffer(g.device, op.instance_buffer, nullptr);
+            g.fn.FreeMemory(g.device, op.instance_mem, nullptr);
+        }
+        if (op.index_buffer) {
+            g.fn.DestroyBuffer(g.device, op.index_buffer, nullptr);
+            g.fn.FreeMemory(g.device, op.index_mem, nullptr);
+        }
         return;
     }
     VkDescriptorBufferInfo dbi{};
@@ -1031,18 +1130,30 @@ void SubmitFlush() {
         g.fn.CmdSetScissor(g.cmd, 0, 1, &sc);
 
         for (const auto& op : g.frame_draws) {
-            VkPipeline pipe = GetOrCreatePipeline(
-                g_programs.at(op.program), op.program, op.attr_counts,
-                op.attr_offsets, op.stride);
+            VkPipeline pipe =
+                GetOrCreatePipeline(g_programs.at(op.program), op);
             if (pipe == VK_NULL_HANDLE) continue;
             g.fn.CmdBindPipeline(g.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
-            VkDeviceSize zero = 0;
-            g.fn.CmdBindVertexBuffers(g.cmd, 0, 1, &op.vertex_buffer, &zero);
+
+            const VkBuffer binds[2] = {op.vertex_buffer, op.instance_buffer};
+            const VkDeviceSize zeros[2] = {0, 0};
+            uint32_t nb = op.instance_buffer ? 2 : 1;
+            g.fn.CmdBindVertexBuffers(g.cmd, 0, nb, binds, zeros);
+
+            if (op.index_count) {
+                g.fn.CmdBindIndexBuffer(g.cmd, op.index_buffer, 0,
+                                        VK_INDEX_TYPE_UINT32);
+            }
             uint32_t dyn = (uint32_t)op.ubo_offset;
             g.fn.CmdBindDescriptorSets(g.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                        g.pipeline_layout, 0, 1, &op.desc_set,
                                        1, &dyn);
-            g.fn.CmdDraw(g.cmd, op.vertex_count, 1, 0, 0);
+            if (op.index_count) {
+                g.fn.CmdDrawIndexed(g.cmd, op.index_count, op.instance_count,
+                                    0, 0, 0);
+            } else {
+                g.fn.CmdDraw(g.cmd, op.vertex_count, op.instance_count, 0, 0);
+            }
         }
         g.fn.CmdEndRenderPass(g.cmd);
     }
@@ -1074,6 +1185,14 @@ void SubmitFlush() {
     for (auto& op : g.frame_draws) {
         g.fn.DestroyBuffer(g.device, op.vertex_buffer, nullptr);
         g.fn.FreeMemory(g.device, op.vertex_mem, nullptr);
+        if (op.instance_buffer) {
+            g.fn.DestroyBuffer(g.device, op.instance_buffer, nullptr);
+            g.fn.FreeMemory(g.device, op.instance_mem, nullptr);
+        }
+        if (op.index_buffer) {
+            g.fn.DestroyBuffer(g.device, op.index_buffer, nullptr);
+            g.fn.FreeMemory(g.device, op.index_mem, nullptr);
+        }
     }
     g.fn.ResetDescriptorPool(g.device, g.desc_pool, 0);
     g.ubo_next = 0;

@@ -34,7 +34,16 @@
 #define GL_COLOR_BUFFER_BIT   0x00004000
 #define GL_RGBA               0x1908
 #define GL_UNSIGNED_BYTE      0x1401
+#define GL_UNSIGNED_SHORT     0x1403
+#define GL_UNSIGNED_INT       0x1405
 #define GL_NO_ERROR           0
+#define GL_TRIANGLE_STRIP     0x0005
+#define GL_TRIANGLE_FAN       0x0006
+#define GL_ELEMENT_ARRAY_BUFFER 0x8893
+#define GL_BUFFER_SIZE        0x8764
+#define GL_VERTEX_ATTRIB_ARRAY_SIZE   0x8623
+#define GL_VERTEX_ATTRIB_ARRAY_STRIDE 0x8624
+#define GL_READ_WRITE         0x88BA
 
 typedef unsigned int GLuint;
 typedef unsigned int GLenum;
@@ -44,6 +53,8 @@ typedef int GLint;
 typedef int GLsizeiptr;
 typedef int GLintptr;
 typedef void* GLvoid;
+typedef unsigned short GLushort;
+typedef unsigned int GLbitfield;
 
 typedef void (*fn_glClearColor)(float, float, float, float);
 typedef void (*fn_glClear)(GLenum);
@@ -64,6 +75,15 @@ typedef void (*fn_glBufferData)(GLenum, GLsizeiptr, const void*, GLenum);
 typedef void (*fn_glEnableVertexAttribArray)(GLuint);
 typedef void (*fn_glVertexAttribPointer)(GLuint, GLint, GLenum, GLboolean, GLsizei, const GLvoid*);
 typedef void (*fn_glDrawArrays)(GLenum, GLint, GLsizei);
+typedef void (*fn_glDrawElements)(GLenum, GLsizei, GLenum, const GLvoid*);
+typedef void (*fn_glDrawArraysInstanced)(GLenum, GLint, GLsizei, GLsizei);
+typedef void (*fn_glDrawElementsInstanced)(GLenum, GLsizei, GLenum, const GLvoid*, GLsizei);
+typedef void (*fn_glVertexAttribDivisor)(GLuint, GLuint);
+typedef void (*fn_glGetBufferParameteriv)(GLenum, GLenum, GLint*);
+typedef void (*fn_glGetVertexAttribiv)(GLuint, GLenum, GLint*);
+typedef void* (*fn_glMapBufferRange)(GLenum, GLintptr, GLsizeiptr, GLbitfield);
+typedef GLboolean (*fn_glUnmapBuffer)(GLenum);
+typedef void (*fn_glBufferSubData)(GLenum, GLintptr, GLsizeiptr, const void*);
 typedef void (*fn_glFinish)(void);
 typedef void (*fn_glReadPixels)(GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, void*);
 typedef void (*fn_glDeleteProgram)(GLuint);
@@ -124,6 +144,15 @@ int main(void) {
     fn_glEnableVertexAttribArray enableAttrib = (fn_glEnableVertexAttribArray)dlsym(h, "glEnableVertexAttribArray");
     fn_glVertexAttribPointer vertexAttribPtr = (fn_glVertexAttribPointer)dlsym(h, "glVertexAttribPointer");
     fn_glDrawArrays        drawArrays        = (fn_glDrawArrays)dlsym(h, "glDrawArrays");
+    fn_glDrawElements      drawElements      = (fn_glDrawElements)dlsym(h, "glDrawElements");
+    fn_glDrawArraysInstanced drawArraysInst = (fn_glDrawArraysInstanced)dlsym(h, "glDrawArraysInstanced");
+    fn_glDrawElementsInstanced drawElementsInst = (fn_glDrawElementsInstanced)dlsym(h, "glDrawElementsInstanced");
+    fn_glVertexAttribDivisor vertexAttribDivisor = (fn_glVertexAttribDivisor)dlsym(h, "glVertexAttribDivisor");
+    fn_glGetBufferParameteriv getBufferParam = (fn_glGetBufferParameteriv)dlsym(h, "glGetBufferParameteriv");
+    fn_glGetVertexAttribiv getVertexAttrib  = (fn_glGetVertexAttribiv)dlsym(h, "glGetVertexAttribiv");
+    fn_glMapBufferRange   mapBufferRange    = (fn_glMapBufferRange)dlsym(h, "glMapBufferRange");
+    fn_glUnmapBuffer      unmapBuffer       = (fn_glUnmapBuffer)dlsym(h, "glUnmapBuffer");
+    fn_glBufferSubData    bufferSubData     = (fn_glBufferSubData)dlsym(h, "glBufferSubData");
     fn_glFinish            finish            = (fn_glFinish)dlsym(h, "glFinish");
     fn_glReadPixels        readPixels        = (fn_glReadPixels)dlsym(h, "glReadPixels");
     fn_glDeleteProgram     deleteProgram     = (fn_glDeleteProgram)dlsym(h, "glDeleteProgram");
@@ -134,6 +163,10 @@ int main(void) {
           genBuffers && bindBuffer && bufferData && enableAttrib &&
           vertexAttribPtr && drawArrays && finish && readPixels,
           "all required GL symbols resolved");
+
+    CHECK(drawElements && drawArraysInst && drawElementsInst && vertexAttribDivisor &&
+          getBufferParam && getVertexAttrib && mapBufferRange && unmapBuffer,
+          "M3 draw/query symbols resolved");
 
     /* -- background ------------------------------------------------ */
     clearColor(0.10f, 0.20f, 0.30f, 1.0f);
@@ -200,6 +233,135 @@ int main(void) {
     CHECK(px_match(px, 0, 0, 255, 255),
           "tint uniform drives the pixel colour (r=%d g=%d b=%d a=%d)",
           px[0], px[1], px[2], px[3]);
+
+    /* -- M3: object/state queries ----------------------------------------- */
+    {
+        GLint sz = 0, n = 0, stride = 0;
+        getBufferParam(GL_ARRAY_BUFFER, GL_BUFFER_SIZE, &sz);
+        CHECK(sz == (GLint)sizeof(verts),
+              "glGetBufferParameteriv reports VBO size (%d)", sz);
+        getVertexAttrib(0, GL_VERTEX_ATTRIB_ARRAY_SIZE, &n);
+        getVertexAttrib(0, GL_VERTEX_ATTRIB_ARRAY_STRIDE, &stride);
+
+        CHECK(n == 3 && stride == (GLint)sizeof(struct Vertex),
+              "glGetVertexAttribiv reflects pointer state (size=%d stride=%d)", n, stride);
+    }
+
+    /* -- M3: indexed draw (UINT16) ----------------------------------------- */
+    {
+        const GLushort idx[3] = {0, 1, 2};
+        GLuint ibo = 0;
+        genBuffers(1, &ibo);
+        bindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo);
+        bufferData(GL_ELEMENT_ARRAY_BUFFER, (GLsizeiptr)sizeof(idx), idx, 0x88E4);
+        uniform4f(tint, 1.0f, 1.0f, 1.0f, 1.0f);
+        clear(GL_COLOR_BUFFER_BIT);
+        drawElements(GL_TRIANGLES, 3, GL_UNSIGNED_SHORT, (const GLvoid*)0);
+        finish();
+        readPixels(256, 300, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        CHECK(px_match(px, 255, 255, 255, 255),
+              "glDrawElements(UINT16) renders white triangle (r=%d g=%d b=%d)",
+              px[0], px[1], px[2]);
+    }
+
+    /* -- M3: map-range write + redraw -------------------------------------- */
+    {
+        struct Vertex mv[3] = {{-0.5f, -0.6f, 0.0f, 1, 1, 1, 1},
+                               { 0.5f, -0.6f, 0.0f, 1, 1, 1, 1},
+                               { 0.0f,  0.8f, 0.0f, 1, 1, 1, 1}};
+        void* map = mapBufferRange(GL_ARRAY_BUFFER, 0, sizeof(mv), GL_READ_WRITE);
+        CHECK(map != NULL, "glMapBufferRange returns writable pointer");
+        memcpy(map, mv, sizeof(mv));
+        CHECK(unmapBuffer(GL_ARRAY_BUFFER) == GL_TRUE, "glUnmapBuffer succeeds");
+        uniform4f(tint, 0.0f, 1.0f, 0.0f, 1.0f);
+        clear(GL_COLOR_BUFFER_BIT);
+        drawArrays(GL_TRIANGLES, 0, 3);
+        finish();
+        readPixels(256, 300, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        CHECK(px_match(px, 0, 255, 0, 255),
+              "mapped-write vertex data renders green (r=%d g=%d b=%d)",
+              px[0], px[1], px[2]);
+        uniform4f(tint, 1.0f, 1.0f, 1.0f, 1.0f);
+    }
+
+    /* -- M3: non-4-byte-aligned interleaved stride -------------------------- */
+    {
+        /* 3 floats pos (0..12) + 2 pad + 4 normalized u8 color at offset 14:
+           stride 18 (18 % 4 == 2), color offset 14 (14 % 4 == 2). */
+        unsigned char data[18 * 3] = {0};
+        float tri[3][3] = {{-0.5f, -0.5f, 0.0f}, {0.5f, -0.5f, 0.0f},
+                           {0.0f, 0.6f, 0.0f}};
+        for (int v = 0; v < 3; ++v) {
+            memcpy(data + v * 18, tri[v], 12);
+            data[v * 18 + 14] = 255; data[v * 18 + 15] = 255;
+            data[v * 18 + 16] = 255; data[v * 18 + 17] = 255;
+        }
+        GLuint vbo2 = 0;
+        genBuffers(1, &vbo2);
+        bindBuffer(GL_ARRAY_BUFFER, vbo2);
+        bufferData(GL_ARRAY_BUFFER, (GLsizeiptr)sizeof(data), data, 0x88E4);
+        enableAttrib(0);
+        vertexAttribPtr(0, 3, GL_FLOAT, GL_FALSE, 18, (const GLvoid*)0);
+        enableAttrib(1);
+        vertexAttribPtr(1, 4, GL_UNSIGNED_BYTE, GL_TRUE, 18, (const GLvoid*)14);
+        clear(GL_COLOR_BUFFER_BIT);
+        drawArrays(GL_TRIANGLES, 0, 3);
+        finish();
+        readPixels(256, 300, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        CHECK(px_match(px, 255, 255, 255, 255),
+              "non-4-aligned stride/offset renders white (r=%d g=%d b=%d)",
+              px[0], px[1], px[2]);
+    }
+
+    /* -- M3: instanced draw (divisor=1) ------------------------------------ */
+    {
+        /* per-vertex: pos from vbo (loc 0); per-instance: color (loc 1) from
+           a second buffer with glVertexAttribDivisor(1, 1). Two instances:
+           red then green; the green instance is drawn last and wins. */
+        struct { float x, y, z; } ipos[3] = {{-0.5f, -0.5f, 0}, {0.5f, -0.5f, 0}, {0, 0.6f, 0}};
+        float instcol[2][4] = {{1.0f, 0, 0, 1}, {0, 1.0f, 0, 1}};
+        GLuint vbo3, vbo4;
+        genBuffers(1, &vbo3);
+        bindBuffer(GL_ARRAY_BUFFER, vbo3);
+        bufferData(GL_ARRAY_BUFFER, (GLsizeiptr)sizeof(ipos), ipos, 0x88E4);
+        enableAttrib(0);
+        vertexAttribPtr(0, 3, GL_FLOAT, GL_FALSE, (GLsizei)sizeof(ipos[0]), 0);
+        genBuffers(1, &vbo4);
+        bindBuffer(GL_ARRAY_BUFFER, vbo4);
+        bufferData(GL_ARRAY_BUFFER, (GLsizeiptr)sizeof(instcol), instcol, 0x88E4);
+        enableAttrib(1);
+        vertexAttribPtr(1, 4, GL_FLOAT, GL_FALSE, 0, 0);
+        vertexAttribDivisor(1, 1);
+        clear(GL_COLOR_BUFFER_BIT);
+        drawArraysInst(GL_TRIANGLES, 0, 3, 2);
+        finish();
+        readPixels(256, 300, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        CHECK(px_match(px, 0, 255, 0, 255),
+              "glDrawArraysInstanced picks per-instance data (r=%d g=%d b=%d)",
+              px[0], px[1], px[2]);
+    }
+
+    /* -- M3: triangle-strip topology --------------------------------------- */
+    {
+        GLuint vao2 = 0;
+        genVertexArrays(1, &vao2);
+        bindVertexArray(vao2);
+        genBuffers(1, &vbo);
+        bindBuffer(GL_ARRAY_BUFFER, vbo);
+        bufferData(GL_ARRAY_BUFFER, (GLsizeiptr)sizeof(verts), verts, 0x88E4);
+        enableAttrib(0);
+        vertexAttribPtr(0, 3, GL_FLOAT, GL_FALSE, sizeof(verts[0]), 0);
+        enableAttrib(1);
+        vertexAttribPtr(1, 4, GL_FLOAT, GL_FALSE, sizeof(verts[0]), (const GLvoid*)12);
+        clear(GL_COLOR_BUFFER_BIT);
+        drawArrays(GL_TRIANGLE_STRIP, 0, 3);
+        finish();
+        readPixels(256, 300, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        CHECK(px_match(px, 255, 255, 255, 255),
+              "GL_TRIANGLE_STRIP renders the same triangle (r=%d g=%d b=%d)",
+              px[0], px[1], px[2]);
+        bindVertexArray(vao);
+    }
 
     deleteProgram(prog);
     dlclose(h);

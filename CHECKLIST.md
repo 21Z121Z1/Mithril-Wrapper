@@ -1,10 +1,11 @@
 # Mithril-Wrapper 实现清单（CHECKLIST）
 
-> 状态：**M2 完成**（S2 着色器层 + Vulkan 后端接通；Linux 四冒烟测试通过，含 GL→Vulkan 全链 draw_smoke）。
+> 状态：**M3 完成**（S3 顶点数据层 76/114 + S2 着色器层 + S1 状态机；Linux 四冒烟测试通过，含 GL→Vulkan 全链 draw_smoke）。
 > 配套文档：`docs/gl33_core_list.md`（GL 3.3 core 342 函数分组）、`docs/egl_list.md`（EGL 符号清单）。
 > 测试：`tests/contract_smoke.c`（EGL 契约）、`tests/state_smoke.c`（GL 状态机）、`tests/shader_smoke.c`（着色器管线）、`tests/draw_smoke.c`（GL→Vulkan→读回全链，需 lavapipe/llvmpipe）。
 > M2 已完成：`src/shader/`（Shader/Program 对象表、glslang 编译缓存 .glsl→SPIR-V、SPIRV-Cross 反射 uniform/attrib）、GLSL 150 自动升级到 330 core、`gl_VertexID/gl_InstanceID` 重写、松散 uniform 折入合成 UBO（ANGLE 模式）、`glUniform*` 全系 + 矩阵 setter/getter；`src/vk/`（dlsym 动态加载 Vulkan loader/ICD、instance 级函数经真实 instance 句柄解析、UBO 反射 VS+FS 双阶段合并 + 动态 UBO 池、staging 顶点缓冲、renderpass + 清屏 + 帧读回）；`draw_smoke` 全链通过。
-> 待办：M3 顶点输入（S3 组，glDrawElements）+ M4 纹理。
+> M3 已完成：S3 组 76/114 真实现——顶点属性全家族（glVertexAttribPointer/IPointer、常量系 1-4、Divisor、Enable/Disable）、attribute 查询（fv/dv/iv/Iiv/Iuiv/Pointerv）、buffer 映射/查询家族（MapBuffer/Range、Unmap、FlushMapped、GetBufferParameteriv/i64v/Pointerv/SubData、CopyBufferSubData）、全部 10 个 draw 入口（DrawArrays/Instanced、DrawElements/BaseVertex/Instanced/InstancedBaseVertex、DrawRangeElements/BaseVertex、MultiDrawArrays/Elements/BaseVertex）；引擎新增双顶点流（VERTEX+INSTANCE binding）、索引缓冲（UBYTE/USHORT/UINT 统一扩 UINT32 staging）、TriangleStrip/Fan 拓扑、实例化（CPU 按 divisor 复制行，无需 EXT）；非 4 字节对齐 stride/offset 由 CPU 打包规整；`glGetVertexAttrib*` 单值查询仅写 params[0]（修先栈溢出 bug）；draw_smoke 扩展 8 断言通过。
+> 待办：M4 纹理（S4 组 glTexImage2D）+ M5 状态管线。
 
 ---
 
@@ -143,7 +144,7 @@ Vulkan 后端（src/vk/，经 MoltenVK → Metal → CAMetalLayer）
 | **M0 基建** | CMake 双分支工程；EGL 44 符号骨架 + config 契约；GL 342 stub 分发表；CI build.yml（macOS runner + MoltenVK + glslang）；Linux 编 .so 验证；iOS 分支 CAMetalLayer→swapchain 纯色 | Linux .so 可加载、EGL 契约通过、CI 产出 dylib |
 | **M1 注入与 Context** | eglMakeCurrent 语义完整；glClear/glViewport/glClearColor 实现；GL_VERSION="3.3 Core Profile" 字符串 | 真机 demo 背景色正确 |
 | **M2 Shader 管线** | glShaderSource→glslang→SPIR-V→vkShaderModule；UBO 管理；glDrawArrays 三角形 | 带色三角形 | ✅ S2 层完成（glslang+SPIRV-Cross、shader_smoke 通过）+ Vulkan 后端接通（`src/vk/`：dlsym 加载器、instance GIPA 解析、UBO 双阶段反射、动态 UBO 池、staging 顶点缓冲、renderpass/清屏/读回）；draw_smoke 全链通过（llvmpipe） |
-| **M3 顶点数据** | VAO/VBO、stride/offset 规整、glDrawElements | 用 App 数据绘制 |
+| **M3 顶点数据** | VAO/VBO、stride/offset 规整、glDrawElements | 用 App 数据绘制 | ✅ S3 76/114 完成（属性全系/映射查询/draw 十入口/双流+索引+拓扑+实例化）；draw_smoke 扩展 8 断言通过 |
 | **M4 纹理** | glTexImage2D 上传、格式/swizzle、采样器、mipmap | 贴图正确 |
 | **M5 状态与管线** | depth/stencil/blend/cull/FBO/MSAA → pipeline 缓存 | 完整三维画面 |
 | **M6 同步** | 双 CMD buffer、barrier、glFinish/glFlush | 多帧不花屏 |
