@@ -30,9 +30,7 @@ bool Draw(const DrawParams& params);
 void SubmitFlush(bool wait_for_completion);
 void ReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, void* out);
 
-void UploadTexture(uint64_t gl_id, const TexUpload& img,
-                   const TexSamplerInfo& sampler);
-void UpdateTextureSampler(uint64_t gl_id, const TexSamplerInfo& sampler);
+void UploadTexture(uint64_t gl_id, const TexUpload& img);
 void DestroyResidentTexture(uint64_t gl_id);
 void DestroyBuffer(uint64_t lifetime_id);
 void CreateRenderbuffer(uint64_t rbo_id, GLenum internalformat,

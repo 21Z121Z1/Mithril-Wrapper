@@ -28,10 +28,6 @@ extern "C" {
     mithril::GlStubCalled("glBindFragDataLocationIndexed");
   }
 
-  void APIENTRY glBindSampler(GLuint unit, GLuint sampler) {
-    mithril::GlStubCalled("glBindSampler");
-  }
-
   void APIENTRY glClearBufferfi(GLenum buffer, GLint drawbuffer, GLfloat depth, GLint stencil) {
     mithril::GlStubCalled("glClearBufferfi");
   }
@@ -57,10 +53,6 @@ extern "C" {
     mithril::GlStubCalled("glDeleteQueries");
   }
 
-  void APIENTRY glDeleteSamplers(GLsizei count, const GLuint *samplers) {
-    mithril::GlStubCalled("glDeleteSamplers");
-  }
-
   void APIENTRY glDeleteSync(GLsync sync) {
     mithril::GlStubCalled("glDeleteSync");
   }
@@ -84,10 +76,6 @@ extern "C" {
 
   void APIENTRY glGenQueries(GLsizei n, GLuint *ids) {
     mithril::GlStubCalled("glGenQueries");
-  }
-
-  void APIENTRY glGenSamplers(GLsizei count, GLuint *samplers) {
-    mithril::GlStubCalled("glGenSamplers");
   }
 
   GLint APIENTRY glGetFragDataIndex(GLuint program, const GLchar *name) {
@@ -124,22 +112,6 @@ extern "C" {
     mithril::GlStubCalled("glGetQueryiv");
   }
 
-  void APIENTRY glGetSamplerParameterIiv(GLuint sampler, GLenum pname, GLint *params) {
-    mithril::GlStubCalled("glGetSamplerParameterIiv");
-  }
-
-  void APIENTRY glGetSamplerParameterIuiv(GLuint sampler, GLenum pname, GLuint *params) {
-    mithril::GlStubCalled("glGetSamplerParameterIuiv");
-  }
-
-  void APIENTRY glGetSamplerParameterfv(GLuint sampler, GLenum pname, GLfloat *params) {
-    mithril::GlStubCalled("glGetSamplerParameterfv");
-  }
-
-  void APIENTRY glGetSamplerParameteriv(GLuint sampler, GLenum pname, GLint *params) {
-    mithril::GlStubCalled("glGetSamplerParameteriv");
-  }
-
   void APIENTRY glGetSynciv(GLsync sync, GLenum pname, GLsizei count, GLsizei *length, GLint *values) {
     mithril::GlStubCalled("glGetSynciv");
   }
@@ -150,11 +122,6 @@ extern "C" {
 
   GLboolean APIENTRY glIsQuery(GLuint id) {
     mithril::GlStubCalled("glIsQuery");
-    return 0;
-  }
-
-  GLboolean APIENTRY glIsSampler(GLuint sampler) {
-    mithril::GlStubCalled("glIsSampler");
     return 0;
   }
 
@@ -189,30 +156,6 @@ extern "C" {
 
   void APIENTRY glQueryCounter(GLuint id, GLenum target) {
     mithril::GlStubCalled("glQueryCounter");
-  }
-
-  void APIENTRY glSamplerParameterIiv(GLuint sampler, GLenum pname, const GLint *param) {
-    mithril::GlStubCalled("glSamplerParameterIiv");
-  }
-
-  void APIENTRY glSamplerParameterIuiv(GLuint sampler, GLenum pname, const GLuint *param) {
-    mithril::GlStubCalled("glSamplerParameterIuiv");
-  }
-
-  void APIENTRY glSamplerParameterf(GLuint sampler, GLenum pname, GLfloat param) {
-    mithril::GlStubCalled("glSamplerParameterf");
-  }
-
-  void APIENTRY glSamplerParameterfv(GLuint sampler, GLenum pname, const GLfloat *param) {
-    mithril::GlStubCalled("glSamplerParameterfv");
-  }
-
-  void APIENTRY glSamplerParameteri(GLuint sampler, GLenum pname, GLint param) {
-    mithril::GlStubCalled("glSamplerParameteri");
-  }
-
-  void APIENTRY glSamplerParameteriv(GLuint sampler, GLenum pname, const GLint *param) {
-    mithril::GlStubCalled("glSamplerParameteriv");
   }
 
   void APIENTRY glTexImage2DMultisample(GLenum target, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height, GLboolean fixedsamplelocations) {

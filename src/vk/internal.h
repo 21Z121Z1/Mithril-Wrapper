@@ -143,8 +143,16 @@ struct TexObj {
     VkImage image = VK_NULL_HANDLE;
     VkDeviceMemory mem = VK_NULL_HANDLE;
     VkImageView view = VK_NULL_HANDLE;
-    VkSampler sampler = VK_NULL_HANDLE;
     uint32_t levels = 1;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    uint32_t depth = 1;
+    bool is_3d = false;
+};
+
+struct SamplerCacheEntry {
+    VkSampler sampler = VK_NULL_HANDLE;
+    uint64_t last_use = 0;
 };
 
 // S5: renderbuffer object (glRenderbufferStorage). Backed by a device-local
@@ -292,6 +300,8 @@ struct Engine {
     // M4 textures: gl texture id -> resident GPU image.
     std::unordered_map<uint64_t, TexObj> textures;
     TexObj dummy_tex;             // 1x1 white fallback for unbound units
+    std::unordered_map<std::string, SamplerCacheEntry> samplers;
+    uint64_t sampler_clock = 0;
 
     VkBuffer ubo = VK_NULL_HANDLE;
     VkDeviceMemory ubo_mem = VK_NULL_HANDLE;
@@ -362,6 +372,7 @@ VkImage FboDepthImage(const FboObj& f);
 // ---- texture helpers (defined in texture.cpp) ----------------------------
 
 TexObj* GetTexObj(uint64_t gl_id);
+VkSampler ResolveSampler(const TexSamplerInfo& sampler, uint32_t levels);
 
 // ---- pipeline helpers (defined in pipeline.cpp) --------------------------
 

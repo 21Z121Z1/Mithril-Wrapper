@@ -165,11 +165,8 @@ void ReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, void* out) {
         default: return;
     }
 }
-void UploadTexture(uint64_t id, const TexUpload& img, const TexSamplerInfo& sampler) {
-    DISPATCH_VOID(UploadTexture, id, img, sampler);
-}
-void UpdateTextureSampler(uint64_t id, const TexSamplerInfo& sampler) {
-    DISPATCH_VOID(UpdateTextureSampler, id, sampler);
+void UploadTexture(uint64_t id, const TexUpload& img) {
+    DISPATCH_VOID(UploadTexture, id, img);
 }
 void DestroyResidentTexture(uint64_t id) { DISPATCH_VOID(DestroyResidentTexture, id); }
 void DestroyBuffer(uint64_t id) { DISPATCH_VOID(DestroyBuffer, id); }

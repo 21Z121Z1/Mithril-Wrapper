@@ -37,6 +37,7 @@ constexpr NSUInteger kUniformBufferIndex = 16;
 constexpr NSUInteger kInitialUploadCapacity = 1u << 20;
 constexpr size_t kMaxPipelineCacheEntries = 512;
 constexpr size_t kMaxClearPipelineCacheEntries = 64;
+constexpr size_t kMaxSamplerCacheEntries = 128;
 
 NSUInteger AlignUp(NSUInteger value, NSUInteger alignment) {
     return (value + alignment - 1) & ~(alignment - 1);
@@ -97,15 +98,18 @@ struct ResidentBuffer {
 
 struct ResidentTexture {
     id<MTLTexture> texture = nil;
-    id<MTLSamplerState> sampler = nil;
     uint64_t content_version = 0;
-    uint64_t sampler_version = 0;
     uint32_t width = 0;
     uint32_t height = 0;
     uint32_t depth = 0;
     uint32_t levels = 0;
     bool is_3d = false;
     bool is_cube = false;
+};
+
+struct CachedSampler {
+    id<MTLSamplerState> sampler = nil;
+    uint64_t last_use = 0;
 };
 
 struct BoundTexture {
@@ -179,9 +183,11 @@ struct Engine {
     std::unordered_map<std::string, ClearPipeline> clear_pipelines;
     std::unordered_map<uint64_t, ResidentBuffer> resident_buffers;
     std::unordered_map<uint64_t, ResidentTexture> textures;
+    std::unordered_map<std::string, CachedSampler> samplers;
     std::unordered_map<uint64_t, Renderbuffer> renderbuffers;
     std::unordered_map<uint64_t, Framebuffer> framebuffers;
     uint64_t pipeline_clock = 0;
+    uint64_t sampler_clock = 0;
     std::vector<PendingDraw> draws;
     std::vector<uint8_t> readback_pixels;
     bool initialized = false;
@@ -200,6 +206,7 @@ Engine& GetEngine() {
 }
 
 void WarnUnsupported(const char* feature);
+MTLCompareFunction CompareFunction(GLenum function);
 
 id<MTLBuffer> RetainResidentBytes(const uint8_t* source_data,
                                   size_t source_size,
@@ -251,20 +258,124 @@ MTLSamplerAddressMode SamplerAddress(GLenum wrap) {
     }
 }
 
+MTLSamplerMipFilter SamplerMipFilter(backend::TexMipFilter filter) {
+    switch (filter) {
+        case backend::TexMipFilter::Nearest: return MTLSamplerMipFilterNearest;
+        case backend::TexMipFilter::Linear: return MTLSamplerMipFilterLinear;
+        default: return MTLSamplerMipFilterNotMipmapped;
+    }
+}
+
+std::string SamplerCacheKey(const backend::TexSamplerInfo& info,
+                            NSUInteger levels) {
+    std::ostringstream key;
+    auto bits = [](float value) {
+        uint32_t output = 0;
+        static_assert(sizeof(output) == sizeof(value));
+        std::memcpy(&output, &value, sizeof(output));
+        return output;
+    };
+    key << static_cast<int>(info.mag) << ':' << static_cast<int>(info.min)
+        << ':' << static_cast<int>(info.mip) << ':' << info.wrap_s << ':'
+        << info.wrap_t << ':' << info.wrap_r << ':' << bits(info.lod_bias)
+        << ':' << info.compare_mode;
+    if (info.mip != backend::TexMipFilter::None)
+        key << ':' << bits(info.min_lod) << ':' << bits(info.max_lod)
+            << ':' << levels;
+    if (info.compare_mode != GL_NONE) key << ':' << info.compare_func;
+    if (info.wrap_s == GL_CLAMP_TO_BORDER ||
+        info.wrap_t == GL_CLAMP_TO_BORDER ||
+        info.wrap_r == GL_CLAMP_TO_BORDER)
+        for (float component : info.border_color) key << ':' << bits(component);
+    return key.str();
+}
+
+bool ResolveMetalBorderColor(const backend::TexSamplerInfo& info,
+                             MTLSamplerBorderColor* output) {
+    const bool uses_border = info.wrap_s == GL_CLAMP_TO_BORDER ||
+                             info.wrap_t == GL_CLAMP_TO_BORDER ||
+                             info.wrap_r == GL_CLAMP_TO_BORDER;
+    if (!uses_border) {
+        *output = MTLSamplerBorderColorTransparentBlack;
+        return true;
+    }
+    const auto& c = info.border_color;
+    if (c[0] == 0.f && c[1] == 0.f && c[2] == 0.f && c[3] == 0.f) {
+        *output = MTLSamplerBorderColorTransparentBlack;
+        return true;
+    }
+    if (c[0] == 0.f && c[1] == 0.f && c[2] == 0.f && c[3] == 1.f) {
+        *output = MTLSamplerBorderColorOpaqueBlack;
+        return true;
+    }
+    if (c[0] == 1.f && c[1] == 1.f && c[2] == 1.f && c[3] == 1.f) {
+        *output = MTLSamplerBorderColorOpaqueWhite;
+        return true;
+    }
+    WarnUnsupported("sampler border color outside Metal's native set");
+    return false;
+}
+
 id<MTLSamplerState> CreateSampler(const backend::TexSamplerInfo& info,
                                   NSUInteger levels) {
+    if (info.lod_bias != 0.0f) {
+        WarnUnsupported("nonzero sampler LOD bias");
+        return nil;
+    }
+    if (info.compare_mode != GL_NONE) {
+        WarnUnsupported("depth-comparison sampling without depth textures");
+        return nil;
+    }
+    MTLSamplerBorderColor border_color;
+    if (!ResolveMetalBorderColor(info, &border_color)) return nil;
+    const float max_available_lod = levels ? static_cast<float>(levels - 1) : 0.f;
+    const bool mipmapped = info.mip != backend::TexMipFilter::None;
+    const float min_lod = mipmapped ? std::max(0.f, info.min_lod) : 0.f;
+    const float max_lod = mipmapped
+        ? std::min(max_available_lod, info.max_lod) : 0.f;
+    if (min_lod > max_lod) {
+        WarnUnsupported("sampler LOD range outside the resident mip chain");
+        return nil;
+    }
     MTLSamplerDescriptor* descriptor = [[MTLSamplerDescriptor alloc] init];
     descriptor.minFilter = SamplerFilter(info.min);
     descriptor.magFilter = SamplerFilter(info.mag);
-    descriptor.mipFilter = info.mip ? MTLSamplerMipFilterLinear
-                                    : MTLSamplerMipFilterNotMipmapped;
+    descriptor.mipFilter = SamplerMipFilter(info.mip);
     descriptor.sAddressMode = SamplerAddress(info.wrap_s);
     descriptor.tAddressMode = SamplerAddress(info.wrap_t);
     descriptor.rAddressMode = SamplerAddress(info.wrap_r);
-    descriptor.borderColor = MTLSamplerBorderColorOpaqueWhite;
-    descriptor.lodMinClamp = 0.0f;
-    descriptor.lodMaxClamp = levels ? (float)(levels - 1) : 0.0f;
+    descriptor.borderColor = border_color;
+    descriptor.lodMinClamp = min_lod;
+    descriptor.lodMaxClamp = max_lod;
+    descriptor.compareFunction = info.compare_mode == GL_COMPARE_REF_TO_TEXTURE
+        ? CompareFunction(info.compare_func) : MTLCompareFunctionNever;
     return [GetEngine().device newSamplerStateWithDescriptor:descriptor];
+}
+
+id<MTLSamplerState> GetOrCreateSampler(const backend::TexSamplerInfo& info,
+                                       NSUInteger levels) {
+    auto& engine = GetEngine();
+    const std::string key = SamplerCacheKey(info, levels);
+    auto cached = engine.samplers.find(key);
+    if (cached != engine.samplers.end()) {
+        cached->second.last_use = ++engine.sampler_clock;
+        return cached->second.sampler;
+    }
+    id<MTLSamplerState> sampler = CreateSampler(info, levels);
+    if (!sampler) return nil;
+    if (engine.samplers.size() >= kMaxSamplerCacheEntries) {
+        auto oldest = std::min_element(
+            engine.samplers.begin(), engine.samplers.end(),
+            [](const auto& left, const auto& right) {
+                return left.second.last_use < right.second.last_use;
+            });
+        if (oldest != engine.samplers.end()) engine.samplers.erase(oldest);
+    }
+    CachedSampler entry;
+    entry.sampler = sampler;
+    entry.last_use = ++engine.sampler_clock;
+    engine.samplers.emplace(key, std::move(entry));
+    return sampler;
 }
 
 bool TextureShapeMatches(const ResidentTexture& resident,
@@ -273,6 +384,19 @@ bool TextureShapeMatches(const ResidentTexture& resident,
            resident.height == image.height && resident.depth == image.depth &&
            resident.levels == image.mip.size() &&
            resident.is_3d == image.is_3d && resident.is_cube == image.is_cube;
+}
+
+bool HasCompleteMipChain(const ResidentTexture& texture,
+                         const backend::TexSamplerInfo& sampler) {
+    if (sampler.mip == backend::TexMipFilter::None) return true;
+    uint32_t largest = std::max(texture.width, texture.height);
+    if (texture.is_3d) largest = std::max(largest, texture.depth);
+    uint32_t expected = 1;
+    while (largest > 1) {
+        largest >>= 1;
+        ++expected;
+    }
+    return texture.levels >= expected;
 }
 
 id<MTLTexture> CreateTexture(const backend::TexUpload& image) {
@@ -1540,9 +1664,7 @@ bool EnsureInit() {
         dummy.width = dummy.height = dummy.depth = 1;
         dummy.mip.push_back({255, 255, 255, 255});
         dummy.content_version = 1;
-        backend::TexSamplerInfo dummy_sampler;
-        dummy_sampler.state_version = 1;
-        UploadTexture(0, dummy, dummy_sampler);
+        UploadTexture(0, dummy);
         if (!engine.textures.count(0)) {
             engine.initialized = false;
             ML_LOG_ERROR("metal: failed to create fallback texture");
@@ -1736,7 +1858,7 @@ bool Draw(const backend::DrawParams& params) {
     if (!ResolveTarget(engine.bound_draw_fbo, &draw_target)) return false;
     const bool uses_sampled_images = program->second.vertex.uses_sampled_images ||
                                      program->second.fragment.uses_sampled_images;
-    if (uses_sampled_images && params.sampler_binds.empty()) return false;
+    if (uses_sampled_images && params.sampled_textures.empty()) return false;
     if (params.pipeline.polygon_mode == GL_POINT) {
         WarnUnsupported("GL_POINT polygon mode");
         return false;
@@ -1781,21 +1903,32 @@ bool Draw(const backend::DrawParams& params) {
         pending.params.uniform_buffers[i].source_data = nullptr;
         pending.params.uniform_buffers[i].source_size = 0;
     }
-    for (const auto& bind : params.sampler_binds) {
-        const NSUInteger slot = bind.first ? bind.first - 1 : 0;
+    for (const auto& bind : params.sampled_textures) {
+        const NSUInteger slot = bind.binding ? bind.binding - 1 : 0;
         if (slot >= backend::kMaxTextureUnits) {
             WarnUnsupported("sampled-image binding beyond the frontend limit");
             return false;
         }
-        auto texture = engine.textures.find(bind.second);
-        if (texture == engine.textures.end() || !texture->second.texture ||
-            !texture->second.sampler) {
+        auto texture = engine.textures.find(bind.texture);
+        if (texture == engine.textures.end() || !texture->second.texture) {
             ML_LOG_ERROR("metal: texture %llu is not resident for binding %u",
-                         (unsigned long long)bind.second, bind.first);
+                         (unsigned long long)bind.texture, bind.binding);
+            return false;
+        }
+        if (!HasCompleteMipChain(texture->second, bind.sampler)) {
+            ML_LOG_ERROR("metal: incomplete mip chain for sampled texture %llu",
+                         (unsigned long long)bind.texture);
+            return false;
+        }
+        id<MTLSamplerState> sampler = GetOrCreateSampler(
+            bind.sampler, texture->second.levels);
+        if (!sampler) {
+            ML_LOG_ERROR("metal: sampler state is not representable for binding %u",
+                         bind.binding);
             return false;
         }
         pending.textures.push_back(
-            {slot, texture->second.texture, texture->second.sampler});
+            {slot, texture->second.texture, sampler});
     }
     engine.draws.push_back(std::move(pending));
     engine.frame_dirty = true;
@@ -1846,8 +1979,7 @@ void ReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, void* output) {
     }
 }
 
-void UploadTexture(uint64_t texture_id, const backend::TexUpload& image,
-                   const backend::TexSamplerInfo& sampler_info) {
+void UploadTexture(uint64_t texture_id, const backend::TexUpload& image) {
     auto& engine = GetEngine();
     if (!engine.initialized || image.mip.empty()) return;
     if (engine.frame_dirty && CurrentTargetUsesTexture(texture_id) &&
@@ -1859,17 +1991,9 @@ void UploadTexture(uint64_t texture_id, const backend::TexUpload& image,
                                 TextureShapeMatches(existing->second, image);
         const bool needs_texture = !same_shape ||
             existing->second.content_version != image.content_version;
-        const bool needs_sampler = existing == engine.textures.end() ||
-            !existing->second.sampler ||
-            existing->second.sampler_version != sampler_info.state_version ||
-            existing->second.levels != image.mip.size();
-
         id<MTLTexture> texture = needs_texture ? CreateTexture(image)
             : existing->second.texture;
-        id<MTLSamplerState> sampler = needs_sampler
-            ? CreateSampler(sampler_info, image.mip.size())
-            : existing->second.sampler;
-        if (!texture || !sampler) {
+        if (!texture) {
             ML_LOG_ERROR("metal: failed to make texture %llu resident",
                          (unsigned long long)texture_id);
             engine.textures.erase(texture_id);
@@ -1878,9 +2002,7 @@ void UploadTexture(uint64_t texture_id, const backend::TexUpload& image,
 
         ResidentTexture resident;
         resident.texture = texture;
-        resident.sampler = sampler;
         resident.content_version = image.content_version;
-        resident.sampler_version = sampler_info.state_version;
         resident.width = image.width;
         resident.height = image.height;
         resident.depth = image.depth;
@@ -1888,23 +2010,6 @@ void UploadTexture(uint64_t texture_id, const backend::TexUpload& image,
         resident.is_3d = image.is_3d;
         resident.is_cube = image.is_cube;
         engine.textures[texture_id] = std::move(resident);
-    }
-}
-void UpdateTextureSampler(uint64_t texture_id,
-                          const backend::TexSamplerInfo& sampler_info) {
-    auto& engine = GetEngine();
-    auto texture = engine.textures.find(texture_id);
-    if (texture == engine.textures.end()) return;
-    @autoreleasepool {
-        id<MTLSamplerState> sampler = CreateSampler(
-            sampler_info, texture->second.levels);
-        if (!sampler) {
-            ML_LOG_ERROR("metal: failed to update sampler for texture %llu",
-                         (unsigned long long)texture_id);
-            return;
-        }
-        texture->second.sampler = sampler;
-        texture->second.sampler_version = sampler_info.state_version;
     }
 }
 void DestroyResidentTexture(uint64_t id) {

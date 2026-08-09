@@ -12,6 +12,7 @@ using backend::FboAttach;
 using backend::FboSpec;
 using backend::PipelineState;
 using backend::TexFilter;
+using backend::TexMipFilter;
 using backend::TexSamplerInfo;
 using backend::TexUpload;
 using backend::Topology;
@@ -20,9 +21,7 @@ using backend::VertexStream;
 
 inline constexpr uint32_t kMaxUnits = backend::kMaxTextureUnits;
 
-void UploadTexture(uint64_t gl_id, const TexUpload& img,
-                   const TexSamplerInfo& sampler);
-void UpdateTextureSampler(uint64_t gl_id, const TexSamplerInfo& sampler);
+void UploadTexture(uint64_t gl_id, const TexUpload& img);
 void DestroyResidentTexture(uint64_t gl_id);
 void DestroyBuffer(uint64_t lifetime_id);
 bool EnsureInit();

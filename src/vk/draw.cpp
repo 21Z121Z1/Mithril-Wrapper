@@ -68,6 +68,43 @@ void Draw(const DrawParams& params) {
     if (!rp_ok) return;
     (void)fbo;
 
+    struct ResolvedSample {
+        uint32_t binding = 0;
+        TexObj* texture = nullptr;
+        VkSampler sampler = VK_NULL_HANDLE;
+    };
+    std::vector<ResolvedSample> resolved_samples;
+    resolved_samples.reserve(params.sampled_textures.size());
+    for (const auto& sampled : params.sampled_textures) {
+        TexObj* texture = GetTexObj(sampled.texture);
+        if (!texture) {
+            ML_LOG_ERROR("vk: sampled texture %llu is not resident",
+                         (unsigned long long)sampled.texture);
+            return;
+        }
+        if (sampled.sampler.mip != backend::TexMipFilter::None) {
+            uint32_t largest = std::max(texture->width, texture->height);
+            if (texture->is_3d) largest = std::max(largest, texture->depth);
+            uint32_t expected = 1;
+            while (largest > 1) {
+                largest >>= 1;
+                ++expected;
+            }
+            if (texture->levels < expected) {
+                ML_LOG_ERROR("vk: incomplete mip chain for sampled texture %llu",
+                             (unsigned long long)sampled.texture);
+                return;
+            }
+        }
+        VkSampler sampler = ResolveSampler(sampled.sampler, texture->levels);
+        if (!sampler) {
+            ML_LOG_ERROR("vk: sampler state is not representable for binding %u",
+                         sampled.binding);
+            return;
+        }
+        resolved_samples.push_back({sampled.binding, texture, sampler});
+    }
+
     DrawOp op;
     op.program = params.program;
     op.topology = (uint32_t)params.topology;
@@ -186,21 +223,21 @@ void Draw(const DrawParams& params) {
     w.pBufferInfo = &dbi;
     writes.push_back(w);
 
-    // Combined image samplers: one per (binding, gl texture id) handed over
-    // by the GL layer; unbound units resolve to the 1x1 white dummy.
+    // Combined image samplers: image and independently resolved sampler state
+    // are captured together for this draw. Unbound textures resolve to the
+    // 1x1 white dummy without changing the sampler-object semantics.
     std::vector<VkDescriptorImageInfo> tis;
-    for (const auto& sb : params.sampler_binds) {
-        TexObj* tex = GetTexObj(sb.second);
-        if (!tex) continue;
+    tis.reserve(resolved_samples.size());
+    for (const auto& sampled : resolved_samples) {
         VkDescriptorImageInfo di{};
-        di.sampler = tex->sampler;
-        di.imageView = tex->view;
+        di.sampler = sampled.sampler;
+        di.imageView = sampled.texture->view;
         di.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         tis.push_back(di);
         VkWriteDescriptorSet ws{};
         ws.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         ws.dstSet = op.desc_set;
-        ws.dstBinding = sb.first;
+        ws.dstBinding = sampled.binding;
         ws.descriptorCount = 1;
         ws.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         ws.pImageInfo = &tis.back();

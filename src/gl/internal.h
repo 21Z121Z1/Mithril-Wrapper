@@ -100,8 +100,11 @@ struct TexState {
     GLenum min_filter = GL_LINEAR;       // sampler state (GL enums)
     GLenum mag_filter = GL_LINEAR;
     GLenum wrap_s = GL_REPEAT, wrap_t = GL_REPEAT, wrap_r = GL_REPEAT;
+    GLfloat min_lod = -1000.0f, max_lod = 1000.0f, lod_bias = 0.0f;
+    std::array<GLfloat, 4> border_color{0.f, 0.f, 0.f, 0.f};
+    GLenum compare_mode = GL_NONE;
+    GLenum compare_func = GL_LEQUAL;
     uint64_t content_version = 0;
-    uint64_t sampler_version = 0;
     uint32_t width = 0, height = 0, depth = 1;  // depth: 3D z / array layers
     std::vector<std::vector<uint8_t>> mip;      // [level] slices concatenated
     bool has_image = false;                    // level 0 present
@@ -133,6 +136,23 @@ struct TexState {
 extern std::unordered_map<GLuint, TexState> g_textures;
 extern std::array<GLuint, kMaxTexUnits> g_texture_units;  // unit -> texture id
 extern GLuint g_next_texture;
+
+struct SamplerData {
+    GLenum min_filter = GL_NEAREST_MIPMAP_LINEAR;
+    GLenum mag_filter = GL_LINEAR;
+    GLenum wrap_s = GL_REPEAT, wrap_t = GL_REPEAT, wrap_r = GL_REPEAT;
+    GLfloat min_lod = -1000.0f, max_lod = 1000.0f, lod_bias = 0.0f;
+    std::array<GLfloat, 4> border_color{0.f, 0.f, 0.f, 0.f};
+    GLenum compare_mode = GL_NONE;
+    GLenum compare_func = GL_LEQUAL;
+};
+
+extern std::unordered_map<GLuint, SamplerData> g_samplers;
+extern std::array<GLuint, kMaxTexUnits> g_sampler_units;
+extern GLuint g_next_sampler;
+
+// Resolve texture parameters vs a sampler-object override at draw time.
+v::TexSamplerInfo ResolveSamplerInfo(GLuint unit, const TexState& texture);
 
 // Texture ids whose CPU mirror changed while the backend was not yet
 // initialized; flushed to the engine at the next draw (see DrawCommon).

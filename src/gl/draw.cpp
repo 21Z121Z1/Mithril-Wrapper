@@ -432,7 +432,7 @@ void DrawCommon(GLenum mode, const std::vector<uint32_t>& idx, GLint first,
                               (float)target_height};
     // Resolve each sampler uniform to the texture bound at its GL unit
     // (the framebelike value glUniform1i wrote; absent -> unit 0).
-    dp.sampler_binds.clear();
+    dp.sampled_textures.clear();
     for (const auto& smp : prog->samplers) {
         GLint unit = 0;
         auto uit = prog->uniform_by_location.find(smp.location);
@@ -441,7 +441,15 @@ void DrawCommon(GLenum mode, const std::vector<uint32_t>& idx, GLint first,
             unit = (GLint)prog->uniforms[uit->second].value[0];
         GLuint tex =
             (unit >= 0 && (GLuint)unit < kMaxTexUnits) ? g_texture_units[unit] : 0;
-        dp.sampler_binds.push_back({smp.binding, tex});
+        const auto texture = g_textures.find(tex);
+        const TexState default_texture;
+        const TexState& texture_state = texture == g_textures.end()
+            ? default_texture : texture->second;
+        dp.sampled_textures.push_back({
+            smp.binding, tex,
+            ResolveSamplerInfo(unit >= 0 ? static_cast<GLuint>(unit)
+                                         : kMaxTexUnits,
+                               texture_state)});
     }
     if (dp.vertex_stream.HasStorage() && !v::Draw(dp))
         PUSH_ERROR(GL_INVALID_OPERATION);

@@ -15,6 +15,7 @@
 #include "internal.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 
 #include <util/log.h>
@@ -367,23 +368,33 @@ bool IsS3TC(GLenum fmt) {
 // Sampler state -> engine projection
 // ---------------------------------------------------------------------------
 
-v::TexSamplerInfo ToSamplerInfo(const TexState& st) {
+template <typename T>
+v::TexSamplerInfo ToSamplerInfo(const T& st) {
     v::TexSamplerInfo si;
     si.mag = st.mag_filter == GL_NEAREST ? v::TexFilter::Nearest
                                          : v::TexFilter::Linear;
-    bool mip = st.min_filter == GL_NEAREST_MIPMAP_NEAREST ||
-               st.min_filter == GL_NEAREST_MIPMAP_LINEAR ||
-               st.min_filter == GL_LINEAR_MIPMAP_NEAREST ||
-               st.min_filter == GL_LINEAR_MIPMAP_LINEAR;
-    si.mip = mip;
     si.min = (st.min_filter == GL_NEAREST ||
-              st.min_filter == GL_NEAREST_MIPMAP_NEAREST)
+              st.min_filter == GL_NEAREST_MIPMAP_NEAREST ||
+              st.min_filter == GL_NEAREST_MIPMAP_LINEAR)
                  ? v::TexFilter::Nearest
                  : v::TexFilter::Linear;
+    if (st.min_filter == GL_NEAREST_MIPMAP_NEAREST ||
+        st.min_filter == GL_LINEAR_MIPMAP_NEAREST)
+        si.mip = v::TexMipFilter::Nearest;
+    else if (st.min_filter == GL_NEAREST_MIPMAP_LINEAR ||
+             st.min_filter == GL_LINEAR_MIPMAP_LINEAR)
+        si.mip = v::TexMipFilter::Linear;
+    else
+        si.mip = v::TexMipFilter::None;
     si.wrap_s = st.wrap_s;
     si.wrap_t = st.wrap_t;
     si.wrap_r = st.wrap_r;
-    si.state_version = st.sampler_version;
+    si.min_lod = st.min_lod;
+    si.max_lod = st.max_lod;
+    si.lod_bias = st.lod_bias;
+    si.border_color = st.border_color;
+    si.compare_mode = st.compare_mode;
+    si.compare_func = st.compare_func;
     return si;
 }
 
@@ -413,14 +424,13 @@ void ReUpload(TexState& st, GLuint id) {
         img.mip.push_back(st.mip[l]);
         w = std::max<uint32_t>(1, w / 2);
         h = std::max<uint32_t>(1, h / 2);
-        if (w == 1 && h == 1) break;
     }
     if (img.mip.empty()) return;
     ML_LOG_DEBUG("gl: upload texture %u (%ux%ux%u, %zu mips, %s%s)", id,
                  img.width, img.height, img.depth, img.mip.size(),
                  img.is_cube ? "cube" : img.is_3d ? "3d" : "2d",
                  slices > 1 ? " layered" : "");
-    v::UploadTexture(id, img, ToSamplerInfo(st));
+    v::UploadTexture(id, img);
 }
 
 // Box-filter one level into the next (average 2x2 neighbourhood) for every
@@ -461,7 +471,121 @@ GLuint ActiveBound() {
     return unit < kMaxTexUnits ? g_texture_units[unit] : 0;
 }
 
+bool ValidMinFilter(GLenum value) {
+    return value == GL_NEAREST || value == GL_LINEAR ||
+           value == GL_NEAREST_MIPMAP_NEAREST ||
+           value == GL_LINEAR_MIPMAP_NEAREST ||
+           value == GL_NEAREST_MIPMAP_LINEAR ||
+           value == GL_LINEAR_MIPMAP_LINEAR;
+}
+
+bool ValidWrap(GLenum value) {
+    return value == GL_REPEAT || value == GL_MIRRORED_REPEAT ||
+           value == GL_CLAMP_TO_EDGE || value == GL_CLAMP_TO_BORDER;
+}
+
+bool ValidCompareFunc(GLenum value) {
+    switch (value) {
+        case GL_NEVER: case GL_LESS: case GL_EQUAL: case GL_LEQUAL:
+        case GL_GREATER: case GL_NOTEQUAL: case GL_GEQUAL: case GL_ALWAYS:
+            return true;
+        default: return false;
+    }
+}
+
+template <typename T>
+bool SetSamplerScalar(T& state, GLenum pname, GLfloat value, GLenum* error) {
+    auto set_enum = [&](GLenum& destination, GLenum next) {
+        if (destination == next) return false;
+        destination = next;
+        return true;
+    };
+    auto set_float = [&](GLfloat& destination) {
+        if (destination == value) return false;
+        destination = value;
+        return true;
+    };
+    const GLenum parameter = static_cast<GLenum>(value);
+    switch (pname) {
+        case GL_TEXTURE_MIN_FILTER:
+            if (!ValidMinFilter(parameter)) { *error = GL_INVALID_ENUM; return false; }
+            return set_enum(state.min_filter, parameter);
+        case GL_TEXTURE_MAG_FILTER:
+            if (parameter != GL_NEAREST && parameter != GL_LINEAR) {
+                *error = GL_INVALID_ENUM; return false;
+            }
+            return set_enum(state.mag_filter, parameter);
+        case GL_TEXTURE_WRAP_S:
+            if (!ValidWrap(parameter)) { *error = GL_INVALID_ENUM; return false; }
+            return set_enum(state.wrap_s, parameter);
+        case GL_TEXTURE_WRAP_T:
+            if (!ValidWrap(parameter)) { *error = GL_INVALID_ENUM; return false; }
+            return set_enum(state.wrap_t, parameter);
+        case GL_TEXTURE_WRAP_R:
+            if (!ValidWrap(parameter)) { *error = GL_INVALID_ENUM; return false; }
+            return set_enum(state.wrap_r, parameter);
+        case GL_TEXTURE_MIN_LOD: return set_float(state.min_lod);
+        case GL_TEXTURE_MAX_LOD: return set_float(state.max_lod);
+        case GL_TEXTURE_LOD_BIAS: return set_float(state.lod_bias);
+        case GL_TEXTURE_COMPARE_MODE:
+            if (parameter != GL_NONE && parameter != GL_COMPARE_REF_TO_TEXTURE) {
+                *error = GL_INVALID_ENUM; return false;
+            }
+            return set_enum(state.compare_mode, parameter);
+        case GL_TEXTURE_COMPARE_FUNC:
+            if (!ValidCompareFunc(parameter)) { *error = GL_INVALID_ENUM; return false; }
+            return set_enum(state.compare_func, parameter);
+        default: *error = GL_INVALID_ENUM; return false;
+    }
+}
+
+template <typename T>
+bool SetBorderColor(T& state, const GLfloat* color) {
+    if (std::equal(state.border_color.begin(), state.border_color.end(), color))
+        return false;
+    std::copy(color, color + 4, state.border_color.begin());
+    return true;
+}
+
+GLfloat SignedBorderToFloat(GLint value) {
+    constexpr double denominator = 4294967295.0; // 2^32 - 1
+    return static_cast<GLfloat>((2.0 * value + 1.0) / denominator);
+}
+
+GLint FloatBorderToSigned(GLfloat value) {
+    constexpr double denominator = 4294967295.0;
+    const double clamped = std::clamp<double>(value, -1.0, 1.0);
+    const double mapped = (clamped * denominator - 1.0) * 0.5;
+    return static_cast<GLint>(std::nearbyint(mapped));
+}
+
+template <typename T>
+GLfloat GetSamplerScalar(const T& state, GLenum pname, GLenum* error) {
+    switch (pname) {
+        case GL_TEXTURE_MIN_FILTER: return static_cast<GLfloat>(state.min_filter);
+        case GL_TEXTURE_MAG_FILTER: return static_cast<GLfloat>(state.mag_filter);
+        case GL_TEXTURE_WRAP_S: return static_cast<GLfloat>(state.wrap_s);
+        case GL_TEXTURE_WRAP_T: return static_cast<GLfloat>(state.wrap_t);
+        case GL_TEXTURE_WRAP_R: return static_cast<GLfloat>(state.wrap_r);
+        case GL_TEXTURE_MIN_LOD: return state.min_lod;
+        case GL_TEXTURE_MAX_LOD: return state.max_lod;
+        case GL_TEXTURE_LOD_BIAS: return state.lod_bias;
+        case GL_TEXTURE_COMPARE_MODE: return static_cast<GLfloat>(state.compare_mode);
+        case GL_TEXTURE_COMPARE_FUNC: return static_cast<GLfloat>(state.compare_func);
+        default: *error = GL_INVALID_ENUM; return 0.0f;
+    }
+}
+
 } // namespace
+
+v::TexSamplerInfo ResolveSamplerInfo(GLuint unit, const TexState& texture) {
+    if (unit < kMaxTexUnits) {
+        const auto sampler = g_samplers.find(g_sampler_units[unit]);
+        if (sampler != g_samplers.end())
+            return ToSamplerInfo(sampler->second);
+    }
+    return ToSamplerInfo(texture);
+}
 
 void FlushDirtyTextureUploads() {
     std::vector<GLuint> ids(g_dirty_textures.begin(), g_dirty_textures.end());
@@ -480,9 +604,8 @@ void FlushDirtyTextureUploads() {
 // FlushDirtyTextureUploads at the first draw.
 void MarkTextureDirty(TexState& st, GLuint id, bool sampler_only = false) {
     if (sampler_only) {
-        ++st.sampler_version;
-        if (st.has_image && !st.mip.empty() && v::IsInitialized())
-            v::UpdateTextureSampler(id, ToSamplerInfo(st));
+        // Native samplers are resolved and content-keyed at draw time. Image
+        // ownership is unchanged by texture sampling-parameter mutations.
         return;
     }
     ++st.content_version;
@@ -494,6 +617,156 @@ void MarkTextureDirty(TexState& st, GLuint id, bool sampler_only = false) {
 extern "C" {
 
 // ---- texture objects ------------------------------------------------------
+
+void APIENTRY glGenSamplers(GLsizei count, GLuint* samplers) {
+    if (count < 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+    if (!samplers || count == 0) return;
+    for (GLsizei i = 0; i < count; ++i) {
+        while (g_samplers.count(g_next_sampler)) ++g_next_sampler;
+        samplers[i] = g_next_sampler++;
+        g_samplers.emplace(samplers[i], SamplerData{});
+    }
+}
+
+void APIENTRY glDeleteSamplers(GLsizei count, const GLuint* samplers) {
+    if (count < 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+    if (!samplers) return;
+    for (GLsizei i = 0; i < count; ++i) {
+        if (!samplers[i]) continue;
+        for (auto& unit : g_sampler_units)
+            if (unit == samplers[i]) unit = 0;
+        g_samplers.erase(samplers[i]);
+    }
+}
+
+GLboolean APIENTRY glIsSampler(GLuint sampler) {
+    return sampler && g_samplers.count(sampler) ? GL_TRUE : GL_FALSE;
+}
+
+void APIENTRY glBindSampler(GLuint unit, GLuint sampler) {
+    if (unit >= kMaxTexUnits) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+    if (sampler && !g_samplers.count(sampler)) {
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return;
+    }
+    g_sampler_units[unit] = sampler;
+}
+
+void APIENTRY glSamplerParameterf(GLuint sampler, GLenum pname, GLfloat param) {
+    auto it = g_samplers.find(sampler);
+    if (it == g_samplers.end()) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+    GLenum error = GL_NO_ERROR;
+    (void)SetSamplerScalar(it->second, pname, param, &error);
+    if (error != GL_NO_ERROR) PUSH_ERROR(error);
+}
+
+void APIENTRY glSamplerParameteri(GLuint sampler, GLenum pname, GLint param) {
+    glSamplerParameterf(sampler, pname, static_cast<GLfloat>(param));
+}
+
+void APIENTRY glSamplerParameterfv(GLuint sampler, GLenum pname,
+                                   const GLfloat* param) {
+    if (!param) return;
+    if (pname != GL_TEXTURE_BORDER_COLOR) {
+        glSamplerParameterf(sampler, pname, param[0]);
+        return;
+    }
+    auto it = g_samplers.find(sampler);
+    if (it == g_samplers.end()) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+    (void)SetBorderColor(it->second, param);
+}
+
+void APIENTRY glSamplerParameteriv(GLuint sampler, GLenum pname,
+                                   const GLint* param) {
+    if (!param) return;
+    if (pname == GL_TEXTURE_BORDER_COLOR) {
+        GLfloat color[4];
+        for (int i = 0; i < 4; ++i)
+            color[i] = SignedBorderToFloat(param[i]);
+        glSamplerParameterfv(sampler, pname, color);
+    } else {
+        glSamplerParameteri(sampler, pname, param[0]);
+    }
+}
+
+void APIENTRY glSamplerParameterIiv(GLuint sampler, GLenum pname,
+                                    const GLint* param) {
+    if (pname == GL_TEXTURE_BORDER_COLOR) {
+        // Integer texture formats are not represented by the current RGBA8
+        // backend contract. Do not silently reinterpret integer border state.
+        if (!g_samplers.count(sampler)) PUSH_ERROR(GL_INVALID_VALUE);
+        else PUSH_ERROR(GL_INVALID_OPERATION);
+        return;
+    }
+    glSamplerParameteriv(sampler, pname, param);
+}
+
+void APIENTRY glSamplerParameterIuiv(GLuint sampler, GLenum pname,
+                                     const GLuint* param) {
+    if (!param) return;
+    if (pname == GL_TEXTURE_BORDER_COLOR) {
+        if (!g_samplers.count(sampler)) PUSH_ERROR(GL_INVALID_VALUE);
+        else PUSH_ERROR(GL_INVALID_OPERATION);
+        return;
+    }
+    GLint values[4];
+    const int count = pname == GL_TEXTURE_BORDER_COLOR ? 4 : 1;
+    for (int i = 0; i < count; ++i)
+        values[i] = static_cast<GLint>(param[i]);
+    glSamplerParameteriv(sampler, pname, values);
+}
+
+void APIENTRY glGetSamplerParameterfv(GLuint sampler, GLenum pname,
+                                      GLfloat* params) {
+    if (!params) return;
+    auto it = g_samplers.find(sampler);
+    if (it == g_samplers.end()) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+    if (pname == GL_TEXTURE_BORDER_COLOR) {
+        std::copy(it->second.border_color.begin(),
+                  it->second.border_color.end(), params);
+        return;
+    }
+    GLenum error = GL_NO_ERROR;
+    *params = GetSamplerScalar(it->second, pname, &error);
+    if (error != GL_NO_ERROR) PUSH_ERROR(error);
+}
+
+void APIENTRY glGetSamplerParameteriv(GLuint sampler, GLenum pname,
+                                      GLint* params) {
+    if (!params) return;
+    GLfloat values[4]{};
+    glGetSamplerParameterfv(sampler, pname, values);
+    const int count = pname == GL_TEXTURE_BORDER_COLOR ? 4 : 1;
+    for (int i = 0; i < count; ++i) {
+        params[i] = pname == GL_TEXTURE_BORDER_COLOR
+            ? FloatBorderToSigned(values[i]) : static_cast<GLint>(values[i]);
+    }
+}
+
+void APIENTRY glGetSamplerParameterIiv(GLuint sampler, GLenum pname,
+                                       GLint* params) {
+    if (pname == GL_TEXTURE_BORDER_COLOR) {
+        if (!g_samplers.count(sampler)) PUSH_ERROR(GL_INVALID_VALUE);
+        else PUSH_ERROR(GL_INVALID_OPERATION);
+        return;
+    }
+    glGetSamplerParameteriv(sampler, pname, params);
+}
+
+void APIENTRY glGetSamplerParameterIuiv(GLuint sampler, GLenum pname,
+                                        GLuint* params) {
+    if (!params) return;
+    if (pname == GL_TEXTURE_BORDER_COLOR) {
+        if (!g_samplers.count(sampler)) PUSH_ERROR(GL_INVALID_VALUE);
+        else PUSH_ERROR(GL_INVALID_OPERATION);
+        return;
+    }
+    GLint values[4]{};
+    glGetSamplerParameteriv(sampler, pname, values);
+    const int count = pname == GL_TEXTURE_BORDER_COLOR ? 4 : 1;
+    for (int i = 0; i < count; ++i)
+        params[i] = static_cast<GLuint>(values[i]);
+}
 
 void APIENTRY glGenTextures(GLsizei n, GLuint* textures) {
     if (n < 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
@@ -752,6 +1025,7 @@ void APIENTRY glGenerateMipmap(GLenum target) {
     uint32_t w = st.width, h = st.height;
     size_t slices = st.SliceCount();
     std::vector<uint8_t> cur = st.mip[0];
+    st.mip.resize(1);
     while (w > 1 || h > 1) {
         std::vector<uint8_t> next;
         GenerateNextMip(cur, w, h, (uint32_t)slices, next);
@@ -833,105 +1107,138 @@ void APIENTRY glTexParameteri(GLenum target, GLenum pname, GLint param) {
     GLuint id = ActiveBound();
     if (id == 0) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
     TexState& st = g_textures[id];
-    bool changed = false;
-    switch (pname) {
-        case GL_TEXTURE_MIN_FILTER:
-            changed = st.min_filter != (GLenum)param;
-            st.min_filter = (GLenum)param;
-            break;
-        case GL_TEXTURE_MAG_FILTER:
-            changed = st.mag_filter != (GLenum)param;
-            st.mag_filter = (GLenum)param;
-            break;
-        case GL_TEXTURE_WRAP_S:
-            changed = st.wrap_s != (GLenum)param;
-            st.wrap_s = (GLenum)param;
-            break;
-        case GL_TEXTURE_WRAP_T:
-            changed = st.wrap_t != (GLenum)param;
-            st.wrap_t = (GLenum)param;
-            break;
-        case GL_TEXTURE_WRAP_R:
-            changed = st.wrap_r != (GLenum)param;
-            st.wrap_r = (GLenum)param;
-            break;
-        case GL_TEXTURE_MIN_LOD:
-        case GL_TEXTURE_MAX_LOD:
-        case GL_TEXTURE_LOD_BIAS:
-        case GL_TEXTURE_BASE_LEVEL:
-        case GL_TEXTURE_MAX_LEVEL:
-            break;   // accepted; mip chain is rebuilt from CPU mirror anyway
-        default:
-            PUSH_ERROR(GL_INVALID_ENUM);
-            return;
+    if (pname == GL_TEXTURE_BASE_LEVEL || pname == GL_TEXTURE_MAX_LEVEL) {
+        // Image-level selection remains texture state. The CPU mirror already
+        // owns the complete explicit chain; level-window lowering is future.
+        return;
+    }
+    GLenum error = GL_NO_ERROR;
+    const bool changed = SetSamplerScalar(st, pname,
+                                          static_cast<GLfloat>(param), &error);
+    if (error != GL_NO_ERROR) {
+        PUSH_ERROR(error);
+        return;
     }
     if (changed) MarkTextureDirty(st, id, true);
 }
 
-void APIENTRY glTexParameteriv(GLenum target, GLenum pname, const GLint* param) {
-    if (!param) return;
-    glTexParameteri(target, pname, param[0]);
-}
-
 void APIENTRY glTexParameterf(GLenum target, GLenum pname, GLfloat param) {
-    glTexParameteri(target, pname, (GLint)param);
+    bool valid = target == GL_TEXTURE_2D || target == GL_TEXTURE_1D ||
+                 target == GL_TEXTURE_3D || target == GL_TEXTURE_2D_ARRAY ||
+                 target == GL_TEXTURE_1D_ARRAY || target == GL_TEXTURE_CUBE_MAP ||
+                 target == GL_TEXTURE_BUFFER || IsCubeFace(target);
+    if (!valid) { PUSH_ERROR(GL_INVALID_ENUM); return; }
+    GLuint id = ActiveBound();
+    if (!id) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
+    TexState& state = g_textures[id];
+    if (pname == GL_TEXTURE_BASE_LEVEL || pname == GL_TEXTURE_MAX_LEVEL)
+        return;
+    GLenum error = GL_NO_ERROR;
+    const bool changed = SetSamplerScalar(state, pname, param, &error);
+    if (error != GL_NO_ERROR) { PUSH_ERROR(error); return; }
+    if (changed) MarkTextureDirty(state, id, true);
 }
 
 void APIENTRY glTexParameterfv(GLenum target, GLenum pname, const GLfloat* param) {
     if (!param) return;
-    glTexParameteri(target, pname, (GLint)param[0]);
+    if (pname != GL_TEXTURE_BORDER_COLOR) {
+        glTexParameterf(target, pname, param[0]);
+        return;
+    }
+    bool valid = target == GL_TEXTURE_2D || target == GL_TEXTURE_1D ||
+                 target == GL_TEXTURE_3D || target == GL_TEXTURE_2D_ARRAY ||
+                 target == GL_TEXTURE_1D_ARRAY || target == GL_TEXTURE_CUBE_MAP ||
+                 target == GL_TEXTURE_BUFFER || IsCubeFace(target);
+    if (!valid) { PUSH_ERROR(GL_INVALID_ENUM); return; }
+    GLuint id = ActiveBound();
+    if (!id) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
+    TexState& state = g_textures[id];
+    if (SetBorderColor(state, param)) MarkTextureDirty(state, id, true);
+}
+
+void APIENTRY glTexParameteriv(GLenum target, GLenum pname, const GLint* param) {
+    if (!param) return;
+    if (pname == GL_TEXTURE_BORDER_COLOR) {
+        GLfloat color[4];
+        for (int i = 0; i < 4; ++i) color[i] = SignedBorderToFloat(param[i]);
+        glTexParameterfv(target, pname, color);
+    } else {
+        glTexParameteri(target, pname, param[0]);
+    }
 }
 
 void APIENTRY glTexParameterIiv(GLenum target, GLenum pname, const GLint* param) {
+    if (pname == GL_TEXTURE_BORDER_COLOR) {
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return;
+    }
     glTexParameteriv(target, pname, param);
 }
 
 void APIENTRY glTexParameterIuiv(GLenum target, GLenum pname, const GLuint* param) {
     if (!param) return;
-    glTexParameteri(target, pname, (GLint)param[0]);
+    if (pname == GL_TEXTURE_BORDER_COLOR) {
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return;
+    }
+    GLint values[4];
+    const int count = pname == GL_TEXTURE_BORDER_COLOR ? 4 : 1;
+    for (int i = 0; i < count; ++i) values[i] = static_cast<GLint>(param[i]);
+    glTexParameteriv(target, pname, values);
 }
 
 // ---- queries --------------------------------------------------------------
 
-void APIENTRY glGetTexParameteriv(GLenum target, GLenum pname, GLint* params) {
-    if (target != GL_TEXTURE_2D && target != GL_TEXTURE_1D &&
-        target != GL_TEXTURE_3D && target != GL_TEXTURE_2D_ARRAY &&
-        target != GL_TEXTURE_1D_ARRAY && target != GL_TEXTURE_CUBE_MAP &&
-        target != GL_TEXTURE_BUFFER && !IsCubeFace(target)) {
-        PUSH_ERROR(GL_INVALID_ENUM);
+void APIENTRY glGetTexParameterfv(GLenum target, GLenum pname, GLfloat* params) {
+    if (!params) return;
+    bool valid = target == GL_TEXTURE_2D || target == GL_TEXTURE_1D ||
+                 target == GL_TEXTURE_3D || target == GL_TEXTURE_2D_ARRAY ||
+                 target == GL_TEXTURE_1D_ARRAY || target == GL_TEXTURE_CUBE_MAP ||
+                 target == GL_TEXTURE_BUFFER || IsCubeFace(target);
+    if (!valid) { PUSH_ERROR(GL_INVALID_ENUM); return; }
+    GLuint id = ActiveBound();
+    if (!id) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
+    const TexState& state = g_textures[id];
+    if (pname == GL_TEXTURE_BORDER_COLOR) {
+        std::copy(state.border_color.begin(), state.border_color.end(), params);
         return;
     }
-    if (!params) return;
-    GLuint id = ActiveBound();
-    if (id == 0) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
-    const TexState& st = g_textures[id];
-    switch (pname) {
-        case GL_TEXTURE_MIN_FILTER: *params = st.min_filter; break;
-        case GL_TEXTURE_MAG_FILTER: *params = st.mag_filter; break;
-        case GL_TEXTURE_WRAP_S: *params = st.wrap_s; break;
-        case GL_TEXTURE_WRAP_T: *params = st.wrap_t; break;
-        case GL_TEXTURE_WRAP_R: *params = st.wrap_r; break;
-        case GL_TEXTURE_MIN_LOD: *params = 0; break;
-        case GL_TEXTURE_MAX_LOD: *params = 1000; break;
-        case GL_TEXTURE_LOD_BIAS: *params = 0; break;
-        default: PUSH_ERROR(GL_INVALID_ENUM); return;
-    }
+    if (pname == GL_TEXTURE_BASE_LEVEL) { *params = 0.0f; return; }
+    if (pname == GL_TEXTURE_MAX_LEVEL) { *params = 1000.0f; return; }
+    GLenum error = GL_NO_ERROR;
+    *params = GetSamplerScalar(state, pname, &error);
+    if (error != GL_NO_ERROR) PUSH_ERROR(error);
 }
 
-void APIENTRY glGetTexParameterfv(GLenum target, GLenum pname, GLfloat* params) {
-    GLint v = 0;
-    glGetTexParameteriv(target, pname, &v);
-    if (params) *params = (GLfloat)v;
+void APIENTRY glGetTexParameteriv(GLenum target, GLenum pname, GLint* params) {
+    if (!params) return;
+    GLfloat values[4]{};
+    glGetTexParameterfv(target, pname, values);
+    const int count = pname == GL_TEXTURE_BORDER_COLOR ? 4 : 1;
+    for (int i = 0; i < count; ++i) {
+        params[i] = pname == GL_TEXTURE_BORDER_COLOR
+            ? FloatBorderToSigned(values[i]) : static_cast<GLint>(values[i]);
+    }
 }
 
 void APIENTRY glGetTexParameterIiv(GLenum target, GLenum pname, GLint* params) {
+    if (pname == GL_TEXTURE_BORDER_COLOR) {
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return;
+    }
     glGetTexParameteriv(target, pname, params);
 }
 
 void APIENTRY glGetTexParameterIuiv(GLenum target, GLenum pname, GLuint* params) {
-    GLint v = 0;
-    glGetTexParameteriv(target, pname, &v);
-    if (params) *params = (GLuint)v;
+    if (!params) return;
+    if (pname == GL_TEXTURE_BORDER_COLOR) {
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return;
+    }
+    GLint values[4]{};
+    glGetTexParameteriv(target, pname, values);
+    const int count = pname == GL_TEXTURE_BORDER_COLOR ? 4 : 1;
+    for (int i = 0; i < count; ++i) params[i] = static_cast<GLuint>(values[i]);
 }
 
 void APIENTRY glGetTexLevelParameteriv(GLenum target, GLint level, GLenum pname,
@@ -1395,4 +1702,7 @@ void APIENTRY glPixelStoref(GLenum pname, GLfloat param) {
 std::unordered_map<GLuint, TexState> g_textures;
 std::array<GLuint, kMaxTexUnits> g_texture_units{};
 GLuint g_next_texture = 1;
+std::unordered_map<GLuint, SamplerData> g_samplers;
+std::array<GLuint, kMaxTexUnits> g_sampler_units{};
+GLuint g_next_sampler = 1;
 std::unordered_set<GLuint> g_dirty_textures;

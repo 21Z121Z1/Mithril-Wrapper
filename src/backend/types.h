@@ -112,6 +112,31 @@ struct UniformBufferBinding {
     uint64_t size = 0;
 };
 
+enum class TexFilter { Nearest = 0, Linear = 1 };
+enum class TexMipFilter { None = 0, Nearest = 1, Linear = 2 };
+
+// Fully resolved sampling state. It is captured with each draw because a GL
+// sampler object is bound to a texture unit, not owned by the texture, and the
+// same image may be sampled through different state in one deferred batch.
+struct TexSamplerInfo {
+    TexFilter mag = TexFilter::Linear;
+    TexFilter min = TexFilter::Linear;
+    TexMipFilter mip = TexMipFilter::None;
+    GLenum wrap_s = GL_REPEAT, wrap_t = GL_REPEAT, wrap_r = GL_REPEAT;
+    float min_lod = -1000.0f;
+    float max_lod = 1000.0f;
+    float lod_bias = 0.0f;
+    std::array<float, 4> border_color{0.f, 0.f, 0.f, 0.f};
+    GLenum compare_mode = GL_NONE;
+    GLenum compare_func = GL_LEQUAL;
+};
+
+struct SampledTextureBinding {
+    uint32_t binding = 0;
+    uint64_t texture = 0;
+    TexSamplerInfo sampler;
+};
+
 struct ClearParams {
     GLbitfield mask = 0;
     std::array<float, 4> color{0.f, 0.f, 0.f, 0.f};
@@ -134,7 +159,7 @@ struct DrawParams {
     Topology topology = Topology::Triangles;
     std::unordered_map<std::string, std::vector<float>> uniforms;
     std::vector<UniformBufferBinding> uniform_buffers;
-    std::vector<std::pair<uint32_t, uint64_t>> sampler_binds;
+    std::vector<SampledTextureBinding> sampled_textures;
     PipelineState pipeline;
     DynamicState dynamic;
 };
@@ -147,16 +172,6 @@ struct TexUpload {
     bool is_cube = false;
     std::vector<std::vector<uint8_t>> mip;
     uint64_t content_version = 0;
-};
-
-enum class TexFilter { Nearest = 0, Linear = 1 };
-
-struct TexSamplerInfo {
-    TexFilter mag = TexFilter::Linear;
-    TexFilter min = TexFilter::Linear;
-    bool mip = false;
-    GLenum wrap_s = GL_REPEAT, wrap_t = GL_REPEAT, wrap_r = GL_REPEAT;
-    uint64_t state_version = 0;
 };
 
 struct FboAttach {
