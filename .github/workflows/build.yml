@@ -146,6 +146,26 @@ jobs:
           echo "$output"
           echo "$output" | grep -F "RENDER SMOKE ALL PASSED"
 
+      - name: Install Pillow for image export
+        run: |
+          python3 -m pip install --quiet --break-system-packages Pillow || \
+            python3 -m pip install --quiet Pillow
+          python3 -c "import PIL; print('Pillow', PIL.__version__)"
+
+      - name: Convert render to PNG
+        run: |
+          python3 scripts/ppm_render.py tests/render3d.ppm tests/render3d.png
+          ls -la tests/render3d.ppm tests/render3d.png
+
+      - name: Upload 3D render image (artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: mithril-render3d-png
+          path: |
+            tests/render3d.ppm
+            tests/render3d.png
+          if-no-files-found: error
+
       - name: Verify GL symbol table (Linux .so)
         run: |
           GL_COUNT=$(nm -D --defined-only output/libmithril.so | awk '{print $3}' | grep -cE '^gl[A-Z0-9]')
