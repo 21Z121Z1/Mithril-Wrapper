@@ -1567,7 +1567,6 @@ void APIENTRY glGetTexImage(GLenum target, GLint level, GLenum format,
               target == GL_TEXTURE_3D || target == GL_TEXTURE_2D_ARRAY ||
               target == GL_TEXTURE_1D_ARRAY || face;
     if (!ok) { PUSH_ERROR(GL_INVALID_ENUM); return; }
-    if (!pixels) return;
     GLuint id = ActiveBound(target);
     if (!id) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
     TexState& st = g_textures[id];
@@ -1603,18 +1602,39 @@ void APIENTRY glGetTexImage(GLenum target, GLint level, GLenum format,
 
     uint32_t lvl_w = std::max<uint32_t>(1, st.width >> level);
     uint32_t lvl_h = std::max<uint32_t>(1, st.height >> level);
+    const uint32_t components = FormatComponents(format);
+    if (!components) { PUSH_ERROR(GL_INVALID_ENUM); return; }
+    const bool one_dimensional_array = target == GL_TEXTURE_1D_ARRAY;
+    const bool three_dimensional = st.Is3D() || target == GL_TEXTURE_2D_ARRAY;
+    const uint32_t pack_height = one_dimensional_array ? count : lvl_h;
+    const uint32_t pack_images = three_dimensional ? count : 1;
+    PixelPackDestination destination;
+    if (!ResolvePixelPackDestination(
+            pixels, lvl_w, pack_height, pack_images, three_dimensional,
+            static_cast<size_t>(components) * TypeBytes(type), TypeBytes(type),
+            &destination))
+        return;
+    if (!destination.provided) return;
     uint32_t row_src = lvl_w * 4;
-    size_t row_dst = RowBytes(lvl_w, format, type, /*pack=*/true);
-    uint32_t plane_dst_rows = PlaneRows(lvl_h, /*pack=*/true);
     for (uint32_t s = 0; s < count; ++s) {
         const uint8_t* src = SlicePtrC(st, (uint32_t)level, slice0 + s);
+        if (one_dimensional_array) {
+            EncodeRowRGBA8(src,
+                           destination.data +
+                               static_cast<size_t>(s) * destination.row_stride,
+                           static_cast<GLsizei>(lvl_w), format, type);
+            continue;
+        }
         for (uint32_t y = 0; y < lvl_h; ++y) {
             EncodeRowRGBA8(src + (size_t)y * row_src,
-                           (uint8_t*)pixels +
-                               (size_t)(s * plane_dst_rows + y) * row_dst,
+                           destination.data +
+                               static_cast<size_t>(s) *
+                                   destination.image_stride +
+                               static_cast<size_t>(y) * destination.row_stride,
                            (GLsizei)lvl_w, format, type);
         }
     }
+    CommitPixelPackDestination(&destination);
 }
 
 // ---- sampler parameters ---------------------------------------------------
@@ -2070,7 +2090,6 @@ void APIENTRY glCompressedTexSubImage3D(GLenum target, GLint level,
 
 void APIENTRY glGetCompressedTexImage(GLenum target, GLint level, void* pixels) {
     (void)target;   // whole-level copy; cube faces share the level buffer
-    if (!pixels) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
     GLuint id = ActiveBound(target);
     if (!id) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
     TexState& st = g_textures[id];
@@ -2078,7 +2097,12 @@ void APIENTRY glGetCompressedTexImage(GLenum target, GLint level, void* pixels) 
         PUSH_ERROR(GL_INVALID_OPERATION);
         return;
     }
-    std::memcpy(pixels, st.comp[level].data(), st.comp[level].size());
+    PixelPackDestination destination;
+    if (!ResolvePixelPackBytes(pixels, st.comp[level].size(), &destination))
+        return;
+    if (!destination.provided) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
+    std::memcpy(destination.data, st.comp[level].data(), st.comp[level].size());
+    CommitPixelPackDestination(&destination);
 }
 
 // ---- framebuffer copies ------------------------------------------------------

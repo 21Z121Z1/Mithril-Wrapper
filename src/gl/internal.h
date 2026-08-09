@@ -75,7 +75,28 @@ extern GLuint g_bound_vao;           // default VAO is 0
 extern GLuint g_bound_array_buffer;
 extern GLuint g_bound_element_buffer;
 extern GLuint g_bound_uniform_buffer;
+extern GLuint g_bound_pixel_pack_buffer;
 extern GLuint g_bound_pixel_unpack_buffer;
+
+struct PixelPackDestination {
+    uint8_t* data = nullptr;
+    size_t row_stride = 0;
+    size_t image_stride = 0;
+    BufferData* buffer = nullptr;
+    bool provided = false;
+};
+
+// Resolve a client pointer or GL_PIXEL_PACK_BUFFER offset. The frontend owns
+// pixel-store layout and buffer lifetime; render backends only produce tightly
+// packed pixels.
+bool ResolvePixelPackDestination(void* pointer, uint32_t width,
+                                 uint32_t height, uint32_t images,
+                                 bool three_dimensional,
+                                 size_t bytes_per_pixel, size_t datum_bytes,
+                                 PixelPackDestination* output);
+bool ResolvePixelPackBytes(void* pointer, size_t byte_count,
+                           PixelPackDestination* output);
+void CommitPixelPackDestination(PixelPackDestination* destination);
 
 struct IndexedBufferBinding {
     GLuint buffer = 0;

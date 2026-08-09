@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <limits>
 #include <utility>
 
 // Shared tables (declared extern in internal.h; the draw path reads
@@ -19,6 +20,7 @@ GLuint g_bound_vao = 0;
 GLuint g_bound_array_buffer = 0;
 GLuint g_bound_element_buffer = 0;
 GLuint g_bound_uniform_buffer = 0;
+GLuint g_bound_pixel_pack_buffer = 0;
 GLuint g_bound_pixel_unpack_buffer = 0;
 std::array<IndexedBufferBinding, kMaxUniformBufferBindings>
     g_uniform_buffer_bindings{};
@@ -26,6 +28,127 @@ std::array<IndexedBufferBinding, kMaxUniformBufferBindings>
 // program id -> selected-backend program handle (created lazily on first draw by the
 // draw path; erased by the shader-lifecycle path on glDeleteProgram).
 std::unordered_map<GLuint, uint64_t> g_backend_programs;
+
+namespace {
+
+bool AddPackProduct(uint64_t* total, uint64_t left, uint64_t right) {
+    if (left && right > std::numeric_limits<uint64_t>::max() / left)
+        return false;
+    const uint64_t product = left * right;
+    if (*total > std::numeric_limits<uint64_t>::max() - product) return false;
+    *total += product;
+    return true;
+}
+
+} // namespace
+
+bool ResolvePixelPackDestination(void* pointer, uint32_t width,
+                                 uint32_t height, uint32_t images,
+                                 bool three_dimensional,
+                                 size_t bytes_per_pixel, size_t datum_bytes,
+                                 PixelPackDestination* output) {
+    if (!output || !bytes_per_pixel || !datum_bytes) return false;
+    *output = {};
+    const s::PixelStore& store = s::GetState().pixels;
+    const uint64_t row_pixels = store.pack_row_length > 0
+        ? static_cast<uint64_t>(store.pack_row_length) : width;
+    uint64_t row_bytes = 0;
+    if (!AddPackProduct(&row_bytes, row_pixels, bytes_per_pixel)) {
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return false;
+    }
+    const uint64_t alignment = static_cast<uint64_t>(store.pack_alignment);
+    if (row_bytes > std::numeric_limits<uint64_t>::max() - alignment + 1) {
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return false;
+    }
+    row_bytes = ((row_bytes + alignment - 1) / alignment) * alignment;
+    const uint64_t image_rows = three_dimensional && store.pack_image_height > 0
+        ? static_cast<uint64_t>(store.pack_image_height) : height;
+    uint64_t image_stride = 0;
+    if (!AddPackProduct(&image_stride, image_rows, row_bytes)) {
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return false;
+    }
+    uint64_t base = 0;
+    if ((three_dimensional &&
+         !AddPackProduct(&base,
+                         static_cast<uint64_t>(store.pack_skip_images),
+                         image_stride)) ||
+        !AddPackProduct(&base, static_cast<uint64_t>(store.pack_skip_rows),
+                        row_bytes) ||
+        !AddPackProduct(&base, static_cast<uint64_t>(store.pack_skip_pixels),
+                        bytes_per_pixel)) {
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return false;
+    }
+    uint64_t span = 0;
+    if (width && height && images &&
+        (!AddPackProduct(&span, images - 1, image_stride) ||
+         !AddPackProduct(&span, height - 1, row_bytes) ||
+         !AddPackProduct(&span, width, bytes_per_pixel))) {
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return false;
+    }
+
+    output->row_stride = static_cast<size_t>(row_bytes);
+    output->image_stride = static_cast<size_t>(image_stride);
+    if (g_bound_pixel_pack_buffer) {
+        const auto found = g_buffers.find(g_bound_pixel_pack_buffer);
+        const uint64_t offset = reinterpret_cast<uintptr_t>(pointer);
+        if (found == g_buffers.end() || found->second.mapped ||
+            offset % datum_bytes != 0 || offset > found->second.data.size() ||
+            base > found->second.data.size() - offset ||
+            span > found->second.data.size() - offset - base) {
+            PUSH_ERROR(GL_INVALID_OPERATION);
+            return false;
+        }
+        output->buffer = &found->second;
+        output->data = found->second.data.empty()
+            ? nullptr : found->second.data.data() + offset + base;
+        output->provided = true;
+        return true;
+    }
+    if (!pointer) return true;
+    const uintptr_t address = reinterpret_cast<uintptr_t>(pointer);
+    if (base > std::numeric_limits<uintptr_t>::max() - address) {
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return false;
+    }
+    output->data = reinterpret_cast<uint8_t*>(address + base);
+    output->provided = true;
+    return true;
+}
+
+bool ResolvePixelPackBytes(void* pointer, size_t byte_count,
+                           PixelPackDestination* output) {
+    if (!output) return false;
+    *output = {};
+    if (!g_bound_pixel_pack_buffer) {
+        output->data = static_cast<uint8_t*>(pointer);
+        output->provided = pointer != nullptr;
+        return true;
+    }
+    const auto found = g_buffers.find(g_bound_pixel_pack_buffer);
+    const uint64_t offset = reinterpret_cast<uintptr_t>(pointer);
+    if (found == g_buffers.end() || found->second.mapped ||
+        offset > found->second.data.size() ||
+        byte_count > found->second.data.size() - offset) {
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return false;
+    }
+    output->buffer = &found->second;
+    output->data = found->second.data.empty()
+        ? nullptr : found->second.data.data() + offset;
+    output->provided = true;
+    return true;
+}
+
+void CommitPixelPackDestination(PixelPackDestination* destination) {
+    if (!destination || !destination->buffer) return;
+    ++destination->buffer->content_version;
+    destination->buffer->defined = true;
+}
 
 extern "C" {
 
@@ -85,6 +208,8 @@ void APIENTRY glDeleteBuffers(GLsizei n, const GLuint* buffers) {
         if (g_bound_array_buffer == buffers[i]) g_bound_array_buffer = 0;
         if (g_bound_element_buffer == buffers[i]) g_bound_element_buffer = 0;
         if (g_bound_uniform_buffer == buffers[i]) g_bound_uniform_buffer = 0;
+        if (g_bound_pixel_pack_buffer == buffers[i])
+            g_bound_pixel_pack_buffer = 0;
         if (g_bound_pixel_unpack_buffer == buffers[i])
             g_bound_pixel_unpack_buffer = 0;
         for (auto& binding : g_uniform_buffer_bindings)
@@ -103,6 +228,7 @@ void APIENTRY glBindBuffer(GLenum target, GLuint buffer) {
         case GL_ARRAY_BUFFER: g_bound_array_buffer = buffer; break;
         case GL_ELEMENT_ARRAY_BUFFER: g_bound_element_buffer = buffer; break;
         case GL_UNIFORM_BUFFER: g_bound_uniform_buffer = buffer; break;
+        case GL_PIXEL_PACK_BUFFER: g_bound_pixel_pack_buffer = buffer; break;
         case GL_PIXEL_UNPACK_BUFFER: g_bound_pixel_unpack_buffer = buffer; break;
         default:
             PUSH_ERROR(GL_INVALID_ENUM);
@@ -117,6 +243,7 @@ void APIENTRY glBufferData(GLenum target, GLsizeiptr size, const void* data, GLe
         case GL_ARRAY_BUFFER: bound = &g_bound_array_buffer; break;
         case GL_ELEMENT_ARRAY_BUFFER: bound = &g_bound_element_buffer; break;
         case GL_UNIFORM_BUFFER: bound = &g_bound_uniform_buffer; break;
+        case GL_PIXEL_PACK_BUFFER: bound = &g_bound_pixel_pack_buffer; break;
         case GL_PIXEL_UNPACK_BUFFER: bound = &g_bound_pixel_unpack_buffer; break;
         default: PUSH_ERROR(GL_INVALID_ENUM); return;
     }
@@ -139,6 +266,7 @@ void APIENTRY glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, c
         case GL_ARRAY_BUFFER: bound = &g_bound_array_buffer; break;
         case GL_ELEMENT_ARRAY_BUFFER: bound = &g_bound_element_buffer; break;
         case GL_UNIFORM_BUFFER: bound = &g_bound_uniform_buffer; break;
+        case GL_PIXEL_PACK_BUFFER: bound = &g_bound_pixel_pack_buffer; break;
         case GL_PIXEL_UNPACK_BUFFER: bound = &g_bound_pixel_unpack_buffer; break;
         default: PUSH_ERROR(GL_INVALID_ENUM); return;
     }
@@ -167,6 +295,7 @@ BufferData* BoundBufferForTarget(GLenum target, GLenum* error) {
         case GL_ARRAY_BUFFER: bound = &g_bound_array_buffer; break;
         case GL_ELEMENT_ARRAY_BUFFER: bound = &g_bound_element_buffer; break;
         case GL_UNIFORM_BUFFER: bound = &g_bound_uniform_buffer; break;
+        case GL_PIXEL_PACK_BUFFER: bound = &g_bound_pixel_pack_buffer; break;
         case GL_PIXEL_UNPACK_BUFFER: bound = &g_bound_pixel_unpack_buffer; break;
         default: *error = GL_INVALID_ENUM; return nullptr;
     }

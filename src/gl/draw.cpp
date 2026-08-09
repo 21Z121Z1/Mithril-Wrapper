@@ -794,9 +794,23 @@ void APIENTRY glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height,
         PUSH_ERROR(GL_INVALID_OPERATION);
         return;
     }
-    if (!pixels) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
+    PixelPackDestination destination;
+    if (!ResolvePixelPackDestination(pixels, static_cast<uint32_t>(width),
+                                     static_cast<uint32_t>(height), 1,
+                                     /*three_dimensional=*/false, 4, 1,
+                                     &destination))
+        return;
+    if (!destination.provided) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
+    if (width == 0 || height == 0) return;
     if (!v::EnsureInit()) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
-    v::ReadPixels(x, y, width, height, pixels);
+    std::vector<uint8_t> tight(static_cast<size_t>(width) * height * 4);
+    v::ReadPixels(x, y, width, height, tight.data());
+    for (GLsizei row = 0; row < height; ++row)
+        std::memcpy(destination.data + static_cast<size_t>(row) *
+                                          destination.row_stride,
+                    tight.data() + static_cast<size_t>(row) * width * 4,
+                    static_cast<size_t>(width) * 4);
+    CommitPixelPackDestination(&destination);
 }
 
 } // extern "C"

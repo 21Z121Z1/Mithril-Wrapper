@@ -25,6 +25,7 @@
 #define GL_TRIANGLE_STRIP     0x0005
 #define GL_ARRAY_BUFFER       0x8892
 #define GL_ELEMENT_ARRAY_BUFFER 0x8893
+#define GL_PIXEL_PACK_BUFFER  0x88EB
 #define GL_PIXEL_UNPACK_BUFFER 0x88EC
 #define GL_TEXTURE0           0x84C0
 #define GL_TEXTURE_2D         0x0DE1
@@ -58,6 +59,9 @@
 #define GL_UNPACK_ROW_LENGTH  0x0CF2
 #define GL_UNPACK_SKIP_ROWS   0x0CF3
 #define GL_UNPACK_SKIP_PIXELS 0x0CF4
+#define GL_PACK_ROW_LENGTH    0x0D02
+#define GL_PACK_SKIP_ROWS     0x0D03
+#define GL_PACK_SKIP_PIXELS   0x0D04
 
 typedef unsigned int GLuint;
 typedef unsigned int GLenum;
@@ -84,6 +88,7 @@ typedef void (*fn_glBindVertexArray)(GLuint);
 typedef void (*fn_glGenBuffers)(GLsizei, GLuint*);
 typedef void (*fn_glBindBuffer)(GLenum, GLuint);
 typedef void (*fn_glBufferData)(GLenum, GLsizeiptr, const void*, GLenum);
+typedef void (*fn_glGetBufferSubData)(GLenum, GLintptr, GLsizeiptr, void*);
 typedef void (*fn_glEnableVertexAttribArray)(GLuint);
 typedef void (*fn_glVertexAttribPointer)(GLuint, GLint, GLenum, GLboolean, GLsizei, const GLvoid*);
 typedef void (*fn_glDrawArrays)(GLenum, GLint, GLsizei);
@@ -164,6 +169,8 @@ int main(void) {
     fn_glGenBuffers        genBuffers   = (fn_glGenBuffers)dlsym(h, "glGenBuffers");
     fn_glBindBuffer        bindBuffer   = (fn_glBindBuffer)dlsym(h, "glBindBuffer");
     fn_glBufferData        bufferData   = (fn_glBufferData)dlsym(h, "glBufferData");
+    fn_glGetBufferSubData  getBufferSubData=
+        (fn_glGetBufferSubData)dlsym(h, "glGetBufferSubData");
     fn_glEnableVertexAttribArray enableAttrib=(fn_glEnableVertexAttribArray)dlsym(h, "glEnableVertexAttribArray");
     fn_glVertexAttribPointer vertexAttribPtr=(fn_glVertexAttribPointer)dlsym(h, "glVertexAttribPointer");
     fn_glDrawArrays        drawArrays   = (fn_glDrawArrays)dlsym(h, "glDrawArrays");
@@ -193,7 +200,8 @@ int main(void) {
     CHECK(clearColor && clear && createShader && shaderSource && compileShader &&
           createProgram && attachShader && linkProgram && useProgram &&
           getUniformLoc && uniform1i && genVertexArrays && bindVertexArray &&
-          genBuffers && bindBuffer && bufferData && enableAttrib &&
+          genBuffers && bindBuffer && bufferData && getBufferSubData &&
+          enableAttrib &&
           vertexAttribPtr && drawArrays && finish && readPixels &&
           genTextures && deleteTextures && isTexture && bindTexture &&
           activeTexture && texImage2D && texSubImage2D && texParameteri &&
@@ -359,6 +367,25 @@ int main(void) {
         CHECK(px_match(px, 0, 255, 0, 255),
               "PBO byte offset and UNPACK row/skip state upload green "
               "(r=%d g=%d b=%d)", px[0], px[1], px[2]);
+
+        unsigned char packed[16 + 4 * 4 * 4];
+        bindBuffer(GL_PIXEL_PACK_BUFFER, pbo);
+        bufferData(GL_PIXEL_PACK_BUFFER, (GLsizeiptr)sizeof(packed), NULL,
+                   0x88E4);
+        pixelStorei(GL_PACK_ROW_LENGTH, 4);
+        pixelStorei(GL_PACK_SKIP_ROWS, 1);
+        pixelStorei(GL_PACK_SKIP_PIXELS, 1);
+        readPixels(256, 256, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE,
+                   (void*)(uintptr_t)16);
+        pixelStorei(GL_PACK_ROW_LENGTH, 0);
+        pixelStorei(GL_PACK_SKIP_ROWS, 0);
+        pixelStorei(GL_PACK_SKIP_PIXELS, 0);
+        getBufferSubData(GL_PIXEL_PACK_BUFFER, 0, (GLsizeiptr)sizeof(packed),
+                         packed);
+        CHECK(px_match(packed + 16 + (4 + 1) * 4, 0, 255, 0, 255),
+              "Metal readback honors PBO offset and PACK row/skip state "
+              "(r=%d g=%d b=%d)", packed[36], packed[37], packed[38]);
+        bindBuffer(GL_PIXEL_PACK_BUFFER, 0);
         deleteTextures(1, &pbo_tex);
         bindTexture(GL_TEXTURE_2D, tex);
     }
