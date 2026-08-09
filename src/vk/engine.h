@@ -196,7 +196,9 @@ struct FboAttach {
 // Complete attachment set for a GL framebuffer object. `width`/`height` are
 // the resolved render-target size (from the attached textures/renderbuffers).
 struct FboSpec {
-    FboAttach color;             // MUST be present for a complete FBO
+    std::vector<FboAttach> color;      // one per GL_COLOR_ATTACHMENTi (MRT)
+    std::vector<GLenum> draw_bufs;     // current draw buffers (GL_COLOR_ATTACHMENTn)
+    GLenum read_buf = GL_COLOR_ATTACHMENT0;   // current read buffer
     bool has_depth = false;
     FboAttach depth;             // optional depth/stencil attachment
     uint32_t width = 0, height = 0;
@@ -224,6 +226,10 @@ void BindReadFramebuffer(uint64_t fbo_id);
 // Size of the framebuffer bound for drawing (for viewport/scissor clamps).
 uint32_t DrawTargetWidth();
 uint32_t DrawTargetHeight();
+
+// Ask the next SubmitFlush to re-record the readback (GL_READ_BUFFER /
+// read-framebuffer changed without any new drawing).
+void RefreshReadback();
 
 // Copy (blit) a rect from the src draw/read framebuffer to the dst draw
 // framebuffer. The GL layer passes both framebuffer ids (0 = default);

@@ -15,6 +15,13 @@ namespace mithril::vk {
 
 namespace {
 
+// MRT: whether colour attachment `i` of `f` is among the active draw buffers.
+static bool OpDrawBufEnabled(const FboObj& f, size_t i) {
+    for (auto b : f.draw_bufs)
+        if (b == (GLenum)(GL_COLOR_ATTACHMENT0 + i)) return true;
+    return false;
+}
+
 // Create a host-visible staging buffer of `size` bytes and copy `data` in.
 bool StageBytes(const void* data, VkDeviceSize size, VkBufferUsageFlags usage,
                 VkBuffer* buf, VkDeviceMemory* mem) {
@@ -73,6 +80,12 @@ void Draw(const DrawParams& params) {
         op.has_render_pass = true;
         op.render_pass = fbo.pass;
         op.rp_sig = fbo.sig;
+        op.color_count = (uint32_t)fbo.colors.size();
+        op.samples = fbo.samples;
+        op.draw_mask = 0;
+        for (size_t i = 0; i < fbo.draw_bufs.size() && i < 32; ++i)
+            if (fbo.draw_bufs[i] != GL_NONE)
+                op.draw_mask |= 1u << (fbo.draw_bufs[i] - GL_COLOR_ATTACHMENT0);
     }
 
     std::string base_key =
@@ -211,7 +224,9 @@ void SubmitFlush() {
         fb_handle = fbo->fb;
         pw = fbo->width;
         ph = fbo->height;
-        color_img = FboColorImage(*fbo);
+        color_img =
+            fbo->color_msaa.empty() ? VK_NULL_HANDLE
+                                    : FboColorImage(*fbo, 0);
         color_layout = &fbo->color_layout;
         if (fbo->has_depth) {
             depth_img = FboDepthImage(*fbo);
@@ -220,7 +235,6 @@ void SubmitFlush() {
             depth_img = VK_NULL_HANDLE;
             has_depth = false;
         }
-        if (color_img == VK_NULL_HANDLE) return;
     }
 
     VkCommandBufferBeginInfo bi{};
@@ -229,49 +243,72 @@ void SubmitFlush() {
     g.fn.ResetCommandBuffer(g.cmd, 0);
     g.fn.BeginCommandBuffer(g.cmd, &bi);
 
-    // Optional explicit clear of the current target.
+    // Optional explicit clear of the current target. MRT: one clear per
+    // colour attachment (only those selected by the draw buffers).
     VkImageSubresourceRange color_range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
     if (g.pending_clear) {
         if (g.clear_mask & GL_COLOR_BUFFER_BIT) {
-            if (*color_layout != VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
-                TransitionLayout(g.cmd, color_img, *color_layout,
-                                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-                *color_layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-            }
             VkClearColorValue c{};
             c.float32[0] = g.clear_r;
             c.float32[1] = g.clear_g;
             c.float32[2] = g.clear_b;
             c.float32[3] = g.clear_a;
-            g.fn.CmdClearColorImage(g.cmd, color_img,
-                                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &c, 1,
-                                    &color_range);
-        }
-        if (has_depth &&
-            (g.clear_mask & (GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT))) {
-            VkImageAspectFlags aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
-            if (g.clear_mask & GL_STENCIL_BUFFER_BIT)
-                aspect |= VK_IMAGE_ASPECT_STENCIL_BIT;
-            if (*depth_layout != VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
-                TransitionLayoutAspect(
-                    g.cmd, depth_img, {aspect, 0, 1, 0, 1}, *depth_layout,
-                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-                *depth_layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            auto clear_img = [&](VkImage img, VkImageLayout lay) {
+                if (img == VK_NULL_HANDLE) return;
+                TransitionLayout(g.cmd, img, lay,
+                                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+                g.fn.CmdClearColorImage(g.cmd, img,
+                                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                        &c, 1, &color_range);
+            };
+            if (!fbo) {
+                clear_img(color_img, *color_layout);
+            } else {
+                for (size_t i = 0; i < fbo->colors.size(); ++i) {
+                    if (!(OpDrawBufEnabled(*fbo, i))) continue;
+                    clear_img(FboColorImage(*fbo, (int)i),
+                              VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+                    if (fbo->color_msaa[i])
+                        clear_img(FboResolveImage(*fbo, (int)i),
+                                   VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+                }
             }
-            VkClearDepthStencilValue c{};
-            c.depth = (float)g.clear_depth;
-            c.stencil = (uint32_t)g.clear_stencil;
-            VkImageSubresourceRange depth_range{aspect, 0, 1, 0, 1};
-            g.fn.CmdClearDepthStencilImage(g.cmd, depth_img,
-                                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                                           &c, 1, &depth_range);
         }
+    }
+    if (g.pending_clear && has_depth &&
+        (g.clear_mask & (GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT))) {
+        VkImageAspectFlags aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
+        if (g.clear_mask & GL_STENCIL_BUFFER_BIT)
+            aspect |= VK_IMAGE_ASPECT_STENCIL_BIT;
+        if (*depth_layout != VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
+            TransitionLayoutAspect(g.cmd, depth_img, {aspect, 0, 1, 0, 1},
+                                   *depth_layout,
+                                   VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+            *depth_layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        }
+        VkClearDepthStencilValue c{};
+        c.depth = (float)g.clear_depth;
+        c.stencil = (uint32_t)g.clear_stencil;
+        VkImageSubresourceRange depth_range{aspect, 0, 1, 0, 1};
+        g.fn.CmdClearDepthStencilImage(g.cmd, depth_img,
+                                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                       &c, 1, &depth_range);
     }
     if (*color_layout != VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
         TransitionLayout(g.cmd, color_img, *color_layout,
                          VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
         *color_layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     }
+    // Bring the FBO colour resolve targets back to color-attachment optimal
+    // (the resolve blit in the render pass expects that layout).
+    for (size_t i = 0; i < (fbo ? fbo->resolve_view.size() : 0); ++i)
+        if (fbo->color_msaa[i] &&
+            fbo->resolve_view[i] &&
+            FboResolveImage(*fbo, (int)i) != VK_NULL_HANDLE) {
+            auto rim = FboResolveImage(*fbo, (int)i);
+            TransitionLayout(g.cmd, rim, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                             VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+        }
     if (has_depth &&
         *depth_layout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL) {
         TransitionLayoutAspect(g.cmd, depth_img,
@@ -357,22 +394,35 @@ void SubmitFlush() {
     VkImageLayout read_layout = g.target_layout;
     uint32_t rw = g.width, rh = g.height;
     FboObj* read_fbo = nullptr;
+    bool have_read = false;
+    int ridx = 0;
     if (g.bound_read_fbo) {
         auto rit = g.framebuffers.find(g.bound_read_fbo);
         if (rit != g.framebuffers.end()) {
             read_fbo = &rit->second;
-            read_img = FboColorImage(rit->second);
-            read_layout = rit->second.color_layout;
+            ridx = (int)(read_fbo->read_buf - GL_COLOR_ATTACHMENT0);
+            if (ridx < 0 || ridx >= (int)read_fbo->colors.size()) ridx = 0;
             rw = rit->second.width;
             rh = rit->second.height;
+            have_read = true;
         }
     } else if (fbo) {
         // No separate read binding: read back the draw target.
         read_fbo = fbo;
-        read_img = FboColorImage(*fbo);
-        read_layout = *color_layout;
+        ridx = (int)(read_fbo->read_buf - GL_COLOR_ATTACHMENT0);
+        if (ridx < 0 || ridx >= (int)read_fbo->colors.size()) ridx = 0;
         rw = fbo->width;
         rh = fbo->height;
+        have_read = true;
+    }
+    if (have_read) {
+        if (read_fbo->color_msaa[ridx]) {
+            read_img = FboResolveImage(*read_fbo, ridx);
+            read_layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        } else {
+            read_img = FboColorImage(*read_fbo, ridx);
+            read_layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        }
     }
 
     if (read_img != VK_NULL_HANDLE &&
@@ -411,15 +461,16 @@ void SubmitFlush() {
                                   1, &bic);
     }
 
-    // Restore the colour target layout (default: colour attachment; an FBO
-    // texture may also be sampled next, so leave it shader-read-optimal).
+    // Restore the read-image layout. MSAA resolve images are only ever
+    // transfer-src (read back), so nothing to do; FBO textures may also be
+    // sampled next, so leave them shader-read-optimal.
     if (read_img != VK_NULL_HANDLE) {
-        if (read_fbo) {
-            TransitionLayout(g.cmd, read_img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        if (read_fbo && !read_fbo->color_msaa[ridx]) {
+            TransitionLayout(g.cmd, read_img, read_layout,
                              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
             read_fbo->color_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        } else {
-            TransitionLayout(g.cmd, read_img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+        } else if (!read_fbo && read_layout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL) {
+            TransitionLayout(g.cmd, read_img, read_layout,
                              VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
             g.target_layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         }
@@ -457,6 +508,13 @@ void SubmitFlush() {
     g.frame_dirty = false;
     ML_LOG_DEBUG("vk: frame submitted to %s target (%ux%u)",
                  fbo ? "FBO" : "default", pw, ph);
+}
+
+void RefreshReadback() {
+    // GL_READ_BUFFER / the read target changed after a rendered frame:
+    // arrange for the next SubmitFlush to re-record the readback copy.
+    if (!g.initialized) return;
+    g.frame_dirty = true;
 }
 
 void ReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, void* out) {

@@ -36,10 +36,14 @@ struct Attach {
 // Complete attachment set for one framebuffer object. `width`/`height` are
 // the resolved render target size (from the attached images).
 struct FbState {
-    Attach color;                    // GL_COLOR_ATTACHMENT0
+    Attach color[8];                 // GL_COLOR_ATTACHMENT0..7 (MRT)
+    int n_color = 0;                 // highest attached color index + 1
     bool has_depth = false;
     Attach depth;                    // GL_DEPTH_ATTACHMENT / _STENCIL_
     GLsizei width = 0, height = 0;
+    GLenum draw_bufs[8] = {GL_COLOR_ATTACHMENT0};
+    int n_draw = 1;
+    GLenum read_buf = GL_COLOR_ATTACHMENT0;
     bool complete = false;           // last glCheckFramebufferStatus result
     bool dirty = true;               // needs a v::SetFramebuffer push
 };
@@ -79,9 +83,26 @@ static bool AttachDimensions(const Attach& a, GLsizei* w, GLsizei* h) {
 
 // Push the current attachments into the Vulkan engine (idempotent unless the
 // FBO changed); marks `complete` for glCheckFramebufferStatus. A GL FBO must
-// have a colour attachment to be renderable (the backend has a color target),
-// so colour-less FBOs stay incomplete.
+// have at least one colour attachment to be renderable (the backend has a
+// color target), so colour-less FBOs stay incomplete.
 static void PushVkFramebuffer(GLuint id);
+
+static bool FillAttach(const Attach& a, v::FboAttach* out) {
+    if (!a.present) return false;
+    if (a.is_texture) {
+        auto it = g_textures.find(a.tex_id);
+        if (it == g_textures.end() || it->second.width == 0) return false;
+        out->is_texture = true;
+        out->tex_id = a.tex_id;
+        out->level = (uint32_t)std::max<GLint>(0, a.level);
+        out->layer = (uint32_t)std::max<GLint>(0, a.layer);
+    } else {
+        auto rit = g_renderbuffers.find(a.rbo_id);
+        if (rit == g_renderbuffers.end() || !rit->second.defined) return false;
+        out->rbo_id = a.rbo_id;
+    }
+    return true;
+}
 
 static void PushVkFramebuffer(GLuint id) {
     FbState* f = FboGet(id);
@@ -89,27 +110,32 @@ static void PushVkFramebuffer(GLuint id) {
 
     v::FboSpec spec;
     GLsizei cw = 0, ch = 0;
-    bool col_ok = f->color.present && AttachDimensions(f->color, &cw, &ch);
-    if (col_ok) {
-        spec.color.is_texture = f->color.is_texture;
-        spec.color.tex_id = f->color.tex_id;
-        spec.color.level = (uint32_t)std::max<GLint>(0, f->color.level);
-        spec.color.layer = (uint32_t)std::max<GLint>(0, f->color.layer);
-        spec.color.rbo_id = f->color.rbo_id;
-        spec.width = cw;
-        spec.height = ch;
+    bool col_ok = false;
+    for (int i = 0; i < f->n_color; ++i) {
+        v::FboAttach ca;
+        if (FillAttach(f->color[i], &ca)) {
+            spec.color.push_back(ca);
+            col_ok = true;
+        } else {
+            v::FboAttach empty;
+            spec.color.push_back(empty);
+        }
+        if (i == 0) AttachDimensions(f->color[i], &cw, &ch);
     }
-
     if (col_ok && f->has_depth && f->depth.present) {
         GLsizei dw = 0, dh = 0;
         if (AttachDimensions(f->depth, &dw, &dh) && dw == cw && dh == ch) {
             spec.has_depth = true;
-            spec.depth.is_texture = f->depth.is_texture;
-            spec.depth.tex_id = f->depth.tex_id;
-            spec.depth.level = (uint32_t)std::max<GLint>(0, f->depth.level);
-            spec.depth.layer = (uint32_t)std::max<GLint>(0, f->depth.layer);
-            spec.depth.rbo_id = f->depth.rbo_id;
+            FillAttach(f->depth, &spec.depth);
         }
+    }
+
+    spec.read_buf = f->read_buf;
+    for (int i = 0; i < f->n_draw; ++i) spec.draw_bufs.push_back(f->draw_bufs[i]);
+
+    if (col_ok) {
+        spec.width = cw;
+        spec.height = ch;
     }
 
     v::SetFramebuffer(id, spec);
@@ -130,21 +156,34 @@ static GLuint AttachmentFbo(GLenum target) {
     }
 }
 
+// Map a GL attachment enum to a color slot index (-1 for depth, -2 invalid).
+static int ColorAttachIndex(GLenum attachment) {
+    if (attachment == GL_DEPTH_ATTACHMENT ||
+        attachment == GL_DEPTH_STENCIL_ATTACHMENT)
+        return -1;
+    if (attachment < GL_COLOR_ATTACHMENT0) return -2;
+    int i = (int)(attachment - GL_COLOR_ATTACHMENT0);
+    return i < 8 ? i : -2;
+}
+
 // Attach a texture (texture == 0 => detach) to an attachment of `fbo`.
 static void SetTextureAttachment(GLenum attachment, GLuint fbo, GLuint texture,
                                  GLint level, GLint layer) {
     FbState* f = FboGet(fbo);
     if (!f) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
-    bool is_depth = attachment == GL_DEPTH_ATTACHMENT ||
-                    attachment == GL_DEPTH_STENCIL_ATTACHMENT;
-    Attach& a = is_depth ? f->depth : f->color;
+    int ci = ColorAttachIndex(attachment);
+    if (ci < -1) { PUSH_ERROR(GL_INVALID_ENUM); return; }
+    Attach& a = ci < 0 ? f->depth : f->color[ci];
     a.present = texture != 0;
     a.is_texture = true;
     a.tex_id = texture;
     a.level = level;
     a.layer = layer;
     a.rbo_id = 0;
-    if (is_depth) f->has_depth = texture != 0;
+    if (ci < 0)
+        f->has_depth = texture != 0;
+    else if (ci + 1 > f->n_color)
+        f->n_color = ci + 1;
     f->dirty = true;
     if (fbo == g_bound_draw_fbo) PushVkFramebuffer(fbo);
 }
@@ -318,11 +357,71 @@ GLenum APIENTRY glCheckFramebufferStatus(GLenum target) {
                        : GL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT;
 }
 
+// Manually chosen draw buffer on the draw FBO (GL_NONE clears colour writes).
+void APIENTRY glDrawBuffer(GLenum buf) {
+    glDrawBuffers(1, &buf);
+}
+
+void APIENTRY glDrawBuffers(GLsizei n, const GLenum* bufs) {
+    if (n < 0 || !bufs) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+    FbState* f = FboGet(g_bound_draw_fbo);
+    if (!f) {
+        if (n == 1 && bufs[0] == GL_BACK) return;   // default framebuffer
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return;
+    }
+    if (n > 8) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+    for (GLsizei i = 0; i < n; ++i) {
+        GLenum b = bufs[i];
+        if (b == GL_NONE) {
+            f->draw_bufs[i] = b;
+            continue;
+        }
+        if (b == GL_BACK) { b = GL_COLOR_ATTACHMENT0; }
+        if (b < GL_COLOR_ATTACHMENT0 ||
+            b >= GL_COLOR_ATTACHMENT0 + (GLenum)8) {
+            PUSH_ERROR(GL_INVALID_ENUM);
+            return;
+        }
+        int ci = (int)(b - GL_COLOR_ATTACHMENT0);
+        if (ci >= f->n_color) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
+        f->draw_bufs[i] = b;
+    }
+    f->n_draw = n;
+    f->dirty = true;
+    if (g_bound_draw_fbo) PushVkFramebuffer(g_bound_draw_fbo);
+}
+
+// The buffer glReadPixels / blit read from (`buf` selects a colour
+// attachment, GL_NONE or a back/depth buffer are not supported here).
+void APIENTRY glReadBuffer(GLenum buf) {
+    FbState* f = FboGet(g_bound_read_fbo);
+    if (!f) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
+    if (buf == GL_NONE) {
+        f->read_buf = buf;
+        f->dirty = true;
+        if (g_bound_read_fbo == g_bound_draw_fbo) PushVkFramebuffer(g_bound_read_fbo);
+        return;
+    }
+    if (buf < GL_COLOR_ATTACHMENT0 ||
+        buf >= GL_COLOR_ATTACHMENT0 + (GLenum)8) {
+        PUSH_ERROR(GL_INVALID_ENUM);
+        return;
+    }
+    int ci = (int)(buf - GL_COLOR_ATTACHMENT0);
+    if (ci >= f->n_color) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
+    f->read_buf = buf;
+    f->dirty = true;
+    v::RefreshReadback();
+    if (g_bound_read_fbo == g_bound_draw_fbo || g_bound_read_fbo)
+        PushVkFramebuffer(g_bound_read_fbo);
+}
+
 static void AttachTexture(GLenum attachment, GLuint fbo, GLuint texture,
                           GLint level, GLint layer) {
-    bool is_depth = attachment == GL_DEPTH_ATTACHMENT ||
-                    attachment == GL_DEPTH_STENCIL_ATTACHMENT;
-    if (attachment != GL_COLOR_ATTACHMENT0 && !is_depth) {
+    bool has_depth = attachment == GL_DEPTH_ATTACHMENT ||
+                     attachment == GL_DEPTH_STENCIL_ATTACHMENT;
+    if (!has_depth && ColorAttachIndex(attachment) < 0) {
         PUSH_ERROR(GL_INVALID_ENUM);
         return;
     }
@@ -408,9 +507,8 @@ void APIENTRY glFramebufferRenderbuffer(GLenum target, GLenum attachment,
         PUSH_ERROR(GL_INVALID_OPERATION);
         return;
     }
-    bool is_depth = attachment == GL_DEPTH_ATTACHMENT ||
-                    attachment == GL_DEPTH_STENCIL_ATTACHMENT;
-    if (attachment != GL_COLOR_ATTACHMENT0 && !is_depth) {
+int ci = ColorAttachIndex(attachment);
+    if (ci < -1) {
         PUSH_ERROR(GL_INVALID_ENUM);
         return;
     }
@@ -418,12 +516,15 @@ void APIENTRY glFramebufferRenderbuffer(GLenum target, GLenum attachment,
     if (renderbuffer && !fbo) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
     FbState* f = FboGet(fbo);
     if (!f) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
-    Attach& a = is_depth ? f->depth : f->color;
+    Attach& a = ci < 0 ? f->depth : f->color[ci];
     a.present = renderbuffer != 0;
     a.is_texture = false;
     a.rbo_id = renderbuffer;
     a.tex_id = 0;
-    if (is_depth) f->has_depth = renderbuffer != 0;
+    if (ci < 0)
+        f->has_depth = renderbuffer != 0;
+    else if (ci + 1 > f->n_color)
+        f->n_color = ci + 1;
     f->dirty = true;
     if (fbo == g_bound_draw_fbo) PushVkFramebuffer(fbo);
 }
@@ -438,12 +539,8 @@ void APIENTRY glGetFramebufferAttachmentParameteriv(GLenum target,
         return;
     }
     if (!params) return;
-    bool is_depth = attachment == GL_DEPTH_ATTACHMENT ||
-                    attachment == GL_DEPTH_STENCIL_ATTACHMENT;
-    if (attachment != GL_COLOR_ATTACHMENT0 && !is_depth) {
-        PUSH_ERROR(GL_INVALID_ENUM);
-        return;
-    }
+    int ci = ColorAttachIndex(attachment);
+    if (ci < -1) { PUSH_ERROR(GL_INVALID_ENUM); return; }
     GLuint id = AttachmentFbo(target);
     const FbState* f = FboGet(id);
     if (!f) {
@@ -453,7 +550,7 @@ void APIENTRY glGetFramebufferAttachmentParameteriv(GLenum target,
             *params = 0;
         return;
     }
-    const Attach& a = is_depth ? f->depth : f->color;
+    const Attach& a = ci < 0 ? f->depth : f->color[ci];
     switch (pname) {
         case GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE:
             *params = a.present ? (a.is_texture ? GL_TEXTURE : GL_RENDERBUFFER)

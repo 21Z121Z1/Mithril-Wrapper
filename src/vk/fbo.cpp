@@ -49,48 +49,77 @@ bool IsDepthFormat(VkFormat f) {
 // Build a render pass matching the given signature. The default framebuffer
 // reuses the engine renderpass (color+depth); FBO passes are cached in
 // g.fbo_passes keyed by the signature string.
-static VkRenderPass BuildFboPass(const std::string& sig, bool has_depth) {
+static VkRenderPass BuildFboPass(const std::string& sig, size_t n_color,
+                                 bool has_depth, uint32_t samples) {
     if (sig == "RGBA8:D24S8") return g.renderpass;
     auto it = g.fbo_passes.find(sig);
     if (it != g.fbo_passes.end()) return it->second;
 
-    VkAttachmentDescription att[2]{};
-    att[0].format = VK_FORMAT_R8G8B8A8_UNORM;
-    att[0].samples = VK_SAMPLE_COUNT_1_BIT;
-    att[0].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;   // explicit clear
-    att[0].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    att[0].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-    att[0].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    att[0].initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    att[0].finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    VkSampleCountFlagBits sc = ToVkSampleCount(samples);
+    // Attachment order: [color0..N-1] [depth?] [resolve0..N-1 (MSAA only)].
+    std::vector<VkAttachmentDescription> att;
+    std::vector<VkAttachmentReference> col(n_color);
+    std::vector<VkAttachmentReference> res;
+    for (size_t i = 0; i < n_color; ++i) {
+        VkAttachmentDescription c{};
+        c.format = VK_FORMAT_R8G8B8A8_UNORM;
+        c.samples = sc;
+        c.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;   // explicit clear
+        c.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        c.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        c.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        c.initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        c.finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        att.push_back(c);
+        col[i] = VkAttachmentReference{(uint32_t)i,
+                                       VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    }
+    uint32_t depth_idx = (uint32_t)att.size();
+    if (has_depth) {
+        VkAttachmentDescription d{};
+        d.format = VK_FORMAT_D24_UNORM_S8_UINT;
+        d.samples = sc;
+        d.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+        d.storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        d.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+        d.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        d.initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        d.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        att.push_back(d);
+    }
+    if (samples > 1) {
+        res.resize(n_color);
+        for (size_t i = 0; i < n_color; ++i) {
+            VkAttachmentDescription r{};
+            r.format = VK_FORMAT_R8G8B8A8_UNORM;
+            r.samples = VK_SAMPLE_COUNT_1_BIT;
+            r.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+            r.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+            r.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+            r.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+            r.initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            r.finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            res[i] = VkAttachmentReference{(uint32_t)att.size(),
+                                           VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+            att.push_back(r);
+        }
+    }
 
-    VkAttachmentReference col{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
-    VkAttachmentReference dep{1, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+    VkAttachmentReference dep{depth_idx,
+                              VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
     VkSubpassDescription sub{};
     sub.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-    sub.colorAttachmentCount = 1;
-    sub.pColorAttachments = &col;
+    sub.colorAttachmentCount = (uint32_t)n_color;
+    sub.pColorAttachments = col.data();
+    if (samples > 1) sub.pResolveAttachments = res.data();
+    if (has_depth) sub.pDepthStencilAttachment = &dep;
 
     VkRenderPassCreateInfo ri{};
     ri.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+    ri.attachmentCount = (uint32_t)att.size();
+    ri.pAttachments = att.data();
     ri.subpassCount = 1;
     ri.pSubpasses = &sub;
-
-    if (has_depth) {
-        att[1].format = VK_FORMAT_D24_UNORM_S8_UINT;
-        att[1].samples = VK_SAMPLE_COUNT_1_BIT;
-        att[1].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-        att[1].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        att[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-        att[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        att[1].initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-        att[1].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-        sub.pDepthStencilAttachment = &dep;
-        ri.attachmentCount = 2;
-    } else {
-        ri.attachmentCount = 1;
-    }
-    ri.pAttachments = att;
 
     VkRenderPass pass = VK_NULL_HANDLE;
     if (g.fn.CreateRenderPass(g.device, &ri, nullptr, &pass) != VK_SUCCESS) {
@@ -120,7 +149,7 @@ bool CreateRbImage(RbObj& r, VkFormat fmt, uint32_t w, uint32_t h,
     ii.extent = {std::max(1u, w), std::max(1u, h), 1};
     ii.mipLevels = 1;
     ii.arrayLayers = 1;
-    ii.samples = samples > 1 ? VK_SAMPLE_COUNT_2_BIT : VK_SAMPLE_COUNT_1_BIT;
+    ii.samples = ToVkSampleCount(samples);
     ii.tiling = VK_IMAGE_TILING_OPTIMAL;
     ii.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
                (IsDepthFormat(fmt) ? VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT
@@ -189,11 +218,12 @@ bool CreateTexSliceView(VkImage image, VkFormat fmt, bool is_depth,
 
 // Public: render pass for an FBO signature ("RGBA8:D24S8" -> the default
 // pass). Cached in g.fbo_passes.
-VkRenderPass GetOrCreateFboPass(const std::string& sig, bool has_depth) {
+VkRenderPass GetOrCreateFboPass(const std::string& sig, size_t n_color,
+                                bool has_depth, uint32_t samples) {
     if (sig == "RGBA8:D24S8") return g.renderpass;
     auto it = g.fbo_passes.find(sig);
     if (it != g.fbo_passes.end()) return it->second;
-    return BuildFboPass(sig, has_depth);
+    return BuildFboPass(sig, n_color, has_depth, samples);
 }
 
 // ---------------------------------------------------------------------------
@@ -225,9 +255,20 @@ void DestroyRenderbuffer(uint64_t rbo_id) {
 void SetFramebuffer(uint64_t fbo_id, const FboSpec& spec) {
     if (!g.initialized) return;
     FboObj& f = g.framebuffers[fbo_id];
-    f.color = spec.color;
+    f.colors.clear();
+    f.color_view.clear();
+    f.resolve_view.clear();
+    f.color_msaa.clear();
+    for (const auto& c : spec.color) {
+        f.colors.push_back(FboSlot(c));
+        f.color_view.push_back(VK_NULL_HANDLE);
+        f.resolve_view.push_back(VK_NULL_HANDLE);
+        f.color_msaa.push_back(false);
+    }
+    f.draw_bufs = spec.draw_bufs;
+    f.read_buf = spec.read_buf;
     f.has_depth = spec.has_depth;
-    f.depth = spec.depth;
+    f.depth = FboSlot(spec.depth);
     f.width = spec.width;
     f.height = spec.height;
     f.dirty = true;
@@ -238,7 +279,8 @@ void DestroyFramebuffer(uint64_t fbo_id) {
     if (it == g.framebuffers.end()) return;
     FboObj& f = it->second;
     if (f.fb) g.fn.DestroyFramebuffer(g.device, f.fb, nullptr);
-    if (f.color_view) g.fn.DestroyImageView(g.device, f.color_view, nullptr);
+    for (auto v : f.color_view) if (v) g.fn.DestroyImageView(g.device, v, nullptr);
+    for (auto v : f.resolve_view) if (v) g.fn.DestroyImageView(g.device, v, nullptr);
     if (f.depth_view) g.fn.DestroyImageView(g.device, f.depth_view, nullptr);
     g.framebuffers.erase(it);
 }
@@ -262,13 +304,22 @@ uint32_t DrawTargetWidth() { return g.bound_draw_fbo ? g.framebuffers[g.bound_dr
 uint32_t DrawTargetHeight() { return g.bound_draw_fbo ? g.framebuffers[g.bound_draw_fbo].height
                                                       : g.height; }
 
-VkImage FboColorImage(const FboObj& f) {
-    if (f.color.is_texture) {
-        auto it = g.textures.find(f.color.tex_id);
+VkImage FboColorImage(const FboObj& f, int idx) {
+    if (idx >= (int)f.colors.size()) return VK_NULL_HANDLE;
+    if (f.colors[idx].is_texture) {
+        auto it = g.textures.find(f.colors[idx].tex_id);
         return it == g.textures.end() ? VK_NULL_HANDLE : it->second.image;
     }
-    auto it = g.renderbuffers.find(f.color.rbo_id);
+    auto it = g.renderbuffers.find(f.colors[idx].rbo_id);
     return it == g.renderbuffers.end() ? VK_NULL_HANDLE : it->second.image;
+}
+
+VkImage FboResolveImage(const FboObj& f, int idx) {
+    if (idx >= (int)f.colors.size() || !f.color_msaa[idx]) return VK_NULL_HANDLE;
+    auto it = g.fbo_msaa.find(&f);
+    if (it == g.fbo_msaa.end()) return VK_NULL_HANDLE;
+    return it->second.size() > (size_t)idx ? it->second[idx].image
+                                           : VK_NULL_HANDLE;
 }
 
 VkImage FboDepthImage(const FboObj& f) {
@@ -290,27 +341,69 @@ bool ResolveDrawFbo(FboObj* out) {
     if (it == g.framebuffers.end()) return false;
     FboObj& f = it->second;
 
-    // Colour image: from a texture (level/layer slice of the resident image)
-    // or a renderbuffer.
-    VkImage color_img = VK_NULL_HANDLE;
-    if (f.color.is_texture) {
-        auto tit = g.textures.find(f.color.tex_id);
-        if (tit == g.textures.end()) return false;
-        color_img = tit->second.image;
-    } else {
-        auto rit = g.renderbuffers.find(f.color.rbo_id);
-        if (rit == g.renderbuffers.end()) return false;
-        color_img = rit->second.image;
+    // Cache stamp: colour texture generation -- compare each resident image.
+    uint64_t tex_gen = 0;
+    for (const auto& c : f.colors) {
+        if (!c.is_texture) continue;
+        auto tit = g.textures.find(c.tex_id);
+        tex_gen = (tex_gen * 31) ^ (tit == g.textures.end() ? 0
+                                                           : (uint64_t)tit->second.image);
     }
-
-    // Cache stamp: (texture resident gen) -- recreated on texture upload by
-    // replacing the TexObj, so compare the image handle.
-    bool tex_changed = f.last_tex_gen != (uint64_t)color_img;
+    bool tex_changed = f.last_tex_gen != tex_gen;
     if (!f.dirty && !tex_changed && f.fb) { *out = f; return true; }
     if (f.fb) g.fn.DestroyFramebuffer(g.device, f.fb, nullptr);
-    if (f.color_view) g.fn.DestroyImageView(g.device, f.color_view, nullptr);
+    for (auto v : f.color_view) if (v) g.fn.DestroyImageView(g.device, v, nullptr);
+    for (auto v : f.resolve_view) if (v) g.fn.DestroyImageView(g.device, v, nullptr);
     if (f.depth_view) g.fn.DestroyImageView(g.device, f.depth_view, nullptr);
-    f.color_view = f.depth_view = VK_NULL_HANDLE;
+    f.color_view.assign(f.colors.size(), VK_NULL_HANDLE);
+    f.resolve_view.assign(f.colors.size(), VK_NULL_HANDLE);
+    f.depth_view = VK_NULL_HANDLE;
+
+    // Create views for every colour attachment.
+    std::vector<VkImageView> atts;
+    uint32_t samples = 1;
+    for (size_t i = 0; i < f.colors.size(); ++i) {
+        const FboSlot& c = f.colors[i];
+        VkImage color_img = VK_NULL_HANDLE;
+        uint32_t rb_samples = 1;
+        if (c.is_texture) {
+            auto tit = g.textures.find(c.tex_id);
+            if (tit == g.textures.end()) return false;
+            color_img = tit->second.image;
+        } else {
+            auto rit = g.renderbuffers.find(c.rbo_id);
+            if (rit == g.renderbuffers.end()) return false;
+            color_img = rit->second.image;
+            rb_samples = rit->second.samples;
+        }
+        if (!CreateTexSliceView(color_img, VK_FORMAT_R8G8B8A8_UNORM, false,
+                                c.level, c.layer, &f.color_view[i])) {
+            ML_LOG_ERROR("vk: FBO %llu colour[%zu] view creation failed",
+                         (unsigned long long)g.bound_draw_fbo, i);
+            return false;
+        }
+        atts.push_back(f.color_view[i]);
+        f.color_msaa[i] = rb_samples > 1;
+        samples = std::max(samples, rb_samples);
+    }
+
+    // Multisampled colour attachments need a single-sample resolve image; the
+    // shared MSAA resolve storage lives in g.fbo_msaa keyed by the FboObj*.
+    auto& ms = g.fbo_msaa[&f];
+    if (samples > 1) {
+        ms.resize(f.colors.size());
+        for (size_t i = 0; i < f.colors.size(); ++i) {
+            if (!f.color_msaa[i]) continue;
+            RbObj r;
+            if (!CreateRbImage(r, VK_FORMAT_R8G8B8A8_UNORM, f.width, f.height, 1)) {
+                ML_LOG_ERROR("vk: FBO resolve image creation failed");
+                return false;
+            }
+            ms[i] = std::move(r);
+            atts.push_back(ms[i].view);
+            f.resolve_view[i] = ms[i].view;
+        }
+    }
 
     VkImage depth_img = VK_NULL_HANDLE;
     if (f.has_depth) {
@@ -323,32 +416,30 @@ bool ResolveDrawFbo(FboObj* out) {
             if (dit == g.renderbuffers.end()) return false;
             depth_img = dit->second.image;
         }
+        if (!CreateTexSliceView(depth_img, VK_FORMAT_D24_UNORM_S8_UINT, true,
+                                f.depth.level, f.depth.layer, &f.depth_view)) {
+            ML_LOG_ERROR("vk: FBO %llu depth view creation failed",
+                         (unsigned long long)g.bound_draw_fbo);
+            return false;
+        }
+        atts.push_back(f.depth_view);
     }
 
-    if (!CreateTexSliceView(color_img, VK_FORMAT_R8G8B8A8_UNORM, false,
-                            f.color.level, f.color.layer, &f.color_view)) {
-        ML_LOG_ERROR("vk: FBO %llu colour view creation failed",
-                     (unsigned long long)g.bound_draw_fbo);
-        return false;
-    }
-    if (f.has_depth &&
-        !CreateTexSliceView(depth_img, VK_FORMAT_D24_UNORM_S8_UINT, true,
-                            f.depth.level, f.depth.layer, &f.depth_view)) {
-        ML_LOG_ERROR("vk: FBO %llu depth view creation failed",
-                     (unsigned long long)g.bound_draw_fbo);
-        return false;
-    }
-
-    f.sig = f.has_depth ? "RGBA8:D24S8" : "RGBA8:";
-    f.pass = GetOrCreateFboPass(f.sig, f.has_depth);
+    // Render-pass signature: N colour attachments, depth presence, samples.
+    f.samples = samples;
+    char buf[48];
+    snprintf(buf, sizeof buf, "RGBA8x%zu%sS%u", f.colors.size(),
+             f.has_depth ? ":D24S8" : "", samples);
+    f.sig = buf;
+    if (f.sig == "RGBA8x1:D24S8S1") f.sig = "RGBA8:D24S8";   // default alias
+    f.pass = GetOrCreateFboPass(f.sig, f.colors.size(), f.has_depth, samples);
     if (f.pass == VK_NULL_HANDLE) return false;
 
-    VkImageView atts[2] = {f.color_view, f.depth_view};
     VkFramebufferCreateInfo fi{};
     fi.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
     fi.renderPass = f.pass;
-    fi.attachmentCount = f.has_depth ? 2 : 1;
-    fi.pAttachments = atts;
+    fi.attachmentCount = (uint32_t)atts.size();
+    fi.pAttachments = atts.data();
     fi.width = std::max(1u, f.width);
     fi.height = std::max(1u, f.height);
     fi.layers = 1;
@@ -357,7 +448,7 @@ bool ResolveDrawFbo(FboObj* out) {
                      (unsigned long long)g.bound_draw_fbo);
         return false;
     }
-    f.last_tex_gen = (uint64_t)color_img;
+    f.last_tex_gen = tex_gen;
     f.dirty = false;
     *out = f;
     return true;
@@ -382,12 +473,16 @@ void BlitFramebuffer(uint64_t src_fbo, uint64_t dst_fbo,
         auto it = g.framebuffers.find(fbo_id);
         if (it == g.framebuffers.end()) return false;
         const FboObj& f = it->second;
-        if (f.color.is_texture) {
-            auto tit = g.textures.find(f.color.tex_id);
+        if (f.colors.empty()) return false;
+        if (f.color_msaa[0]) {
+            *img = FboResolveImage(f, 0);
+            if (*img == VK_NULL_HANDLE) return false;
+        } else if (f.colors[0].is_texture) {
+            auto tit = g.textures.find(f.colors[0].tex_id);
             if (tit == g.textures.end()) return false;
             *img = tit->second.image;
         } else {
-            auto rit = g.renderbuffers.find(f.color.rbo_id);
+            auto rit = g.renderbuffers.find(f.colors[0].rbo_id);
             if (rit == g.renderbuffers.end()) return false;
             *img = rit->second.image;
         }

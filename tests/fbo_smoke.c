@@ -54,7 +54,12 @@
 #define GL_REPLACE            0x1E01
 #define GL_LINE               0x1B01
 #define GL_FILL               0x1B02
-/* S5 FBO / renderbuffer */
+/* S5-MRT constants */
+#define GL_DRAW_BUFFER          0x0C01
+#define GL_BACK                 0x0405
+#define GL_NONE                 0
+#define GL_RENDERBUFFER_SAMPLES 0x8CAB
+#define GL_COLOR_ATTACHMENT1    0x8CE1
 #define GL_FRAMEBUFFER        0x8D40
 #define GL_DRAW_FRAMEBUFFER    0x8CA9
 #define GL_READ_FRAMEBUFFER    0x8CA8
@@ -127,6 +132,12 @@ typedef void (*fn_glBindTexture)(GLenum, GLuint);
 typedef void (*fn_glDeleteTextures)(GLsizei, const GLuint*);
 typedef void (*fn_glTexImage2D)(GLenum, GLint, GLint, GLsizei, GLsizei, GLint, GLenum, GLenum, const void*);
 typedef void (*fn_glBlitFramebuffer)(GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLbitfield, GLenum);
+typedef void (*fn_glDrawBuffers)(GLsizei, const GLenum*);
+typedef void (*fn_glDrawBuffer)(GLenum);
+typedef void (*fn_glReadBuffer)(GLenum);
+typedef void (*fn_glRenderbufferStorageMultisample)(GLenum, GLsizei, GLenum, GLsizei, GLsizei);
+typedef void (*fn_glGetRenderbufferParameteriv)(GLenum, GLenum, GLint*);
+typedef void (*fn_glGetIntegerv)(GLenum, GLint*);
 
 static int failures = 0;
 
@@ -157,6 +168,19 @@ static const char* FS =
     "layout(location=0) out vec4 fragColor;\n"
     "void main() {\n"
     "    fragColor = vColor;\n"
+    "}\n";
+
+/* S5-MRT: writes the input color to colour attachment 0 and a fixed green
+ * to attachment 1. Both outputs come from a uniforms-free constant path so
+ * the fixed-function MRT plumbing is what's exercised. */
+static const char* FS_MRT =
+    "#version 150\n"
+    "in vec4 vColor;\n"
+    "layout(location=0) out vec4 fragColor0;\n"
+    "layout(location=1) out vec4 fragColor1;\n"
+    "void main() {\n"
+    "    fragColor0 = vColor;\n"
+    "    fragColor1 = vec4(0.0, 1.0, 0.0, 1.0);\n"
     "}\n";
 
 int main(void) {
@@ -211,6 +235,12 @@ int main(void) {
     fn_glDeleteTextures deleteTextures = (fn_glDeleteTextures)dlsym(h, "glDeleteTextures");
     fn_glTexImage2D texImage2D = (fn_glTexImage2D)dlsym(h, "glTexImage2D");
     fn_glBlitFramebuffer blitFramebuffer = (fn_glBlitFramebuffer)dlsym(h, "glBlitFramebuffer");
+    fn_glDrawBuffers drawBuffers = (fn_glDrawBuffers)dlsym(h, "glDrawBuffers");
+    fn_glDrawBuffer drawBuffer = (fn_glDrawBuffer)dlsym(h, "glDrawBuffer");
+    fn_glReadBuffer readBuffer = (fn_glReadBuffer)dlsym(h, "glReadBuffer");
+    fn_glRenderbufferStorageMultisample rboMultisample = (fn_glRenderbufferStorageMultisample)dlsym(h, "glRenderbufferStorageMultisample");
+    fn_glGetRenderbufferParameteriv getRboParam = (fn_glGetRenderbufferParameteriv)dlsym(h, "glGetRenderbufferParameteriv");
+    fn_glGetIntegerv getIntegerv = (fn_glGetIntegerv)dlsym(h, "glGetIntegerv");
 
     CHECK(clearColor && clear && enable && depthFunc && scissor && blendFunc &&
           cullFace && frontFace && stencilFunc && stencilOp && stencilMask &&
@@ -224,7 +254,8 @@ int main(void) {
           framebufferTexture2D && framebufferRenderbuffer &&
           checkFramebufferStatus && genRenderbuffers && bindRenderbuffer &&
           renderbufferStorage && genTextures && bindTexture && texImage2D &&
-          blitFramebuffer,
+          blitFramebuffer && drawBuffers && drawBuffer && readBuffer &&
+          rboMultisample && getRboParam && getIntegerv,
           "all required GL symbols resolved");
 
     /* -- program ------------------------------------------------ */
@@ -683,6 +714,120 @@ int main(void) {
         deleteFramebuffers(1, &fboB);
         deleteTextures(1, &texA);
         deleteTextures(1, &texB);
+    }
+
+    /* -- S5-MRT: two colour attachments, per-attachment draw buffer ------- */
+    {
+        /* Build a 2-attachment texture FBO; the MRT shader writes red to
+           attachment 0 and green to attachment 1. Selecting only attachment
+           0 for drawing must leave attachment 1 at its clear colour. */
+        GLuint fbo, tex0, tex1;
+        genFramebuffers(1, &fbo);
+        genTextures(1, &tex0);
+        genTextures(1, &tex1);
+        bindTexture(GL_TEXTURE_2D, tex0);
+        texImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 32, 32, 0, GL_RGBA,
+                   GL_UNSIGNED_BYTE, 0);
+        bindTexture(GL_TEXTURE_2D, tex1);
+        texImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 32, 32, 0, GL_RGBA,
+                   GL_UNSIGNED_BYTE, 0);
+        bindFramebuffer(GL_FRAMEBUFFER, fbo);
+        framebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                             GL_TEXTURE_2D, tex0, 0);
+        framebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1,
+                             GL_TEXTURE_2D, tex1, 0);
+        CHECK(checkFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE,
+              "MRT FBO with two colour textures is complete");
+
+        /* Swap in the MRT fragment shader (re-link a fresh program). */
+        GLuint fs2 = createShader(GL_FRAGMENT_SHADER);
+        shaderSource(fs2, 1, &FS_MRT, 0);
+        compileShader(fs2);
+        GLuint prog2 = createProgram();
+        attachShader(prog2, vs);
+        attachShader(prog2, fs2);
+        linkProgram(prog2);
+        useProgram(prog2);
+
+        clearColor(0, 0, 0, 1.0f);
+        GLenum bufs2[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
+        drawBuffers(2, bufs2);
+        clear(GL_COLOR_BUFFER_BIT);
+        /* full-viewport red triangle; both attachments receive it. */
+        float red[3][7] = {
+            {-1, -1, 0.0f, 1, 0, 0, 1},
+            { 3, -1, 0.0f, 1, 0, 0, 1},
+            {-1,  3, 0.0f, 1, 0, 0, 1},
+        };
+        bufferData(GL_ARRAY_BUFFER, (GLsizeiptr)sizeof(red), red, 0x88E4);
+        drawArrays(GL_TRIANGLES, 0, 3);
+        finish();
+        /* attachment 0 reads red; attachment 1 reads green (MRC path). */
+        readBuffer(GL_COLOR_ATTACHMENT0);
+        readPixels(16, 16, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        CHECK(px_match(px, 255, 0, 0, 255),
+              "MRT attachment 0 reads back the shader color (r=%d g=%d b=%d)",
+              px[0], px[1], px[2]);
+        readBuffer(GL_COLOR_ATTACHMENT1);
+        readPixels(16, 16, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        CHECK(px_match(px, 0, 255, 0, 255),
+              "MRT attachment 1 reads back green (r=%d g=%d b=%d)",
+              px[0], px[1], px[2]);
+
+        /* Restrict the draw to attachment 0 only: the write is gated to
+           attachment 0, so attachment 1 keeps the value from the previous
+           two-attachment draw (green) instead of receiving the new red. */
+        GLenum one[1] = {GL_COLOR_ATTACHMENT0};
+        drawBuffers(1, one);
+        clearColor(0, 0, 0, 1.0f);
+        clear(GL_COLOR_BUFFER_BIT);
+        drawArrays(GL_TRIANGLES, 0, 3);
+        finish();
+        readBuffer(GL_COLOR_ATTACHMENT1);
+        readPixels(16, 16, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        CHECK(px_match(px, 0, 255, 0, 255),
+              "single draw buffer leaves attachment 1 untouched (r=%d g=%d b=%d)",
+              px[0], px[1], px[2]);
+        readBuffer(GL_COLOR_ATTACHMENT0);
+        readPixels(16, 16, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        CHECK(px_match(px, 255, 0, 0, 255),
+              "single draw buffer still writes attachment 0 (r=%d g=%d b=%d)",
+              px[0], px[1], px[2]);
+
+        deleteFramebuffers(1, &fbo);
+        deleteTextures(1, &tex0);
+        deleteTextures(1, &tex1);
+    }
+
+    /* -- S5-MSAA: multisampled renderbuffer colour resolve ---------------- */
+    {
+        GLuint rbo, fbo;
+        GLint rbo_samples = 0;
+        genRenderbuffers(1, &rbo);
+        bindRenderbuffer(GL_RENDERBUFFER, rbo);
+        rboMultisample(GL_RENDERBUFFER, 4, GL_RGBA, 32, 32);
+        getRboParam(GL_RENDERBUFFER, GL_RENDERBUFFER_SAMPLES, &rbo_samples);
+        CHECK(rbo_samples == 4, "MSAA renderbuffer reports 4 samples (got %d)",
+              rbo_samples);
+        genFramebuffers(1, &fbo);
+        bindFramebuffer(GL_FRAMEBUFFER, fbo);
+        framebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                GL_RENDERBUFFER, rbo);
+        CHECK(checkFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE,
+              "MSAA FBO with a 4-sample colour renderbuffer is complete");
+
+        clearColor(0, 0, 1, 1.0f);
+        clear(GL_COLOR_BUFFER_BIT);
+        drawArrays(GL_TRIANGLES, 0, 3);   /* reuse the red triangle */
+        finish();
+        readPixels(16, 16, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        CHECK(px_match(px, 255, 0, 0, 255),
+              "MSAA resolve reads back the red triangle (r=%d g=%d b=%d)",
+              px[0], px[1], px[2]);
+
+        bindFramebuffer(GL_FRAMEBUFFER, 0);
+        deleteFramebuffers(1, &fbo);
+        deleteRenderbuffers(1, &rbo);
     }
 
     dlclose(h);

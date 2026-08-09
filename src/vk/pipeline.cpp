@@ -148,6 +148,19 @@ VkFormat AttrFormat(uint32_t components) {
     }
 }
 
+VkSampleCountFlagBits ToVkSampleCount(uint32_t samples) {
+    switch (samples) {
+        case 1:  return VK_SAMPLE_COUNT_1_BIT;
+        case 2:  return VK_SAMPLE_COUNT_2_BIT;
+        case 4:  return VK_SAMPLE_COUNT_4_BIT;
+        case 8:  return VK_SAMPLE_COUNT_8_BIT;
+        case 16: return VK_SAMPLE_COUNT_16_BIT;
+        case 32: return VK_SAMPLE_COUNT_32_BIT;
+        case 64: return VK_SAMPLE_COUNT_64_BIT;
+        default: return VK_SAMPLE_COUNT_1_BIT;
+    }
+}
+
 VkPipeline GetOrCreatePipeline(const Program& prog, const DrawOp& op) {
     auto it = g_pipelines.find(op.pipeline_key);
     if (it != g_pipelines.end()) return it->second;
@@ -227,7 +240,7 @@ VkPipeline GetOrCreatePipeline(const Program& prog, const DrawOp& op) {
 
     VkPipelineMultisampleStateCreateInfo ms{};
     ms.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-    ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    ms.rasterizationSamples = ToVkSampleCount(op.samples);
 
     VkPipelineDepthStencilStateCreateInfo ds{};
     ds.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
@@ -265,10 +278,18 @@ VkPipeline GetOrCreatePipeline(const Program& prog, const DrawOp& op) {
     cb_att.dstAlphaBlendFactor = ToVkBlend(op.pipe.blend_dst_alpha);
     cb_att.alphaBlendOp = ToBlendOp(op.pipe.blend_eq_alpha);
     cb_att.colorWriteMask = ColorMask(op.pipe);
+    // One blend state per colour attachment (MRT). Attachments that the
+    // current draw buffers exclude get a zero write mask so they keep their
+    // cleared/previous content.
+    std::vector<VkPipelineColorBlendAttachmentState> cb_atts(
+        op.color_count, cb_att);
+    for (size_t i = 0; i < cb_atts.size(); ++i)
+        if (!(op.draw_mask & (1u << i)))
+            cb_atts[i].colorWriteMask = 0;
     VkPipelineColorBlendStateCreateInfo cb{};
     cb.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-    cb.attachmentCount = 1;
-    cb.pAttachments = &cb_att;
+    cb.attachmentCount = op.color_count;
+    cb.pAttachments = cb_atts.data();
 
     VkDynamicState dyn[2] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
     VkPipelineDynamicStateCreateInfo dyn_s{};

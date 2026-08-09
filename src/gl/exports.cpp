@@ -73,14 +73,6 @@ extern "C" {
     mithril::GlStubCalled("glDeleteSync");
   }
 
-  void APIENTRY glDrawBuffer(GLenum buf) {
-    mithril::GlStubCalled("glDrawBuffer");
-  }
-
-  void APIENTRY glDrawBuffers(GLsizei n, const GLenum *bufs) {
-    mithril::GlStubCalled("glDrawBuffers");
-  }
-
   void APIENTRY glEndConditionalRender(void) {
     mithril::GlStubCalled("glEndConditionalRender");
   }
@@ -230,10 +222,6 @@ extern "C" {
 
   void APIENTRY glQueryCounter(GLuint id, GLenum target) {
     mithril::GlStubCalled("glQueryCounter");
-  }
-
-  void APIENTRY glReadBuffer(GLenum src) {
-    mithril::GlStubCalled("glReadBuffer");
   }
 
   void APIENTRY glSamplerParameterIiv(GLuint sampler, GLenum pname, const GLint *param) {

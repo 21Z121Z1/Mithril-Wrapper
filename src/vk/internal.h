@@ -174,20 +174,30 @@ struct FboSlot {
 
 // S5: a configured (GL) framebuffer object, keyed by gl id. The Vk
 // framebuffer + render pass are rebuilt lazily before each draw flush so a
-// texture re-upload pops a fresh image view automatically.
+// texture re-upload pops a fresh image view automatically. MRT supports
+// GL_COLOR_ATTACHMENT0..kMaxColorAtt (the render pass + framebuffer expose one
+// colour attachment per attached colour image). MSAA: a multisampled color
+// attachment gets a single-sample resolve image (colour attachment + resolve)
+// so readback/blit see the resolved result.
+constexpr uint32_t kMaxColorAtt = 8;
 struct FboObj {
-    FboSlot color;                 // attachment 0 (a GL FBO needs >=1 color)
+    std::vector<FboSlot> colors;         // one per color attachment slot
+    std::vector<VkImageView> color_view; // views for the framebuffer
+    std::vector<VkImageView> resolve_view;// single-sample resolve views (MSAA)
+    std::vector<bool> color_msaa;        // per-slot multisampled flag
     bool has_depth = false;
     FboSlot depth;                 // depth/stencil attachment
     VkFormat color_fmt = VK_FORMAT_R8G8B8A8_UNORM;
     VkFormat depth_fmt = VK_FORMAT_D24_UNORM_S8_UINT;
+    uint32_t samples = 1;
     uint32_t width = 0, height = 0;
-    VkImageView color_view = VK_NULL_HANDLE;
     VkImageView depth_view = VK_NULL_HANDLE;
     VkRenderPass pass = VK_NULL_HANDLE;
     VkFramebuffer fb = VK_NULL_HANDLE;
+    std::vector<GLenum> draw_bufs;       // current draw buffer list (MRT)
+    GLenum read_buf = GL_COLOR_ATTACHMENT0;
     std::string sig;               // render-pass signature (pipeline keys)
-    uint64_t last_tex_gen = 0;      // cache stamp of the colour texture
+    uint64_t last_tex_gen = 0;      // cache stamp of the colour textures
     bool dirty = true;              // rebuild pass+framebuffer next use
     VkImageLayout color_layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     VkImageLayout depth_layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
@@ -219,10 +229,14 @@ struct DrawOp {
     PipelineState pipe;
     // S5: render pass signature for the target this draw records into
     // (empty => default framebuffer). Included in the pipeline cache key and
-    // the VkGraphicsPipelineCreateInfo.renderPass.
+    // the VkGraphicsPipelineCreateInfo.renderPass. `color_count`/`samples`
+    // describe that render pass (multi-colour MRT + MSAA).
     bool has_render_pass = false;
     VkRenderPass render_pass = VK_NULL_HANDLE;
     std::string rp_sig;
+    uint32_t color_count = 1;
+    uint32_t samples = 1;
+    uint32_t draw_mask = 1;    // bit i set => colour attachment i receives the draw
 };
 
 struct Engine {
@@ -256,6 +270,9 @@ struct Engine {
     // S5: FBO/renderbuffer tables + current draw/read framebuffer bindings.
     std::unordered_map<uint64_t, RbObj> renderbuffers;
     std::unordered_map<uint64_t, FboObj> framebuffers;
+    // MSAA resolve images for multisampled colour FBO attachments; keyed by
+    // the FboObj pointer (owns the single-sample resolve RbObj storage).
+    std::unordered_map<const FboObj*, std::vector<RbObj>> fbo_msaa;
     uint64_t bound_draw_fbo = 0;   // 0 => default framebuffer
     uint64_t bound_read_fbo = 0;   // 0 => default framebuffer
     // Extra FBO render passes (framebuffers revive their own when formats
@@ -332,11 +349,13 @@ void CreateDummyTexture();
 bool ResolveDrawFbo(FboObj* out);
 
 // Render pass for an FBO signature ("RGBA8:D24S8" -> the default pass).
-VkRenderPass GetOrCreateFboPass(const std::string& sig, bool has_depth);
+VkRenderPass GetOrCreateFboPass(const std::string& sig, size_t n_color,
+                                bool has_depth, uint32_t samples);
 
 // Live image handle for an FBO colour/depth attachment (texture or
 // renderbuffer resolution). Returns VK_NULL_HANDLE when unattached.
-VkImage FboColorImage(const FboObj& f);
+VkImage FboColorImage(const FboObj& f, int idx);
+VkImage FboResolveImage(const FboObj& f, int idx);
 VkImage FboDepthImage(const FboObj& f);
 
 // ---- texture helpers (defined in texture.cpp) ----------------------------
@@ -358,5 +377,8 @@ std::string StateSignature(const PipelineState& ps);
 VkFormat AttrFormat(uint32_t components);
 
 VkPipeline GetOrCreatePipeline(const Program& prog, const DrawOp& op);
+
+// Map a GL sample count (1/2/4/8/...) to the Vulkan sample-count bit.
+VkSampleCountFlagBits ToVkSampleCount(uint32_t samples);
 
 } // namespace mithril::vk
