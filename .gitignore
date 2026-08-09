@@ -1,0 +1,8 @@
+build-linux/
+*.o
+*.so
+*.a
+
+# 本地参考仓库，勿提交
+MobileGL/
+glslang_check/

@@ -1,0 +1,9 @@
+[submodule "Mithril-Wrapper-cpp/3rdparty/glslang"]
+	path = Mithril-Wrapper-cpp/3rdparty/glslang
+	url = https://github.com/KhronosGroup/glslang.git
+[submodule "Mithril-Wrapper-cpp/3rdparty/SPIRV-Cross"]
+	path = Mithril-Wrapper-cpp/3rdparty/SPIRV-Cross
+	url = https://github.com/KhronosGroup/SPIRV-Cross.git
+[submodule "Mithril-Wrapper-cpp/3rdparty/SPIRV-Headers"]
+	path = Mithril-Wrapper-cpp/3rdparty/SPIRV-Headers
+	url = https://github.com/KhronosGroup/SPIRV-Headers.git
