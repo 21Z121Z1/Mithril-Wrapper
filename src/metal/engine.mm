@@ -1305,6 +1305,41 @@ bool EnsureInit() {
 
 bool IsInitialized() { return GetEngine().initialized; }
 
+static bool LayerDrawableSize(CAMetalLayer* layer, uint32_t* width,
+                              uint32_t* height) {
+    if (!layer || layer.drawableSize.width <= 0 ||
+        layer.drawableSize.height <= 0 ||
+        layer.drawableSize.width > std::numeric_limits<uint32_t>::max() ||
+        layer.drawableSize.height > std::numeric_limits<uint32_t>::max())
+        return false;
+    *width = static_cast<uint32_t>(layer.drawableSize.width);
+    *height = static_cast<uint32_t>(layer.drawableSize.height);
+    return *width != 0 && *height != 0;
+}
+
+static bool SyncLayerTargetSize(bool initialize_viewport) {
+    auto& engine = GetEngine();
+    uint32_t width = 0;
+    uint32_t height = 0;
+    if (!LayerDrawableSize(engine.layer, &width, &height)) {
+        ML_LOG_ERROR("metal: CAMetalLayer has no drawable size");
+        return false;
+    }
+    if (width == engine.width && height == engine.height) return true;
+    const std::array<float, 4> viewport = {
+        engine.viewport[0], engine.viewport[1],
+        engine.viewport[2], engine.viewport[3]};
+    const std::array<float, 4> scissor = {
+        engine.scissor[0], engine.scissor[1],
+        engine.scissor[2], engine.scissor[3]};
+    if (!SetTargetSize(width, height)) return false;
+    if (!initialize_viewport) {
+        std::copy(viewport.begin(), viewport.end(), engine.viewport);
+        std::copy(scissor.begin(), scissor.end(), engine.scissor);
+    }
+    return true;
+}
+
 bool SetNativeWindow(void* native_window) {
     if (!native_window) {
         GetEngine().layer = nil;
@@ -1329,10 +1364,11 @@ bool SetNativeWindow(void* native_window) {
     layer.framebufferOnly = NO;
     if (layer.drawableSize.width <= 0 || layer.drawableSize.height <= 0)
         layer.drawableSize = CGSizeMake(engine.width, engine.height);
-    const uint32_t width = (uint32_t)std::max<CGFloat>(1, layer.drawableSize.width);
-    const uint32_t height = (uint32_t)std::max<CGFloat>(1, layer.drawableSize.height);
-    if (!SetTargetSize(width, height)) return false;
     engine.layer = layer;
+    if (!SyncLayerTargetSize(true)) {
+        engine.layer = nil;
+        return false;
+    }
     return true;
 }
 
@@ -1343,6 +1379,9 @@ bool Present() {
         return false;
     }
     @autoreleasepool {
+        // Draws are recorded until submit, so resizing here re-targets the
+        // complete pending GL frame without rendering an intermediate size.
+        if (!SyncLayerTargetSize(false)) return false;
         if (!SubmitInternal(false, false, nullptr)) return false;
         id<CAMetalDrawable> drawable = [engine.layer nextDrawable];
         if (!drawable) {
@@ -1384,8 +1423,20 @@ bool SetTargetSize(uint32_t width, uint32_t height) {
     return CreateTargets();
 }
 
-uint32_t TargetWidth() { return static_cast<uint32_t>(GetEngine().width); }
-uint32_t TargetHeight() { return static_cast<uint32_t>(GetEngine().height); }
+uint32_t TargetWidth() {
+    auto& engine = GetEngine();
+    uint32_t width = 0;
+    uint32_t height = 0;
+    return LayerDrawableSize(engine.layer, &width, &height)
+        ? width : static_cast<uint32_t>(engine.width);
+}
+uint32_t TargetHeight() {
+    auto& engine = GetEngine();
+    uint32_t width = 0;
+    uint32_t height = 0;
+    return LayerDrawableSize(engine.layer, &width, &height)
+        ? height : static_cast<uint32_t>(engine.height);
+}
 
 void SetClearColor(float r, float g, float b, float a) {
     auto& engine = GetEngine();

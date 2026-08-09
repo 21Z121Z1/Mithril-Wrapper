@@ -120,6 +120,19 @@ int main(void) {
     if (!eglSwapBuffers(dpy, surf)) { printf("eglSwapBuffers failed\n"); return 10; }
     /* Wait only for validation: production eglSwapBuffers remains nonblocking. */
     glFinish();
+#if defined(__APPLE__) && defined(__OBJC__)
+    metal_layer.drawableSize = CGSizeMake(96, 48);
+    glClearColor(0.25f, 0.5f, 0.75f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    if (!eglSwapBuffers(dpy, surf)) { printf("resized eglSwapBuffers failed\n"); return 12; }
+    glFinish();
+    if (!eglQuerySurface(dpy, surf, EGL_WIDTH, &surface_width) ||
+        !eglQuerySurface(dpy, surf, EGL_HEIGHT, &surface_height) ||
+        surface_width != 96 || surface_height != 48) {
+        printf("unexpected resized surface: %dx%d\n", surface_width, surface_height);
+        return 13;
+    }
+#endif
     eglMakeCurrent(dpy, NULL, NULL, NULL);
     eglTerminate(dpy);
 
