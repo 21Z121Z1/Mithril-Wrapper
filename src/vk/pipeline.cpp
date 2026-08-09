@@ -337,6 +337,30 @@ uint64_t CreateProgram(const std::vector<uint32_t>& vs,
                        const std::vector<uint32_t>& fs) {
     if (!g.initialized || vs.empty() || fs.empty()) return 0;
 
+    // The reference backend currently owns only binding 0 for Mithril's
+    // synthetic loose-uniform block. Reject real GL uniform blocks explicitly
+    // instead of silently packing them into the wrong descriptor allocation.
+    try {
+        auto has_user_uniform_block = [](const std::vector<uint32_t>& words) {
+            spirv_cross::Compiler compiler(words.data(), words.size());
+            for (const auto& block :
+                 compiler.get_shader_resources().uniform_buffers) {
+                if (compiler.get_decoration(
+                        block.id, spv::DecorationBinding) != 0)
+                    return true;
+            }
+            return false;
+        };
+        if (has_user_uniform_block(vs) || has_user_uniform_block(fs)) {
+            ML_LOG_ERROR("vk: explicit GL uniform blocks are not supported by "
+                         "the reference backend yet");
+            return 0;
+        }
+    } catch (const std::exception& error) {
+        ML_LOG_ERROR("vk: uniform-block reflection failed: %s", error.what());
+        return 0;
+    }
+
     // Hash both modules to key the program cache.
     uint64_t h = 1469598103934665603ULL;
     auto mix = [&h](uint32_t v) { h ^= v; h *= 1099511628211ULL; };

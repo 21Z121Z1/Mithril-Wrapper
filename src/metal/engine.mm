@@ -9,6 +9,7 @@
 #include "engine.h"
 
 #include <util/log.h>
+#include <shader/shader.h>
 
 #include <spirv_cross.hpp>
 #include <spirv_msl.hpp>
@@ -113,6 +114,14 @@ struct BoundTexture {
     id<MTLSamplerState> sampler = nil;
 };
 
+struct BoundUniformBuffer {
+    NSUInteger index = 0;
+    NSUInteger offset = 0;
+    id<MTLBuffer> buffer = nil;
+    bool vertex_stage = false;
+    bool fragment_stage = false;
+};
+
 struct Renderbuffer {
     id<MTLTexture> texture = nil;
     id<MTLTexture> resolve = nil;
@@ -141,6 +150,7 @@ struct PendingDraw {
     // Strong references make GL deletion safe for already-recorded work.
     id<MTLBuffer> resident_vertex = nil;
     id<MTLBuffer> resident_instance = nil;
+    std::vector<BoundUniformBuffer> uniform_buffers;
     std::vector<BoundTexture> textures;
 };
 
@@ -191,29 +201,40 @@ Engine& GetEngine() {
 
 void WarnUnsupported(const char* feature);
 
-id<MTLBuffer> RetainResidentBuffer(const backend::VertexStream& stream) {
-    if (!stream.HasResidentSource()) return nil;
+id<MTLBuffer> RetainResidentBytes(const uint8_t* source_data,
+                                  size_t source_size,
+                                  uint64_t lifetime_id,
+                                  uint64_t content_version) {
+    if (!source_data || !source_size || !lifetime_id) return nil;
     auto& engine = GetEngine();
-    ResidentBuffer& resident = engine.resident_buffers[stream.source_lifetime_id];
-    if (!resident.buffer || resident.content_version != stream.source_content_version ||
-        resident.size != stream.source_size) {
-        resident.buffer = [engine.device newBufferWithBytes:stream.source_data
-                                                    length:stream.source_size
+    ResidentBuffer& resident = engine.resident_buffers[lifetime_id];
+    if (!resident.buffer || resident.content_version != content_version ||
+        resident.size != source_size) {
+        resident.buffer = [engine.device newBufferWithBytes:source_data
+                                                    length:source_size
                                                    options:MTLResourceStorageModeShared];
         if (!resident.buffer) {
-            engine.resident_buffers.erase(stream.source_lifetime_id);
+            engine.resident_buffers.erase(lifetime_id);
             return nil;
         }
         resident.buffer.label = @"Mithril resident GL buffer";
-        resident.content_version = stream.source_content_version;
-        resident.size = stream.source_size;
+        resident.content_version = content_version;
+        resident.size = source_size;
         static bool logged_resident_path = false;
         if (!logged_resident_path) {
-            ML_LOG_INFO("metal: resident VBO path active (lifetime/version keyed)");
+            ML_LOG_INFO("metal: resident GL buffer path active "
+                        "(lifetime/version keyed)");
             logged_resident_path = true;
         }
     }
     return resident.buffer;
+}
+
+id<MTLBuffer> RetainResidentBuffer(const backend::VertexStream& stream) {
+    if (!stream.HasResidentSource()) return nil;
+    return RetainResidentBytes(stream.source_data, stream.source_size,
+                               stream.source_lifetime_id,
+                               stream.source_content_version);
 }
 
 MTLSamplerMinMagFilter SamplerFilter(backend::TexFilter filter) {
@@ -460,8 +481,9 @@ bool TranslateStage(const std::vector<uint32_t>& words,
             ML_LOG_ERROR("metal: shader uses a resource class not supported by this slice");
             return false;
         }
-        if (resources.uniform_buffers.size() > 1) {
-            ML_LOG_ERROR("metal: more than one uniform block per stage is not supported yet");
+        if (resources.uniform_buffers.size() >
+            shader::kMaxUserUniformBlocksPerStage + 1) {
+            ML_LOG_ERROR("metal: shader exceeds the bounded per-stage uniform-block limit");
             return false;
         }
 
@@ -470,28 +492,34 @@ bool TranslateStage(const std::vector<uint32_t>& words,
                 block.id, spv::DecorationDescriptorSet);
             const uint32_t binding = compiler.get_decoration(
                 block.id, spv::DecorationBinding);
-            if (set != 0 || binding != 0) {
-                ML_LOG_ERROR("metal: only the frontend loose-uniform block at set=0 binding=0 is supported");
+            const bool loose = binding == shader::kLooseUniformBinding;
+            const bool user = binding >= shader::kUserUniformBindingBase &&
+                binding < shader::kUserUniformBindingBase +
+                              shader::kMaxUserUniformBlocksPerStage;
+            if (set != 0 || (!loose && !user)) {
+                ML_LOG_ERROR("metal: uniform block uses an unknown internal binding");
                 return false;
             }
             spirv_cross::MSLResourceBinding remap{};
             remap.stage = expected_model;
             remap.desc_set = set;
             remap.binding = binding;
-            remap.msl_buffer = kUniformBufferIndex;
+            remap.msl_buffer = loose ? kUniformBufferIndex : binding;
             compiler.add_msl_resource_binding(remap);
 
-            const auto& type = compiler.get_type(block.base_type_id);
-            output->ubo_size = static_cast<uint32_t>(
-                compiler.get_declared_struct_size(type));
-            for (uint32_t i = 0; i < type.member_types.size(); ++i) {
-                UboMember member;
-                member.name = compiler.get_member_name(block.base_type_id, i);
-                member.offset = compiler.get_member_decoration(
-                    block.base_type_id, i, spv::DecorationOffset);
-                member.size = static_cast<uint32_t>(
-                    compiler.get_declared_struct_member_size(type, i));
-                output->members.push_back(std::move(member));
+            if (loose) {
+                const auto& type = compiler.get_type(block.base_type_id);
+                output->ubo_size = static_cast<uint32_t>(
+                    compiler.get_declared_struct_size(type));
+                for (uint32_t i = 0; i < type.member_types.size(); ++i) {
+                    UboMember member;
+                    member.name = compiler.get_member_name(block.base_type_id, i);
+                    member.offset = compiler.get_member_decoration(
+                        block.base_type_id, i, spv::DecorationOffset);
+                    member.size = static_cast<uint32_t>(
+                        compiler.get_declared_struct_member_size(type, i));
+                    output->members.push_back(std::move(member));
+                }
             }
         }
 
@@ -1285,6 +1313,14 @@ bool EncodeDraws(id<MTLRenderCommandEncoder> encoder, FrameContext& frame) {
         if (fragment_ubo != NSNotFound)
             [encoder setFragmentBuffer:frame.upload offset:fragment_ubo
                                atIndex:kUniformBufferIndex];
+        for (const auto& binding : pending.uniform_buffers) {
+            if (binding.vertex_stage)
+                [encoder setVertexBuffer:binding.buffer offset:binding.offset
+                                 atIndex:binding.index];
+            if (binding.fragment_stage)
+                [encoder setFragmentBuffer:binding.buffer offset:binding.offset
+                                   atIndex:binding.index];
+        }
         for (const auto& binding : pending.textures) {
             [encoder setVertexTexture:binding.texture atIndex:binding.slot];
             [encoder setVertexSamplerState:binding.sampler atIndex:binding.slot];
@@ -1722,6 +1758,28 @@ bool Draw(const backend::DrawParams& params) {
         if (!pending.resident_instance) return false;
         pending.params.instance_stream.source_data = nullptr;
         pending.params.instance_stream.source_size = 0;
+    }
+    for (size_t i = 0; i < params.uniform_buffers.size(); ++i) {
+        const auto& binding = params.uniform_buffers[i];
+        if (binding.internal_binding < shader::kUserUniformBindingBase ||
+            binding.internal_binding >= shader::kUserUniformBindingBase +
+                                            shader::kMaxUserUniformBlocksPerStage ||
+            (!binding.vertex_stage && !binding.fragment_stage) ||
+            binding.offset > binding.source_size ||
+            binding.size > binding.source_size - binding.offset) {
+            ML_LOG_ERROR("metal: invalid resolved uniform-buffer binding");
+            return false;
+        }
+        id<MTLBuffer> resident = RetainResidentBytes(
+            binding.source_data, binding.source_size,
+            binding.source_lifetime_id, binding.source_content_version);
+        if (!resident) return false;
+        pending.uniform_buffers.push_back({
+            static_cast<NSUInteger>(binding.internal_binding),
+            static_cast<NSUInteger>(binding.offset), resident,
+            binding.vertex_stage, binding.fragment_stage});
+        pending.params.uniform_buffers[i].source_data = nullptr;
+        pending.params.uniform_buffers[i].source_size = 0;
     }
     for (const auto& bind : params.sampler_binds) {
         const NSUInteger slot = bind.first ? bind.first - 1 : 0;

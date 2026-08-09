@@ -20,14 +20,6 @@ extern "C" {
     mithril::GlStubCalled("glBeginTransformFeedback");
   }
 
-  void APIENTRY glBindBufferBase(GLenum target, GLuint index, GLuint buffer) {
-    mithril::GlStubCalled("glBindBufferBase");
-  }
-
-  void APIENTRY glBindBufferRange(GLenum target, GLuint index, GLuint buffer, GLintptr offset, GLsizeiptr size) {
-    mithril::GlStubCalled("glBindBufferRange");
-  }
-
   void APIENTRY glBindFragDataLocation(GLuint program, GLuint color, const GLchar *name) {
     mithril::GlStubCalled("glBindFragDataLocation");
   }
@@ -98,22 +90,6 @@ extern "C" {
     mithril::GlStubCalled("glGenSamplers");
   }
 
-  void APIENTRY glGetActiveUniformBlockName(GLuint program, GLuint uniformBlockIndex, GLsizei bufSize, GLsizei *length, GLchar *uniformBlockName) {
-    mithril::GlStubCalled("glGetActiveUniformBlockName");
-  }
-
-  void APIENTRY glGetActiveUniformBlockiv(GLuint program, GLuint uniformBlockIndex, GLenum pname, GLint *params) {
-    mithril::GlStubCalled("glGetActiveUniformBlockiv");
-  }
-
-  void APIENTRY glGetActiveUniformName(GLuint program, GLuint uniformIndex, GLsizei bufSize, GLsizei *length, GLchar *uniformName) {
-    mithril::GlStubCalled("glGetActiveUniformName");
-  }
-
-  void APIENTRY glGetActiveUniformsiv(GLuint program, GLsizei uniformCount, const GLuint *uniformIndices, GLenum pname, GLint *params) {
-    mithril::GlStubCalled("glGetActiveUniformsiv");
-  }
-
   GLint APIENTRY glGetFragDataIndex(GLuint program, const GLchar *name) {
     mithril::GlStubCalled("glGetFragDataIndex");
     return 0;
@@ -170,15 +146,6 @@ extern "C" {
 
   void APIENTRY glGetTransformFeedbackVarying(GLuint program, GLuint index, GLsizei bufSize, GLsizei *length, GLsizei *size, GLenum *type, GLchar *name) {
     mithril::GlStubCalled("glGetTransformFeedbackVarying");
-  }
-
-  GLuint APIENTRY glGetUniformBlockIndex(GLuint program, const GLchar *uniformBlockName) {
-    mithril::GlStubCalled("glGetUniformBlockIndex");
-    return 0;
-  }
-
-  void APIENTRY glGetUniformIndices(GLuint program, GLsizei uniformCount, const GLchar *const*uniformNames, GLuint *uniformIndices) {
-    mithril::GlStubCalled("glGetUniformIndices");
   }
 
   GLboolean APIENTRY glIsQuery(GLuint id) {
@@ -258,10 +225,6 @@ extern "C" {
 
   void APIENTRY glTransformFeedbackVaryings(GLuint program, GLsizei count, const GLchar *const*varyings, GLenum bufferMode) {
     mithril::GlStubCalled("glTransformFeedbackVaryings");
-  }
-
-  void APIENTRY glUniformBlockBinding(GLuint program, GLuint uniformBlockIndex, GLuint uniformBlockBinding) {
-    mithril::GlStubCalled("glUniformBlockBinding");
   }
 
   void APIENTRY glVertexAttribI1i(GLuint index, GLint x) {

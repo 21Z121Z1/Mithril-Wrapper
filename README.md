@@ -11,9 +11,9 @@
 
 ## 状态
 
-- **DirectMetal 原生执行路径**：frontend 已改为 backend-neutral draw/resource contract；Apple 路径直接创建 `MTLDevice`、command queue、offscreen RGBA8 + depth/stencil target，执行 GLSL→SPIR-V→MSL→`MTLLibrary`/`MTLRenderPipelineState`，支持 clear、vertex/index/instance draw、loose uniform、2D texture/sampler/mipmap、texture/renderbuffer FBO、MRT、4× MSAA resolve、同尺寸 nearest blit、基础 depth/blend/raster/stencil state 和可靠 readback。EGL window surface 接受真实 `CAMetalLayer`，默认 framebuffer 在同一 Metal queue 复制到 drawable 并由 `presentDrawable` 非阻塞提交。program/pipeline 有缓存与销毁边界，pipeline cache 有上限；viewport/scissor 等 observable dynamic state 和 clear 值均在调用点快照，不会在延迟编码时折叠；全幅 clear 走 loadAction，局部/写掩码 clear 使用有上限缓存的 Metal clear pipeline。常见交错 float VBO 以不可复用 lifetime ID + content version 驻留并跨 draw 复用，复杂 attribute 转换才走 float32 重排兼容路径；纹理与采样器分别按 content/state version 更新，动态索引/实例数据和严格按字节去重后的 UBO 使用三帧复用 upload arena。`glFlush`/`eglSwapBuffers` 不 wait，`glFinish`/readback 才建立 CPU 完成点。
+- **DirectMetal 原生执行路径**：frontend 已改为 backend-neutral draw/resource contract；Apple 路径直接创建 `MTLDevice`、command queue、offscreen RGBA8 + depth/stencil target，执行 GLSL→SPIR-V→MSL→`MTLLibrary`/`MTLRenderPipelineState`，支持 clear、vertex/index/instance draw、loose uniform、真实 GL uniform block（block reflection/查询、`glUniformBlockBinding`、`glBindBufferBase/Range`，每 stage 最多 12 个）、2D texture/sampler/mipmap、texture/renderbuffer FBO、MRT、4× MSAA resolve、同尺寸 nearest blit、基础 depth/blend/raster/stencil state 和可靠 readback。EGL window surface 接受真实 `CAMetalLayer`，默认 framebuffer 在同一 Metal queue 复制到 drawable 并由 `presentDrawable` 非阻塞提交。program/pipeline 有缓存与销毁边界，pipeline cache 有上限；viewport/scissor 等 observable dynamic state 和 clear 值均在调用点快照，不会在延迟编码时折叠；全幅 clear 走 loadAction，局部/写掩码 clear 使用有上限缓存的 Metal clear pipeline。常见交错 float VBO 与 GL uniform buffer 都以不可复用 lifetime ID + content version 驻留并跨 draw 复用，复杂 attribute 转换才走 float32 重排兼容路径；纹理与采样器分别按 content/state version 更新，动态索引/实例数据和严格按字节去重后的 loose-uniform block 使用三帧复用 upload arena。`glFlush`/`eglSwapBuffers` 不 wait，`glFinish`/readback 才建立 CPU 完成点。
 - **DirectMetal 当前诚实边界**：window surface 必须由调用方提供 `CAMetalLayer`；swap 时会在编码 pending frame 前同步 drawable 尺寸，尺寸变化会重建默认 target。compute、缩放/过滤 framebuffer blit，以及 3D texture 的 mip 链采样尚未接通；相关路径明确失败并记录 unsupported，不宣称这些能力。需要这些功能时应显式使用 Vulkan backend。
-- **Vulkan reference 边界**：scissored clear 已保持顺序并按矩形执行；部分 color-channel 或 stencil-bit clear 暂不近似，明确返回 unsupported/error。
+- **Vulkan reference 边界**：scissored clear 已保持顺序并按矩形执行；部分 color-channel 或 stencil-bit clear 暂不近似；真实 GL uniform block 尚未接入其 descriptor seam。上述路径均明确返回 unsupported/error，不会误用 loose-uniform allocation 近似执行。
 - **M0 基建已交付**：CMake 双分支工程、EGL 44 符号 + 契约冒烟、GL 342 符号导出、CI build.yml、契约文档。
 - **M1 状态引擎完成**：`src/state/`（全局 Context、错误 FIFO、capability 表）；`src/gl/state.cpp`（S1 组 48 函数真实现：glClear/glViewport/glEnable/glGetString「3.3 Core Profile」/glGetError 等）；生成脚本 `scripts/gen_gl_stubs.py` 支持实现排除名单重新生成 stub。
 - **M2 完成：着色器管线 + Vulkan 后端接通**：
@@ -44,6 +44,8 @@ cmake -S . -B build-macos -G Ninja -DCMAKE_BUILD_TYPE=Debug
 cmake --build build-macos
 clang -o /tmp/mithril-draw-smoke tests/draw_smoke.c
 MITHRIL_BACKEND=metal MITHRIL_EXPECT_RENDERER=DirectMetal /tmp/mithril-draw-smoke
+clang -std=c11 -o /tmp/mithril-ubo-smoke tests/ubo_smoke.c
+MITHRIL_BACKEND=metal MTL_DEBUG_LAYER=1 /tmp/mithril-ubo-smoke
 ```
 
 ## 冒烟测试
@@ -86,5 +88,5 @@ src/backend backend-neutral draw/resource contract 与显式 backend 选择
 src/metal   DirectMetal（SPIR-V→MSL、program/pipeline cache、frame arena、command encoding/readback）
 src/vk      Vulkan reference/fallback（dlsym 加载器、离屏渲染、动态 UBO 池、读回）
 scripts/    gen_gl_stubs.py（stub 生成器）、exported_symbols.txt
-tests/      contract_smoke.c / state_smoke.c / shader_smoke.c / draw_smoke.c / texture_smoke.c / fbo_smoke.c / 3d_smoke.c / render3d_smoke.c
+tests/      contract_smoke.c / state_smoke.c / shader_smoke.c / draw_smoke.c / ubo_smoke.c / texture_smoke.c / fbo_smoke.c / 3d_smoke.c / render3d_smoke.c
 ```

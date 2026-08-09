@@ -10,6 +10,8 @@
 #include <cstring>
 #include <utility>
 
+#include <util/log.h>
+
 namespace {
 namespace sh = mithril::shader;
 float HalfToFloat(uint16_t h) {
@@ -129,7 +131,8 @@ uint64_t CreateBackendProgram(sh::Program* prog) {
 std::unordered_map<std::string, std::vector<float>> ComposeUniforms(
     sh::Program* prog) {
     std::unordered_map<std::string, std::vector<float>> uniforms;
-    for (const auto& u : prog->uniforms) uniforms[u.name] = u.value;
+    for (const auto& u : prog->uniforms)
+        if (u.location >= 0) uniforms[u.name] = u.value;
     return uniforms;
 }
 
@@ -367,6 +370,52 @@ void DrawCommon(GLenum mode, const std::vector<uint32_t>& idx, GLint first,
     dp.instance_count = (uint32_t)instance_count;
     dp.topology = (v::Topology)topo;
     dp.uniforms = ComposeUniforms(prog);
+    for (const auto& block : prog->uniform_blocks) {
+        if (block.binding >= kMaxUniformBufferBindings) {
+            PUSH_ERROR(GL_INVALID_OPERATION);
+            return;
+        }
+        const IndexedBufferBinding& indexed =
+            g_uniform_buffer_bindings[block.binding];
+        const auto buffer = g_buffers.find(indexed.buffer);
+        if (!indexed.buffer || buffer == g_buffers.end()) {
+            PUSH_ERROR(GL_INVALID_OPERATION);
+            return;
+        }
+        const uint64_t offset = static_cast<uint64_t>(indexed.offset);
+        const uint64_t available = indexed.whole_buffer
+            ? static_cast<uint64_t>(buffer->second.data.size())
+            : static_cast<uint64_t>(indexed.size);
+        if (available < static_cast<uint64_t>(block.data_size) ||
+            offset > buffer->second.data.size() ||
+            static_cast<uint64_t>(block.data_size) >
+                buffer->second.data.size() - offset) {
+            ML_LOG_ERROR("uniform block %s needs %d bytes but binding %u "
+                         "does not provide a complete range",
+                         block.name.c_str(), block.data_size, block.binding);
+            PUSH_ERROR(GL_INVALID_OPERATION);
+            return;
+        }
+        auto append_binding = [&](uint32_t internal_binding,
+                                  bool vertex_stage,
+                                  bool fragment_stage) {
+            v::UniformBufferBinding binding;
+            binding.internal_binding = internal_binding;
+            binding.vertex_stage = vertex_stage;
+            binding.fragment_stage = fragment_stage;
+            binding.source_data = buffer->second.data.data();
+            binding.source_size = buffer->second.data.size();
+            binding.source_lifetime_id = buffer->second.lifetime_id;
+            binding.source_content_version = buffer->second.content_version;
+            binding.offset = offset;
+            binding.size = available;
+            dp.uniform_buffers.push_back(binding);
+        };
+        if (block.referenced_vertex)
+            append_binding(block.vertex_internal_binding, true, false);
+        if (block.referenced_fragment)
+            append_binding(block.fragment_internal_binding, false, true);
+    }
     dp.pipeline = BuildPipelineState();
     const s::GLState& state = s::GetState();
     const uint32_t target_width = v::DrawTargetWidth();

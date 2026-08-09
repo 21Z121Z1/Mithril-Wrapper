@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cstring>
 #include <string>
+#include <unordered_map>
 
 #include <util/log.h>
 
@@ -167,8 +168,9 @@ void APIENTRY glLinkProgram(GLuint program) {
     p->fragment_spirv.clear();
     p->linked = false;
     p->info_log.clear();
-
     bool have_vs = false, have_fs = false;
+    std::unordered_map<std::string, sh::UniformBlockDeclaration>
+        block_declarations;
     for (GLuint sid : p->attached) {
         auto* s = sh::GetShader(sid);
         if (!s) continue;
@@ -180,6 +182,34 @@ void APIENTRY glLinkProgram(GLuint program) {
         }
         if (s->type == GL_VERTEX_SHADER) { p->vertex_spirv = s->spirv; have_vs = true; }
         else if (s->type == GL_FRAGMENT_SHADER) { p->fragment_spirv = s->spirv; have_fs = true; }
+        for (const auto& declaration : sh::DiscoverUniformBlocks(s->source)) {
+            if (declaration.has_explicit_binding &&
+                declaration.binding >= kMaxUniformBufferBindings) {
+                p->info_log = "link failed: uniform block " + declaration.name +
+                              " uses a binding beyond GL_MAX_UNIFORM_BUFFER_BINDINGS";
+                ML_LOG_WARN("glLinkProgram(%u): %s", program,
+                            p->info_log.c_str());
+                return;
+            }
+            auto [it, inserted] = block_declarations.emplace(
+                declaration.name, declaration);
+            if (!inserted) {
+                it->second.has_instance = it->second.has_instance ||
+                                          declaration.has_instance;
+                if (declaration.has_explicit_binding) {
+                    if (it->second.has_explicit_binding &&
+                        it->second.binding != declaration.binding) {
+                        p->info_log = "link failed: conflicting layout(binding=) "
+                                      "values for uniform block " + declaration.name;
+                        ML_LOG_WARN("glLinkProgram(%u): %s", program,
+                                    p->info_log.c_str());
+                        return;
+                    }
+                    it->second.binding = declaration.binding;
+                    it->second.has_explicit_binding = true;
+                }
+            }
+        }
     }
     if (!have_vs || !have_fs) {
         if (p->info_log.empty())
@@ -188,11 +218,39 @@ void APIENTRY glLinkProgram(GLuint program) {
         return;
     }
 
+    std::string reflection_error;
+    if (!sh::ReflectProgram(*p, reflection_error)) {
+        p->info_log = "link failed: " + reflection_error;
+        ML_LOG_WARN("glLinkProgram(%u): %s", program, p->info_log.c_str());
+        return;
+    }
+    auto native = g_backend_programs.find(program);
+    if (native != g_backend_programs.end()) {
+        v::DestroyProgram(native->second);
+        g_backend_programs.erase(native);
+    }
     p->linked = true;
-    sh::ReflectProgram(*p);
-    ML_LOG_DEBUG("glLinkProgram(%u): VS=%zu FS=%zu words, %zu uniforms",
+    for (auto& block : p->uniform_blocks) {
+        const auto declaration = block_declarations.find(block.name);
+        if (declaration == block_declarations.end()) continue;
+        if (declaration->second.has_explicit_binding)
+            block.binding = declaration->second.binding;
+        if (declaration->second.has_instance) {
+            for (GLuint uniform_index : block.active_uniform_indices) {
+                sh::Uniform& uniform = p->uniforms[uniform_index];
+                p->active_uniform_by_name.erase(uniform.name);
+                const size_t dot = uniform.name.rfind('.');
+                const std::string member = dot == std::string::npos
+                    ? uniform.name : uniform.name.substr(dot + 1);
+                uniform.name = block.name + "." + member;
+                p->active_uniform_by_name[uniform.name] = uniform_index;
+            }
+        }
+    }
+    ML_LOG_DEBUG("glLinkProgram(%u): VS=%zu FS=%zu words, %zu uniforms, "
+                 "%zu uniform blocks",
                  program, p->vertex_spirv.size(), p->fragment_spirv.size(),
-                 p->uniforms.size());
+                 p->uniforms.size(), p->uniform_blocks.size());
 }
 
 void APIENTRY glGetProgramiv(GLuint program, GLenum pname, GLint* params) {
@@ -204,6 +262,22 @@ void APIENTRY glGetProgramiv(GLuint program, GLenum pname, GLint* params) {
         case GL_VALIDATE_STATUS:  *params = GL_TRUE; return;
         case GL_INFO_LOG_LENGTH:  *params = (GLint)(p->info_log.size() + 1); return;
         case GL_ACTIVE_UNIFORMS:  *params = (GLint)p->uniforms.size(); return;
+        case GL_ACTIVE_UNIFORM_MAX_LENGTH: {
+            size_t length = 0;
+            for (const auto& uniform : p->uniforms)
+                length = std::max(length, uniform.name.size() + 1);
+            *params = static_cast<GLint>(length);
+            return;
+        }
+        case GL_ACTIVE_UNIFORM_BLOCKS:
+            *params = static_cast<GLint>(p->uniform_blocks.size()); return;
+        case GL_ACTIVE_UNIFORM_BLOCK_MAX_NAME_LENGTH: {
+            size_t length = 0;
+            for (const auto& block : p->uniform_blocks)
+                length = std::max(length, block.name.size() + 1);
+            *params = static_cast<GLint>(length);
+            return;
+        }
         case GL_ACTIVE_ATTRIBUTES:*params = (GLint)p->attrib_locations.size(); return;
         case GL_ATTACHED_SHADERS: *params = (GLint)p->attached.size(); return;
         case GL_DELETE_STATUS:    *params = GL_FALSE; return;
@@ -268,7 +342,7 @@ void APIENTRY glGetActiveUniform(GLuint program, GLuint index, GLsizei bufSize,
     if (!p) { PUSH_ERROR(GL_INVALID_VALUE); return; }
     if (index >= p->uniforms.size()) { PUSH_ERROR(GL_INVALID_VALUE); return; }
     const sh::Uniform& u = p->uniforms[index];
-    if (size) *size = 1;
+    if (size) *size = u.size;
     if (type) *type = u.type;
     if (name && bufSize > 0) {
         GLsizei n = (GLsizei)u.name.size();
@@ -277,6 +351,143 @@ void APIENTRY glGetActiveUniform(GLuint program, GLuint index, GLsizei bufSize,
         name[n] = 0;
         if (length) *length = n;
     } else if (length) *length = 0;
+}
+
+void APIENTRY glGetActiveUniformName(GLuint program, GLuint uniformIndex,
+                                     GLsizei bufSize, GLsizei* length,
+                                     GLchar* uniformName) {
+    auto* p = sh::GetProgram(program);
+    if (!p) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+    if (uniformIndex >= p->uniforms.size()) {
+        PUSH_ERROR(GL_INVALID_VALUE); return;
+    }
+    if (!uniformName || bufSize <= 0) {
+        if (length) *length = 0;
+        return;
+    }
+    const std::string& name = p->uniforms[uniformIndex].name;
+    GLsizei count = std::min<GLsizei>(static_cast<GLsizei>(name.size()),
+                                     bufSize - 1);
+    std::memcpy(uniformName, name.data(), static_cast<size_t>(count));
+    uniformName[count] = 0;
+    if (length) *length = count;
+}
+
+void APIENTRY glGetUniformIndices(GLuint program, GLsizei uniformCount,
+                                  const GLchar* const* uniformNames,
+                                  GLuint* uniformIndices) {
+    auto* p = sh::GetProgram(program);
+    if (!p) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+    if (uniformCount < 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+    if (!uniformNames || !uniformIndices) return;
+    for (GLsizei i = 0; i < uniformCount; ++i) {
+        const auto found = uniformNames[i]
+            ? p->active_uniform_by_name.find(uniformNames[i])
+            : p->active_uniform_by_name.end();
+        uniformIndices[i] = found == p->active_uniform_by_name.end()
+            ? GL_INVALID_INDEX : found->second;
+    }
+}
+
+void APIENTRY glGetActiveUniformsiv(GLuint program, GLsizei uniformCount,
+                                    const GLuint* uniformIndices, GLenum pname,
+                                    GLint* params) {
+    auto* p = sh::GetProgram(program);
+    if (!p) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+    if (uniformCount < 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+    if (!uniformIndices || !params) return;
+    for (GLsizei i = 0; i < uniformCount; ++i) {
+        if (uniformIndices[i] >= p->uniforms.size()) {
+            PUSH_ERROR(GL_INVALID_VALUE); return;
+        }
+        const sh::Uniform& uniform = p->uniforms[uniformIndices[i]];
+        switch (pname) {
+            case GL_UNIFORM_TYPE: params[i] = static_cast<GLint>(uniform.type); break;
+            case GL_UNIFORM_SIZE: params[i] = uniform.size; break;
+            case GL_UNIFORM_NAME_LENGTH:
+                params[i] = static_cast<GLint>(uniform.name.size() + 1); break;
+            case GL_UNIFORM_BLOCK_INDEX: params[i] = uniform.block_index; break;
+            case GL_UNIFORM_OFFSET: params[i] = uniform.offset; break;
+            case GL_UNIFORM_ARRAY_STRIDE: params[i] = uniform.array_stride; break;
+            case GL_UNIFORM_MATRIX_STRIDE: params[i] = uniform.matrix_stride; break;
+            case GL_UNIFORM_IS_ROW_MAJOR: params[i] = uniform.row_major; break;
+            default: PUSH_ERROR(GL_INVALID_ENUM); return;
+        }
+    }
+}
+
+GLuint APIENTRY glGetUniformBlockIndex(GLuint program,
+                                       const GLchar* uniformBlockName) {
+    auto* p = sh::GetProgram(program);
+    if (!p) { PUSH_ERROR(GL_INVALID_VALUE); return GL_INVALID_INDEX; }
+    if (!p->linked || !uniformBlockName) return GL_INVALID_INDEX;
+    const auto found = p->uniform_block_by_name.find(uniformBlockName);
+    return found == p->uniform_block_by_name.end()
+        ? GL_INVALID_INDEX : found->second;
+}
+
+void APIENTRY glGetActiveUniformBlockName(GLuint program,
+                                          GLuint uniformBlockIndex,
+                                          GLsizei bufSize, GLsizei* length,
+                                          GLchar* uniformBlockName) {
+    auto* p = sh::GetProgram(program);
+    if (!p) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+    if (uniformBlockIndex >= p->uniform_blocks.size()) {
+        PUSH_ERROR(GL_INVALID_VALUE); return;
+    }
+    if (!uniformBlockName || bufSize <= 0) {
+        if (length) *length = 0;
+        return;
+    }
+    const std::string& name = p->uniform_blocks[uniformBlockIndex].name;
+    const GLsizei count = std::min<GLsizei>(
+        static_cast<GLsizei>(name.size()), bufSize - 1);
+    std::memcpy(uniformBlockName, name.data(), static_cast<size_t>(count));
+    uniformBlockName[count] = 0;
+    if (length) *length = count;
+}
+
+void APIENTRY glGetActiveUniformBlockiv(GLuint program,
+                                        GLuint uniformBlockIndex, GLenum pname,
+                                        GLint* params) {
+    auto* p = sh::GetProgram(program);
+    if (!p) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+    if (uniformBlockIndex >= p->uniform_blocks.size()) {
+        PUSH_ERROR(GL_INVALID_VALUE); return;
+    }
+    if (!params) return;
+    const sh::UniformBlock& block = p->uniform_blocks[uniformBlockIndex];
+    switch (pname) {
+        case GL_UNIFORM_BLOCK_BINDING:
+            *params = static_cast<GLint>(block.binding); return;
+        case GL_UNIFORM_BLOCK_DATA_SIZE: *params = block.data_size; return;
+        case GL_UNIFORM_BLOCK_NAME_LENGTH:
+            *params = static_cast<GLint>(block.name.size() + 1); return;
+        case GL_UNIFORM_BLOCK_ACTIVE_UNIFORMS:
+            *params = static_cast<GLint>(block.active_uniform_indices.size()); return;
+        case GL_UNIFORM_BLOCK_ACTIVE_UNIFORM_INDICES:
+            for (size_t i = 0; i < block.active_uniform_indices.size(); ++i)
+                params[i] = static_cast<GLint>(block.active_uniform_indices[i]);
+            return;
+        case GL_UNIFORM_BLOCK_REFERENCED_BY_VERTEX_SHADER:
+            *params = block.referenced_vertex ? GL_TRUE : GL_FALSE; return;
+        case GL_UNIFORM_BLOCK_REFERENCED_BY_FRAGMENT_SHADER:
+            *params = block.referenced_fragment ? GL_TRUE : GL_FALSE; return;
+        case GL_UNIFORM_BLOCK_REFERENCED_BY_GEOMETRY_SHADER:
+            *params = GL_FALSE; return;
+        default: PUSH_ERROR(GL_INVALID_ENUM); return;
+    }
+}
+
+void APIENTRY glUniformBlockBinding(GLuint program, GLuint uniformBlockIndex,
+                                    GLuint uniformBlockBinding) {
+    auto* p = sh::GetProgram(program);
+    if (!p || !p->linked) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
+    if (uniformBlockIndex >= p->uniform_blocks.size() ||
+        uniformBlockBinding >= kMaxUniformBufferBindings) {
+        PUSH_ERROR(GL_INVALID_VALUE); return;
+    }
+    p->uniform_blocks[uniformBlockIndex].binding = uniformBlockBinding;
 }
 
 void APIENTRY glGetActiveAttrib(GLuint program, GLuint index, GLsizei bufSize,

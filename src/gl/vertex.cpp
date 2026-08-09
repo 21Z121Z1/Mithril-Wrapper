@@ -18,6 +18,9 @@ uint64_t g_next_buffer_lifetime = 1;
 GLuint g_bound_vao = 0;
 GLuint g_bound_array_buffer = 0;
 GLuint g_bound_element_buffer = 0;
+GLuint g_bound_uniform_buffer = 0;
+std::array<IndexedBufferBinding, kMaxUniformBufferBindings>
+    g_uniform_buffer_bindings{};
 
 // program id -> selected-backend program handle (created lazily on first draw by the
 // draw path; erased by the shader-lifecycle path on glDeleteProgram).
@@ -79,6 +82,9 @@ void APIENTRY glDeleteBuffers(GLsizei n, const GLuint* buffers) {
         v::DestroyBuffer(it->second.lifetime_id);
         if (g_bound_array_buffer == buffers[i]) g_bound_array_buffer = 0;
         if (g_bound_element_buffer == buffers[i]) g_bound_element_buffer = 0;
+        if (g_bound_uniform_buffer == buffers[i]) g_bound_uniform_buffer = 0;
+        for (auto& binding : g_uniform_buffer_bindings)
+            if (binding.buffer == buffers[i]) binding = {};
         g_buffers.erase(it);
     }
 }
@@ -92,6 +98,7 @@ void APIENTRY glBindBuffer(GLenum target, GLuint buffer) {
     switch (target) {
         case GL_ARRAY_BUFFER: g_bound_array_buffer = buffer; break;
         case GL_ELEMENT_ARRAY_BUFFER: g_bound_element_buffer = buffer; break;
+        case GL_UNIFORM_BUFFER: g_bound_uniform_buffer = buffer; break;
         default:
             PUSH_ERROR(GL_INVALID_ENUM);
             return;
@@ -104,6 +111,7 @@ void APIENTRY glBufferData(GLenum target, GLsizeiptr size, const void* data, GLe
     switch (target) {
         case GL_ARRAY_BUFFER: bound = &g_bound_array_buffer; break;
         case GL_ELEMENT_ARRAY_BUFFER: bound = &g_bound_element_buffer; break;
+        case GL_UNIFORM_BUFFER: bound = &g_bound_uniform_buffer; break;
         default: PUSH_ERROR(GL_INVALID_ENUM); return;
     }
     if (*bound == 0) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
@@ -123,6 +131,7 @@ void APIENTRY glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, c
     switch (target) {
         case GL_ARRAY_BUFFER: bound = &g_bound_array_buffer; break;
         case GL_ELEMENT_ARRAY_BUFFER: bound = &g_bound_element_buffer; break;
+        case GL_UNIFORM_BUFFER: bound = &g_bound_uniform_buffer; break;
         default: PUSH_ERROR(GL_INVALID_ENUM); return;
     }
     if (*bound == 0) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
@@ -132,6 +141,10 @@ void APIENTRY glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, c
         PUSH_ERROR(GL_INVALID_VALUE);
         return;
     }
+    if (it->second.defined && size > 0 &&
+        std::memcmp(it->second.data.data() + offset, data,
+                    static_cast<size_t>(size)) == 0)
+        return;
     std::memcpy(it->second.data.data() + offset, data, size);
     ++it->second.content_version;
     it->second.defined = true;
@@ -144,12 +157,99 @@ BufferData* BoundBufferForTarget(GLenum target, GLenum* error) {
     switch (target) {
         case GL_ARRAY_BUFFER: bound = &g_bound_array_buffer; break;
         case GL_ELEMENT_ARRAY_BUFFER: bound = &g_bound_element_buffer; break;
+        case GL_UNIFORM_BUFFER: bound = &g_bound_uniform_buffer; break;
         default: *error = GL_INVALID_ENUM; return nullptr;
     }
     if (*bound == 0) { *error = GL_INVALID_OPERATION; return nullptr; }
     auto it = g_buffers.find(*bound);
     if (it == g_buffers.end()) { *error = GL_INVALID_OPERATION; return nullptr; }
     return &it->second;
+}
+
+void APIENTRY glBindBufferBase(GLenum target, GLuint index, GLuint buffer) {
+    if (target != GL_UNIFORM_BUFFER) { PUSH_ERROR(GL_INVALID_ENUM); return; }
+    if (index >= kMaxUniformBufferBindings) {
+        PUSH_ERROR(GL_INVALID_VALUE); return;
+    }
+    if (buffer != 0 && !g_buffers.count(buffer)) {
+        PUSH_ERROR(GL_INVALID_VALUE); return;
+    }
+    g_bound_uniform_buffer = buffer;
+    IndexedBufferBinding binding;
+    binding.buffer = buffer;
+    binding.whole_buffer = buffer != 0;
+    g_uniform_buffer_bindings[index] = binding;
+}
+
+void APIENTRY glBindBufferRange(GLenum target, GLuint index, GLuint buffer,
+                                GLintptr offset, GLsizeiptr size) {
+    if (target != GL_UNIFORM_BUFFER) { PUSH_ERROR(GL_INVALID_ENUM); return; }
+    if (index >= kMaxUniformBufferBindings) {
+        PUSH_ERROR(GL_INVALID_VALUE); return;
+    }
+    if (buffer == 0) {
+        g_bound_uniform_buffer = 0;
+        g_uniform_buffer_bindings[index] = {};
+        return;
+    }
+    const auto found = g_buffers.find(buffer);
+    if (found == g_buffers.end()) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+    if (offset < 0 || size <= 0 ||
+        offset % kUniformBufferOffsetAlignment != 0) {
+        PUSH_ERROR(GL_INVALID_VALUE); return;
+    }
+    const uint64_t begin = static_cast<uint64_t>(offset);
+    const uint64_t length = static_cast<uint64_t>(size);
+    if (begin > found->second.data.size() ||
+        length > found->second.data.size() - begin) {
+        PUSH_ERROR(GL_INVALID_VALUE); return;
+    }
+    g_bound_uniform_buffer = buffer;
+    g_uniform_buffer_bindings[index] = {buffer, offset, size, false};
+}
+
+void APIENTRY glGetIntegeri_v(GLenum target, GLuint index, GLint* data) {
+    if (!data) return;
+    if (index >= kMaxUniformBufferBindings) {
+        PUSH_ERROR(GL_INVALID_VALUE); return;
+    }
+    const IndexedBufferBinding& binding = g_uniform_buffer_bindings[index];
+    switch (target) {
+        case GL_UNIFORM_BUFFER_BINDING:
+            *data = static_cast<GLint>(binding.buffer); return;
+        case GL_UNIFORM_BUFFER_START:
+            *data = static_cast<GLint>(binding.offset); return;
+        case GL_UNIFORM_BUFFER_SIZE: {
+            const auto found = g_buffers.find(binding.buffer);
+            *data = binding.whole_buffer && found != g_buffers.end()
+                ? static_cast<GLint>(found->second.data.size())
+                : static_cast<GLint>(binding.size);
+            return;
+        }
+        default: PUSH_ERROR(GL_INVALID_ENUM); return;
+    }
+}
+
+void APIENTRY glGetInteger64i_v(GLenum target, GLuint index, GLint64* data) {
+    if (!data) return;
+    if (index >= kMaxUniformBufferBindings) {
+        PUSH_ERROR(GL_INVALID_VALUE); return;
+    }
+    const IndexedBufferBinding& binding = g_uniform_buffer_bindings[index];
+    switch (target) {
+        case GL_UNIFORM_BUFFER_BINDING:
+            *data = static_cast<GLint64>(binding.buffer); return;
+        case GL_UNIFORM_BUFFER_START:
+            *data = static_cast<GLint64>(binding.offset); return;
+        case GL_UNIFORM_BUFFER_SIZE: {
+            const auto found = g_buffers.find(binding.buffer);
+            *data = binding.whole_buffer && found != g_buffers.end()
+                ? static_cast<GLint64>(found->second.data.size())
+                : static_cast<GLint64>(binding.size);
+            return;
+        }
+        default: PUSH_ERROR(GL_INVALID_ENUM); return;
+    }
 }
 
 void APIENTRY glCopyBufferSubData(GLenum readtarget, GLenum writetarget,

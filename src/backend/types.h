@@ -96,6 +96,22 @@ struct DynamicState {
     std::array<float, 4> scissor{0.f, 0.f, 0.f, 0.f};
 };
 
+// One resolved GL uniform-block binding. The source pointer is borrowed only
+// for the synchronous backend Draw() call; native backends retain versioned
+// storage before returning. Internal binding numbers come from shared shader
+// lowering and are deliberately distinct from GL indexed binding points.
+struct UniformBufferBinding {
+    uint32_t internal_binding = 0;
+    bool vertex_stage = false;
+    bool fragment_stage = false;
+    const uint8_t* source_data = nullptr;
+    size_t source_size = 0;
+    uint64_t source_lifetime_id = 0;
+    uint64_t source_content_version = 0;
+    uint64_t offset = 0;
+    uint64_t size = 0;
+};
+
 struct ClearParams {
     GLbitfield mask = 0;
     std::array<float, 4> color{0.f, 0.f, 0.f, 0.f};
@@ -117,6 +133,7 @@ struct DrawParams {
     uint32_t instance_count = 1;
     Topology topology = Topology::Triangles;
     std::unordered_map<std::string, std::vector<float>> uniforms;
+    std::vector<UniformBufferBinding> uniform_buffers;
     std::vector<std::pair<uint32_t, uint64_t>> sampler_binds;
     PipelineState pipeline;
     DynamicState dynamic;

@@ -4,7 +4,8 @@
 //   2. Desktop builtins Vulkan GLSL renames (gl_VertexID etc.).
 //   3. Loose non-opaque uniforms fold into a synthetic mithril_GlobalBlock
 //      UBO (ANGLE-style).
-//   4. EShClientOpenGL + EShMsgVulkanRules + mapIO, then GlslangToSpv.
+//   4. User uniform blocks receive a collision-free internal binding.
+//   5. EShClientOpenGL + EShMsgVulkanRules + mapIO, then GlslangToSpv.
 // Results are cached by (stage, source hash).
 
 #include <shader/shader.h>
@@ -182,6 +183,69 @@ void assign_sampler_bindings(std::string& source) {
     }
 }
 
+const std::regex& uniform_block_re() {
+    static const std::regex re(
+        R"(((layout\s*\(([^)]*)\)\s*)?uniform\s+(\w+)\s*\{))",
+        std::regex::optimize);
+    return re;
+}
+
+bool set_internal_uniform_block_bindings(std::string& source,
+                                         std::string& error) {
+    struct Edit { size_t pos; size_t len; std::string text; };
+    std::vector<Edit> edits;
+    uint32_t user_block = 0;
+    auto cur = source.cbegin(), end = source.cend();
+    std::smatch match;
+    while (std::regex_search(cur, end, match, uniform_block_re())) {
+        const size_t off = match.position(0) + (cur - source.cbegin());
+        cur = match.suffix().first;
+        if (is_in_comment(source, off)) continue;
+
+        const std::string name = match[4].str();
+        uint32_t binding = kLooseUniformBinding;
+        if (name != "mithril_GlobalBlock") {
+            if (user_block >= kMaxUserUniformBlocksPerStage) {
+                error = "shader uses more than " +
+                        std::to_string(kMaxUserUniformBlocksPerStage) +
+                        " user uniform blocks in one stage";
+                return false;
+            }
+            binding = kUserUniformBindingBase + user_block++;
+        }
+
+        std::string inner = match[3].matched ? match[3].str() : "";
+        static const std::regex literal_binding(
+            R"(\bbinding\s*=\s*([0-9]+))", std::regex::optimize);
+        static const std::regex any_binding(
+            R"(\bbinding\s*=)", std::regex::optimize);
+        if (std::regex_search(inner, any_binding) &&
+            !std::regex_search(inner, literal_binding)) {
+            error = "uniform block layout(binding=) must use an integer literal";
+            return false;
+        }
+        if (std::regex_search(inner, literal_binding)) {
+            inner = std::regex_replace(
+                inner, literal_binding,
+                "binding=" + std::to_string(binding),
+                std::regex_constants::format_first_only);
+        } else {
+            if (!inner.empty()) inner += ", ";
+            inner += "binding=" + std::to_string(binding);
+        }
+        const std::string layout = "layout(" + inner + ") ";
+        if (match[2].matched)
+            edits.push_back({off, match[2].str().size(), layout});
+        else
+            edits.push_back({off, 0, layout});
+    }
+    for (auto it = edits.rbegin(); it != edits.rend(); ++it) {
+        if (it->len) source.replace(it->pos, it->len, it->text);
+        else source.insert(it->pos, it->text);
+    }
+    return true;
+}
+
 void split_declarators(const std::string& list, std::vector<std::string>& out) {
     std::string cur;
     int depth = 0;
@@ -309,6 +373,49 @@ Cache& cache() { static Cache c; return c; }
 
 } // namespace
 
+std::vector<UniformBlockDeclaration> DiscoverUniformBlocks(
+    const std::string& source) {
+    std::vector<UniformBlockDeclaration> declarations;
+    auto cur = source.cbegin(), end = source.cend();
+    std::smatch match;
+    static const std::regex binding_re(
+        R"(\bbinding\s*=\s*([0-9]+))", std::regex::optimize);
+    while (std::regex_search(cur, end, match, uniform_block_re())) {
+        const size_t off = match.position(0) + (cur - source.cbegin());
+        cur = match.suffix().first;
+        if (is_in_comment(source, off)) continue;
+        UniformBlockDeclaration declaration;
+        declaration.name = match[4].str();
+        const size_t brace = off + match[0].str().size() - 1;
+        const size_t close = find_matching_brace(source, brace);
+        if (close != std::string::npos) {
+            const size_t semicolon = source.find(';', close + 1);
+            if (semicolon != std::string::npos) {
+                const std::string instance = source.substr(
+                    close + 1, semicolon - close - 1);
+                static const std::regex instance_re(
+                    R"(^\s*[A-Za-z_]\w*)", std::regex::optimize);
+                static const std::regex array_re(
+                    R"(^\s*[A-Za-z_]\w*\s*\[)", std::regex::optimize);
+                declaration.has_instance =
+                    std::regex_search(instance, instance_re);
+                declaration.is_array = std::regex_search(instance, array_re);
+            }
+        }
+        std::smatch binding;
+        const std::string inner = match[3].matched ? match[3].str() : "";
+        if (std::regex_search(inner, binding, binding_re)) {
+            const unsigned long value = std::stoul(binding[1].str());
+            if (value <= UINT32_MAX) {
+                declaration.binding = static_cast<GLuint>(value);
+                declaration.has_explicit_binding = true;
+            }
+        }
+        declarations.push_back(std::move(declaration));
+    }
+    return declarations;
+}
+
 bool CompileStage(GLenum stage, const std::string& src,
                   std::vector<uint32_t>& spirv, std::string& info) {
     glslang_init();
@@ -320,6 +427,17 @@ bool CompileStage(GLenum stage, const std::string& src,
         std::lock_guard<std::mutex> lk(cache().mu);
         auto it = cache().entries.find(key);
         if (it != cache().entries.end()) { spirv = it->second; return true; }
+    }
+
+    for (const auto& declaration : DiscoverUniformBlocks(src)) {
+        if (declaration.name == "mithril_GlobalBlock") {
+            info = "uniform block name mithril_GlobalBlock is reserved by Mithril";
+            return false;
+        }
+        if (declaration.is_array) {
+            info = "uniform block arrays are not supported by the current Mithril execution model";
+            return false;
+        }
     }
 
     std::string source = src;
@@ -337,12 +455,15 @@ bool CompileStage(GLenum stage, const std::string& src,
         ML_LOG_WARN("wrap_loose_uniforms threw (%s); using unwrapped source", e.what());
         source = unwrapped;
     }
+    if (!set_internal_uniform_block_bindings(source, info) ||
+        !set_internal_uniform_block_bindings(unwrapped, info))
+        return false;
     assign_sampler_bindings(source);
     assign_sampler_bindings(unwrapped);
     // layout(binding=...) requires GLSL 420+; bump only when injected.
-    if (source.find("layout(binding=") != std::string::npos)
+    if (source.find("binding=") != std::string::npos)
         bump_glsl_version(source, 450);
-    if (unwrapped.find("layout(binding=") != std::string::npos)
+    if (unwrapped.find("binding=") != std::string::npos)
         bump_glsl_version(unwrapped, 450);
 
     int version = get_glsl_version(source);

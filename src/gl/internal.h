@@ -36,6 +36,8 @@ namespace v = mithril::backend;
 // ---- shared vertex attribute state (vertex.cpp owns the storage) --------
 
 constexpr GLuint kMaxAttribs = 16;
+constexpr GLuint kMaxUniformBufferBindings = 36;
+constexpr GLintptr kUniformBufferOffsetAlignment = 256;
 
 // One enabled/constant vertex attribute slot.
 struct AttribData {
@@ -68,6 +70,17 @@ extern std::unordered_map<GLuint, BufferData> g_buffers;
 extern GLuint g_bound_vao;           // default VAO is 0
 extern GLuint g_bound_array_buffer;
 extern GLuint g_bound_element_buffer;
+extern GLuint g_bound_uniform_buffer;
+
+struct IndexedBufferBinding {
+    GLuint buffer = 0;
+    GLintptr offset = 0;
+    GLsizeiptr size = 0;
+    bool whole_buffer = false;
+};
+
+extern std::array<IndexedBufferBinding, kMaxUniformBufferBindings>
+    g_uniform_buffer_bindings;
 
 // GL program id -> selected-backend program handle (created on first draw).
 extern std::unordered_map<GLuint, uint64_t> g_backend_programs;
