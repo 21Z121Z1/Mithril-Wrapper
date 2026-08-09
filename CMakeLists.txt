@@ -26,6 +26,7 @@ add_subdirectory(third_party/glslang EXCLUDE_FROM_ALL)
 add_subdirectory(third_party/Vulkan-Headers EXCLUDE_FROM_ALL)
 
 add_library(mithril SHARED
+    src/backend/backend.cpp
     src/egl/impl.cpp
     src/egl/exports.cpp
     src/gl/exports.cpp

@@ -18,9 +18,9 @@ GLuint g_bound_vao = 0;
 GLuint g_bound_array_buffer = 0;
 GLuint g_bound_element_buffer = 0;
 
-// program id -> Vulkan program handle (created lazily on first draw by the
+// program id -> selected-backend program handle (created lazily on first draw by the
 // draw path; erased by the shader-lifecycle path on glDeleteProgram).
-std::unordered_map<GLuint, uint64_t> g_vk_programs;
+std::unordered_map<GLuint, uint64_t> g_backend_programs;
 
 extern "C" {
 

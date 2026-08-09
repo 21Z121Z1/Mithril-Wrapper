@@ -6,7 +6,7 @@
 //
 // Only the definitions actually shared between two or more TUs live here:
 //  - object tables for VAO/VBO state (vertex + draw path),
-//  - the lazy program->Vulkan-program map (shader + draw path),
+//  - the lazy program->backend-program map (shader + draw path),
 //  - attribute fetch helpers (draw path, called through the header below).
 
 #pragma once
@@ -26,10 +26,10 @@
 
 #include <shader/shader.h>
 #include <state/state.h>
-#include <vk/engine.h>
+#include <backend/backend.h>
 
 namespace s = mithril::state;
-namespace v = mithril::vk;
+namespace v = mithril::backend;
 
 #define PUSH_ERROR(e) s::GetState().errors.Push((e))
 
@@ -66,19 +66,19 @@ extern GLuint g_bound_vao;           // default VAO is 0
 extern GLuint g_bound_array_buffer;
 extern GLuint g_bound_element_buffer;
 
-// GL program id -> Vulkan program handle (lazily created at first draw).
-extern std::unordered_map<GLuint, uint64_t> g_vk_programs;
+// GL program id -> selected-backend program handle (created on first draw).
+extern std::unordered_map<GLuint, uint64_t> g_backend_programs;
 
 // ---- shared texture state (texture.cpp owns the storage) ------------------
 
-// Mirrors the engine's texture-unit count (v::kMaxUnits); GL uses units
+// Mirrors the backend contract's texture-unit count; GL uses units
 // beyond this only as a no-op.
-constexpr GLuint kMaxTexUnits = 16;
+constexpr GLuint kMaxTexUnits = v::kMaxTextureUnits;
 
 // CPU-side image of one GL texture object (M4). Pixels are kept as an RGBA8
 // mip chain so TexSubImage/GenerateMipmap can rebuild the upload cheaply.
 // Layered targets concatenate their slices inside each level buffer in the
-// same order vk::TexUpload expects (3D: z; array: layers; cube: 6 faces).
+// same order backend::TexUpload expects (3D: z; array: layers; cube: 6 faces).
 struct TexState {
     GLenum target = GL_TEXTURE_2D;       // target bound at creation
     GLenum min_filter = GL_LINEAR;       // sampler state (GL enums)
@@ -116,7 +116,7 @@ extern std::unordered_map<GLuint, TexState> g_textures;
 extern std::array<GLuint, kMaxTexUnits> g_texture_units;  // unit -> texture id
 extern GLuint g_next_texture;
 
-// Texture ids whose CPU mirror changed while the Vulkan backend was not yet
+// Texture ids whose CPU mirror changed while the backend was not yet
 // initialized; flushed to the engine at the next draw (see DrawCommon).
 extern std::unordered_set<GLuint> g_dirty_textures;
 void FlushDirtyTextureUploads();   // defined in texture.cpp

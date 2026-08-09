@@ -119,10 +119,10 @@ int GLModeToTopology(GLenum mode) {
 }
 
 uint64_t CreateVProgram(sh::Program* prog) {
-    auto it = g_vk_programs.find(prog->id);
-    if (it != g_vk_programs.end()) return it->second;
+    auto it = g_backend_programs.find(prog->id);
+    if (it != g_backend_programs.end()) return it->second;
     uint64_t handle = v::CreateProgram(prog->vertex_spirv, prog->fragment_spirv);
-    if (handle) g_vk_programs.emplace(prog->id, handle);
+    if (handle) g_backend_programs.emplace(prog->id, handle);
     return handle;
 }
 
@@ -339,7 +339,8 @@ void DrawCommon(GLenum mode, const std::vector<uint32_t>& idx, GLint first,
             (unit >= 0 && (GLuint)unit < kMaxTexUnits) ? g_texture_units[unit] : 0;
         dp.sampler_binds.push_back({smp.binding, tex});
     }
-    if (!dp.vertex_stream.data.empty()) v::Draw(dp);
+    if (!dp.vertex_stream.data.empty() && !v::Draw(dp))
+        PUSH_ERROR(GL_INVALID_OPERATION);
 }
 
 // Expand element indices from the bound GL_ELEMENT_ARRAY_BUFFER into raw
@@ -470,7 +471,7 @@ void APIENTRY glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height,
     }
     if (!pixels) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
     if (!v::EnsureInit()) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
-    v::SubmitFlush();
+    v::SubmitFlush(true);
     v::ReadPixels(x, y, width, height, pixels);
 }
 

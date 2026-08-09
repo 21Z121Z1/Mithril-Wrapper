@@ -1,6 +1,6 @@
 // Mithril-Wrapper GL entry points -- S4 texture domain (M4).
 // Texture object table (name pool + CPU RGBA8 mip mirror + sampler state),
-// glTexImage*/TexSubImage* uploads through vk::UploadTexture, box-filtered
+// glTexImage*/TexSubImage* uploads through backend::UploadTexture, box-filtered
 // mip generation, S3TC decompression, framebuffer copies, and the
 // unit/binding bookkeeping the draw path needs to resolve sampler uniforms
 // to textures.  Unsupported targets/formats stay in the CPU mirror but are
@@ -9,7 +9,7 @@
 //
 // Layout of the CPU mirror (TexState::mip[level]): every "slice" of the
 // level is a width*height*4 plane of RGBA8 rows; slices are concatenated in
-// the same order vk::TexUpload expects (3D: z; 2D/1D arrays: layer; cubemap:
+// the same order backend::TexUpload expects (3D: z; 2D/1D arrays: layer; cubemap:
 // the six faces in POSITIVE_X..NEGATIVE_Z order).
 
 #include "internal.h"
@@ -474,7 +474,7 @@ void FlushDirtyTextureUploads() {
 }
 
 // Mark `id` as needing a (re)upload and try it immediately when the backend
-// is already up. Uploads made before vk::EnsureInit are replayed by
+// is already up. Uploads made before backend::EnsureInit are replayed by
 // FlushDirtyTextureUploads at the first draw.
 void MarkTextureDirty(TexState& st, GLuint id) {
     if (!st.has_image || st.mip.empty()) return;

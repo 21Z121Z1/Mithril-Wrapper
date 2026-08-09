@@ -1,6 +1,6 @@
 // Mithril-Wrapper GL layer -- S5 framebuffer object / renderbuffer bridge.
 // Owns the GL object tables for framebuffers and renderbuffers, and forwards
-// attachment changes into the Vulkan engine (mapping texture + renderbuffer
+// attachment changes into the selected backend (mapping texture + renderbuffer
 // attachments onto resident Vk images). Draw, clear and readback already
 // target the bound framebuffer in the backend, so this TU keeps the bindings
 // in sync and answers the object/status queries.
@@ -11,7 +11,7 @@
 #include <cstring>
 
 namespace s = mithril::state;
-namespace v = mithril::vk;
+namespace v = mithril::backend;
 
 // GL renderbuffer object: format + size as set by glRenderbufferStorage, plus
 // a mirror of the produced specs for renderbuffer-size FBO checks.
@@ -592,7 +592,7 @@ void APIENTRY glBlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1,
     }
     if (srcX0 == srcX1 || srcY0 == srcY1 || dstX0 == dstX1 || dstY0 == dstY1)
         return;   // zero-area blit is a no-op
-    v::SubmitFlush();
+    v::SubmitFlush(true);
     v::BlitFramebuffer(g_bound_read_fbo, g_bound_draw_fbo,
                        srcX0, srcY0, srcX1, srcY1, dstX0, dstY0, dstX1, dstY1,
                        mask, filter);

@@ -1,7 +1,7 @@
 // Mithril-Wrapper GL entry points -- S2 shader/program/uniform domain
 // (milestone M2-S2). Shader object lifecycle, link, use, the glUniform*
 // setter families and the uniform getters, backed by mithril::shader,
-// plus teardown of the lazily created Vulkan program handles.
+// plus teardown of the lazily created native-backend program handles.
 
 #include "internal.h"
 
@@ -124,10 +124,10 @@ GLuint APIENTRY glCreateProgram(void) {
 
 void APIENTRY glDeleteProgram(GLuint program) {
     if (program && sh::GetProgram(program) == nullptr) { PUSH_ERROR(GL_INVALID_VALUE); return; }
-    auto it = g_vk_programs.find(program);
-    if (it != g_vk_programs.end()) {
+    auto it = g_backend_programs.find(program);
+    if (it != g_backend_programs.end()) {
         v::DestroyProgram(it->second);
-        g_vk_programs.erase(it);
+        g_backend_programs.erase(it);
     }
     sh::DeleteProgram(program);
 }

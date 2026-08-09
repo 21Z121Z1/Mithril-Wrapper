@@ -74,8 +74,8 @@ GLboolean APIENTRY glIsEnabledi(GLenum cap, GLuint index) {
 
 // ---- noise cancellers -------------------------------------------------------
 
-void APIENTRY glFinish() { v::SubmitFlush(); }
-void APIENTRY glFlush() { v::SubmitFlush(); }
+void APIENTRY glFinish() { v::SubmitFlush(true); }
+void APIENTRY glFlush() { v::SubmitFlush(false); }
 
 // ---- viewport / scissor ----------------------------------------------------
 
@@ -364,7 +364,7 @@ GLenum APIENTRY glGetError() { return s::GetState().errors.Pop(); }
 const GLubyte* APIENTRY glGetString(GLenum name) {
     switch (name) {
         case GL_VENDOR:   return reinterpret_cast<const GLubyte*>("Mithril-Wrapper");
-        case GL_RENDERER: return reinterpret_cast<const GLubyte*>("Vulkan on Metal (MoltenVK)");
+        case GL_RENDERER: return reinterpret_cast<const GLubyte*>(v::RendererName());
         case GL_VERSION:  return reinterpret_cast<const GLubyte*>("3.3 Core Profile Mithril");
         case GL_SHADING_LANGUAGE_VERSION:
                           return reinterpret_cast<const GLubyte*>("3.30 Mithril");
