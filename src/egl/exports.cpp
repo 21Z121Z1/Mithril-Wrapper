@@ -9,6 +9,7 @@
 
 #include <backend/backend.h>
 #include <egl/internal.h>
+#include <state/state.h>
 #include <util/log.h>
 
 using namespace mithril::egl;
@@ -162,6 +163,7 @@ EGLContext eglCreateContext(EGLDisplay dpy, EGLConfig config, EGLContext share_c
                             const EGLint* attrib_list) {
     (void)attrib_list;
     globals().context.config = config;
+    globals().context.drawable_state_initialized = false;
     ML_LOG_DEBUG("eglCreateContext(config=%p, share=%p)", config, share_context);
     SetError(EGL_SUCCESS);
     return reinterpret_cast<EGLContext>(&globals().context);
@@ -172,6 +174,7 @@ EGLBoolean eglDestroyContext(EGLDisplay dpy, EGLContext ctx) {
         SetError(EGL_BAD_CONTEXT);
         return EGL_FALSE;
     }
+    globals().context.drawable_state_initialized = false;
     SetError(EGL_SUCCESS);
     return EGL_TRUE;
 }
@@ -194,6 +197,16 @@ EGLBoolean eglMakeCurrent(EGLDisplay dpy, EGLSurface draw, EGLSurface read, EGLC
     if (ctx == EGL_NO_CONTEXT && draw == EGL_NO_SURFACE) {
         SetError(EGL_SUCCESS);
         return EGL_TRUE;
+    }
+    if (ctx == reinterpret_cast<EGLContext>(&globals().context) &&
+        draw == reinterpret_cast<EGLSurface>(&globals().surface) &&
+        !globals().context.drawable_state_initialized) {
+        const GLsizei width = static_cast<GLsizei>(mithril::backend::TargetWidth());
+        const GLsizei height = static_cast<GLsizei>(mithril::backend::TargetHeight());
+        auto& state = mithril::state::GetState();
+        state.viewport = {0, 0, width, height, true};
+        state.scissor = {0, 0, width, height, true};
+        globals().context.drawable_state_initialized = true;
     }
     SetError(EGL_SUCCESS);
     return EGL_TRUE;

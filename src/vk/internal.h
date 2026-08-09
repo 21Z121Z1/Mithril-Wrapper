@@ -229,6 +229,9 @@ struct DrawOp {
     std::vector<std::pair<uint32_t, VkDescriptorImageInfo>> tex_binds;
     // M5: pipeline-affecting state captured at draw-record time.
     PipelineState pipe;
+    // Dynamic raster state is also captured at draw-record time; command
+    // encoding may happen after the frontend changes it again.
+    backend::DynamicState dynamic;
     // S5: render pass signature for the target this draw records into
     // (empty => default framebuffer). Included in the pipeline cache key and
     // the VkGraphicsPipelineCreateInfo.renderPass. `color_count`/`samples`
@@ -307,8 +310,6 @@ struct Engine {
     float clear_r = 0, clear_g = 0, clear_b = 0, clear_a = 0;
     double clear_depth = 1.0;
     int clear_stencil = 0;
-    float vp_x = 0, vp_y = 0, vp_w = 512, vp_h = 512;
-    float sc_x = 0, sc_y = 0, sc_w = 512, sc_h = 512;
     std::vector<DrawOp> frame_draws;
 };
 

@@ -17,8 +17,6 @@ void SetClearColor(float r, float g, float b, float a);
 void SetClearMask(GLbitfield mask);
 void SetClearDepth(double depth);
 void SetClearStencil(GLint value);
-void SetViewport(float x, float y, float w, float h);
-void SetScissor(float x, float y, float w, float h);
 uint64_t CreateProgram(const std::vector<uint32_t>& vs,
                        const std::vector<uint32_t>& fs);
 void DestroyProgram(uint64_t program);
@@ -26,9 +24,7 @@ bool Draw(const backend::DrawParams& params);
 void SubmitFlush(bool wait_for_completion);
 void ReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, void* out);
 
-// The first DirectMetal slice deliberately does not claim texture/FBO support.
-// These functions preserve backend state and emit an explicit diagnostic so a
-// draw can fail rather than silently approximate the GL workload.
+// Resident resource and framebuffer portion of the shared backend contract.
 void UploadTexture(uint64_t gl_id, const backend::TexUpload& img,
                    const backend::TexSamplerInfo& sampler);
 void UpdateTextureSampler(uint64_t gl_id,

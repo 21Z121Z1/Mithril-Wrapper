@@ -80,19 +80,19 @@ void APIENTRY glFlush() { v::SubmitFlush(false); }
 // ---- viewport / scissor ----------------------------------------------------
 
 void APIENTRY glViewport(GLint x, GLint y, GLsizei width, GLsizei height) {
+    if (width < 0 || height < 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
     auto& st = s::GetState();
     st.viewport.x = x; st.viewport.y = y;
     st.viewport.w = width; st.viewport.h = height;
-    if (v::IsInitialized())
-        v::SetViewport((float)x, (float)y, (float)width, (float)height);
+    st.viewport.initialized = true;
 }
 
 void APIENTRY glScissor(GLint x, GLint y, GLsizei width, GLsizei height) {
+    if (width < 0 || height < 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
     auto& st = s::GetState();
     st.scissor.x = x; st.scissor.y = y;
     st.scissor.w = width; st.scissor.h = height;
-    if (v::IsInitialized())
-        v::SetScissor((float)x, (float)y, (float)width, (float)height);
+    st.scissor.initialized = true;
 }
 
 // ---- clear state -----------------------------------------------------------

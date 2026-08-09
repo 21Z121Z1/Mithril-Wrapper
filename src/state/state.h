@@ -37,8 +37,16 @@ struct CapSet {
     }
 };
 
-struct ViewportState { GLint x = 0, y = 0; GLsizei w = 0, h = 0; };
-struct ScissorState  { GLint x = 0, y = 0; GLsizei w = 0, h = 0; };
+struct ViewportState {
+    GLint x = 0, y = 0;
+    GLsizei w = 0, h = 0;
+    bool initialized = false;
+};
+struct ScissorState {
+    GLint x = 0, y = 0;
+    GLsizei w = 0, h = 0;
+    bool initialized = false;
+};
 
 struct DepthState {
     GLenum func = GL_LESS;

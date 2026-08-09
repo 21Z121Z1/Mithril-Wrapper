@@ -368,6 +368,19 @@ void DrawCommon(GLenum mode, const std::vector<uint32_t>& idx, GLint first,
     dp.topology = (v::Topology)topo;
     dp.uniforms = ComposeUniforms(prog);
     dp.pipeline = BuildPipelineState();
+    const s::GLState& state = s::GetState();
+    const uint32_t target_width = v::DrawTargetWidth();
+    const uint32_t target_height = v::DrawTargetHeight();
+    dp.dynamic.viewport = state.viewport.initialized
+        ? std::array<float, 4>{(float)state.viewport.x, (float)state.viewport.y,
+                              (float)state.viewport.w, (float)state.viewport.h}
+        : std::array<float, 4>{0.f, 0.f, (float)target_width,
+                              (float)target_height};
+    dp.dynamic.scissor = state.scissor.initialized
+        ? std::array<float, 4>{(float)state.scissor.x, (float)state.scissor.y,
+                              (float)state.scissor.w, (float)state.scissor.h}
+        : std::array<float, 4>{0.f, 0.f, (float)target_width,
+                              (float)target_height};
     // Resolve each sampler uniform to the texture bound at its GL unit
     // (the framebelike value glUniform1i wrote; absent -> unit 0).
     dp.sampler_binds.clear();

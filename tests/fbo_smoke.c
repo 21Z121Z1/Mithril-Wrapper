@@ -89,6 +89,7 @@ typedef void (*fn_glClear)(GLenum);
 typedef void (*fn_glEnable)(GLenum);
 typedef void (*fn_glDisable)(GLenum);
 typedef void (*fn_glDepthFunc)(GLenum);
+typedef void (*fn_glViewport)(GLint, GLint, GLsizei, GLsizei);
 typedef void (*fn_glScissor)(GLint, GLint, GLsizei, GLsizei);
 typedef void (*fn_glBlendFunc)(GLenum, GLenum);
 typedef void (*fn_glCullFace)(GLenum);
@@ -192,6 +193,7 @@ int main(void) {
     fn_glEnable enable = (fn_glEnable)dlsym(h, "glEnable");
     fn_glDisable disable = (fn_glDisable)dlsym(h, "glDisable");
     fn_glDepthFunc depthFunc = (fn_glDepthFunc)dlsym(h, "glDepthFunc");
+    fn_glViewport viewport = (fn_glViewport)dlsym(h, "glViewport");
     fn_glScissor scissor = (fn_glScissor)dlsym(h, "glScissor");
     fn_glBlendFunc blendFunc = (fn_glBlendFunc)dlsym(h, "glBlendFunc");
     fn_glCullFace cullFace = (fn_glCullFace)dlsym(h, "glCullFace");
@@ -242,7 +244,7 @@ int main(void) {
     fn_glGetRenderbufferParameteriv getRboParam = (fn_glGetRenderbufferParameteriv)dlsym(h, "glGetRenderbufferParameteriv");
     fn_glGetIntegerv getIntegerv = (fn_glGetIntegerv)dlsym(h, "glGetIntegerv");
 
-    CHECK(clearColor && clear && enable && depthFunc && scissor && blendFunc &&
+    CHECK(clearColor && clear && enable && depthFunc && viewport && scissor && blendFunc &&
           cullFace && frontFace && stencilFunc && stencilOp && stencilMask &&
           colorMask && polygonMode &&
           createShader && shaderSource && compileShader && createProgram &&
@@ -357,6 +359,49 @@ int main(void) {
         CHECK(px_match(px, 255, 255, 255, 255),
               "scissored region still receives the triangle (r=%d g=%d b=%d)",
               px[0], px[1], px[2]);
+    }
+
+    /* -- deferred encoding: viewport/scissor are per-draw snapshots ------- */
+    {
+        float red[3][7] = {
+            {-1, -1, 0.0f, 1, 0, 0, 1},
+            { 3, -1, 0.0f, 1, 0, 0, 1},
+            {-1,  3, 0.0f, 1, 0, 0, 1},
+        };
+        float green[3][7] = {
+            {-1, -1, 0.0f, 0, 1, 0, 1},
+            { 3, -1, 0.0f, 0, 1, 0, 1},
+            {-1,  3, 0.0f, 0, 1, 0, 1},
+        };
+        disable(GL_DEPTH_TEST);
+        disable(GL_SCISSOR_TEST);
+        clearColor(0, 0, 0, 1);
+        clear(GL_COLOR_BUFFER_BIT);
+
+        enable(GL_SCISSOR_TEST);
+        viewport(0, 0, 256, 512);
+        scissor(0, 0, 256, 512);
+        bufferData(GL_ARRAY_BUFFER, (GLsizeiptr)sizeof(red), red, 0x88E4);
+        drawArrays(GL_TRIANGLES, 0, 3);
+
+        viewport(256, 0, 256, 512);
+        scissor(256, 0, 256, 512);
+        bufferData(GL_ARRAY_BUFFER, (GLsizeiptr)sizeof(green), green, 0x88E4);
+        drawArrays(GL_TRIANGLES, 0, 3);
+        /* Both draws must still be pending when their dynamic state changes. */
+        finish();
+        readPixels(128, 256, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        CHECK(px_match(px, 255, 0, 0, 255),
+              "first deferred draw keeps left viewport/scissor (r=%d g=%d b=%d)",
+              px[0], px[1], px[2]);
+        readPixels(384, 256, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        CHECK(px_match(px, 0, 255, 0, 255),
+              "second deferred draw keeps right viewport/scissor (r=%d g=%d b=%d)",
+              px[0], px[1], px[2]);
+
+        viewport(0, 0, 512, 512);
+        scissor(0, 0, 512, 512);
+        disable(GL_SCISSOR_TEST);
     }
 
     /* -- blend: SRC_ALPHA/ONE_MINUS_SRC_ALPHA --------------------- */

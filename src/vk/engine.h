@@ -33,8 +33,6 @@ void SetClearColor(float r, float g, float b, float a);
 void SetClearMask(GLbitfield mask);
 void SetClearDepth(double depth);
 void SetClearStencil(GLint value);
-void SetViewport(float x, float y, float w, float h);
-void SetScissor(float x, float y, float w, float h);
 uint64_t CreateProgram(const std::vector<uint32_t>& vs,
                        const std::vector<uint32_t>& fs);
 void DestroyProgram(uint64_t program);

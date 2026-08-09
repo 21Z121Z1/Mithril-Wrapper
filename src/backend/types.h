@@ -89,6 +89,13 @@ struct PipelineState {
     GLboolean color_wmask_b = GL_TRUE, color_wmask_a = GL_TRUE;
 };
 
+// GL dynamic raster state is observable at each draw.  It must travel with
+// the draw description because native backends may defer command encoding.
+struct DynamicState {
+    std::array<float, 4> viewport{0.f, 0.f, 0.f, 0.f};
+    std::array<float, 4> scissor{0.f, 0.f, 0.f, 0.f};
+};
+
 struct DrawParams {
     uint64_t program = 0;
     VertexStream vertex_stream;
@@ -99,6 +106,7 @@ struct DrawParams {
     std::unordered_map<std::string, std::vector<float>> uniforms;
     std::vector<std::pair<uint32_t, uint64_t>> sampler_binds;
     PipelineState pipeline;
+    DynamicState dynamic;
 };
 
 struct TexUpload {

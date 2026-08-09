@@ -174,10 +174,6 @@ struct Engine {
     float clear_color[4] = {0.f, 0.f, 0.f, 0.f};
     double clear_depth = 1.0;
     uint32_t clear_stencil = 0;
-    float viewport[4] = {0.f, 0.f, (float)kDefaultWidth,
-                         (float)kDefaultHeight};
-    float scissor[4] = {0.f, 0.f, (float)kDefaultWidth,
-                        (float)kDefaultHeight};
     uint64_t bound_draw_fbo = 0;
     uint64_t bound_read_fbo = 0;
 };
@@ -976,24 +972,24 @@ MTLPrimitiveType PrimitiveType(backend::Topology topology) {
 
 void ApplyDynamicState(id<MTLRenderCommandEncoder> encoder,
                        const backend::PipelineState& state,
+                       const backend::DynamicState& dynamic,
                        NSUInteger target_width, NSUInteger target_height) {
-    auto& engine = GetEngine();
-    const double vx = std::clamp<double>(engine.viewport[0], 0, target_width);
-    const double vy_bottom = std::clamp<double>(engine.viewport[1], 0, target_height);
-    const double vw = std::clamp<double>(engine.viewport[2], 0, target_width - vx);
-    const double vh = std::clamp<double>(engine.viewport[3], 0, target_height - vy_bottom);
+    const double vx = std::clamp<double>(dynamic.viewport[0], 0, target_width);
+    const double vy_bottom = std::clamp<double>(dynamic.viewport[1], 0, target_height);
+    const double vw = std::clamp<double>(dynamic.viewport[2], 0, target_width - vx);
+    const double vh = std::clamp<double>(dynamic.viewport[3], 0, target_height - vy_bottom);
     MTLViewport viewport{vx, target_height - (vy_bottom + vh), vw, vh, 0.0, 1.0};
     [encoder setViewport:viewport];
 
     MTLScissorRect scissor{0, 0, target_width, target_height};
     if (state.scissor_test) {
-        const NSUInteger sx = std::clamp<NSInteger>((NSInteger)engine.scissor[0], 0,
+        const NSUInteger sx = std::clamp<NSInteger>((NSInteger)dynamic.scissor[0], 0,
                                                      (NSInteger)target_width);
-        const NSUInteger sy_bottom = std::clamp<NSInteger>((NSInteger)engine.scissor[1], 0,
+        const NSUInteger sy_bottom = std::clamp<NSInteger>((NSInteger)dynamic.scissor[1], 0,
                                                             (NSInteger)target_height);
-        const NSUInteger sw = std::min<NSUInteger>((NSUInteger)std::max(0.f, engine.scissor[2]),
+        const NSUInteger sw = std::min<NSUInteger>((NSUInteger)std::max(0.f, dynamic.scissor[2]),
                                                     target_width - sx);
-        const NSUInteger sh = std::min<NSUInteger>((NSUInteger)std::max(0.f, engine.scissor[3]),
+        const NSUInteger sh = std::min<NSUInteger>((NSUInteger)std::max(0.f, dynamic.scissor[3]),
                                                     target_height - sy_bottom);
         scissor = {sx, target_height - (sy_bottom + sh), sw, sh};
     }
@@ -1074,7 +1070,8 @@ bool EncodeDraws(id<MTLRenderCommandEncoder> encoder, FrameContext& frame) {
 
         [encoder setRenderPipelineState:pipeline->pipeline];
         [encoder setDepthStencilState:pipeline->depth_stencil];
-        ApplyDynamicState(encoder, draw.pipeline, target.width, target.height);
+        ApplyDynamicState(encoder, draw.pipeline, draw.dynamic,
+                          target.width, target.height);
         [encoder setVertexBuffer:vertex_buffer offset:vertex_offset atIndex:0];
         if (instance_offset != NSNotFound)
             [encoder setVertexBuffer:instance_buffer offset:instance_offset atIndex:1];
@@ -1317,7 +1314,7 @@ static bool LayerDrawableSize(CAMetalLayer* layer, uint32_t* width,
     return *width != 0 && *height != 0;
 }
 
-static bool SyncLayerTargetSize(bool initialize_viewport) {
+static bool SyncLayerTargetSize() {
     auto& engine = GetEngine();
     uint32_t width = 0;
     uint32_t height = 0;
@@ -1325,19 +1322,7 @@ static bool SyncLayerTargetSize(bool initialize_viewport) {
         ML_LOG_ERROR("metal: CAMetalLayer has no drawable size");
         return false;
     }
-    if (width == engine.width && height == engine.height) return true;
-    const std::array<float, 4> viewport = {
-        engine.viewport[0], engine.viewport[1],
-        engine.viewport[2], engine.viewport[3]};
-    const std::array<float, 4> scissor = {
-        engine.scissor[0], engine.scissor[1],
-        engine.scissor[2], engine.scissor[3]};
-    if (!SetTargetSize(width, height)) return false;
-    if (!initialize_viewport) {
-        std::copy(viewport.begin(), viewport.end(), engine.viewport);
-        std::copy(scissor.begin(), scissor.end(), engine.scissor);
-    }
-    return true;
+    return SetTargetSize(width, height);
 }
 
 bool SetNativeWindow(void* native_window) {
@@ -1365,7 +1350,7 @@ bool SetNativeWindow(void* native_window) {
     if (layer.drawableSize.width <= 0 || layer.drawableSize.height <= 0)
         layer.drawableSize = CGSizeMake(engine.width, engine.height);
     engine.layer = layer;
-    if (!SyncLayerTargetSize(true)) {
+    if (!SyncLayerTargetSize()) {
         engine.layer = nil;
         return false;
     }
@@ -1381,7 +1366,7 @@ bool Present() {
     @autoreleasepool {
         // Draws are recorded until submit, so resizing here re-targets the
         // complete pending GL frame without rendering an intermediate size.
-        if (!SyncLayerTargetSize(false)) return false;
+        if (!SyncLayerTargetSize()) return false;
         if (!SubmitInternal(false, false, nullptr)) return false;
         id<CAMetalDrawable> drawable = [engine.layer nextDrawable];
         if (!drawable) {
@@ -1415,10 +1400,6 @@ bool SetTargetSize(uint32_t width, uint32_t height) {
     WaitForAllFrames();
     engine.width = width;
     engine.height = height;
-    engine.viewport[2] = width;
-    engine.viewport[3] = height;
-    engine.scissor[2] = width;
-    engine.scissor[3] = height;
     engine.pipelines.clear();
     return CreateTargets();
 }
@@ -1454,22 +1435,6 @@ void SetClearMask(GLbitfield mask) {
 
 void SetClearDepth(double depth) { GetEngine().clear_depth = depth; }
 void SetClearStencil(GLint value) { GetEngine().clear_stencil = (uint32_t)value; }
-
-void SetViewport(float x, float y, float width, float height) {
-    auto& viewport = GetEngine().viewport;
-    viewport[0] = x;
-    viewport[1] = y;
-    viewport[2] = width;
-    viewport[3] = height;
-}
-
-void SetScissor(float x, float y, float width, float height) {
-    auto& scissor = GetEngine().scissor;
-    scissor[0] = x;
-    scissor[1] = y;
-    scissor[2] = width;
-    scissor[3] = height;
-}
 
 uint64_t CreateProgram(const std::vector<uint32_t>& vs,
                        const std::vector<uint32_t>& fs) {

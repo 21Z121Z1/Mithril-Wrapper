@@ -86,6 +86,7 @@ void Draw(const DrawParams& params) {
     op.instance_offset = params.instance_stream.binding_offset;
     op.index_count = (uint32_t)params.indices.size();
     op.pipe = params.pipeline;
+    op.dynamic = params.dynamic;
     if (g.bound_draw_fbo) {
         // resolve the FBO material in case Draw() ran before flush
         ResolveDrawFbo(&fbo);
@@ -340,35 +341,39 @@ void SubmitFlush() {
         rbi.renderArea = {0, 0, pw, ph};
         g.fn.CmdBeginRenderPass(g.cmd, &rbi, VK_SUBPASS_CONTENTS_INLINE);
 
-        VkViewport vp{};
-        vp.x = g.vp_x;
-        vp.y = g.vp_y;
-        vp.width = std::min<float>(g.vp_w, pw);
-        vp.height = std::min<float>(g.vp_h, ph);
-        vp.minDepth = 0.f;
-        vp.maxDepth = 1.f;
-        g.fn.CmdSetViewport(g.cmd, 0, 1, &vp);
-
-        // Per-draw scissor: GL_SCISSOR_TEST gates a per-draw rectangle
-        // (dynamic state), otherwise the full target.
+        // Viewport and scissor are captured per draw. A whole GL batch can
+        // therefore be encoded later without collapsing state transitions.
         for (const auto& op : g.frame_draws) {
             VkPipeline pipe =
                 GetOrCreatePipeline(g_programs.at(op.program), op);
             if (pipe == VK_NULL_HANDLE) continue;
             g.fn.CmdBindPipeline(g.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
 
+            VkViewport vp{};
+            vp.x = op.dynamic.viewport[0];
+            vp.y = op.dynamic.viewport[1];
+            vp.width = std::min<float>(op.dynamic.viewport[2], pw);
+            vp.height = std::min<float>(op.dynamic.viewport[3], ph);
+            vp.minDepth = 0.f;
+            vp.maxDepth = 1.f;
+            g.fn.CmdSetViewport(g.cmd, 0, 1, &vp);
+
             // Dynamic scissor for this draw (GL_SCISSOR_TEST).
             VkRect2D sc;
-            if (op.pipe.scissor_test && g.sc_w > 0 && g.sc_h > 0) {
+            const auto& dynamic_scissor = op.dynamic.scissor;
+            if (op.pipe.scissor_test && dynamic_scissor[2] > 0 &&
+                dynamic_scissor[3] > 0) {
                 // GL scissor has a bottom-left origin; Vulkan is top-left, so
                 // flip Y and clamp the rectangle to the target.
-                int32_t sx = std::clamp<int32_t>((int32_t)g.sc_x, 0,
+                int32_t sx = std::clamp<int32_t>((int32_t)dynamic_scissor[0], 0,
                                                  (int32_t)pw);
-                int32_t sy = std::clamp<int32_t>((int32_t)ph - ((int32_t)g.sc_y + (int32_t)g.sc_h), 0,
+                int32_t sy = std::clamp<int32_t>((int32_t)ph -
+                                                 ((int32_t)dynamic_scissor[1] +
+                                                  (int32_t)dynamic_scissor[3]), 0,
                                                  (int32_t)ph);
-                uint32_t sw = std::min<uint32_t>((uint32_t)g.sc_w,
+                uint32_t sw = std::min<uint32_t>((uint32_t)dynamic_scissor[2],
                                                  pw - (uint32_t)sx);
-                uint32_t sh = std::min<uint32_t>((uint32_t)g.sc_h,
+                uint32_t sh = std::min<uint32_t>((uint32_t)dynamic_scissor[3],
                                                  ph - (uint32_t)sy);
                 sc.offset = {sx, sy};
                 sc.extent = {sw, sh};
