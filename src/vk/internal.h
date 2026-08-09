@@ -214,6 +214,8 @@ struct DrawOp {
     uint32_t vertex_count = 0;
     uint32_t index_count = 0;
     uint32_t instance_count = 1;
+    VkDeviceSize vertex_offset = 0;
+    VkDeviceSize instance_offset = 0;
     uint32_t topology = 0;         // Topology index
     uint32_t v_stride = 0;         // per-vertex record bytes
     uint32_t i_stride = 0;         // per-instance record bytes

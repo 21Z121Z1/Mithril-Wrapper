@@ -38,11 +38,18 @@ bool StageBytes(const void* data, VkDeviceSize size, VkBufferUsageFlags usage,
     return true;
 }
 
-// Stage a float32 stream into buf/mem (no-op for an empty stream).
+// Stage either a frontend-resolved stream or its raw resident-source snapshot.
+// Vulkan remains the reference backend and deliberately keeps its existing
+// per-draw staging ownership; the shared contract no longer requires repacking.
 bool StageStream(const VertexStream& stream, VkBuffer* buf,
                  VkDeviceMemory* mem) {
-    if (stream.data.empty() || stream.stride == 0) return true;
-    return StageBytes(stream.data.data(), stream.data.size() * sizeof(float),
+    if (!stream.HasStorage() || stream.stride == 0) return true;
+    const void* bytes = stream.HasResidentSource()
+        ? static_cast<const void*>(stream.source_data)
+        : static_cast<const void*>(stream.data.data());
+    const size_t size = stream.HasResidentSource()
+        ? stream.source_size : stream.data.size() * sizeof(float);
+    return StageBytes(bytes, size,
                       VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, buf, mem);
 }
 
@@ -53,7 +60,7 @@ void Draw(const DrawParams& params) {
     auto prog_it = g_programs.find(params.program);
     if (prog_it == g_programs.end()) return;
     const Program& prog = prog_it->second;
-    if (params.vertex_stream.data.empty()) return;
+    if (!params.vertex_stream.HasStorage()) return;
     // Ensure the bound draw framebuffer's device resources exist (rebuilds
     // them lazily); the pass identity flows into the pipeline cache key.
     FboObj fbo;
@@ -69,9 +76,14 @@ void Draw(const DrawParams& params) {
     op.i_stride = params.instance_stream.stride;
     op.i_attrs = params.instance_stream.attrs;
     op.instance_count = std::max<uint32_t>(params.instance_count, 1);
-    op.vertex_count =
-        (uint32_t)(params.vertex_stream.data.size() * sizeof(float) /
-                   op.v_stride);
+    const size_t vertex_bytes = params.vertex_stream.HasResidentSource()
+        ? params.vertex_stream.source_size
+        : params.vertex_stream.data.size() * sizeof(float);
+    op.vertex_count = params.vertex_stream.record_count
+        ? params.vertex_stream.record_count
+        : (uint32_t)(vertex_bytes / op.v_stride);
+    op.vertex_offset = params.vertex_stream.binding_offset;
+    op.instance_offset = params.instance_stream.binding_offset;
     op.index_count = (uint32_t)params.indices.size();
     op.pipe = params.pipeline;
     if (g.bound_draw_fbo) {
@@ -367,9 +379,10 @@ void SubmitFlush() {
             g.fn.CmdSetScissor(g.cmd, 0, 1, &sc);
 
             const VkBuffer binds[2] = {op.vertex_buffer, op.instance_buffer};
-            const VkDeviceSize zeros[2] = {0, 0};
+            const VkDeviceSize offsets[2] = {op.vertex_offset,
+                                             op.instance_offset};
             uint32_t nb = op.instance_buffer ? 2 : 1;
-            g.fn.CmdBindVertexBuffers(g.cmd, 0, nb, binds, zeros);
+            g.fn.CmdBindVertexBuffers(g.cmd, 0, nb, binds, offsets);
 
             if (op.index_count) {
                 g.fn.CmdBindIndexBuffer(g.cmd, op.index_buffer, 0,

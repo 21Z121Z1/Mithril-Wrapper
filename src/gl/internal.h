@@ -57,6 +57,9 @@ struct VAOData {
 
 struct BufferData {
     std::vector<uint8_t> data;
+    uint64_t lifetime_id = 0;
+    uint64_t content_version = 0;
+    bool defined = false;
 };
 
 // Storage lives in vertex.cpp; the draw path reads these through the header.

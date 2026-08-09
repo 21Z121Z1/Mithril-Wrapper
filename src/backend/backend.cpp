@@ -157,6 +157,7 @@ void UploadTexture(uint64_t id, const TexUpload& img, const TexSamplerInfo& samp
     DISPATCH_VOID(UploadTexture, id, img, sampler);
 }
 void DestroyResidentTexture(uint64_t id) { DISPATCH_VOID(DestroyResidentTexture, id); }
+void DestroyBuffer(uint64_t id) { DISPATCH_VOID(DestroyBuffer, id); }
 void CreateRenderbuffer(uint64_t id, GLenum format, uint32_t w, uint32_t h, uint32_t samples) {
     DISPATCH_VOID(CreateRenderbuffer, id, format, w, h, samples);
 }

@@ -248,32 +248,74 @@ void DrawCommon(GLenum mode, const std::vector<uint32_t>& idx, GLint first,
 
     v::VertexStream vstream;
     if (!vertex_slots.empty()) {
-        uint32_t off = 0;
+        // Preserve the frontend raw interleaved float VBO as authoritative
+        // source when every per-vertex attribute shares its layout. Complex
+        // GL conversions keep using the resolved float32 compatibility path.
+        bool resident = row_base >= 0;
+        GLuint resident_buffer = vao.attribs[vertex_slots.front()].buffer;
+        GLsizei resident_stride = vao.attribs[vertex_slots.front()].stride;
+        auto bit = g_buffers.find(resident_buffer);
+        resident = resident && resident_buffer != 0 && resident_stride > 0 &&
+                   bit != g_buffers.end() && bit->second.defined;
         for (GLuint slot : vertex_slots) {
-            v::VertexAttr va;
-            va.location = slot;
-            va.components = (uint32_t)vao.attribs[slot].size;
-            va.offset = off;
-            off += (uint32_t)vao.attribs[slot].size * 4;
-            vstream.attrs.push_back(va);
+            const AttribData& a = vao.attribs[slot];
+            resident = resident && a.buffer == resident_buffer &&
+                       a.type == GL_FLOAT && a.normalized == GL_FALSE &&
+                       a.stride == resident_stride && a.offset >= 0 &&
+                       (uint64_t)a.offset + (uint64_t)a.size * sizeof(float) <=
+                           (uint64_t)resident_stride;
         }
-        vstream.stride = off;
-        std::vector<float> verts((size_t)v_count * off / 4);
-        for (GLsizei i = 0; i < v_count; ++i) {
-            size_t rec = (size_t)i * off / 4;
-            for (size_t k = 0; k < vertex_slots.size(); ++k) {
-                const AttribData& a = vao.attribs[vertex_slots[k]];
-                float comps[4];
-                if (!FetchAttribRow(a, row_base + i, comps)) {
-                    PUSH_ERROR(GL_INVALID_OPERATION);
-                    return;
-                }
-                size_t dst = rec + vstream.attrs[k].offset / 4;
-                for (uint32_t c = 0; c < (uint32_t)a.size; ++c)
-                    verts[dst + c] = comps[c];
+        const uint64_t start = (uint64_t)std::max(row_base, 0) *
+                               (uint64_t)std::max(resident_stride, 0);
+        const uint64_t end = start + (uint64_t)v_count *
+                             (uint64_t)std::max(resident_stride, 0);
+        resident = resident && end >= start &&
+                   end <= (uint64_t)bit->second.data.size();
+
+        if (resident) {
+            for (GLuint slot : vertex_slots) {
+                const AttribData& a = vao.attribs[slot];
+                v::VertexAttr va;
+                va.location = slot;
+                va.components = (uint32_t)a.size;
+                va.offset = (uint32_t)a.offset;
+                vstream.attrs.push_back(va);
             }
+            vstream.stride = (uint32_t)resident_stride;
+            vstream.source_data = bit->second.data.data();
+            vstream.source_size = bit->second.data.size();
+            vstream.source_lifetime_id = bit->second.lifetime_id;
+            vstream.source_content_version = bit->second.content_version;
+            vstream.binding_offset = start;
+            vstream.record_count = (uint32_t)v_count;
+        } else {
+            uint32_t off = 0;
+            for (GLuint slot : vertex_slots) {
+                v::VertexAttr va;
+                va.location = slot;
+                va.components = (uint32_t)vao.attribs[slot].size;
+                va.offset = off;
+                off += (uint32_t)vao.attribs[slot].size * 4;
+                vstream.attrs.push_back(va);
+            }
+            vstream.stride = off;
+            std::vector<float> verts((size_t)v_count * off / 4);
+            for (GLsizei i = 0; i < v_count; ++i) {
+                size_t rec = (size_t)i * off / 4;
+                for (size_t k = 0; k < vertex_slots.size(); ++k) {
+                    const AttribData& a = vao.attribs[vertex_slots[k]];
+                    float comps[4];
+                    if (!FetchAttribRow(a, row_base + i, comps)) {
+                        PUSH_ERROR(GL_INVALID_OPERATION);
+                        return;
+                    }
+                    size_t dst = rec + vstream.attrs[k].offset / 4;
+                    for (uint32_t c = 0; c < (uint32_t)a.size; ++c)
+                        verts[dst + c] = comps[c];
+                }
+            }
+            vstream.data = std::move(verts);
         }
-        vstream.data = std::move(verts);
     }
 
     v::VertexStream istream;
@@ -339,7 +381,7 @@ void DrawCommon(GLenum mode, const std::vector<uint32_t>& idx, GLint first,
             (unit >= 0 && (GLuint)unit < kMaxTexUnits) ? g_texture_units[unit] : 0;
         dp.sampler_binds.push_back({smp.binding, tex});
     }
-    if (!dp.vertex_stream.data.empty() && !v::Draw(dp))
+    if (dp.vertex_stream.HasStorage() && !v::Draw(dp))
         PUSH_ERROR(GL_INVALID_OPERATION);
 }
 

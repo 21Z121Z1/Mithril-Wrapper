@@ -36,6 +36,7 @@ void ReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, void* out);
 void UploadTexture(uint64_t gl_id, const TexUpload& img,
                    const TexSamplerInfo& sampler);
 void DestroyResidentTexture(uint64_t gl_id);
+void DestroyBuffer(uint64_t lifetime_id);
 void CreateRenderbuffer(uint64_t rbo_id, GLenum internalformat,
                         uint32_t width, uint32_t height, uint32_t samples);
 void DestroyRenderbuffer(uint64_t rbo_id);

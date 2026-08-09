@@ -8,6 +8,7 @@
 #include <GL/glcorearb.h>
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <unordered_map>
@@ -31,9 +32,27 @@ struct VertexAttr {
 };
 
 struct VertexStream {
+    // Transient compatibility path: frontend-resolved float32 records.
     std::vector<float> data;
     uint32_t stride = 0;
     std::vector<VertexAttr> attrs;
+
+    // Resident-source fast path. `source_data` is borrowed only for the
+    // synchronous backend Draw() call. Backends retain/copy it before Draw
+    // returns and key reuse on the never-reused lifetime id plus content
+    // version. This keeps the contract extensible beyond per-draw repacking.
+    const uint8_t* source_data = nullptr;
+    size_t source_size = 0;
+    uint64_t source_lifetime_id = 0;
+    uint64_t source_content_version = 0;
+    uint64_t binding_offset = 0;
+    uint32_t record_count = 0;
+
+    bool HasStorage() const { return !data.empty() || source_data != nullptr; }
+    bool HasResidentSource() const {
+        return source_data != nullptr && source_size != 0 &&
+               source_lifetime_id != 0;
+    }
 };
 
 struct PipelineState {

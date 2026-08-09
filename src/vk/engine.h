@@ -22,6 +22,7 @@ inline constexpr uint32_t kMaxUnits = backend::kMaxTextureUnits;
 void UploadTexture(uint64_t gl_id, const TexUpload& img,
                    const TexSamplerInfo& sampler);
 void DestroyResidentTexture(uint64_t gl_id);
+void DestroyBuffer(uint64_t lifetime_id);
 bool EnsureInit();
 bool IsInitialized();
 bool SetTargetSize(uint32_t w, uint32_t h);

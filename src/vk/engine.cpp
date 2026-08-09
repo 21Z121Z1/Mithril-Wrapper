@@ -14,6 +14,10 @@ std::unordered_map<std::string, VkPipeline> g_pipelines;
 
 bool IsInitialized() { return g.initialized; }
 
+// Vulkan's current compatibility path stages resolved bytes per draw and has
+// no cross-draw resident buffer cache to retire yet.
+void DestroyBuffer(uint64_t) {}
+
 bool SetTargetSize(uint32_t w, uint32_t h) {
     if (!g.initialized) return false;
     if (w == g.width && h == g.height) return true;

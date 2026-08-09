@@ -11,7 +11,7 @@
 
 ## 状态
 
-- **DirectMetal 首个真实垂直切片**：frontend 已改为 backend-neutral draw/resource contract；Apple 路径直接创建 `MTLDevice`、command queue、offscreen RGBA8 + depth/stencil target，执行 GLSL→SPIR-V→MSL→`MTLLibrary`/`MTLRenderPipelineState`，支持 clear、vertex/index/instance draw、loose uniform、基础 depth/blend/raster/stencil state 和可靠 readback。program/pipeline 有缓存与销毁边界，pipeline cache 有上限，动态 draw/UBO 数据使用三帧复用 upload arena；`glFlush` 不 wait，`glFinish`/readback 才建立 CPU 完成点。
+- **DirectMetal 首个真实垂直切片**：frontend 已改为 backend-neutral draw/resource contract；Apple 路径直接创建 `MTLDevice`、command queue、offscreen RGBA8 + depth/stencil target，执行 GLSL→SPIR-V→MSL→`MTLLibrary`/`MTLRenderPipelineState`，支持 clear、vertex/index/instance draw、loose uniform、基础 depth/blend/raster/stencil state 和可靠 readback。program/pipeline 有缓存与销毁边界，pipeline cache 有上限；常见交错 float VBO 以不可复用 lifetime ID + content version 驻留并跨 draw 复用，复杂 attribute 转换才走 float32 重排兼容路径；动态索引/实例数据和去重后的 UBO 使用三帧复用 upload arena。`glFlush` 不 wait，`glFinish`/readback 才建立 CPU 完成点。
 - **DirectMetal 当前诚实边界**：sampled texture/sampler、用户 FBO/renderbuffer/blit、MSAA、presentation/CAMetalLayer、compute 尚未接通；相关 draw 明确失败并记录 unsupported，不宣称这些能力。需要这些功能时应显式使用 Vulkan backend。
 - **M0 基建已交付**：CMake 双分支工程、EGL 44 符号 + 契约冒烟、GL 342 符号导出、CI build.yml、契约文档。
 - **M1 状态引擎完成**：`src/state/`（全局 Context、错误 FIFO、capability 表）；`src/gl/state.cpp`（S1 组 48 函数真实现：glClear/glViewport/glEnable/glGetString「3.3 Core Profile」/glGetError 等）；生成脚本 `scripts/gen_gl_stubs.py` 支持实现排除名单重新生成 stub。

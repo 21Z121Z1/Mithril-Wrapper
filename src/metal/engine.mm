@@ -80,6 +80,19 @@ struct PipelineBundle {
     uint64_t last_use = 0;
 };
 
+struct ResidentBuffer {
+    id<MTLBuffer> buffer = nil;
+    uint64_t content_version = 0;
+    size_t size = 0;
+};
+
+struct PendingDraw {
+    backend::DrawParams params;
+    // Strong references make GL deletion safe for already-recorded work.
+    id<MTLBuffer> resident_vertex = nil;
+    id<MTLBuffer> resident_instance = nil;
+};
+
 struct FrameContext {
     id<MTLCommandBuffer> command = nil;
     id<MTLBuffer> upload = nil;
@@ -101,8 +114,9 @@ struct Engine {
     NSUInteger height = kDefaultHeight;
     std::unordered_map<uint64_t, Program> programs;
     std::unordered_map<std::string, PipelineBundle> pipelines;
+    std::unordered_map<uint64_t, ResidentBuffer> resident_buffers;
     uint64_t pipeline_clock = 0;
-    std::vector<backend::DrawParams> draws;
+    std::vector<PendingDraw> draws;
     std::vector<uint8_t> readback_pixels;
     bool initialized = false;
     bool frame_dirty = false;
@@ -123,6 +137,31 @@ struct Engine {
 Engine& GetEngine() {
     static Engine engine;
     return engine;
+}
+
+id<MTLBuffer> RetainResidentBuffer(const backend::VertexStream& stream) {
+    if (!stream.HasResidentSource()) return nil;
+    auto& engine = GetEngine();
+    ResidentBuffer& resident = engine.resident_buffers[stream.source_lifetime_id];
+    if (!resident.buffer || resident.content_version != stream.source_content_version ||
+        resident.size != stream.source_size) {
+        resident.buffer = [engine.device newBufferWithBytes:stream.source_data
+                                                    length:stream.source_size
+                                                   options:MTLResourceStorageModeShared];
+        if (!resident.buffer) {
+            engine.resident_buffers.erase(stream.source_lifetime_id);
+            return nil;
+        }
+        resident.buffer.label = @"Mithril resident GL buffer";
+        resident.content_version = stream.source_content_version;
+        resident.size = stream.source_size;
+        static bool logged_resident_path = false;
+        if (!logged_resident_path) {
+            ML_LOG_INFO("metal: resident VBO path active (lifetime/version keyed)");
+            logged_resident_path = true;
+        }
+    }
+    return resident.buffer;
 }
 
 void WarnUnsupported(const char* feature) {
@@ -560,13 +599,18 @@ NSUInteger RequiredUploadBytes() {
         cursor = AlignUp(cursor, 256);
         cursor += size;
     };
-    for (const auto& draw : engine.draws) {
-        add(draw.vertex_stream.data.size() * sizeof(float));
-        add(draw.instance_stream.data.size() * sizeof(float));
+    for (const auto& pending : engine.draws) {
+        const auto& draw = pending.params;
+        if (!pending.resident_vertex)
+            add(draw.vertex_stream.data.size() * sizeof(float));
+        if (!pending.resident_instance)
+            add(draw.instance_stream.data.size() * sizeof(float));
         if (draw.topology == backend::Topology::TriangleFan) {
             const NSUInteger source_count = draw.indices.empty()
-                ? draw.vertex_stream.data.size() * sizeof(float) /
-                      std::max<uint32_t>(draw.vertex_stream.stride, 1)
+                ? (draw.vertex_stream.record_count
+                    ? draw.vertex_stream.record_count
+                    : draw.vertex_stream.data.size() * sizeof(float) /
+                          std::max<uint32_t>(draw.vertex_stream.stride, 1))
                 : draw.indices.size();
             if (source_count >= 3) add((source_count - 2) * 3 * sizeof(uint32_t));
         } else {
@@ -596,27 +640,35 @@ NSUInteger AllocateUpload(FrameContext& frame, NSUInteger* cursor,
 
 NSUInteger PackUniforms(FrameContext& frame, NSUInteger* cursor,
                         const ShaderStage& stage,
-                        const backend::DrawParams& draw) {
+                        const backend::DrawParams& draw,
+                        std::unordered_map<std::string, NSUInteger>* memo) {
     if (!stage.ubo_size) return NSNotFound;
-    const NSUInteger offset = AllocateUpload(frame, cursor, nullptr,
-                                              AlignUp(stage.ubo_size, 256));
-    if (offset == NSNotFound) return NSNotFound;
-    uint8_t* destination = static_cast<uint8_t*>(frame.upload.contents) + offset;
+    std::vector<uint8_t> packed(AlignUp(stage.ubo_size, 256), 0);
     for (const auto& member : stage.members) {
         auto value = draw.uniforms.find(member.name);
         if (value == draw.uniforms.end() || value->second.empty()) continue;
         const size_t bytes = std::min<size_t>(
             member.size, value->second.size() * sizeof(float));
         if ((size_t)member.offset + bytes <= stage.ubo_size)
-            std::memcpy(destination + member.offset, value->second.data(), bytes);
+            std::memcpy(packed.data() + member.offset, value->second.data(), bytes);
     }
+    // Exact byte identity is the only reuse criterion. The memo lives for one
+    // frame arena, so offsets can never escape into a recycled frame context.
+    std::string key(reinterpret_cast<const char*>(packed.data()), packed.size());
+    auto existing = memo->find(key);
+    if (existing != memo->end()) return existing->second;
+    const NSUInteger offset = AllocateUpload(frame, cursor, packed.data(),
+                                              packed.size());
+    if (offset == NSNotFound) return NSNotFound;
+    memo->emplace(std::move(key), offset);
     return offset;
 }
 
 std::vector<uint32_t> ExpandTriangleFan(const backend::DrawParams& draw) {
-    const uint32_t vertex_count = static_cast<uint32_t>(
-        draw.vertex_stream.data.size() * sizeof(float) /
-        std::max<uint32_t>(draw.vertex_stream.stride, 1));
+    const uint32_t vertex_count = draw.vertex_stream.record_count
+        ? draw.vertex_stream.record_count
+        : static_cast<uint32_t>(draw.vertex_stream.data.size() * sizeof(float) /
+              std::max<uint32_t>(draw.vertex_stream.stride, 1));
     const uint32_t count = draw.indices.empty()
         ? vertex_count : static_cast<uint32_t>(draw.indices.size());
     std::vector<uint32_t> triangles;
@@ -686,22 +738,33 @@ void ApplyDynamicState(id<MTLRenderCommandEncoder> encoder,
 bool EncodeDraws(id<MTLRenderCommandEncoder> encoder, FrameContext& frame) {
     auto& engine = GetEngine();
     NSUInteger cursor = 0;
-    for (const auto& draw : engine.draws) {
+    std::unordered_map<std::string, NSUInteger> uniform_memo;
+    for (const auto& pending : engine.draws) {
+        const auto& draw = pending.params;
         PipelineBundle* pipeline = GetOrCreatePipeline(draw);
         auto program = engine.programs.find(draw.program);
         if (!pipeline || program == engine.programs.end()) return false;
 
+        id<MTLBuffer> vertex_buffer = pending.resident_vertex;
+        NSUInteger vertex_offset = (NSUInteger)draw.vertex_stream.binding_offset;
         const NSUInteger vertex_bytes = draw.vertex_stream.data.size() * sizeof(float);
-        const NSUInteger vertex_offset = AllocateUpload(
-            frame, &cursor, draw.vertex_stream.data.data(), vertex_bytes);
-        if (vertex_offset == NSNotFound) return false;
+        if (!vertex_buffer) {
+            vertex_offset = AllocateUpload(
+                frame, &cursor, draw.vertex_stream.data.data(), vertex_bytes);
+            if (vertex_offset == NSNotFound) return false;
+            vertex_buffer = frame.upload;
+        }
 
+        id<MTLBuffer> instance_buffer = pending.resident_instance;
         NSUInteger instance_offset = NSNotFound;
-        if (!draw.instance_stream.data.empty()) {
+        if (instance_buffer) {
+            instance_offset = (NSUInteger)draw.instance_stream.binding_offset;
+        } else if (!draw.instance_stream.data.empty()) {
             instance_offset = AllocateUpload(
                 frame, &cursor, draw.instance_stream.data.data(),
                 draw.instance_stream.data.size() * sizeof(float));
             if (instance_offset == NSNotFound) return false;
+            instance_buffer = frame.upload;
         }
 
         std::vector<uint32_t> fan_indices;
@@ -718,16 +781,16 @@ bool EncodeDraws(id<MTLRenderCommandEncoder> encoder, FrameContext& frame) {
         }
 
         const NSUInteger vertex_ubo = PackUniforms(
-            frame, &cursor, program->second.vertex, draw);
+            frame, &cursor, program->second.vertex, draw, &uniform_memo);
         const NSUInteger fragment_ubo = PackUniforms(
-            frame, &cursor, program->second.fragment, draw);
+            frame, &cursor, program->second.fragment, draw, &uniform_memo);
 
         [encoder setRenderPipelineState:pipeline->pipeline];
         [encoder setDepthStencilState:pipeline->depth_stencil];
         ApplyDynamicState(encoder, draw.pipeline);
-        [encoder setVertexBuffer:frame.upload offset:vertex_offset atIndex:0];
+        [encoder setVertexBuffer:vertex_buffer offset:vertex_offset atIndex:0];
         if (instance_offset != NSNotFound)
-            [encoder setVertexBuffer:frame.upload offset:instance_offset atIndex:1];
+            [encoder setVertexBuffer:instance_buffer offset:instance_offset atIndex:1];
         if (vertex_ubo != NSNotFound)
             [encoder setVertexBuffer:frame.upload offset:vertex_ubo
                              atIndex:kUniformBufferIndex];
@@ -735,8 +798,9 @@ bool EncodeDraws(id<MTLRenderCommandEncoder> encoder, FrameContext& frame) {
             [encoder setFragmentBuffer:frame.upload offset:fragment_ubo
                                atIndex:kUniformBufferIndex];
 
-        const NSUInteger vertex_count = vertex_bytes /
-            std::max<uint32_t>(draw.vertex_stream.stride, 1);
+        const NSUInteger vertex_count = draw.vertex_stream.record_count
+            ? draw.vertex_stream.record_count
+            : vertex_bytes / std::max<uint32_t>(draw.vertex_stream.stride, 1);
         const NSUInteger instance_count = std::max<uint32_t>(draw.instance_count, 1);
         const MTLPrimitiveType primitive = PrimitiveType(draw.topology);
         if (index_offset != NSNotFound) {
@@ -971,9 +1035,15 @@ void DestroyProgram(uint64_t handle) {
     engine.programs.erase(program);
 }
 
+void DestroyBuffer(uint64_t lifetime_id) {
+    // PendingDraw owns strong references, so erasing the reusable memo never
+    // invalidates commands that have already captured this GL object.
+    GetEngine().resident_buffers.erase(lifetime_id);
+}
+
 bool Draw(const backend::DrawParams& params) {
     auto& engine = GetEngine();
-    if (!engine.initialized || !params.program || params.vertex_stream.data.empty())
+    if (!engine.initialized || !params.program || !params.vertex_stream.HasStorage())
         return false;
     auto program = engine.programs.find(params.program);
     if (program == engine.programs.end()) return false;
@@ -995,7 +1065,21 @@ bool Draw(const backend::DrawParams& params) {
         WarnUnsupported("simultaneous front-and-back culling");
         return false;
     }
-    engine.draws.push_back(params);
+    PendingDraw pending;
+    pending.params = params;
+    if (params.vertex_stream.HasResidentSource()) {
+        pending.resident_vertex = RetainResidentBuffer(params.vertex_stream);
+        if (!pending.resident_vertex) return false;
+        pending.params.vertex_stream.source_data = nullptr;
+        pending.params.vertex_stream.source_size = 0;
+    }
+    if (params.instance_stream.HasResidentSource()) {
+        pending.resident_instance = RetainResidentBuffer(params.instance_stream);
+        if (!pending.resident_instance) return false;
+        pending.params.instance_stream.source_data = nullptr;
+        pending.params.instance_stream.source_size = 0;
+    }
+    engine.draws.push_back(std::move(pending));
     engine.frame_dirty = true;
     return true;
 }

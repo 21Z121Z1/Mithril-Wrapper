@@ -14,6 +14,7 @@
 std::unordered_map<GLuint, VAOData> g_vaos;
 std::unordered_map<GLuint, BufferData> g_buffers;
 GLuint g_next_vao = 1, g_next_buffer = 1;
+uint64_t g_next_buffer_lifetime = 1;
 GLuint g_bound_vao = 0;
 GLuint g_bound_array_buffer = 0;
 GLuint g_bound_element_buffer = 0;
@@ -64,7 +65,9 @@ void APIENTRY glGenBuffers(GLsizei n, GLuint* buffers) {
     for (GLsizei i = 0; i < n; ++i) {
         while (g_buffers.count(g_next_buffer)) ++g_next_buffer;
         buffers[i] = g_next_buffer++;
-        g_buffers.emplace(buffers[i], BufferData{});
+        BufferData buffer;
+        buffer.lifetime_id = g_next_buffer_lifetime++;
+        g_buffers.emplace(buffers[i], std::move(buffer));
     }
 }
 
@@ -73,6 +76,7 @@ void APIENTRY glDeleteBuffers(GLsizei n, const GLuint* buffers) {
     for (GLsizei i = 0; i < n; ++i) {
         auto it = g_buffers.find(buffers[i]);
         if (it == g_buffers.end()) continue;
+        v::DestroyBuffer(it->second.lifetime_id);
         if (g_bound_array_buffer == buffers[i]) g_bound_array_buffer = 0;
         if (g_bound_element_buffer == buffers[i]) g_bound_element_buffer = 0;
         g_buffers.erase(it);
@@ -110,6 +114,8 @@ void APIENTRY glBufferData(GLenum target, GLsizeiptr size, const void* data, GLe
     } else {
         it->second.data.assign((size_t)size, 0);
     }
+    ++it->second.content_version;
+    it->second.defined = data != nullptr;
 }
 
 void APIENTRY glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, const void* data) {
@@ -127,6 +133,8 @@ void APIENTRY glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, c
         return;
     }
     std::memcpy(it->second.data.data() + offset, data, size);
+    ++it->second.content_version;
+    it->second.defined = true;
 }
 
 // ---- buffer queries / mapping (M3) -----------------------------------------
@@ -161,6 +169,8 @@ void APIENTRY glCopyBufferSubData(GLenum readtarget, GLenum writetarget,
     }
     std::memmove(dst->data.data() + writeoffset, src->data.data() + readoffset,
                  size);
+    ++dst->content_version;
+    dst->defined = true;
 }
 
 void APIENTRY glGetBufferParameteriv(GLenum target, GLenum pname, GLint* params) {
@@ -218,30 +228,48 @@ void* APIENTRY glMapBuffer(GLenum target, GLenum access) {
     BufferData* b = BoundBufferForTarget(target, &err);
     if (err) { PUSH_ERROR(err); return nullptr; }
     if (b->data.empty()) { PUSH_ERROR(GL_OUT_OF_MEMORY); return nullptr; }
+    if (access != GL_READ_ONLY) {
+        ++b->content_version;
+        b->defined = true;
+    }
     return b->data.data();
 }
 
 void* APIENTRY glMapBufferRange(GLenum target, GLintptr offset, GLsizeiptr length,
                                 GLbitfield access) {
-    (void)access;
     if (offset < 0 || length < 0) { PUSH_ERROR(GL_INVALID_VALUE); return nullptr; }
     GLenum err = GL_NO_ERROR;
     BufferData* b = BoundBufferForTarget(target, &err);
     if (err) { PUSH_ERROR(err); return nullptr; }
     if (offset + length > (GLintptr)b->data.size()) { PUSH_ERROR(GL_INVALID_VALUE); return nullptr; }
+    if (access != GL_MAP_READ_BIT) {
+        ++b->content_version;
+        b->defined = true;
+    }
     return b->data.data() + offset;
 }
 
 GLboolean APIENTRY glUnmapBuffer(GLenum target) {
     GLenum err = GL_NO_ERROR;
-    BoundBufferForTarget(target, &err);
+    BufferData* b = BoundBufferForTarget(target, &err);
     if (err) { PUSH_ERROR(err); return GL_FALSE; }
+    ++b->content_version;
+    b->defined = true;
     return GL_TRUE;  // host-coherent staging: nothing to flush
 }
 
 void APIENTRY glFlushMappedBufferRange(GLenum target, GLintptr offset,
                                        GLsizeiptr length) {
-    (void)target; (void)offset; (void)length;
+    GLenum err = GL_NO_ERROR;
+    BufferData* b = BoundBufferForTarget(target, &err);
+    if (err) { PUSH_ERROR(err); return; }
+    if (offset < 0 || length < 0 ||
+        offset + length > (GLintptr)b->data.size()) {
+        PUSH_ERROR(GL_INVALID_VALUE);
+        return;
+    }
+    ++b->content_version;
+    b->defined = true;
 }
 
 void APIENTRY glEnableVertexAttribArray(GLuint index) {
