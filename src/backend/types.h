@@ -211,6 +211,9 @@ struct DrawParams {
     // frontend to UINT32_MAX. Metal consumes that sentinel natively; Vulkan
     // uses this flag to enable its matching input-assembly behavior.
     bool primitive_restart = false;
+    // Backend query generation active when this draw was issued. Zero means
+    // visibility testing is disabled for this draw.
+    uint64_t occlusion_query = 0;
     uint32_t instance_count = 1;
     Topology topology = Topology::Triangles;
     std::unordered_map<std::string, std::vector<float>> uniforms;

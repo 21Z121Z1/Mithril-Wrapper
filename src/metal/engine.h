@@ -25,6 +25,11 @@ void DestroyFence(uint64_t fence);
 backend::SyncWaitResult ClientWaitFence(uint64_t fence, uint64_t timeout_ns);
 bool FenceSignaled(uint64_t fence);
 bool ServerWaitFence(uint64_t fence);
+uint64_t CreateOcclusionQuery(bool boolean_result);
+void EndOcclusionQuery(uint64_t query);
+void DestroyOcclusionQuery(uint64_t query);
+bool OcclusionQueryAvailable(uint64_t query);
+bool GetOcclusionQueryResult(uint64_t query, uint64_t* result);
 
 // Resident resource and framebuffer portion of the shared backend contract.
 void UploadTexture(uint64_t gl_id, const backend::TexUpload& img);

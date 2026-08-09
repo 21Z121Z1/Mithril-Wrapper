@@ -163,6 +163,22 @@ bool ServerWaitFence(uint64_t fence) {
     DISPATCH_RET(ServerWaitFence, false, fence);
 }
 
+uint64_t CreateOcclusionQuery(bool boolean_result) {
+    DISPATCH_RET(CreateOcclusionQuery, 0, boolean_result);
+}
+void EndOcclusionQuery(uint64_t query) {
+    DISPATCH_VOID(EndOcclusionQuery, query);
+}
+void DestroyOcclusionQuery(uint64_t query) {
+    DISPATCH_VOID(DestroyOcclusionQuery, query);
+}
+bool OcclusionQueryAvailable(uint64_t query) {
+    DISPATCH_RET(OcclusionQueryAvailable, false, query);
+}
+bool GetOcclusionQueryResult(uint64_t query, uint64_t* result) {
+    DISPATCH_RET(GetOcclusionQueryResult, false, query, result);
+}
+
 void ReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, void* out) {
     switch (SelectedKind()) {
         case Kind::Vulkan:

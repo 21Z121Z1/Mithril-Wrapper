@@ -39,6 +39,15 @@ SyncWaitResult ClientWaitFence(uint64_t fence, uint64_t timeout_ns);
 bool FenceSignaled(uint64_t fence);
 bool ServerWaitFence(uint64_t fence);
 
+// Occlusion query objects keep GL name/target semantics in the frontend.
+// Each BeginQuery generation gets a backend handle so reusing a GL name never
+// aliases results that are still in flight.
+uint64_t CreateOcclusionQuery(bool boolean_result);
+void EndOcclusionQuery(uint64_t query);
+void DestroyOcclusionQuery(uint64_t query);
+bool OcclusionQueryAvailable(uint64_t query);
+bool GetOcclusionQueryResult(uint64_t query, uint64_t* result);
+
 void UploadTexture(uint64_t gl_id, const TexUpload& img);
 void DestroyResidentTexture(uint64_t gl_id);
 void DestroyBuffer(uint64_t lifetime_id);

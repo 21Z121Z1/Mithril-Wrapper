@@ -31,6 +31,18 @@ backend::SyncWaitResult ClientWaitFence(uint64_t fence, uint64_t) {
 bool FenceSignaled(uint64_t fence) { return fence != 0; }
 bool ServerWaitFence(uint64_t fence) { return fence != 0; }
 
+uint64_t CreateOcclusionQuery(bool) {
+    // The Vulkan reference backend has no VkQueryPool seam yet. Returning no
+    // handle lets the GL frontend report unsupported instead of fabricating a
+    // visibility result.
+    ML_LOG_ERROR("vk: occlusion queries are not implemented");
+    return 0;
+}
+void EndOcclusionQuery(uint64_t) {}
+void DestroyOcclusionQuery(uint64_t) {}
+bool OcclusionQueryAvailable(uint64_t) { return false; }
+bool GetOcclusionQueryResult(uint64_t, uint64_t*) { return false; }
+
 // Vulkan's current compatibility path stages resolved bytes per draw and has
 // no cross-draw resident buffer cache to retire yet.
 void DestroyBuffer(uint64_t) {}

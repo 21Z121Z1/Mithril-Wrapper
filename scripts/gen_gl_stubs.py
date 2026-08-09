@@ -34,6 +34,10 @@ MGL_IMPL = frozenset({
     # GL 3.2 execution sync objects.
     "glClientWaitSync", "glDeleteSync", "glFenceSync", "glGetSynciv",
     "glIsSync", "glPrimitiveRestartIndex", "glWaitSync",
+    # GL 3.3 occlusion-query objects. Timer queries remain explicitly unsupported.
+    "glBeginQuery", "glDeleteQueries", "glEndQuery", "glGenQueries",
+    "glGetQueryObjecti64v", "glGetQueryObjectiv", "glGetQueryObjectui64v",
+    "glGetQueryObjectuiv", "glGetQueryiv", "glIsQuery", "glQueryCounter",
     # S2 shaders/programs/uniforms implemented in src/gl/.
     "glAttachShader", "glBindAttribLocation", "glCompileShader", "glCreateProgram",
     "glCreateShader", "glDeleteProgram", "glDeleteShader", "glDetachShader",

@@ -177,6 +177,10 @@ void DetachBufferTextures(GLuint buffer);
 extern std::unordered_set<GLuint> g_dirty_textures;
 void FlushDirtyTextureUploads();   // defined in texture.cpp
 
+// Backend generation of the active occlusion query, snapshotted by each draw.
+// Query object names and target validation stay in query.cpp.
+uint64_t CurrentOcclusionQueryHandle();
+
 // ---- draw-time attribute fetch helpers (defined in draw.cpp) ------------
 
 // IEEE 754 half (binary16) -> float.

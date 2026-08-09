@@ -12,10 +12,6 @@ extern "C" {
     mithril::GlStubCalled("glBeginConditionalRender");
   }
 
-  void APIENTRY glBeginQuery(GLenum target, GLuint id) {
-    mithril::GlStubCalled("glBeginQuery");
-  }
-
   void APIENTRY glBeginTransformFeedback(GLenum primitiveMode) {
     mithril::GlStubCalled("glBeginTransformFeedback");
   }
@@ -28,24 +24,12 @@ extern "C" {
     mithril::GlStubCalled("glBindFragDataLocationIndexed");
   }
 
-  void APIENTRY glDeleteQueries(GLsizei n, const GLuint *ids) {
-    mithril::GlStubCalled("glDeleteQueries");
-  }
-
   void APIENTRY glEndConditionalRender(void) {
     mithril::GlStubCalled("glEndConditionalRender");
   }
 
-  void APIENTRY glEndQuery(GLenum target) {
-    mithril::GlStubCalled("glEndQuery");
-  }
-
   void APIENTRY glEndTransformFeedback(void) {
     mithril::GlStubCalled("glEndTransformFeedback");
-  }
-
-  void APIENTRY glGenQueries(GLsizei n, GLuint *ids) {
-    mithril::GlStubCalled("glGenQueries");
   }
 
   GLint APIENTRY glGetFragDataIndex(GLuint program, const GLchar *name) {
@@ -62,33 +46,8 @@ extern "C" {
     mithril::GlStubCalled("glGetMultisamplefv");
   }
 
-  void APIENTRY glGetQueryObjecti64v(GLuint id, GLenum pname, GLint64 *params) {
-    mithril::GlStubCalled("glGetQueryObjecti64v");
-  }
-
-  void APIENTRY glGetQueryObjectiv(GLuint id, GLenum pname, GLint *params) {
-    mithril::GlStubCalled("glGetQueryObjectiv");
-  }
-
-  void APIENTRY glGetQueryObjectui64v(GLuint id, GLenum pname, GLuint64 *params) {
-    mithril::GlStubCalled("glGetQueryObjectui64v");
-  }
-
-  void APIENTRY glGetQueryObjectuiv(GLuint id, GLenum pname, GLuint *params) {
-    mithril::GlStubCalled("glGetQueryObjectuiv");
-  }
-
-  void APIENTRY glGetQueryiv(GLenum target, GLenum pname, GLint *params) {
-    mithril::GlStubCalled("glGetQueryiv");
-  }
-
   void APIENTRY glGetTransformFeedbackVarying(GLuint program, GLuint index, GLsizei bufSize, GLsizei *length, GLsizei *size, GLenum *type, GLchar *name) {
     mithril::GlStubCalled("glGetTransformFeedbackVarying");
-  }
-
-  GLboolean APIENTRY glIsQuery(GLuint id) {
-    mithril::GlStubCalled("glIsQuery");
-    return 0;
   }
 
   void APIENTRY glPointParameterf(GLenum pname, GLfloat param) {
@@ -109,10 +68,6 @@ extern "C" {
 
   void APIENTRY glProvokingVertex(GLenum mode) {
     mithril::GlStubCalled("glProvokingVertex");
-  }
-
-  void APIENTRY glQueryCounter(GLuint id, GLenum target) {
-    mithril::GlStubCalled("glQueryCounter");
   }
 
   void APIENTRY glTexImage2DMultisample(GLenum target, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height, GLboolean fixedsamplelocations) {

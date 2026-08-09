@@ -485,6 +485,7 @@ void DrawCommon(GLenum mode, const std::vector<uint32_t>& idx, GLint first,
     dp.indices = idx;  // raw u32 indices into the payload rows
     dp.primitive_restart = std::find(idx.begin(), idx.end(), UINT32_MAX) !=
                            idx.end();
+    dp.occlusion_query = CurrentOcclusionQueryHandle();
     dp.instance_count = (uint32_t)instance_count;
     dp.topology = (v::Topology)topo;
     dp.uniforms = ComposeUniforms(prog);

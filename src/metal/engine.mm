@@ -159,6 +159,8 @@ struct ResolvedTarget {
     NSUInteger samples = 1;
 };
 
+struct OcclusionQueryState;
+
 struct PendingDraw {
     backend::DrawParams params;
     // Strong references make GL deletion safe for already-recorded work.
@@ -166,6 +168,7 @@ struct PendingDraw {
     id<MTLBuffer> resident_instance = nil;
     std::vector<BoundUniformBuffer> uniform_buffers;
     std::vector<BoundTexture> textures;
+    std::shared_ptr<OcclusionQueryState> occlusion;
 };
 
 struct FrameContext {
@@ -182,6 +185,19 @@ struct CommandCompletion {
     std::condition_variable condition;
     bool completed = false;
     bool success = false;
+};
+
+struct OcclusionSegment {
+    id<MTLBuffer> results = nil;
+    NSUInteger offset = 0;
+    std::shared_ptr<CommandCompletion> completion;
+};
+
+struct OcclusionQueryState {
+    bool boolean_result = false;
+    bool ended = false;
+    size_t pending_draws = 0;
+    std::vector<OcclusionSegment> segments;
 };
 
 struct Engine {
@@ -205,7 +221,10 @@ struct Engine {
     std::unordered_map<uint64_t, Renderbuffer> renderbuffers;
     std::unordered_map<uint64_t, Framebuffer> framebuffers;
     std::unordered_map<uint64_t, std::shared_ptr<CommandCompletion>> fences;
+    std::unordered_map<uint64_t, std::shared_ptr<OcclusionQueryState>>
+        occlusion_queries;
     uint64_t next_fence = 1;
+    uint64_t next_occlusion_query = 1;
     uint64_t pipeline_clock = 0;
     uint64_t sampler_clock = 0;
     std::vector<PendingDraw> draws;
@@ -1540,12 +1559,15 @@ bool EncodeClear(id<MTLRenderCommandEncoder> encoder,
     return true;
 }
 
-bool EncodeDraws(id<MTLRenderCommandEncoder> encoder, FrameContext& frame) {
+bool EncodeDraws(
+    id<MTLRenderCommandEncoder> encoder, FrameContext& frame,
+    const std::unordered_map<OcclusionQueryState*, NSUInteger>& query_offsets) {
     auto& engine = GetEngine();
     ResolvedTarget target;
     if (!ResolveTarget(engine.bound_draw_fbo, &target)) return false;
     NSUInteger cursor = 0;
     std::unordered_map<std::string, NSUInteger> uniform_memo;
+    OcclusionQueryState* active_occlusion = nullptr;
     for (const auto& pending : engine.draws) {
         const auto& draw = pending.params;
         PipelineBundle* pipeline = GetOrCreatePipeline(draw);
@@ -1625,6 +1647,22 @@ bool EncodeDraws(id<MTLRenderCommandEncoder> encoder, FrameContext& frame) {
             : vertex_bytes / std::max<uint32_t>(draw.vertex_stream.stride, 1);
         const NSUInteger instance_count = std::max<uint32_t>(draw.instance_count, 1);
         const MTLPrimitiveType primitive = PrimitiveType(draw.topology);
+        OcclusionQueryState* desired_occlusion = pending.occlusion.get();
+        if (desired_occlusion != active_occlusion) {
+            if (desired_occlusion) {
+                auto offset = query_offsets.find(desired_occlusion);
+                if (offset == query_offsets.end()) return false;
+                [encoder setVisibilityResultMode:
+                    (desired_occlusion->boolean_result
+                        ? MTLVisibilityResultModeBoolean
+                        : MTLVisibilityResultModeCounting)
+                                           offset:offset->second];
+            } else {
+                [encoder setVisibilityResultMode:MTLVisibilityResultModeDisabled
+                                           offset:0];
+            }
+            active_occlusion = desired_occlusion;
+        }
         if (index_offset != NSNotFound) {
             [encoder drawIndexedPrimitives:primitive
                                 indexCount:indices->size()
@@ -1724,8 +1762,31 @@ bool SubmitInternal(bool wait_for_completion, bool copy_for_readback,
     if (!command) return false;
     command.label = @"Mithril DirectMetal frame";
 
+    std::vector<std::shared_ptr<OcclusionQueryState>> query_states;
+    std::unordered_map<OcclusionQueryState*, NSUInteger> query_offsets;
+    std::unordered_map<OcclusionQueryState*, size_t> query_draw_counts;
+    for (const auto& pending : engine.draws) {
+        if (!pending.occlusion) continue;
+        auto* key = pending.occlusion.get();
+        ++query_draw_counts[key];
+        if (query_offsets.count(key)) continue;
+        query_offsets.emplace(key, query_states.size() * sizeof(uint64_t));
+        query_states.push_back(pending.occlusion);
+    }
+    id<MTLBuffer> query_results = nil;
+    if (!query_states.empty()) {
+        query_results = [engine.device
+            newBufferWithLength:query_states.size() * sizeof(uint64_t)
+                       options:MTLResourceStorageModeShared];
+        if (!query_results) return false;
+        std::memset(query_results.contents, 0,
+                    query_states.size() * sizeof(uint64_t));
+        query_results.label = @"Mithril GL occlusion results";
+    }
+
     if (needs_render) {
         MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+        pass.visibilityResultBuffer = query_results;
         const backend::FboSpec* draw_spec = nullptr;
         if (engine.bound_draw_fbo) {
             auto fbo = engine.framebuffers.find(engine.bound_draw_fbo);
@@ -1793,7 +1854,7 @@ bool SubmitInternal(bool wait_for_completion, bool copy_for_readback,
             [encoder endEncoding];
             return false;
         }
-        if (!EncodeDraws(encoder, frame)) {
+        if (!EncodeDraws(encoder, frame, query_offsets)) {
             [encoder endEncoding];
             return false;
         }
@@ -1818,7 +1879,15 @@ bool SubmitInternal(bool wait_for_completion, bool copy_for_readback,
         [blit endEncoding];
     }
 
-    if (!CommitCommandBuffer(command)) return false;
+    auto completion = CommitCommandBuffer(command);
+    if (!completion) return false;
+    for (const auto& query : query_states) {
+        const NSUInteger offset = query_offsets.at(query.get());
+        query->segments.push_back({query_results, offset, completion});
+        const size_t submitted = query_draw_counts.at(query.get());
+        query->pending_draws = submitted >= query->pending_draws
+            ? 0 : query->pending_draws - submitted;
+    }
     frame.command = command;
     engine.draws.clear();
     engine.frame_dirty = false;
@@ -2057,6 +2126,14 @@ bool Draw(const backend::DrawParams& params) {
     }
     PendingDraw pending;
     pending.params = params;
+    if (params.occlusion_query) {
+        auto query = engine.occlusion_queries.find(params.occlusion_query);
+        if (query == engine.occlusion_queries.end() || query->second->ended) {
+            ML_LOG_ERROR("metal: draw references an invalid occlusion query");
+            return false;
+        }
+        pending.occlusion = query->second;
+    }
     if (params.vertex_stream.HasResidentSource()) {
         pending.resident_vertex = RetainResidentBuffer(params.vertex_stream);
         if (!pending.resident_vertex) return false;
@@ -2118,6 +2195,7 @@ bool Draw(const backend::DrawParams& params) {
         pending.textures.push_back({slot, texture->second.texture, sampler,
                                     texture->second.backing_buffer});
     }
+    if (pending.occlusion) ++pending.occlusion->pending_draws;
     engine.draws.push_back(std::move(pending));
     engine.frame_dirty = true;
     return true;
@@ -2199,6 +2277,86 @@ bool ServerWaitFence(uint64_t fence) {
     // are ordered after it, so a server-side wait needs no CPU stall or extra
     // Metal command. Cross-context object sharing is not advertised.
     return GetEngine().fences.find(fence) != GetEngine().fences.end();
+}
+
+uint64_t CreateOcclusionQuery(bool boolean_result) {
+    if (!EnsureInit()) return 0;
+    auto& engine = GetEngine();
+    uint64_t handle = engine.next_occlusion_query++;
+    while (!handle || engine.occlusion_queries.count(handle))
+        handle = engine.next_occlusion_query++;
+    auto query = std::make_shared<OcclusionQueryState>();
+    query->boolean_result = boolean_result;
+    engine.occlusion_queries.emplace(handle, std::move(query));
+    return handle;
+}
+
+void EndOcclusionQuery(uint64_t query) {
+    auto found = GetEngine().occlusion_queries.find(query);
+    if (found != GetEngine().occlusion_queries.end()) found->second->ended = true;
+}
+
+void DestroyOcclusionQuery(uint64_t query) {
+    // PendingDraw and submitted result segments own shared state independently,
+    // so deleting the GL name cannot invalidate deferred or in-flight work.
+    GetEngine().occlusion_queries.erase(query);
+}
+
+bool OcclusionQueryAvailable(uint64_t query) {
+    auto& engine = GetEngine();
+    auto found = engine.occlusion_queries.find(query);
+    if (found == engine.occlusion_queries.end() || !found->second->ended)
+        return false;
+    auto state = found->second;
+    // GL_QUERY_RESULT_AVAILABLE flushes pending query work but never waits.
+    if (state->pending_draws && !SubmitInternal(false, false, nullptr))
+        return false;
+    if (state->pending_draws) return false;
+    for (const auto& segment : state->segments) {
+        if (!segment.completion) return false;
+        std::lock_guard<std::mutex> lock(segment.completion->mutex);
+        if (!segment.completion->completed || !segment.completion->success)
+            return false;
+    }
+    return true;
+}
+
+bool GetOcclusionQueryResult(uint64_t query, uint64_t* result) {
+    if (!result) return false;
+    auto& engine = GetEngine();
+    auto found = engine.occlusion_queries.find(query);
+    if (found == engine.occlusion_queries.end() || !found->second->ended)
+        return false;
+    auto state = found->second;
+    // A blocking result query establishes completion only where GL requires it.
+    if (state->pending_draws && !SubmitInternal(false, false, nullptr))
+        return false;
+    if (state->pending_draws) return false;
+
+    uint64_t aggregate = 0;
+    for (const auto& segment : state->segments) {
+        if (!segment.completion || !segment.results) return false;
+        std::unique_lock<std::mutex> lock(segment.completion->mutex);
+        segment.completion->condition.wait(lock, [&segment] {
+            return segment.completion->completed;
+        });
+        if (!segment.completion->success) return false;
+        lock.unlock();
+        uint64_t value = 0;
+        std::memcpy(&value,
+                    static_cast<const uint8_t*>(segment.results.contents) +
+                        segment.offset,
+                    sizeof(value));
+        if (state->boolean_result) {
+            aggregate = aggregate || value;
+        } else if (value > std::numeric_limits<uint64_t>::max() - aggregate) {
+            aggregate = std::numeric_limits<uint64_t>::max();
+        } else {
+            aggregate += value;
+        }
+    }
+    *result = aggregate;
+    return true;
 }
 
 void ReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, void* output) {

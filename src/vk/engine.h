@@ -41,6 +41,11 @@ void DestroyFence(uint64_t fence);
 backend::SyncWaitResult ClientWaitFence(uint64_t fence, uint64_t timeout_ns);
 bool FenceSignaled(uint64_t fence);
 bool ServerWaitFence(uint64_t fence);
+uint64_t CreateOcclusionQuery(bool boolean_result);
+void EndOcclusionQuery(uint64_t query);
+void DestroyOcclusionQuery(uint64_t query);
+bool OcclusionQueryAvailable(uint64_t query);
+bool GetOcclusionQueryResult(uint64_t query, uint64_t* result);
 void CreateRenderbuffer(uint64_t rbo_id, GLenum internalformat,
                         uint32_t width, uint32_t height, uint32_t samples);
 void DestroyRenderbuffer(uint64_t rbo_id);
