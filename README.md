@@ -13,9 +13,12 @@ GL → Vulkan → Metal（MoltenVK），无 OpenGL ES 参与。
   - `tests/draw_smoke.c` 全链通过（llvmpipe）：GL 层着色 + glDrawArrays → Vulkan 绘制 → glReadPixels 校验（白三角形、tint 驱动变色、背景色）。
 - **M3 完成：顶点数据**：S3 组 76/114 真实现（顶点属性全家族：pointer/IPointer/常量 1-4 系/Divisor、buffer 映射与查询家族、10 个 draw 入口：DrawArrays(Instanced)/DrawElements(Instanced/BaseVertex/Range 双变体)/MultiDraw 全系）；引擎新增双顶点流（顶点+实例）、索引缓冲（统一 UINT32 staging）、TriangleStrip/Fan 拓扑；实例化采用 CPU 逐实例打包（divisor 行复制）；非 4 字节对齐 stride/offset 由 CPU 规整为 float32 打包；`draw_smoke` 扩展 8 个 M3 断言全部通过。
 - **M4 纹理完成（S4 42/42 函数）**：`src/vk/texture.cpp` 上传路径扩展（staging→CmdCopyBufferToImage 全 mip 逐切片、image/view/sampler 覆盖 2D/1D、3D volume、2D/1D array、cubemap、wrap_r、白 dummy 兜底）；`src/gl/texture.cpp` 全量真实现（TexImage1D/2D/3D + TexSub 全系含 cubemap face/array 分层、GetTexImage PACK 回读、GenerateMipmap 逐切片滤波、TexParameter/GetTexParameter/GetTexLevelParameter 全系、S3TC DXT1/3/5 CPU 解压 + GetCompressedTexImage、CopyTexImage/CopyTexSubImage 帧读回、glTexBuffer、glPixelStoref）；`texture_smoke` 26 断言全通过（llvmpipe：红纹理采样/mip/dummy 白/GetTexImage 往返/3D 切片/数组分层/cubemap 6 面/拷贝/texBuffer/压缩）。
-- **M5 进行中（stage C S5 FBO 完成；MRT/MSAA 待办）**：
+- **M5 完成（S5 FBO 全量 24 + MRT + MSAA）**：
   - stage A+B 状态管线：`src/vk/pipeline.cpp` 深度附件 D24S8、`PipelineState` 烘焙进 pipeline 缓存 key、显式清除、动态 scissor Y 翻转、depth/blend/cull/frontFace/stencil 域、colorMask/polygon；GL 侧 `BuildPipelineState` 快照接入。
-  - stage C（本提交）S5 FBO/渲染缓冲：`src/vk/fbo.cpp` 新建（renderbuffer 表 CreateRbImage/Rb view、FBO 表 SetFramebuffer + 懒重建 Vk framebuffer/renderpass，`ResolveDrawFbo` 脏检测 + 纹理重传跟随、`BlitFramebuffer` 经 CmdCopyImage/CmdBlitImage）；`draw.cpp` SubmitFlush 按当前 target（默认或 FBO）清屏-渲染-回读，readback buffer 按目标尺寸重建，read/draw 分离绑定，binding 切换强制下一帧回读刷新；`pipeline.cpp` 用 op 的 renderpass 建管（FBO pipeline 键含 rp 签名）；`texture.cpp` 纹理 image 加 COLOR/DEPTH_STENCIL attachment 用途；`src/gl/fbo.cpp` 对象表 + 20 函数真实现（Gen/Delete/Bind FBO+RBO、FramebufferTexture*Layer/1D/2D/3D/Renderbuffer、CheckFramebufferStatus、Attachment/Renderbuffer 参数查询、BlitFramebuffer）。`tests/fbo_smoke.c` 现有 18 状态断言全过 + 新增 5 S5 断言（FBO 纹理附件离屏渲染回读红、默认帧不受污染、RBO 颜色附件回读绿、draw/read 双绑定 complete、blit B→A 中心变蓝）；全六冒烟（contract/state/shader/draw/texture/fbo）回归通过。待办：MRT（多颜色附件）、MSAA samples>1 renderbuffer。
+  - stage C S5 FBO/渲染缓冲：`src/vk/fbo.cpp`（renderbuffer 表 CreateRbImage/Rb view、FBO 表 SetFramebuffer + 懒重建 Vk framebuffer/renderpass，`ResolveDrawFbo` 脏检测 + 纹理重传跟随、`BlitFramebuffer`）；`draw.cpp` SubmitFlush 按 target（默认或 FBO）清屏-渲染-回读，readback buffer 按目标尺寸重建，read/draw 分离绑定；`src/gl/fbo.cpp` 对象表 + 24 函数真实现。
+  - **MRT**：`src/gl/fbo.cpp` color[8] 多附件槽 + `glDrawBuffers`/`glDrawBuffer`/`glReadBuffer` 真实现；Vk 层 renderpass N 附件 + 附件 N 视图、pipeline `attachmentCount=附件数` 每附件独立 blend（draw_mask 未选型号清写掩码）、显式 clear 逐附件（仅 draw buffer 选中）、读回按 read_buf 挑附件。
+  - **MSAA**：renderbuffer `samples>1` → `rasterizationSamples` + resolve 附件（单采样转储）、clear 写颜色与 resolve、读回 resolve 图；`ToVkSampleCount` 映射 1/2/4/8/16/32/64。
+  - `tests/fbo_smoke.c` 29 行 ok（28 断言）：17 状态断言 + S5 FBO 纹理/RBO/blit + MRT 双附件读回与单 drawBuffer 门控 + MSAA 4x resolve 回读；八冒烟（contract/state/shader/draw/texture/fbo/3d/render3d）回归全过。
 
 ## 快速构建（Linux 开发循环）
 
@@ -39,7 +42,7 @@ LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu ./tests/draw_smoke       # GL→Vulkan
 gcc -o tests/texture_smoke tests/texture_smoke.c -ldl
 LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu ./tests/texture_smoke   # M4 纹理全链（需 lavapipe/loader）
 gcc -o tests/fbo_smoke tests/fbo_smoke.c -ldl
-LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu ./tests/fbo_smoke      # M5 S5 FBO/渲染缓冲 + 状态管线（depth/scissor/blend/cull/stencil/colorMask）
+LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu ./tests/fbo_smoke      # M5 S5 FBO/渲染缓冲 + MRT + MSAA + 状态管线（depth/scissor/blend/cull/stencil/colorMask）
 gcc -o tests/3d_smoke tests/3d_smoke.c -ldl -lm
 LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu ./tests/3d_smoke       # 3D 深度排序 + 透视投影（mat4 uniform 全链）
 gcc -o tests/render3d_smoke tests/render3d_smoke.c -ldl -lm
@@ -61,7 +64,7 @@ src/egl     EGL 层（44 符号，display/config/context/surface 生命周期）
 src/gl      分发电层（exports.cpp 生成 + 按域拆分的真实现 state/shader/vertex/draw）
 src/shader  glslang GLSL→SPIR-V + SPIRV-Cross 反射（M2 完成）
 src/state   GL 状态引擎（Context 结构、错误队列、capability 表）
-src/vk      Vulkan 后端（dlsym 加载器、离屏渲染、动态 UBO 池、读回；engine/dispatch/target/pipeline/draw 按域拆分）
+src/vk      Vulkan 后端（dlsym 加载器、离屏渲染、动态 UBO 池、读回；engine/dispatch/target/pipeline/fbo/draw 按域拆分）
 scripts/    gen_gl_stubs.py（stub 生成器）、exported_symbols.txt
 tests/      contract_smoke.c / state_smoke.c / shader_smoke.c / draw_smoke.c / texture_smoke.c / fbo_smoke.c / 3d_smoke.c / render3d_smoke.c
 ```
