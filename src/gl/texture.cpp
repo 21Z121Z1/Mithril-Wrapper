@@ -688,6 +688,19 @@ GLenum TextureTargetForSampler(GLenum sampler_type) {
     }
 }
 
+bool SamplerUsesDepthCompare(GLenum sampler_type) {
+    switch (sampler_type) {
+        case GL_SAMPLER_1D_SHADOW:
+        case GL_SAMPLER_2D_SHADOW:
+        case GL_SAMPLER_CUBE_SHADOW:
+        case GL_SAMPLER_1D_ARRAY_SHADOW:
+        case GL_SAMPLER_2D_ARRAY_SHADOW:
+            return true;
+        default:
+            return false;
+    }
+}
+
 GLuint TextureBindingForUnit(GLuint unit, GLenum target) {
     const size_t slot = TextureTargetSlot(target);
     return unit < kMaxTexUnits && slot < kTextureTargetSlots

@@ -568,11 +568,24 @@ void DrawCommon(GLenum mode, const std::vector<uint32_t>& idx, GLint first,
         const TexState default_texture;
         const TexState& texture_state = texture == g_textures.end()
             ? default_texture : texture->second;
+        const v::TexSamplerInfo sampler = ResolveSamplerInfo(
+            unit >= 0 ? static_cast<GLuint>(unit) : kMaxTexUnits,
+            texture_state);
+        const bool shader_compares_depth = SamplerUsesDepthCompare(smp.type);
+        const bool texture_is_depth = texture != g_textures.end() &&
+            texture_state.image_backend_format == v::TexelFormat::Depth32Float;
+        if ((shader_compares_depth &&
+             (!texture_is_depth ||
+              sampler.compare_mode != GL_COMPARE_REF_TO_TEXTURE)) ||
+            (!shader_compares_depth && sampler.compare_mode != GL_NONE)) {
+            // A shadow/non-shadow shader type must agree with the effective
+            // texture/sampler comparison state. Do not bind an incompatible
+            // Metal texture/sampler pair and produce driver-dependent output.
+            PUSH_ERROR(GL_INVALID_OPERATION);
+            return;
+        }
         dp.sampled_textures.push_back({
-            smp.binding, tex,
-            ResolveSamplerInfo(unit >= 0 ? static_cast<GLuint>(unit)
-                                         : kMaxTexUnits,
-                               texture_state)});
+            smp.binding, tex, sampler});
     }
     if (dp.vertex_stream.HasStorage() && !v::Draw(dp))
         PUSH_ERROR(GL_INVALID_OPERATION);

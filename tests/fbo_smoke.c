@@ -75,6 +75,9 @@
 #define GL_DEPTH_COMPONENT32F  0x8CAC
 #define GL_TEXTURE_INTERNAL_FORMAT 0x1003
 #define GL_TEXTURE_RED_TYPE    0x8C10
+#define GL_TEXTURE_COMPARE_MODE 0x884C
+#define GL_TEXTURE_COMPARE_FUNC 0x884D
+#define GL_COMPARE_REF_TO_TEXTURE 0x884E
 #define GL_NEAREST             0x2600
 #define GL_LINEAR              0x2601
 #define GL_COLOR_ATTACHMENT0   0x8CE0
@@ -152,6 +155,7 @@ typedef void (*fn_glGenTextures)(GLsizei, GLuint*);
 typedef void (*fn_glBindTexture)(GLenum, GLuint);
 typedef void (*fn_glDeleteTextures)(GLsizei, const GLuint*);
 typedef void (*fn_glTexImage2D)(GLenum, GLint, GLint, GLsizei, GLsizei, GLint, GLenum, GLenum, const void*);
+typedef void (*fn_glTexParameteri)(GLenum, GLenum, GLint);
 typedef void (*fn_glTexImage2DMultisample)(GLenum, GLsizei, GLenum, GLsizei,
                                            GLsizei, GLboolean);
 typedef void (*fn_glGetTexLevelParameteriv)(GLenum, GLint, GLenum, GLint*);
@@ -236,6 +240,15 @@ static const char* FS_DEPTH_TEXTURE =
     "    fragColor = vec4(d, 0.0, 0.0, 1.0);\n"
     "}\n";
 
+static const char* FS_DEPTH_SHADOW =
+    "#version 150\n"
+    "uniform sampler2DShadow depthImage;\n"
+    "layout(location=0) out vec4 fragColor;\n"
+    "void main() {\n"
+    "    float visible = texture(depthImage, vec3(0.5, 0.5, 0.25));\n"
+    "    fragColor = vec4(visible, 0.0, 0.0, 1.0);\n"
+    "}\n";
+
 int main(void) {
     void* h = dlopen("./output/libmithril.so", RTLD_NOW | RTLD_GLOBAL);
     if (!h) { printf("dlopen: %s\n", dlerror()); return 2; }
@@ -303,6 +316,8 @@ int main(void) {
     fn_glBindTexture bindTexture = (fn_glBindTexture)dlsym(h, "glBindTexture");
     fn_glDeleteTextures deleteTextures = (fn_glDeleteTextures)dlsym(h, "glDeleteTextures");
     fn_glTexImage2D texImage2D = (fn_glTexImage2D)dlsym(h, "glTexImage2D");
+    fn_glTexParameteri texParameteri =
+        (fn_glTexParameteri)dlsym(h, "glTexParameteri");
     fn_glTexImage2DMultisample texImage2DMultisample =
         (fn_glTexImage2DMultisample)dlsym(h, "glTexImage2DMultisample");
     fn_glGetTexLevelParameteriv getTexLevelParameteriv =
@@ -329,6 +344,7 @@ int main(void) {
           framebufferTexture2D && framebufferRenderbuffer &&
           checkFramebufferStatus && genRenderbuffers && bindRenderbuffer &&
           renderbufferStorage && genTextures && bindTexture && texImage2D &&
+          texParameteri &&
           texImage2DMultisample && getTexLevelParameteriv &&
           blitFramebuffer && drawBuffers && drawBuffer && readBuffer &&
           rboMultisample && getRboParam && getIntegerv,
@@ -1220,6 +1236,29 @@ int main(void) {
             CHECK(px_match(px, 128, 0, 0, 255),
                   "shader reads GL z=0 as 0.5 from native Metal depth storage "
                   "(r=%d g=%d b=%d)", px[0], px[1], px[2]);
+
+            /* The same resident image now feeds a comparison sampler. The
+               LEQUAL reference 0.25 passes against the stored depth 0.5. */
+            bindTexture(GL_TEXTURE_2D, depth);
+            texParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE,
+                          GL_COMPARE_REF_TO_TEXTURE);
+            texParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_FUNC, GL_LEQUAL);
+            GLuint fs_shadow = createShader(GL_FRAGMENT_SHADER);
+            shaderSource(fs_shadow, 1, &FS_DEPTH_SHADOW, 0);
+            compileShader(fs_shadow);
+            GLuint program_shadow = createProgram();
+            attachShader(program_shadow, vs_depth);
+            attachShader(program_shadow, fs_shadow);
+            linkProgram(program_shadow);
+            useProgram(program_shadow);
+            clearColor(0, 0, 0, 1);
+            clear(GL_COLOR_BUFFER_BIT);
+            drawArrays(GL_TRIANGLES, 0, 3);
+            finish();
+            readPixels(256, 256, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+            CHECK(px_match(px, 255, 0, 0, 255),
+                  "sampler2DShadow compares through a cached Metal compare "
+                  "sampler (r=%d g=%d b=%d)", px[0], px[1], px[2]);
 
             deleteFramebuffers(1, &fbo);
             deleteTextures(1, &color);

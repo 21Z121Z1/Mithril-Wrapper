@@ -365,10 +365,6 @@ id<MTLSamplerState> CreateSampler(const backend::TexSamplerInfo& info,
         WarnUnsupported("nonzero sampler LOD bias");
         return nil;
     }
-    if (info.compare_mode != GL_NONE) {
-        WarnUnsupported("depth-comparison sampling without depth textures");
-        return nil;
-    }
     MTLSamplerBorderColor border_color;
     if (!ResolveMetalBorderColor(info, &border_color)) return nil;
     const float max_available_lod = levels ? static_cast<float>(levels - 1) : 0.f;

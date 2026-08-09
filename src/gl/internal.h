@@ -169,6 +169,7 @@ v::TexSamplerInfo ResolveSamplerInfo(GLuint unit, const TexState& texture);
 // Resolve the texture target implied by a reflected sampler type, and the
 // object bound to that target in a given unit.
 GLenum TextureTargetForSampler(GLenum sampler_type);
+bool SamplerUsesDepthCompare(GLenum sampler_type);
 GLuint TextureBindingForUnit(GLuint unit, GLenum target);
 
 // Lazily refresh a buffer texture from its authoritative GL buffer storage.
