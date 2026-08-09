@@ -1,11 +1,16 @@
-/* M5 state-pipeline smoke test (stage A): depth test + blend + scissor
- * on the default framebuffer, verified through RV8 readback.
+/* M5 state-pipeline smoke test (stages A+B): depth test + blend + scissor +
+ * cull/stencil/colorMask/polygon on the default framebuffer, verified through
+ * RV8 readback.
  *
  * Exercises the new pipeline-state path end to end:
  *   glEnable(GL_DEPTH_TEST)/glDepthFunc/glClear(GL_DEPTH_BUFFER_BIT) ->
  *   two overlapping triangles at different z -> the near one wins
  *   glEnable(GL_BLEND) + glBlendFunc -> premultiplied blend result
  *   glEnable(GL_SCISSOR_TEST)+glScissor -> clipped region
+ *   GL_CULL_FACE + glCullFace/glFrontFace -> winding-consistent dropping
+ *   GL_STENCIL_TEST + glStencilFunc/Op/Top/Mask -> REPLACE mark + EQUAL read
+ *   glColorMask -> per-channel write gating
+ *   glPolygonMode(GL_LINE) -> wireframe interior empty, FILL restores
  *
  * Build (from project root):
  *   gcc -o tests/fbo_smoke tests/fbo_smoke.c -ldl
@@ -34,8 +39,21 @@
 #define GL_SCISSOR_TEST       0x0C11
 #define GL_LEQUAL             0x0203
 #define GL_ALWAYS             0x0207
+#define GL_EQUAL              0x0202
+#define GL_NOTEQUAL           0x0205
 #define GL_SRC_ALPHA          0x0302
 #define GL_ONE_MINUS_SRC_ALPHA 0x0303
+#define GL_CULL_FACE          0x0B44
+#define GL_STENCIL_TEST       0x0B90
+#define GL_FRONT              0x0404
+#define GL_BACK               0x0405
+#define GL_FRONT_AND_BACK     0x0408
+#define GL_CW                 0x0900
+#define GL_CCW                0x0901
+#define GL_KEEP               0x1E00
+#define GL_REPLACE            0x1E01
+#define GL_LINE               0x1B01
+#define GL_FILL               0x1B02
 
 typedef unsigned int GLuint;
 typedef unsigned int GLenum;
@@ -53,6 +71,13 @@ typedef void (*fn_glDisable)(GLenum);
 typedef void (*fn_glDepthFunc)(GLenum);
 typedef void (*fn_glScissor)(GLint, GLint, GLsizei, GLsizei);
 typedef void (*fn_glBlendFunc)(GLenum, GLenum);
+typedef void (*fn_glCullFace)(GLenum);
+typedef void (*fn_glFrontFace)(GLenum);
+typedef void (*fn_glStencilFunc)(GLenum, GLint, GLuint);
+typedef void (*fn_glStencilOp)(GLenum, GLenum, GLenum);
+typedef void (*fn_glStencilMask)(GLuint);
+typedef void (*fn_glColorMask)(GLboolean, GLboolean, GLboolean, GLboolean);
+typedef void (*fn_glPolygonMode)(GLenum, GLenum);
 typedef GLuint (*fn_glCreateShader)(GLenum);
 typedef void (*fn_glShaderSource)(GLuint, GLsizei, const char* const*, const GLint*);
 typedef void (*fn_glCompileShader)(GLuint);
@@ -115,6 +140,13 @@ int main(void) {
     fn_glDepthFunc depthFunc = (fn_glDepthFunc)dlsym(h, "glDepthFunc");
     fn_glScissor scissor = (fn_glScissor)dlsym(h, "glScissor");
     fn_glBlendFunc blendFunc = (fn_glBlendFunc)dlsym(h, "glBlendFunc");
+    fn_glCullFace cullFace = (fn_glCullFace)dlsym(h, "glCullFace");
+    fn_glFrontFace frontFace = (fn_glFrontFace)dlsym(h, "glFrontFace");
+    fn_glStencilFunc stencilFunc = (fn_glStencilFunc)dlsym(h, "glStencilFunc");
+    fn_glStencilOp stencilOp = (fn_glStencilOp)dlsym(h, "glStencilOp");
+    fn_glStencilMask stencilMask = (fn_glStencilMask)dlsym(h, "glStencilMask");
+    fn_glColorMask colorMask = (fn_glColorMask)dlsym(h, "glColorMask");
+    fn_glPolygonMode polygonMode = (fn_glPolygonMode)dlsym(h, "glPolygonMode");
     fn_glCreateShader createShader = (fn_glCreateShader)dlsym(h, "glCreateShader");
     fn_glShaderSource shaderSource = (fn_glShaderSource)dlsym(h, "glShaderSource");
     fn_glCompileShader compileShader = (fn_glCompileShader)dlsym(h, "glCompileShader");
@@ -136,6 +168,8 @@ int main(void) {
     fn_glReadPixels readPixels = (fn_glReadPixels)dlsym(h, "glReadPixels");
 
     CHECK(clearColor && clear && enable && depthFunc && scissor && blendFunc &&
+          cullFace && frontFace && stencilFunc && stencilOp && stencilMask &&
+          colorMask && polygonMode &&
           createShader && shaderSource && compileShader && createProgram &&
           attachShader && linkProgram && useProgram && getUniformLoc &&
           uniform4f && genVertexArrays && bindVertexArray && genBuffers &&
@@ -277,6 +311,195 @@ int main(void) {
         CHECK(px_match(px, 128, 0, 0, 191),
               "blend SRC_ALPHA/1-SRC_ALPHA over black (r=%d g=%d b=%d a=%d)",
               px[0], px[1], px[2], px[3]);
+    }
+
+    /* -- cull: winding-consistent front/back face dropping ---------------- */
+    {
+        disable(GL_SCISSOR_TEST);
+        enable(GL_CULL_FACE);
+        /* full-viewport white triangle, CCW in NDC (default front=CCW). */
+        float tri[3][7] = {
+            {-1, -1, 0.0f, 1, 1, 1, 1},
+            { 3, -1, 0.0f, 1, 1, 1, 1},
+            {-1,  3, 0.0f, 1, 1, 1, 1},
+        };
+        bufferData(GL_ARRAY_BUFFER, (GLsizeiptr)sizeof(tri), tri, 0x88E4);
+        clearColor(0.10f, 0.20f, 0.30f, 1.0f);
+        finish();
+
+        cullFace(GL_BACK);
+        frontFace(GL_CCW);
+        clear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        drawArrays(GL_TRIANGLES, 0, 3);
+        finish();
+        readPixels(256, 300, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        CHECK(px_match(px, 255, 255, 255, 255),
+              "cull GL_BACK keeps the front-facing (CCW) triangle (r=%d g=%d b=%d)",
+              px[0], px[1], px[2]);
+
+        cullFace(GL_FRONT);
+        clear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        drawArrays(GL_TRIANGLES, 0, 3);
+        finish();
+        readPixels(256, 300, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        CHECK(px_match(px, 26, 51, 77, 255),
+              "cull GL_FRONT drops the front-facing (CCW) triangle (r=%d g=%d b=%d)",
+              px[0], px[1], px[2]);
+
+        /* CCW data wound, but winding interpreted as CW via GL_CW: now that
+           is treated as a back face and must be dropped by GL_BACK. */
+        cullFace(GL_BACK);
+        frontFace(GL_CW);
+        clear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        drawArrays(GL_TRIANGLES, 0, 3);
+        finish();
+        readPixels(256, 300, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        CHECK(px_match(px, 26, 51, 77, 255),
+              "frontFace(GL_CW) turns the CCW triangle into a back face (r=%d g=%d b=%d)",
+              px[0], px[1], px[2]);
+
+        frontFace(GL_CCW);
+        disable(GL_CULL_FACE);
+    }
+
+    /* -- stencil: REPLACE mark, then EQUAL / mismatch reads -------------- */
+    {
+        enable(GL_DEPTH_TEST);
+        depthFunc(GL_LEQUAL);
+        disable(GL_SCISSOR_TEST);
+        float red[3][7] = {
+            {-1, -1, 0.0f, 1, 0, 0, 1},
+            { 3, -1, 0.0f, 1, 0, 0, 1},
+            {-1,  3, 0.0f, 1, 0, 0, 1},
+        };
+        float blue[3][7] = {
+            {-1, -1, 0.0f, 0, 0, 1, 1},
+            { 3, -1, 0.0f, 0, 0, 1, 1},
+            {-1,  3, 0.0f, 0, 0, 1, 1},
+        };
+        float green[3][7] = {
+            {-1, -1, 0.0f, 0, 1, 0, 1},
+            { 3, -1, 0.0f, 0, 1, 0, 1},
+            {-1,  3, 0.0f, 0, 1, 0, 1},
+        };
+        enable(GL_STENCIL_TEST);
+        /* pass 1: ALWAYS writes reference 255 into the stencil buffer. */
+        stencilFunc(GL_ALWAYS, 255, 0xFF);
+        stencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
+        stencilMask(0xFF);
+        clearColor(0.10f, 0.20f, 0.30f, 1.0f);
+        bufferData(GL_ARRAY_BUFFER, (GLsizeiptr)sizeof(red), red, 0x88E4);
+        clear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+        drawArrays(GL_TRIANGLES, 0, 3);
+        finish();
+        readPixels(256, 300, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        CHECK(px_match(px, 255, 0, 0, 255),
+              "stencil pass writes color (r=%d g=%d b=%d)", px[0], px[1], px[2]);
+
+        /* pass 2: test EQUAL 255; the mark survives -> blue draws. */
+        stencilFunc(GL_EQUAL, 255, 0xFF);
+        stencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
+        bufferData(GL_ARRAY_BUFFER, (GLsizeiptr)sizeof(blue), blue, 0x88E4);
+        clear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        drawArrays(GL_TRIANGLES, 0, 3);
+        finish();
+        readPixels(256, 300, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        CHECK(px_match(px, 0, 0, 255, 255),
+              "stencil EQUAL reads the marked value (r=%d g=%d b=%d)",
+              px[0], px[1], px[2]);
+
+        /* pass 3: mismatched reference (1 != 255) must block the draw. */
+        stencilFunc(GL_EQUAL, 1, 0xFF);
+        bufferData(GL_ARRAY_BUFFER, (GLsizeiptr)sizeof(green), green, 0x88E4);
+        clear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        drawArrays(GL_TRIANGLES, 0, 3);
+        finish();
+        readPixels(256, 300, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        CHECK(px_match(px, 26, 51, 77, 255),
+              "stencil ref mismatch blocks the draw (r=%d g=%d b=%d)",
+              px[0], px[1], px[2]);
+
+        disable(GL_STENCIL_TEST);
+        stencilMask(0xFFFFFFFFu);
+    }
+
+    /* -- color mask: per-channel write gating ---------------------------- */
+    {
+        disable(GL_SCISSOR_TEST);
+        disable(GL_STENCIL_TEST);
+        enable(GL_DEPTH_TEST);
+        depthFunc(GL_LEQUAL);
+        float red[3][7] = {
+            {-1, -1, 0.0f, 1, 0, 0, 1},
+            { 3, -1, 0.0f, 1, 0, 0, 1},
+            {-1,  3, 0.0f, 1, 0, 0, 1},
+        };
+        bufferData(GL_ARRAY_BUFFER, (GLsizeiptr)sizeof(red), red, 0x88E4);
+        clearColor(0.10f, 0.20f, 0.30f, 1.0f);
+        finish();
+
+        /* no color writes at all -> the cleared background survives */
+        colorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+        clear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        drawArrays(GL_TRIANGLES, 0, 3);
+        finish();
+        readPixels(256, 300, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        CHECK(px_match(px, 26, 51, 77, 255),
+              "colorMask off leaves the background (r=%d g=%d b=%d)",
+              px[0], px[1], px[2]);
+
+        /* red-only writes: red channel overwritten, g/b keep background */
+        colorMask(GL_TRUE, GL_FALSE, GL_FALSE, GL_TRUE);
+        clear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        drawArrays(GL_TRIANGLES, 0, 3);
+        finish();
+        readPixels(256, 300, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        CHECK(px_match(px, 255, 51, 77, 255),
+              "colorMask R-only gates the other channels (r=%d g=%d b=%d)",
+              px[0], px[1], px[2]);
+
+        colorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        clear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        drawArrays(GL_TRIANGLES, 0, 3);
+        finish();
+        readPixels(256, 300, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        CHECK(px_match(px, 255, 0, 0, 255),
+              "colorMask restored writes all channels (r=%d g=%d b=%d)",
+              px[0], px[1], px[2]);
+    }
+
+    /* -- polygon mode: GL_LINE only stroke-edges -------------------------- */
+    {
+        enable(GL_DEPTH_TEST);
+        depthFunc(GL_LEQUAL);
+        disable(GL_SCISSOR_TEST);
+        disable(GL_STENCIL_TEST);
+        float white[3][7] = {
+            {-1, -1, 0.0f, 1, 1, 1, 1},
+            { 3, -1, 0.0f, 1, 1, 1, 1},
+            {-1,  3, 0.0f, 1, 1, 1, 1},
+        };
+        bufferData(GL_ARRAY_BUFFER, (GLsizeiptr)sizeof(white), white, 0x88E4);
+        clearColor(0.10f, 0.20f, 0.30f, 1.0f);
+
+        polygonMode(GL_FRONT_AND_BACK, GL_LINE);
+        clear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        drawArrays(GL_TRIANGLES, 0, 3);
+        finish();
+        readPixels(256, 300, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        CHECK(px_match(px, 26, 51, 77, 255),
+              "polygonMode GL_LINE leaves the interior clear (r=%d g=%d b=%d)",
+              px[0], px[1], px[2]);
+
+        polygonMode(GL_FRONT_AND_BACK, GL_FILL);
+        clear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        drawArrays(GL_TRIANGLES, 0, 3);
+        finish();
+        readPixels(256, 300, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        CHECK(px_match(px, 255, 255, 255, 255),
+              "polygonMode GL_FILL restores the fill (r=%d g=%d b=%d)",
+              px[0], px[1], px[2]);
+        polygonMode(GL_FRONT_AND_BACK, GL_FILL);
     }
 
     dlclose(h);

@@ -94,6 +94,7 @@ jobs:
           gcc -o tests/shader_smoke  tests/shader_smoke.c  -ldl
           gcc -o tests/draw_smoke    tests/draw_smoke.c    -ldl
           gcc -o tests/texture_smoke tests/texture_smoke.c -ldl
+          gcc -o tests/fbo_smoke     tests/fbo_smoke.c     -ldl
 
       - name: Run EGL contract smoke
         run: |
@@ -124,6 +125,12 @@ jobs:
           output=$(./tests/texture_smoke)
           echo "$output"
           echo "$output" | grep -q "TEXTURE SMOKE ALL PASSED"
+
+      - name: Run GL->Vulkan state-pipeline smoke (lavapipe)
+        run: |
+          output=$(./tests/fbo_smoke)
+          echo "$output"
+          echo "$output" | grep -q "FBO SMOKE ALL PASSED"
 
       - name: Verify GL symbol table (Linux .so)
         run: |

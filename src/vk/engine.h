@@ -69,6 +69,8 @@ struct PipelineState {
     GLint stencil_back_ref = 0;
     GLuint stencil_front_read_mask = 0xFFFFFFFFu;
     GLuint stencil_back_read_mask = 0xFFFFFFFFu;
+    GLuint stencil_front_write_mask = 0xFFFFFFFFu;
+    GLuint stencil_back_write_mask = 0xFFFFFFFFu;
     GLenum stencil_front_op_fail = GL_KEEP;
     GLenum stencil_front_op_zfail = GL_KEEP;
     GLenum stencil_front_op_zpass = GL_KEEP;

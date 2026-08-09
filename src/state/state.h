@@ -49,7 +49,8 @@ struct DepthState {
 struct StencilState {
     GLenum func = GL_ALWAYS;
     GLint ref = 0;
-    GLuint mask = 0xFFFFFFFFu;
+    GLuint mask = 0xFFFFFFFFu;   // read mask (glStencilFunc)
+    GLuint write_mask = 0xFFFFFFFFu; // write mask (glStencilMask)
     GLenum op_fail = GL_KEEP;
     GLenum op_zfail = GL_KEEP;
     GLenum op_zpass = GL_KEEP;

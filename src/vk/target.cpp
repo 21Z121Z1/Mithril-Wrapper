@@ -150,7 +150,7 @@ bool CreateRenderPass() {
     // color attachment's explicit clear), so the render pass must LOAD it.
     att[1].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
     att[1].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    att[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    att[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
     att[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
     att[1].initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
     att[1].finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
@@ -219,7 +219,9 @@ bool CreateDepthTarget() {
     vi.image = g.depth_image;
     vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
     vi.format = g.depth_format;
-    vi.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+    vi.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT |
+                               VK_IMAGE_ASPECT_STENCIL_BIT,
+                           0, 1, 0, 1};
     if (g.fn.CreateImageView(g.device, &vi, nullptr, &g.depth_view) !=
         VK_SUCCESS) {
         ML_LOG_ERROR("vk: depth image view creation failed");

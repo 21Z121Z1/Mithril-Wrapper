@@ -216,27 +216,30 @@ void APIENTRY glStencilFunc(GLenum func, GLint ref, GLuint mask) {
 void APIENTRY glStencilFuncSeparate(GLenum face, GLenum func, GLint ref, GLuint mask) {
     auto& st = s::GetState();
     switch (face) {
-        case GL_FRONT: st.stencil_front = {func, ref, mask, st.stencil_front.op_fail, st.stencil_front.op_zfail, st.stencil_front.op_zpass}; break;
-        case GL_BACK:  st.stencil_back  = {func, ref, mask, st.stencil_back.op_fail,  st.stencil_back.op_zfail,  st.stencil_back.op_zpass}; break;
-        case GL_FRONT_AND_BACK: st.stencil_front = {func, ref, mask, st.stencil_front.op_fail, st.stencil_front.op_zfail, st.stencil_front.op_zpass};
-                                st.stencil_back  = st.stencil_front; break;
+        case GL_FRONT: st.stencil_front.func = func; st.stencil_front.ref = ref;
+                       st.stencil_front.mask = mask; break;
+        case GL_BACK:  st.stencil_back.func = func; st.stencil_back.ref = ref;
+                       st.stencil_back.mask = mask; break;
+        case GL_FRONT_AND_BACK: st.stencil_front.func = func; st.stencil_front.ref = ref;
+                                st.stencil_front.mask = mask;
+                                st.stencil_back = st.stencil_front; break;
         default: PUSH_ERROR(GL_INVALID_ENUM);
     }
 }
 
 void APIENTRY glStencilMask(GLuint mask) {
     auto& st = s::GetState();
-    st.stencil_front.mask = mask;
-    st.stencil_back.mask = mask;
+    st.stencil_front.write_mask = mask;
+    st.stencil_back.write_mask = mask;
 }
 
 void APIENTRY glStencilMaskSeparate(GLenum face, GLuint mask) {
     auto& st = s::GetState();
     switch (face) {
-        case GL_FRONT: st.stencil_front.mask = mask; break;
-        case GL_BACK:  st.stencil_back.mask = mask; break;
+        case GL_FRONT: st.stencil_front.write_mask = mask; break;
+        case GL_BACK:  st.stencil_back.write_mask = mask; break;
         case GL_FRONT_AND_BACK:
-            st.stencil_front.mask = mask; st.stencil_back.mask = mask; break;
+            st.stencil_front.write_mask = mask; st.stencil_back.write_mask = mask; break;
         default: PUSH_ERROR(GL_INVALID_ENUM);
     }
 }

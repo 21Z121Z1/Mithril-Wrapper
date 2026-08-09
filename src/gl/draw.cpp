@@ -150,6 +150,8 @@ v::PipelineState BuildPipelineState() {
     ps.stencil_back_ref = st.stencil_back.ref;
     ps.stencil_front_read_mask = st.stencil_front.mask;
     ps.stencil_back_read_mask = st.stencil_back.mask;
+    ps.stencil_front_write_mask = st.stencil_front.write_mask;
+    ps.stencil_back_write_mask = st.stencil_back.write_mask;
     ps.stencil_front_op_fail = st.stencil_front.op_fail;
     ps.stencil_front_op_zfail = st.stencil_front.op_zfail;
     ps.stencil_front_op_zpass = st.stencil_front.op_zpass;

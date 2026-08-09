@@ -94,8 +94,11 @@ std::string StateSignature(const PipelineState& ps) {
          std::to_string(ps.depth_func) + (ps.depth_write ? "1" : "0");
     k += "|S" + std::string(ps.stencil_test ? "1" : "0") +
          std::to_string(ps.stencil_front_func) + std::to_string(ps.stencil_back_func) +
+         std::to_string(ps.stencil_front_ref) + std::to_string(ps.stencil_back_ref) +
          std::to_string(ps.stencil_front_read_mask) +
          std::to_string(ps.stencil_back_read_mask) +
+         std::to_string(ps.stencil_front_write_mask) +
+         std::to_string(ps.stencil_back_write_mask) +
          std::to_string(ps.stencil_front_op_fail) +
          std::to_string(ps.stencil_front_op_zfail) +
          std::to_string(ps.stencil_front_op_zpass) +
@@ -216,8 +219,10 @@ VkPipeline GetOrCreatePipeline(const Program& prog, const DrawOp& op) {
             : op.pipe.cull_face == GL_FRONT_AND_BACK
                   ? VK_CULL_MODE_FRONT_AND_BACK
                   : VK_CULL_MODE_BACK_BIT;
-    rs.frontFace = op.pipe.front_face == GL_CW ? VK_FRONT_FACE_CLOCKWISE
-                                               : VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    // Vulkan's framebuffer is +Y-down (we keep the GL bottom-left flip in the
+    // readout), so a GL front-face winding maps to the opposite Vk value.
+    rs.frontFace = op.pipe.front_face == GL_CW ? VK_FRONT_FACE_COUNTER_CLOCKWISE
+                                                : VK_FRONT_FACE_CLOCKWISE;
     rs.lineWidth = 1.0f;
 
     VkPipelineMultisampleStateCreateInfo ms{};
@@ -238,11 +243,12 @@ VkPipeline GetOrCreatePipeline(const Program& prog, const DrawOp& op) {
     front_st.depthFailOp = StencilOp(op.pipe.stencil_front_op_zfail);
     front_st.compareOp = ToVkCompare(op.pipe.stencil_front_func);
     front_st.compareMask = op.pipe.stencil_front_read_mask;
-    front_st.writeMask = 0xFFFFFFFFu;
+    front_st.writeMask = op.pipe.stencil_front_write_mask;
     front_st.reference = (uint32_t)op.pipe.stencil_front_ref;
     VkStencilOpState back_st = front_st;   // copy, override fields
     back_st.compareOp = ToVkCompare(op.pipe.stencil_back_func);
     back_st.compareMask = op.pipe.stencil_back_read_mask;
+    back_st.writeMask = op.pipe.stencil_back_write_mask;
     back_st.failOp = StencilOp(op.pipe.stencil_back_op_fail);
     back_st.passOp = StencilOp(op.pipe.stencil_back_op_zpass);
     back_st.depthFailOp = StencilOp(op.pipe.stencil_back_op_zfail);
