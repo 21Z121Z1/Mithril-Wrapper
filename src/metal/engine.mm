@@ -783,14 +783,82 @@ bool TranslateStage(const std::vector<uint32_t>& words,
     }
 }
 
-MTLVertexFormat VertexFormat(uint32_t components) {
+MTLVertexFormat SelectVertexFormat(uint32_t components,
+                                   MTLVertexFormat scalar,
+                                   MTLVertexFormat two,
+                                   MTLVertexFormat three,
+                                   MTLVertexFormat four) {
     switch (components) {
-        case 1: return MTLVertexFormatFloat;
-        case 2: return MTLVertexFormatFloat2;
-        case 3: return MTLVertexFormatFloat3;
-        case 4: return MTLVertexFormatFloat4;
+        case 1: return scalar;
+        case 2: return two;
+        case 3: return three;
+        case 4: return four;
         default: return MTLVertexFormatInvalid;
     }
+}
+
+MTLVertexFormat VertexFormat(const backend::VertexAttr& attribute) {
+    using Type = backend::VertexScalarType;
+    const uint32_t count = attribute.components;
+    switch (attribute.scalar_type) {
+        case Type::Float32:
+            if (attribute.normalized) return MTLVertexFormatInvalid;
+            return SelectVertexFormat(count, MTLVertexFormatFloat,
+                MTLVertexFormatFloat2, MTLVertexFormatFloat3,
+                MTLVertexFormatFloat4);
+        case Type::Float16:
+            if (attribute.normalized) return MTLVertexFormatInvalid;
+            return SelectVertexFormat(count, MTLVertexFormatHalf,
+                MTLVertexFormatHalf2, MTLVertexFormatHalf3,
+                MTLVertexFormatHalf4);
+        case Type::Sint8:
+            return attribute.normalized
+                ? SelectVertexFormat(count, MTLVertexFormatCharNormalized,
+                    MTLVertexFormatChar2Normalized,
+                    MTLVertexFormatChar3Normalized,
+                    MTLVertexFormatChar4Normalized)
+                : SelectVertexFormat(count, MTLVertexFormatChar,
+                    MTLVertexFormatChar2, MTLVertexFormatChar3,
+                    MTLVertexFormatChar4);
+        case Type::Uint8:
+            return attribute.normalized
+                ? SelectVertexFormat(count, MTLVertexFormatUCharNormalized,
+                    MTLVertexFormatUChar2Normalized,
+                    MTLVertexFormatUChar3Normalized,
+                    MTLVertexFormatUChar4Normalized)
+                : SelectVertexFormat(count, MTLVertexFormatUChar,
+                    MTLVertexFormatUChar2, MTLVertexFormatUChar3,
+                    MTLVertexFormatUChar4);
+        case Type::Sint16:
+            return attribute.normalized
+                ? SelectVertexFormat(count, MTLVertexFormatShortNormalized,
+                    MTLVertexFormatShort2Normalized,
+                    MTLVertexFormatShort3Normalized,
+                    MTLVertexFormatShort4Normalized)
+                : SelectVertexFormat(count, MTLVertexFormatShort,
+                    MTLVertexFormatShort2, MTLVertexFormatShort3,
+                    MTLVertexFormatShort4);
+        case Type::Uint16:
+            return attribute.normalized
+                ? SelectVertexFormat(count, MTLVertexFormatUShortNormalized,
+                    MTLVertexFormatUShort2Normalized,
+                    MTLVertexFormatUShort3Normalized,
+                    MTLVertexFormatUShort4Normalized)
+                : SelectVertexFormat(count, MTLVertexFormatUShort,
+                    MTLVertexFormatUShort2, MTLVertexFormatUShort3,
+                    MTLVertexFormatUShort4);
+        case Type::Sint32:
+            if (attribute.normalized) return MTLVertexFormatInvalid;
+            return SelectVertexFormat(count, MTLVertexFormatInt,
+                MTLVertexFormatInt2, MTLVertexFormatInt3,
+                MTLVertexFormatInt4);
+        case Type::Uint32:
+            if (attribute.normalized) return MTLVertexFormatInvalid;
+            return SelectVertexFormat(count, MTLVertexFormatUInt,
+                MTLVertexFormatUInt2, MTLVertexFormatUInt3,
+                MTLVertexFormatUInt4);
+    }
+    return MTLVertexFormatInvalid;
 }
 
 MTLCompareFunction CompareFunction(GLenum function) {
@@ -883,10 +951,12 @@ std::string PipelineKey(const backend::DrawParams& params) {
     key << params.program << '|' << static_cast<int>(params.topology)
         << "|v" << params.vertex_stream.stride;
     for (const auto& attr : params.vertex_stream.attrs)
-        key << ':' << attr.location << '@' << attr.offset << '/' << attr.components;
+        key << ':' << attr.location << '@' << attr.offset << '/' << attr.components
+            << ',' << static_cast<int>(attr.scalar_type) << ',' << attr.normalized;
     key << "|i" << params.instance_stream.stride;
     for (const auto& attr : params.instance_stream.attrs)
-        key << ':' << attr.location << '@' << attr.offset << '/' << attr.components;
+        key << ':' << attr.location << '@' << attr.offset << '/' << attr.components
+            << ',' << static_cast<int>(attr.scalar_type) << ',' << attr.normalized;
     AppendPipelineState(key, params.pipeline);
     return key.str();
 }
@@ -947,8 +1017,13 @@ PipelineBundle* GetOrCreatePipeline(const backend::DrawParams& params) {
         vertex_descriptor.layouts[buffer_index].stepFunction = step;
         vertex_descriptor.layouts[buffer_index].stepRate = 1;
         for (const auto& attr : stream.attrs) {
-            if (attr.location >= 31 || attr.offset >= stream.stride) return false;
-            MTLVertexFormat format = VertexFormat(attr.components);
+            const uint64_t attribute_end = static_cast<uint64_t>(attr.offset) +
+                static_cast<uint64_t>(attr.components) *
+                    backend::VertexScalarBytes(attr.scalar_type);
+            if (attr.location >= 31 || attr.offset >= stream.stride ||
+                attribute_end > stream.stride)
+                return false;
+            MTLVertexFormat format = VertexFormat(attr);
             if (format == MTLVertexFormatInvalid) return false;
             vertex_descriptor.attributes[attr.location].format = format;
             vertex_descriptor.attributes[attr.location].offset = attr.offset;
@@ -1121,14 +1196,14 @@ NSUInteger RequiredUploadBytes() {
     for (const auto& pending : engine.draws) {
         const auto& draw = pending.params;
         if (!pending.resident_vertex)
-            add(draw.vertex_stream.data.size() * sizeof(float));
+            add(draw.vertex_stream.data.size());
         if (!pending.resident_instance)
-            add(draw.instance_stream.data.size() * sizeof(float));
+            add(draw.instance_stream.data.size());
         if (draw.topology == backend::Topology::TriangleFan) {
             const NSUInteger source_count = draw.indices.empty()
                 ? (draw.vertex_stream.record_count
                     ? draw.vertex_stream.record_count
-                    : draw.vertex_stream.data.size() * sizeof(float) /
+                    : draw.vertex_stream.data.size() /
                           std::max<uint32_t>(draw.vertex_stream.stride, 1))
                 : draw.indices.size();
             if (source_count >= 3) add((source_count - 2) * 3 * sizeof(uint32_t));
@@ -1186,7 +1261,7 @@ NSUInteger PackUniforms(FrameContext& frame, NSUInteger* cursor,
 std::vector<uint32_t> ExpandTriangleFan(const backend::DrawParams& draw) {
     const uint32_t vertex_count = draw.vertex_stream.record_count
         ? draw.vertex_stream.record_count
-        : static_cast<uint32_t>(draw.vertex_stream.data.size() * sizeof(float) /
+        : static_cast<uint32_t>(draw.vertex_stream.data.size() /
               std::max<uint32_t>(draw.vertex_stream.stride, 1));
     const uint32_t count = draw.indices.empty()
         ? vertex_count : static_cast<uint32_t>(draw.indices.size());
@@ -1479,7 +1554,7 @@ bool EncodeDraws(id<MTLRenderCommandEncoder> encoder, FrameContext& frame) {
 
         id<MTLBuffer> vertex_buffer = pending.resident_vertex;
         NSUInteger vertex_offset = (NSUInteger)draw.vertex_stream.binding_offset;
-        const NSUInteger vertex_bytes = draw.vertex_stream.data.size() * sizeof(float);
+        const NSUInteger vertex_bytes = draw.vertex_stream.data.size();
         if (!vertex_buffer) {
             vertex_offset = AllocateUpload(
                 frame, &cursor, draw.vertex_stream.data.data(), vertex_bytes);
@@ -1494,7 +1569,7 @@ bool EncodeDraws(id<MTLRenderCommandEncoder> encoder, FrameContext& frame) {
         } else if (!draw.instance_stream.data.empty()) {
             instance_offset = AllocateUpload(
                 frame, &cursor, draw.instance_stream.data.data(),
-                draw.instance_stream.data.size() * sizeof(float));
+                draw.instance_stream.data.size());
             if (instance_offset == NSNotFound) return false;
             instance_buffer = frame.upload;
         }

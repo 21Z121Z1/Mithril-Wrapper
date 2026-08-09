@@ -129,23 +129,89 @@ std::string BuildPipelineKey(uint64_t program, uint32_t topology,
                       "|V" + std::to_string(v_stride);
     for (const auto& a : v_attrs)
         key += "|" + std::to_string(a.location) + "@" +
-               std::to_string(a.offset) + ":" + std::to_string(a.components);
+               std::to_string(a.offset) + ":" + std::to_string(a.components) +
+               "," + std::to_string(static_cast<int>(a.scalar_type)) +
+               "," + std::to_string(a.normalized);
     if (!i_attrs.empty()) {
         key += "|I" + std::to_string(i_stride);
         for (const auto& a : i_attrs)
             key += "|" + std::to_string(a.location) + "@" +
-                   std::to_string(a.offset) + ":" + std::to_string(a.components);
+                   std::to_string(a.offset) + ":" + std::to_string(a.components) +
+                   "," + std::to_string(static_cast<int>(a.scalar_type)) +
+                   "," + std::to_string(a.normalized);
     }
     return key;
 }
 
-VkFormat AttrFormat(uint32_t components) {
+VkFormat SelectAttrFormat(uint32_t components, VkFormat scalar, VkFormat two,
+                          VkFormat three, VkFormat four) {
     switch (components) {
-        case 1: return VK_FORMAT_R32_SFLOAT;
-        case 2: return VK_FORMAT_R32G32_SFLOAT;
-        case 3: return VK_FORMAT_R32G32B32_SFLOAT;
-        default: return VK_FORMAT_R32G32B32A32_SFLOAT;
+        case 1: return scalar;
+        case 2: return two;
+        case 3: return three;
+        case 4: return four;
+        default: return VK_FORMAT_UNDEFINED;
     }
+}
+
+VkFormat AttrFormat(const VertexAttr& attribute) {
+    using Type = backend::VertexScalarType;
+    const uint32_t count = attribute.components;
+    switch (attribute.scalar_type) {
+        case Type::Float32:
+            if (attribute.normalized) return VK_FORMAT_UNDEFINED;
+            return SelectAttrFormat(count, VK_FORMAT_R32_SFLOAT,
+                VK_FORMAT_R32G32_SFLOAT, VK_FORMAT_R32G32B32_SFLOAT,
+                VK_FORMAT_R32G32B32A32_SFLOAT);
+        case Type::Float16:
+            if (attribute.normalized) return VK_FORMAT_UNDEFINED;
+            return SelectAttrFormat(count, VK_FORMAT_R16_SFLOAT,
+                VK_FORMAT_R16G16_SFLOAT, VK_FORMAT_R16G16B16_SFLOAT,
+                VK_FORMAT_R16G16B16A16_SFLOAT);
+        case Type::Sint8:
+            return attribute.normalized
+                ? SelectAttrFormat(count, VK_FORMAT_R8_SNORM,
+                    VK_FORMAT_R8G8_SNORM, VK_FORMAT_R8G8B8_SNORM,
+                    VK_FORMAT_R8G8B8A8_SNORM)
+                : SelectAttrFormat(count, VK_FORMAT_R8_SINT,
+                    VK_FORMAT_R8G8_SINT, VK_FORMAT_R8G8B8_SINT,
+                    VK_FORMAT_R8G8B8A8_SINT);
+        case Type::Uint8:
+            return attribute.normalized
+                ? SelectAttrFormat(count, VK_FORMAT_R8_UNORM,
+                    VK_FORMAT_R8G8_UNORM, VK_FORMAT_R8G8B8_UNORM,
+                    VK_FORMAT_R8G8B8A8_UNORM)
+                : SelectAttrFormat(count, VK_FORMAT_R8_UINT,
+                    VK_FORMAT_R8G8_UINT, VK_FORMAT_R8G8B8_UINT,
+                    VK_FORMAT_R8G8B8A8_UINT);
+        case Type::Sint16:
+            return attribute.normalized
+                ? SelectAttrFormat(count, VK_FORMAT_R16_SNORM,
+                    VK_FORMAT_R16G16_SNORM, VK_FORMAT_R16G16B16_SNORM,
+                    VK_FORMAT_R16G16B16A16_SNORM)
+                : SelectAttrFormat(count, VK_FORMAT_R16_SINT,
+                    VK_FORMAT_R16G16_SINT, VK_FORMAT_R16G16B16_SINT,
+                    VK_FORMAT_R16G16B16A16_SINT);
+        case Type::Uint16:
+            return attribute.normalized
+                ? SelectAttrFormat(count, VK_FORMAT_R16_UNORM,
+                    VK_FORMAT_R16G16_UNORM, VK_FORMAT_R16G16B16_UNORM,
+                    VK_FORMAT_R16G16B16A16_UNORM)
+                : SelectAttrFormat(count, VK_FORMAT_R16_UINT,
+                    VK_FORMAT_R16G16_UINT, VK_FORMAT_R16G16B16_UINT,
+                    VK_FORMAT_R16G16B16A16_UINT);
+        case Type::Sint32:
+            if (attribute.normalized) return VK_FORMAT_UNDEFINED;
+            return SelectAttrFormat(count, VK_FORMAT_R32_SINT,
+                VK_FORMAT_R32G32_SINT, VK_FORMAT_R32G32B32_SINT,
+                VK_FORMAT_R32G32B32A32_SINT);
+        case Type::Uint32:
+            if (attribute.normalized) return VK_FORMAT_UNDEFINED;
+            return SelectAttrFormat(count, VK_FORMAT_R32_UINT,
+                VK_FORMAT_R32G32_UINT, VK_FORMAT_R32G32B32_UINT,
+                VK_FORMAT_R32G32B32A32_UINT);
+    }
+    return VK_FORMAT_UNDEFINED;
 }
 
 VkSampleCountFlagBits ToVkSampleCount(uint32_t samples) {
@@ -185,7 +251,8 @@ VkPipeline GetOrCreatePipeline(const Program& prog, const DrawOp& op) {
         VkVertexInputAttributeDescription d{};
         d.location = a.location;
         d.binding = 0;
-        d.format = AttrFormat(a.components);
+        d.format = AttrFormat(a);
+        if (d.format == VK_FORMAT_UNDEFINED) return VK_NULL_HANDLE;
         d.offset = a.offset;
         fa.push_back(d);
     }
@@ -193,7 +260,8 @@ VkPipeline GetOrCreatePipeline(const Program& prog, const DrawOp& op) {
         VkVertexInputAttributeDescription d{};
         d.location = a.location;
         d.binding = 1;
-        d.format = AttrFormat(a.components);
+        d.format = AttrFormat(a);
+        if (d.format == VK_FORMAT_UNDEFINED) return VK_NULL_HANDLE;
         d.offset = a.offset;
         fa.push_back(d);
     }

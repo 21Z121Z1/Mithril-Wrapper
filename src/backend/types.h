@@ -35,15 +35,41 @@ enum class SyncWaitResult {
     Failed,
 };
 
+enum class VertexScalarType {
+    Float32 = 0,
+    Float16,
+    Sint8,
+    Uint8,
+    Sint16,
+    Uint16,
+    Sint32,
+    Uint32,
+};
+
+inline uint32_t VertexScalarBytes(VertexScalarType type) {
+    switch (type) {
+        case VertexScalarType::Sint8:
+        case VertexScalarType::Uint8: return 1;
+        case VertexScalarType::Float16:
+        case VertexScalarType::Sint16:
+        case VertexScalarType::Uint16: return 2;
+        default: return 4;
+    }
+}
+
 struct VertexAttr {
     uint32_t location = 0;
     uint32_t components = 0;
     uint32_t offset = 0;
+    VertexScalarType scalar_type = VertexScalarType::Float32;
+    bool normalized = false;
 };
 
 struct VertexStream {
-    // Transient compatibility path: frontend-resolved float32 records.
-    std::vector<float> data;
+    // Transient compatibility path: frontend-resolved typed records. This is
+    // byte storage because one interleaved record may contain float, sint and
+    // uint inputs with distinct shader ABIs.
+    std::vector<uint8_t> data;
     uint32_t stride = 0;
     std::vector<VertexAttr> attrs;
 

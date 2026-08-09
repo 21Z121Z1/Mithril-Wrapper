@@ -404,6 +404,7 @@ void APIENTRY glVertexAttribPointer(GLuint index, GLint size, GLenum type,
     a.offset = (GLsizeiptr)pointer;
     a.buffer = g_bound_array_buffer;
     a.is_pointer = true;
+    a.integer = false;
 }
 
 void APIENTRY glVertexAttribIPointer(GLuint index, GLint size, GLenum type,
@@ -425,6 +426,7 @@ void APIENTRY glVertexAttribIPointer(GLuint index, GLint size, GLenum type,
     a.offset = (GLsizeiptr)pointer;
     a.buffer = g_bound_array_buffer;
     a.is_pointer = true;
+    a.integer = true;
 }
 
 void APIENTRY glVertexAttribDivisor(GLuint index, GLuint divisor) {
@@ -435,11 +437,10 @@ void APIENTRY glVertexAttribDivisor(GLuint index, GLuint divisor) {
 // ---- generic (constant) vertex attributes -----------------------------------
 
 // Constant values apply when the array is *disabled*; setting them must not
-// change the enable bit (GL 4.46).
+// change the enable bit or the array pointer/format state (GL 4.46).
 void SetConstantAttrib(GLuint index, const GLfloat* v, GLsizei n) {
     if (index >= kMaxAttribs || n < 1 || n > 4) { PUSH_ERROR(GL_INVALID_VALUE); return; }
     AttribData& a = g_vaos[g_bound_vao].attribs[index];
-    a.is_pointer = false;
     for (GLsizei i = 0; i < n; ++i) a.constant[i] = v[i];
     for (GLsizei i = n; i < 4; ++i) a.constant[i] = i == 3 ? 1.0f : 0.0f;
 }
@@ -518,6 +519,7 @@ void APIENTRY glGetVertexAttribfv(GLuint index, GLenum pname, GLfloat* params) {
         case GL_VERTEX_ATTRIB_ARRAY_STRIDE: params[0] = (GLfloat)a.stride; break;
         case GL_VERTEX_ATTRIB_ARRAY_TYPE: params[0] = (GLfloat)a.type; break;
         case GL_VERTEX_ATTRIB_ARRAY_NORMALIZED: params[0] = a.normalized ? 1.f : 0.f; break;
+        case GL_VERTEX_ATTRIB_ARRAY_INTEGER: params[0] = a.integer ? 1.f : 0.f; break;
         default: {
             const GLfloat* v = a.constant.data();
             for (int i = 0; i < 4; ++i) params[i] = v[i];
@@ -528,28 +530,32 @@ void APIENTRY glGetVertexAttribdv(GLuint index, GLenum pname, GLdouble* params) 
     GLfloat f[4]; glGetVertexAttribfv(index, pname, f);
     int n = (pname == GL_VERTEX_ATTRIB_ARRAY_ENABLED || pname == GL_VERTEX_ATTRIB_ARRAY_SIZE ||
              pname == GL_VERTEX_ATTRIB_ARRAY_STRIDE || pname == GL_VERTEX_ATTRIB_ARRAY_TYPE ||
-             pname == GL_VERTEX_ATTRIB_ARRAY_NORMALIZED) ? 1 : 4;
+             pname == GL_VERTEX_ATTRIB_ARRAY_NORMALIZED ||
+             pname == GL_VERTEX_ATTRIB_ARRAY_INTEGER) ? 1 : 4;
     for (int i = 0; i < n; ++i) params[i] = (GLdouble)f[i];
 }
 void APIENTRY glGetVertexAttribiv(GLuint index, GLenum pname, GLint* params) {
     GLfloat f[4]; glGetVertexAttribfv(index, pname, f);
     int n = (pname == GL_VERTEX_ATTRIB_ARRAY_ENABLED || pname == GL_VERTEX_ATTRIB_ARRAY_SIZE ||
              pname == GL_VERTEX_ATTRIB_ARRAY_STRIDE || pname == GL_VERTEX_ATTRIB_ARRAY_TYPE ||
-             pname == GL_VERTEX_ATTRIB_ARRAY_NORMALIZED) ? 1 : 4;
+             pname == GL_VERTEX_ATTRIB_ARRAY_NORMALIZED ||
+             pname == GL_VERTEX_ATTRIB_ARRAY_INTEGER) ? 1 : 4;
     for (int i = 0; i < n; ++i) params[i] = (GLint)f[i];
 }
 void APIENTRY glGetVertexAttribIiv(GLuint index, GLenum pname, GLint* params) {
     GLfloat f[4]; glGetVertexAttribfv(index, pname, f);
     int n = (pname == GL_VERTEX_ATTRIB_ARRAY_ENABLED || pname == GL_VERTEX_ATTRIB_ARRAY_SIZE ||
              pname == GL_VERTEX_ATTRIB_ARRAY_STRIDE || pname == GL_VERTEX_ATTRIB_ARRAY_TYPE ||
-             pname == GL_VERTEX_ATTRIB_ARRAY_NORMALIZED) ? 1 : 4;
+             pname == GL_VERTEX_ATTRIB_ARRAY_NORMALIZED ||
+             pname == GL_VERTEX_ATTRIB_ARRAY_INTEGER) ? 1 : 4;
     for (int i = 0; i < n; ++i) params[i] = (GLint)f[i];
 }
 void APIENTRY glGetVertexAttribIuiv(GLuint index, GLenum pname, GLuint* params) {
     GLfloat f[4]; glGetVertexAttribfv(index, pname, f);
     int n = (pname == GL_VERTEX_ATTRIB_ARRAY_ENABLED || pname == GL_VERTEX_ATTRIB_ARRAY_SIZE ||
              pname == GL_VERTEX_ATTRIB_ARRAY_STRIDE || pname == GL_VERTEX_ATTRIB_ARRAY_TYPE ||
-             pname == GL_VERTEX_ATTRIB_ARRAY_NORMALIZED) ? 1 : 4;
+             pname == GL_VERTEX_ATTRIB_ARRAY_NORMALIZED ||
+             pname == GL_VERTEX_ATTRIB_ARRAY_INTEGER) ? 1 : 4;
     for (int i = 0; i < n; ++i) params[i] = (GLuint)f[i];
 }
 void APIENTRY glGetVertexAttribPointerv(GLuint index, GLenum pname, void** pointer) {

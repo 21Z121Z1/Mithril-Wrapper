@@ -61,7 +61,7 @@ bool StageStream(const VertexStream& stream, VkBuffer* buf,
         ? static_cast<const void*>(stream.source_data)
         : static_cast<const void*>(stream.data.data());
     const size_t size = stream.HasResidentSource()
-        ? stream.source_size : stream.data.size() * sizeof(float);
+        ? stream.source_size : stream.data.size();
     return StageBytes(bytes, size,
                       VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, buf, mem);
 }
@@ -128,7 +128,7 @@ void Draw(const DrawParams& params) {
     op.instance_count = std::max<uint32_t>(params.instance_count, 1);
     const size_t vertex_bytes = params.vertex_stream.HasResidentSource()
         ? params.vertex_stream.source_size
-        : params.vertex_stream.data.size() * sizeof(float);
+        : params.vertex_stream.data.size();
     op.vertex_count = params.vertex_stream.record_count
         ? params.vertex_stream.record_count
         : (uint32_t)(vertex_bytes / op.v_stride);

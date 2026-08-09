@@ -50,6 +50,7 @@ struct AttribData {
     GLuint buffer = 0;         // GL_ARRAY_BUFFER bound at glVertexAttribPointer
     GLuint divisor = 0;        // glVertexAttribDivisor
     bool is_pointer = false;   // array (pointer) vs generic constant value
+    bool integer = false;      // glVertexAttribIPointer (no float conversion)
     std::array<GLfloat, 4> constant{0.0f, 0.0f, 0.0f, 1.0f};
 };
 

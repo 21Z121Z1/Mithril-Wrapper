@@ -49,6 +49,52 @@ uint32_t AttribTypeSize(GLenum type) {
     }
 }
 
+bool IsSignedIntegerAttrib(GLenum type) {
+    return type == GL_BYTE || type == GL_SHORT || type == GL_INT;
+}
+
+bool NativeVertexAttr(const AttribData& source, GLuint location,
+                      v::VertexAttr* output) {
+    if (!output || source.size < 1 || source.size > 4) return false;
+    v::VertexScalarType type;
+    bool normalized = false;
+    if (source.integer) {
+        switch (source.type) {
+            case GL_BYTE: type = v::VertexScalarType::Sint8; break;
+            case GL_UNSIGNED_BYTE: type = v::VertexScalarType::Uint8; break;
+            case GL_SHORT: type = v::VertexScalarType::Sint16; break;
+            case GL_UNSIGNED_SHORT: type = v::VertexScalarType::Uint16; break;
+            case GL_INT: type = v::VertexScalarType::Sint32; break;
+            case GL_UNSIGNED_INT: type = v::VertexScalarType::Uint32; break;
+            default: return false;
+        }
+    } else if (source.type == GL_FLOAT) {
+        type = v::VertexScalarType::Float32;
+    } else if (source.type == GL_HALF_FLOAT) {
+        type = v::VertexScalarType::Float16;
+    } else if (source.normalized &&
+               (source.type == GL_BYTE || source.type == GL_UNSIGNED_BYTE ||
+                source.type == GL_SHORT || source.type == GL_UNSIGNED_SHORT)) {
+        normalized = true;
+        switch (source.type) {
+            case GL_BYTE: type = v::VertexScalarType::Sint8; break;
+            case GL_UNSIGNED_BYTE: type = v::VertexScalarType::Uint8; break;
+            case GL_SHORT: type = v::VertexScalarType::Sint16; break;
+            default: type = v::VertexScalarType::Uint16; break;
+        }
+    } else {
+        // Metal has no normalized 32-bit integer vertex format, and plain
+        // glVertexAttribPointer integer inputs require conversion to float.
+        return false;
+    }
+    output->location = location;
+    output->components = static_cast<uint32_t>(source.size);
+    output->offset = static_cast<uint32_t>(source.offset);
+    output->scalar_type = type;
+    output->normalized = normalized;
+    return true;
+}
+
 // Read `count` components of `type` at `p` into float, honouring the
 // normalized flag. Integer types read the raw integer value as float32
 // (kept exact for |v| < 2^24, which covers MC's attribute usage).
@@ -100,6 +146,18 @@ void FetchComponents(const uint8_t* p, GLenum type, GLboolean normalized,
         default:
             for (GLuint i = 0; i < count; ++i) out[i] = 0.0f;
             break;
+    }
+}
+
+template <typename Destination, typename Source>
+void ConvertIntegerComponents(const uint8_t* bytes, uint8_t* output,
+                              GLuint count) {
+    for (GLuint i = 0; i < count; ++i) {
+        Source source{};
+        std::memcpy(&source, bytes + i * sizeof(Source), sizeof(Source));
+        const Destination value = static_cast<Destination>(source);
+        std::memcpy(output + i * sizeof(Destination), &value,
+                    sizeof(Destination));
     }
 }
 
@@ -205,8 +263,56 @@ bool FetchAttribRow(const AttribData& a, GLint row, GLfloat* out) {
     return true;
 }
 
-// Core draw: resolve the current VAO into float32 streams and hand them to
-// the selected backend. `idx` holds raw indices (glDrawElements path); when
+bool PackIntegerAttribRow(const AttribData& a, GLint row, uint8_t* output) {
+    if (!a.is_pointer || !a.buffer || row < 0 || a.offset < 0) return false;
+    auto buffer = g_buffers.find(a.buffer);
+    if (buffer == g_buffers.end()) return false;
+    const uint32_t type_size = AttribTypeSize(a.type);
+    const GLsizei stride = a.stride ? a.stride : a.size * type_size;
+    const uint64_t source_offset = static_cast<uint64_t>(a.offset) +
+                                   static_cast<uint64_t>(row) * stride;
+    const uint64_t source_bytes = static_cast<uint64_t>(a.size) * type_size;
+    if (source_offset > buffer->second.data.size() ||
+        source_bytes > buffer->second.data.size() - source_offset)
+        return false;
+    const uint8_t* bytes = buffer->second.data.data() +
+                           static_cast<size_t>(source_offset);
+    switch (a.type) {
+        case GL_BYTE:
+            ConvertIntegerComponents<int32_t, int8_t>(
+                bytes, output, static_cast<GLuint>(a.size)); return true;
+        case GL_UNSIGNED_BYTE:
+            ConvertIntegerComponents<uint32_t, uint8_t>(
+                bytes, output, static_cast<GLuint>(a.size)); return true;
+        case GL_SHORT:
+            ConvertIntegerComponents<int32_t, int16_t>(
+                bytes, output, static_cast<GLuint>(a.size)); return true;
+        case GL_UNSIGNED_SHORT:
+            ConvertIntegerComponents<uint32_t, uint16_t>(
+                bytes, output, static_cast<GLuint>(a.size)); return true;
+        case GL_INT:
+            ConvertIntegerComponents<int32_t, int32_t>(
+                bytes, output, static_cast<GLuint>(a.size)); return true;
+        case GL_UNSIGNED_INT:
+            ConvertIntegerComponents<uint32_t, uint32_t>(
+                bytes, output, static_cast<GLuint>(a.size)); return true;
+        default: return false;
+    }
+}
+
+bool PackTransientAttribRow(const AttribData& source,
+                            const v::VertexAttr& destination,
+                            GLint row, uint8_t* output) {
+    if (source.integer) return PackIntegerAttribRow(source, row, output);
+    float components[4]{};
+    if (!FetchAttribRow(source, row, components)) return false;
+    std::memcpy(output, components,
+                destination.components * sizeof(float));
+    return true;
+}
+
+// Core draw: resolve the current VAO into typed streams and hand them to the
+// selected backend. `idx` holds raw indices (glDrawElements path); when
 // empty, `first`/`count` describe a glDrawArrays-style range and `base_vertex`
 // is ignored.
 void DrawCommon(GLenum mode, const std::vector<uint32_t>& idx, GLint first,
@@ -251,22 +357,27 @@ void DrawCommon(GLenum mode, const std::vector<uint32_t>& idx, GLint first,
 
     v::VertexStream vstream;
     if (!vertex_slots.empty()) {
-        // Preserve the frontend raw interleaved float VBO as authoritative
-        // source when every per-vertex attribute shares its layout. Complex
-        // GL conversions keep using the resolved float32 compatibility path.
+        // Preserve a representable raw interleaved VBO as authoritative
+        // source when every per-vertex attribute shares its layout. This
+        // covers Minecraft-like float + normalized colour + integer metadata
+        // records without a CPU repack on every draw.
         bool resident = row_base >= 0;
         GLuint resident_buffer = vao.attribs[vertex_slots.front()].buffer;
         GLsizei resident_stride = vao.attribs[vertex_slots.front()].stride;
         auto bit = g_buffers.find(resident_buffer);
         resident = resident && resident_buffer != 0 && resident_stride > 0 &&
                    bit != g_buffers.end() && bit->second.defined;
+        std::vector<v::VertexAttr> native_attrs;
         for (GLuint slot : vertex_slots) {
             const AttribData& a = vao.attribs[slot];
+            v::VertexAttr native;
             resident = resident && a.buffer == resident_buffer &&
-                       a.type == GL_FLOAT && a.normalized == GL_FALSE &&
                        a.stride == resident_stride && a.offset >= 0 &&
-                       (uint64_t)a.offset + (uint64_t)a.size * sizeof(float) <=
+                       NativeVertexAttr(a, slot, &native) &&
+                       (uint64_t)a.offset +
+                           (uint64_t)a.size * AttribTypeSize(a.type) <=
                            (uint64_t)resident_stride;
+            native_attrs.push_back(native);
         }
         const uint64_t start = (uint64_t)std::max(row_base, 0) *
                                (uint64_t)std::max(resident_stride, 0);
@@ -276,14 +387,7 @@ void DrawCommon(GLenum mode, const std::vector<uint32_t>& idx, GLint first,
                    end <= (uint64_t)bit->second.data.size();
 
         if (resident) {
-            for (GLuint slot : vertex_slots) {
-                const AttribData& a = vao.attribs[slot];
-                v::VertexAttr va;
-                va.location = slot;
-                va.components = (uint32_t)a.size;
-                va.offset = (uint32_t)a.offset;
-                vstream.attrs.push_back(va);
-            }
+            vstream.attrs = std::move(native_attrs);
             vstream.stride = (uint32_t)resident_stride;
             vstream.source_data = bit->second.data.data();
             vstream.source_size = bit->second.data.size();
@@ -298,26 +402,29 @@ void DrawCommon(GLenum mode, const std::vector<uint32_t>& idx, GLint first,
                 va.location = slot;
                 va.components = (uint32_t)vao.attribs[slot].size;
                 va.offset = off;
-                off += (uint32_t)vao.attribs[slot].size * 4;
+                va.scalar_type = vao.attribs[slot].integer
+                    ? (IsSignedIntegerAttrib(vao.attribs[slot].type)
+                        ? v::VertexScalarType::Sint32
+                        : v::VertexScalarType::Uint32)
+                    : v::VertexScalarType::Float32;
+                off += va.components * v::VertexScalarBytes(va.scalar_type);
                 vstream.attrs.push_back(va);
             }
             vstream.stride = off;
-            std::vector<float> verts((size_t)v_count * off / 4);
+            vstream.data.resize((size_t)v_count * off);
             for (GLsizei i = 0; i < v_count; ++i) {
-                size_t rec = (size_t)i * off / 4;
+                size_t rec = (size_t)i * off;
                 for (size_t k = 0; k < vertex_slots.size(); ++k) {
                     const AttribData& a = vao.attribs[vertex_slots[k]];
-                    float comps[4];
-                    if (!FetchAttribRow(a, row_base + i, comps)) {
+                    uint8_t* destination = vstream.data.data() + rec +
+                                           vstream.attrs[k].offset;
+                    if (!PackTransientAttribRow(
+                            a, vstream.attrs[k], row_base + i, destination)) {
                         PUSH_ERROR(GL_INVALID_OPERATION);
                         return;
                     }
-                    size_t dst = rec + vstream.attrs[k].offset / 4;
-                    for (uint32_t c = 0; c < (uint32_t)a.size; ++c)
-                        verts[dst + c] = comps[c];
                 }
             }
-            vstream.data = std::move(verts);
         }
     }
 
@@ -332,6 +439,11 @@ void DrawCommon(GLenum mode, const std::vector<uint32_t>& idx, GLint first,
             v::VertexAttr va;
             va.location = slot;
             va.components = (uint32_t)vao.attribs[slot].size;
+            va.scalar_type = vao.attribs[slot].integer
+                ? (IsSignedIntegerAttrib(vao.attribs[slot].type)
+                    ? v::VertexScalarType::Sint32
+                    : v::VertexScalarType::Uint32)
+                : v::VertexScalarType::Float32;
             istream.attrs.push_back(va);
         }
         // Pack one record per instance: instance i reads attribute buffer
@@ -340,26 +452,24 @@ void DrawCommon(GLenum mode, const std::vector<uint32_t>& idx, GLint first,
         uint32_t ioff = 0;
         for (auto& attr : istream.attrs) {
             attr.offset = ioff;
-            ioff += attr.components * 4;
+            ioff += attr.components * v::VertexScalarBytes(attr.scalar_type);
         }
         istream.stride = ioff;
-        std::vector<float> inst((size_t)instance_count * ioff / 4);
+        istream.data.resize((size_t)instance_count * ioff);
         for (GLsizei i = 0; i < instance_count; ++i) {
             GLint src_row = divisor ? (GLint)(i / divisor) : 0;
-            size_t rec = (size_t)i * ioff / 4;
+            size_t rec = (size_t)i * ioff;
             for (size_t k = 0; k < instance_slots.size(); ++k) {
                 const AttribData& a = vao.attribs[instance_slots[k]];
-                float comps[4];
-                if (!FetchAttribRow(a, src_row, comps)) {
+                uint8_t* destination = istream.data.data() + rec +
+                                       istream.attrs[k].offset;
+                if (!PackTransientAttribRow(
+                        a, istream.attrs[k], src_row, destination)) {
                     PUSH_ERROR(GL_INVALID_OPERATION);
                     return;
                 }
-                size_t dst = rec + istream.attrs[k].offset / 4;
-                for (uint32_t c = 0; c < (uint32_t)a.size; ++c)
-                    inst[dst + c] = comps[c];
             }
         }
-        istream.data = std::move(inst);
     }
 
     v::DrawParams dp;
