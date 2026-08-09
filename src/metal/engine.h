@@ -20,6 +20,11 @@ void DestroyProgram(uint64_t program);
 bool Draw(const backend::DrawParams& params);
 void SubmitFlush(bool wait_for_completion);
 void ReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, void* out);
+uint64_t CreateFence();
+void DestroyFence(uint64_t fence);
+backend::SyncWaitResult ClientWaitFence(uint64_t fence, uint64_t timeout_ns);
+bool FenceSignaled(uint64_t fence);
+bool ServerWaitFence(uint64_t fence);
 
 // Resident resource and framebuffer portion of the shared backend contract.
 void UploadTexture(uint64_t gl_id, const backend::TexUpload& img);

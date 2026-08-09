@@ -31,6 +31,9 @@ MGL_IMPL = frozenset({
     "glStencilFunc", "glStencilFuncSeparate", "glStencilMask",
     "glStencilMaskSeparate", "glStencilOp", "glStencilOpSeparate", "glViewport",
     "glGetPointerv", "glClampColor",
+    # GL 3.2 execution sync objects.
+    "glClientWaitSync", "glDeleteSync", "glFenceSync", "glGetSynciv",
+    "glIsSync", "glWaitSync",
     # S2 shaders/programs/uniforms implemented in src/gl/.
     "glAttachShader", "glBindAttribLocation", "glCompileShader", "glCreateProgram",
     "glCreateShader", "glDeleteProgram", "glDeleteShader", "glDetachShader",

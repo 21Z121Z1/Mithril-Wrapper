@@ -151,6 +151,18 @@ void SubmitFlush(bool wait_for_completion) {
     }
 }
 
+uint64_t CreateFence() { DISPATCH_RET(CreateFence, 0); }
+void DestroyFence(uint64_t fence) { DISPATCH_VOID(DestroyFence, fence); }
+SyncWaitResult ClientWaitFence(uint64_t fence, uint64_t timeout_ns) {
+    DISPATCH_RET(ClientWaitFence, SyncWaitResult::Failed, fence, timeout_ns);
+}
+bool FenceSignaled(uint64_t fence) {
+    DISPATCH_RET(FenceSignaled, false, fence);
+}
+bool ServerWaitFence(uint64_t fence) {
+    DISPATCH_RET(ServerWaitFence, false, fence);
+}
+
 void ReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, void* out) {
     switch (SelectedKind()) {
         case Kind::Vulkan:

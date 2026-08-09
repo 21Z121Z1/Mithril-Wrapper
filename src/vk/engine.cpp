@@ -14,6 +14,23 @@ std::unordered_map<std::string, VkPipeline> g_pipelines;
 
 bool IsInitialized() { return g.initialized; }
 
+// The reference Vulkan backend currently waits for its VkFence on every
+// SubmitFlush, so a fence created after that submission is already signaled.
+// Keep this honest compatibility behavior until Vulkan gains frames-in-flight;
+// DirectMetal below is the asynchronous production path.
+uint64_t CreateFence() {
+    static uint64_t next_fence = 1;
+    SubmitFlush();
+    return next_fence++;
+}
+void DestroyFence(uint64_t) {}
+backend::SyncWaitResult ClientWaitFence(uint64_t fence, uint64_t) {
+    return fence ? backend::SyncWaitResult::AlreadySignaled
+                 : backend::SyncWaitResult::Failed;
+}
+bool FenceSignaled(uint64_t fence) { return fence != 0; }
+bool ServerWaitFence(uint64_t fence) { return fence != 0; }
+
 // Vulkan's current compatibility path stages resolved bytes per draw and has
 // no cross-draw resident buffer cache to retire yet.
 void DestroyBuffer(uint64_t) {}

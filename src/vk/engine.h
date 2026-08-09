@@ -36,6 +36,11 @@ void DestroyProgram(uint64_t program);
 void Draw(const DrawParams& params);
 void SubmitFlush();
 void ReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, void* out);
+uint64_t CreateFence();
+void DestroyFence(uint64_t fence);
+backend::SyncWaitResult ClientWaitFence(uint64_t fence, uint64_t timeout_ns);
+bool FenceSignaled(uint64_t fence);
+bool ServerWaitFence(uint64_t fence);
 void CreateRenderbuffer(uint64_t rbo_id, GLenum internalformat,
                         uint32_t width, uint32_t height, uint32_t samples);
 void DestroyRenderbuffer(uint64_t rbo_id);

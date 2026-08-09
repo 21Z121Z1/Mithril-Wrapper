@@ -30,6 +30,15 @@ bool Draw(const DrawParams& params);
 void SubmitFlush(bool wait_for_completion);
 void ReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, void* out);
 
+// Execution fences are backend objects, while GLsync name validation and GL
+// parameter semantics remain in the frontend. Creating a fence orders all GL
+// work issued before it; it does not imply a CPU wait.
+uint64_t CreateFence();
+void DestroyFence(uint64_t fence);
+SyncWaitResult ClientWaitFence(uint64_t fence, uint64_t timeout_ns);
+bool FenceSignaled(uint64_t fence);
+bool ServerWaitFence(uint64_t fence);
+
 void UploadTexture(uint64_t gl_id, const TexUpload& img);
 void DestroyResidentTexture(uint64_t gl_id);
 void DestroyBuffer(uint64_t lifetime_id);

@@ -16,10 +16,14 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstring>
 #include <exception>
 #include <limits>
+#include <memory>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -173,6 +177,13 @@ struct FrameContext {
     NSUInteger readback_row_bytes = 0;
 };
 
+struct CommandCompletion {
+    std::mutex mutex;
+    std::condition_variable condition;
+    bool completed = false;
+    bool success = false;
+};
+
 struct Engine {
     id<MTLDevice> device = nil;
     id<MTLCommandQueue> queue = nil;
@@ -180,6 +191,7 @@ struct Engine {
     id<MTLTexture> color = nil;
     id<MTLTexture> depth_stencil = nil;
     id<MTLCommandBuffer> last_submitted = nil;
+    std::shared_ptr<CommandCompletion> last_completion;
     std::array<FrameContext, kFrameCount> frames;
     NSUInteger next_frame = 0;
     NSUInteger width = kDefaultWidth;
@@ -192,6 +204,8 @@ struct Engine {
     std::unordered_map<std::string, CachedSampler> samplers;
     std::unordered_map<uint64_t, Renderbuffer> renderbuffers;
     std::unordered_map<uint64_t, Framebuffer> framebuffers;
+    std::unordered_map<uint64_t, std::shared_ptr<CommandCompletion>> fences;
+    uint64_t next_fence = 1;
     uint64_t pipeline_clock = 0;
     uint64_t sampler_clock = 0;
     std::vector<PendingDraw> draws;
@@ -1563,6 +1577,27 @@ bool CommandSucceeded(id<MTLCommandBuffer> command) {
     return true;
 }
 
+std::shared_ptr<CommandCompletion> CommitCommandBuffer(
+    id<MTLCommandBuffer> command) {
+    if (!command) return nullptr;
+    auto completion = std::make_shared<CommandCompletion>();
+    [command addCompletedHandler:^(id<MTLCommandBuffer> completed_command) {
+        const bool success =
+            completed_command.status == MTLCommandBufferStatusCompleted;
+        {
+            std::lock_guard<std::mutex> lock(completion->mutex);
+            completion->success = success;
+            completion->completed = true;
+        }
+        completion->condition.notify_all();
+    }];
+    auto& engine = GetEngine();
+    engine.last_submitted = command;
+    engine.last_completion = completion;
+    [command commit];
+    return completion;
+}
+
 bool SubmitInternal(bool wait_for_completion, bool copy_for_readback,
                     FrameContext** submitted_frame) {
     auto& engine = GetEngine();
@@ -1708,9 +1743,8 @@ bool SubmitInternal(bool wait_for_completion, bool copy_for_readback,
         [blit endEncoding];
     }
 
-    [command commit];
+    if (!CommitCommandBuffer(command)) return false;
     frame.command = command;
-    engine.last_submitted = command;
     engine.draws.clear();
     engine.frame_dirty = false;
     engine.has_clear = false;
@@ -1843,8 +1877,7 @@ bool Present() {
              destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
         [blit endEncoding];
         [command presentDrawable:drawable];
-        [command commit];
-        engine.last_submitted = command;
+        if (!CommitCommandBuffer(command)) return false;
         return true;
     }
 }
@@ -2019,6 +2052,78 @@ void SubmitFlush(bool wait_for_completion) {
     @autoreleasepool {
         (void)SubmitInternal(wait_for_completion, false, nullptr);
     }
+}
+
+uint64_t CreateFence() {
+    if (!EnsureInit()) return 0;
+    auto& engine = GetEngine();
+    @autoreleasepool {
+        // A GL fence orders all earlier commands but does not wait for them.
+        // Submit the deferred render batch so the returned fence always names
+        // real queued Metal work. An empty command stream is already complete.
+        if (engine.frame_dirty && !SubmitInternal(false, false, nullptr))
+            return 0;
+    }
+    auto completion = engine.last_completion;
+    if (!completion) {
+        completion = std::make_shared<CommandCompletion>();
+        completion->completed = true;
+        completion->success = true;
+    }
+    uint64_t handle = engine.next_fence++;
+    if (!handle) handle = engine.next_fence++;
+    engine.fences.emplace(handle, std::move(completion));
+    return handle;
+}
+
+void DestroyFence(uint64_t fence) {
+    GetEngine().fences.erase(fence);
+}
+
+backend::SyncWaitResult ClientWaitFence(uint64_t fence, uint64_t timeout_ns) {
+    auto& engine = GetEngine();
+    auto found = engine.fences.find(fence);
+    if (found == engine.fences.end()) return backend::SyncWaitResult::Failed;
+    const auto completion = found->second;
+    std::unique_lock<std::mutex> lock(completion->mutex);
+    if (completion->completed) {
+        return completion->success ? backend::SyncWaitResult::AlreadySignaled
+                                   : backend::SyncWaitResult::Failed;
+    }
+    if (!timeout_ns) return backend::SyncWaitResult::TimeoutExpired;
+
+    if (timeout_ns == std::numeric_limits<uint64_t>::max()) {
+        completion->condition.wait(
+            lock, [&completion] { return completion->completed; });
+    } else {
+        using Duration = std::chrono::nanoseconds;
+        const uint64_t max_count = static_cast<uint64_t>(
+            std::numeric_limits<Duration::rep>::max());
+        const Duration timeout(static_cast<Duration::rep>(
+            std::min(timeout_ns, max_count)));
+        if (!completion->condition.wait_for(
+                lock, timeout, [&completion] { return completion->completed; }))
+            return backend::SyncWaitResult::TimeoutExpired;
+    }
+    return completion->success
+        ? backend::SyncWaitResult::ConditionSatisfied
+        : backend::SyncWaitResult::Failed;
+}
+
+bool FenceSignaled(uint64_t fence) {
+    auto& engine = GetEngine();
+    auto found = engine.fences.find(fence);
+    if (found == engine.fences.end()) return false;
+    std::lock_guard<std::mutex> lock(found->second->mutex);
+    return found->second->completed;
+}
+
+bool ServerWaitFence(uint64_t fence) {
+    // Every context currently owns exactly one Metal command queue. CreateFence
+    // commits earlier work immediately, and later command buffers on that queue
+    // are ordered after it, so a server-side wait needs no CPU stall or extra
+    // Metal command. Cross-context object sharing is not advertised.
+    return GetEngine().fences.find(fence) != GetEngine().fences.end();
 }
 
 void ReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, void* output) {
@@ -2258,8 +2363,7 @@ void BlitFramebuffer(uint64_t src_id, uint64_t dst_id,
          destinationSlice:0 destinationLevel:0
         destinationOrigin:MTLOriginMake(destination_x, destination_y, 0)];
     [blit endEncoding];
-    [command commit];
-    engine.last_submitted = command;
+    (void)CommitCommandBuffer(command);
 }
 
 } // namespace mithril::metal

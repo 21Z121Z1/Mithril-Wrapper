@@ -25,6 +25,16 @@ enum class Topology {
     TriangleFan = 2,
 };
 
+// Result of a client-side wait on a backend execution fence.  The GL layer
+// maps this small semantic set to GL_ALREADY_SIGNALED / GL_CONDITION_SATISFIED
+// / GL_TIMEOUT_EXPIRED / GL_WAIT_FAILED without exposing native handles.
+enum class SyncWaitResult {
+    AlreadySignaled = 0,
+    ConditionSatisfied,
+    TimeoutExpired,
+    Failed,
+};
+
 struct VertexAttr {
     uint32_t location = 0;
     uint32_t components = 0;

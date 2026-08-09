@@ -28,17 +28,8 @@ extern "C" {
     mithril::GlStubCalled("glBindFragDataLocationIndexed");
   }
 
-  GLenum APIENTRY glClientWaitSync(GLsync sync, GLbitfield flags, GLuint64 timeout) {
-    mithril::GlStubCalled("glClientWaitSync");
-    return 0;
-  }
-
   void APIENTRY glDeleteQueries(GLsizei n, const GLuint *ids) {
     mithril::GlStubCalled("glDeleteQueries");
-  }
-
-  void APIENTRY glDeleteSync(GLsync sync) {
-    mithril::GlStubCalled("glDeleteSync");
   }
 
   void APIENTRY glEndConditionalRender(void) {
@@ -51,11 +42,6 @@ extern "C" {
 
   void APIENTRY glEndTransformFeedback(void) {
     mithril::GlStubCalled("glEndTransformFeedback");
-  }
-
-  GLsync APIENTRY glFenceSync(GLenum condition, GLbitfield flags) {
-    mithril::GlStubCalled("glFenceSync");
-    return nullptr;
   }
 
   void APIENTRY glGenQueries(GLsizei n, GLuint *ids) {
@@ -96,21 +82,12 @@ extern "C" {
     mithril::GlStubCalled("glGetQueryiv");
   }
 
-  void APIENTRY glGetSynciv(GLsync sync, GLenum pname, GLsizei count, GLsizei *length, GLint *values) {
-    mithril::GlStubCalled("glGetSynciv");
-  }
-
   void APIENTRY glGetTransformFeedbackVarying(GLuint program, GLuint index, GLsizei bufSize, GLsizei *length, GLsizei *size, GLenum *type, GLchar *name) {
     mithril::GlStubCalled("glGetTransformFeedbackVarying");
   }
 
   GLboolean APIENTRY glIsQuery(GLuint id) {
     mithril::GlStubCalled("glIsQuery");
-    return 0;
-  }
-
-  GLboolean APIENTRY glIsSync(GLsync sync) {
-    mithril::GlStubCalled("glIsSync");
     return 0;
   }
 
@@ -264,10 +241,6 @@ extern "C" {
 
   void APIENTRY glVertexAttribP4uiv(GLuint index, GLenum type, GLboolean normalized, const GLuint *value) {
     mithril::GlStubCalled("glVertexAttribP4uiv");
-  }
-
-  void APIENTRY glWaitSync(GLsync sync, GLbitfield flags, GLuint64 timeout) {
-    mithril::GlStubCalled("glWaitSync");
   }
 
 } // extern "C"

@@ -37,6 +37,7 @@ add_library(mithril SHARED
     src/gl/draw.cpp
     src/gl/stub.cpp
     src/gl/fbo.cpp
+    src/gl/sync.cpp
     src/shader/glsl.cpp
     src/shader/reflect.cpp
     src/shader/registry.cpp
