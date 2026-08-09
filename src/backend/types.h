@@ -159,6 +159,7 @@ enum class TexMipFilter { None = 0, Nearest = 1, Linear = 2 };
 // cannot silently reinterpret the same bytes differently per backend.
 enum class TexelFormat {
     RGBA8Unorm = 0,
+    Depth32Float,
     R8Sint,
     R8Uint,
     R32Sint,

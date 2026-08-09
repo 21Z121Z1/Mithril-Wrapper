@@ -145,6 +145,7 @@ struct Renderbuffer {
     uint32_t height = 0;
     uint32_t samples = 1;
     bool depth_stencil = false;
+    bool has_stencil = false;
 };
 
 struct Framebuffer {
@@ -156,6 +157,7 @@ struct ResolvedTarget {
     std::vector<id<MTLTexture>> colors;
     std::vector<id<MTLTexture>> resolve_colors;
     id<MTLTexture> depth_stencil = nil;
+    bool has_stencil = false;
     NSUInteger width = 0;
     NSUInteger height = 0;
     NSUInteger samples = 1;
@@ -422,6 +424,7 @@ id<MTLSamplerState> GetOrCreateSampler(const backend::TexSamplerInfo& info,
 MTLPixelFormat MetalTexelFormat(backend::TexelFormat format) {
     switch (format) {
         case backend::TexelFormat::RGBA8Unorm: return MTLPixelFormatRGBA8Unorm;
+        case backend::TexelFormat::Depth32Float: return MTLPixelFormatDepth32Float;
         case backend::TexelFormat::R8Sint: return MTLPixelFormatR8Sint;
         case backend::TexelFormat::R8Uint: return MTLPixelFormatR8Uint;
         case backend::TexelFormat::R32Sint: return MTLPixelFormatR32Sint;
@@ -474,6 +477,7 @@ id<MTLTexture> CreateTexture(const backend::TexUpload& image,
     if (backing_buffer) *backing_buffer = nil;
     if (image.is_multisample) {
         if (image.is_buffer || image.is_3d || image.is_cube || image.depth != 1 ||
+            image.format != backend::TexelFormat::RGBA8Unorm ||
             !image.mip.empty() ||
             ![GetEngine().device supportsTextureSampleCount:image.samples])
             return nil;
@@ -490,6 +494,23 @@ id<MTLTexture> CreateTexture(const backend::TexUpload& image,
         id<MTLTexture> texture =
             [GetEngine().device newTextureWithDescriptor:descriptor];
         texture.label = @"Mithril resident GL multisample texture";
+        return texture;
+    }
+    if (image.format == backend::TexelFormat::Depth32Float) {
+        if (image.is_buffer || image.is_3d || image.is_cube || image.depth != 1 ||
+            image.samples != 1 || image.mip.size() != 1)
+            return nil;
+        MTLTextureDescriptor* descriptor = [MTLTextureDescriptor
+            texture2DDescriptorWithPixelFormat:MTLPixelFormatDepth32Float
+                                         width:image.width
+                                        height:image.height
+                                     mipmapped:NO];
+        descriptor.storageMode = MTLStorageModePrivate;
+        descriptor.usage = MTLTextureUsageShaderRead |
+                           MTLTextureUsageRenderTarget;
+        id<MTLTexture> texture =
+            [GetEngine().device newTextureWithDescriptor:descriptor];
+        texture.label = @"Mithril resident GL depth texture";
         return texture;
     }
     if (image.is_buffer) {
@@ -584,7 +605,8 @@ id<MTLTexture> CreateTexture(const backend::TexUpload& image,
 }
 
 bool ResolveAttachment(const backend::FboAttach& attachment,
-                       id<MTLTexture>* texture, bool* is_depth = nullptr) {
+                       id<MTLTexture>* texture, bool* is_depth = nullptr,
+                       bool* has_stencil = nullptr) {
     auto& engine = GetEngine();
     if (attachment.is_texture) {
         auto found = engine.textures.find(attachment.tex_id);
@@ -592,7 +614,9 @@ bool ResolveAttachment(const backend::FboAttach& attachment,
             attachment.layer != 0)
             return false;
         *texture = found->second.texture;
-        if (is_depth) *is_depth = false;
+        if (is_depth)
+            *is_depth = found->second.format == backend::TexelFormat::Depth32Float;
+        if (has_stencil) *has_stencil = false;
         return *texture != nil;
     }
     if (attachment.rbo_id) {
@@ -600,6 +624,7 @@ bool ResolveAttachment(const backend::FboAttach& attachment,
         if (found == engine.renderbuffers.end()) return false;
         *texture = found->second.texture;
         if (is_depth) *is_depth = found->second.depth_stencil;
+        if (has_stencil) *has_stencil = found->second.has_stencil;
         return *texture != nil;
     }
     return false;
@@ -613,6 +638,7 @@ bool ResolveTarget(uint64_t fbo_id, ResolvedTarget* target) {
         target->colors.push_back(engine.color);
         target->resolve_colors.push_back(nil);
         target->depth_stencil = engine.depth_stencil;
+        target->has_stencil = true;
         target->width = engine.width;
         target->height = engine.height;
         return engine.color != nil;
@@ -651,12 +677,14 @@ bool ResolveTarget(uint64_t fbo_id, ResolvedTarget* target) {
     }
     if (found->second.spec.has_depth) {
         bool depth = false;
+        bool has_stencil = false;
         id<MTLTexture> depth_texture = nil;
         if (!ResolveAttachment(found->second.spec.depth,
-                               &depth_texture, &depth) || !depth)
+                               &depth_texture, &depth, &has_stencil) || !depth)
             return false;
         if (!merge_sample_count(depth_texture)) return false;
         target->depth_stencil = depth_texture;
+        target->has_stencil = has_stencil;
     }
     return !target->colors.empty() && target->colors.front() != nil;
 }
@@ -1047,7 +1075,9 @@ PipelineBundle* GetOrCreatePipeline(const backend::DrawParams& params) {
     std::ostringstream target_key;
     target_key << PipelineKey(params) << "|rt:" << target.colors.size() << ':'
                << (target.depth_stencil != nil)
-               << ':' << target.samples;
+               << ':' << (target.depth_stencil
+                    ? target.depth_stencil.pixelFormat : MTLPixelFormatInvalid)
+               << ':' << target.has_stencil << ':' << target.samples;
     if (engine.bound_draw_fbo) {
         auto fbo = engine.framebuffers.find(engine.bound_draw_fbo);
         if (fbo != engine.framebuffers.end())
@@ -1098,9 +1128,9 @@ PipelineBundle* GetOrCreatePipeline(const backend::DrawParams& params) {
     descriptor.vertexDescriptor = vertex_descriptor;
     descriptor.rasterSampleCount = target.samples;
     descriptor.depthAttachmentPixelFormat = target.depth_stencil
-        ? MTLPixelFormatDepth32Float_Stencil8 : MTLPixelFormatInvalid;
-    descriptor.stencilAttachmentPixelFormat = target.depth_stencil
-        ? MTLPixelFormatDepth32Float_Stencil8 : MTLPixelFormatInvalid;
+        ? target.depth_stencil.pixelFormat : MTLPixelFormatInvalid;
+    descriptor.stencilAttachmentPixelFormat = target.has_stencil
+        ? target.depth_stencil.pixelFormat : MTLPixelFormatInvalid;
     const backend::FboSpec* fbo_spec = nullptr;
     if (engine.bound_draw_fbo) {
         auto fbo = engine.framebuffers.find(engine.bound_draw_fbo);
@@ -1143,7 +1173,7 @@ PipelineBundle* GetOrCreatePipeline(const backend::DrawParams& params) {
     depth_descriptor.depthWriteEnabled = target.depth_stencil &&
                                          params.pipeline.depth_test &&
                                          params.pipeline.depth_write;
-    if (target.depth_stencil && params.pipeline.stencil_test) {
+    if (target.has_stencil && params.pipeline.stencil_test) {
         depth_descriptor.frontFaceStencil = MakeStencilDescriptor(
             params.pipeline.stencil_front_func,
             params.pipeline.stencil_front_op_fail,
@@ -1455,13 +1485,13 @@ ClearPipeline* GetOrCreateClearPipeline(
     }
     const bool clear_depth = target.depth_stencil &&
         (encoded_mask & GL_DEPTH_BUFFER_BIT) && clear.depth_write;
-    const bool clear_stencil = target.depth_stencil &&
+    const bool clear_stencil = target.has_stencil &&
         (encoded_mask & GL_STENCIL_BUFFER_BIT) && clear.stencil_write_mask;
     if (!color_output_mask && !clear_depth && !clear_stencil) return nullptr;
 
     std::ostringstream key;
     key << color_output_mask << ':' << ClearColorWriteMask(clear) << ':'
-        << clear_depth << ':' << clear_stencil << ':'
+        << clear_depth << ':' << clear_stencil << ':' << target.has_stencil << ':'
         << clear.stencil_write_mask << ':' << target.samples;
     for (id<MTLTexture> texture : target.colors)
         key << ':' << (texture ? texture.pixelFormat : MTLPixelFormatInvalid);
@@ -1513,7 +1543,8 @@ ClearPipeline* GetOrCreateClearPipeline(
     descriptor.rasterSampleCount = target.samples;
     if (target.depth_stencil) {
         descriptor.depthAttachmentPixelFormat = target.depth_stencil.pixelFormat;
-        descriptor.stencilAttachmentPixelFormat = target.depth_stencil.pixelFormat;
+        descriptor.stencilAttachmentPixelFormat = target.has_stencil
+            ? target.depth_stencil.pixelFormat : MTLPixelFormatInvalid;
     }
     for (NSUInteger i = 0; i < target.colors.size(); ++i) {
         if (!target.colors[i]) continue;
@@ -1841,12 +1872,16 @@ bool SubmitInternal(bool wait_for_completion, bool copy_for_readback,
         const bool load_color_clear = full_clear &&
             (engine.clear.mask & GL_COLOR_BUFFER_BIT) &&
             ClearColorWriteMask(engine.clear) == MTLColorWriteMaskAll;
-        const bool load_depth_clear = full_clear &&
+        const bool load_depth_clear = draw_target.depth_stencil && full_clear &&
             (engine.clear.mask & GL_DEPTH_BUFFER_BIT) && engine.clear.depth_write;
-        const bool load_stencil_clear = full_clear &&
+        const bool load_stencil_clear = draw_target.has_stencil && full_clear &&
             (engine.clear.mask & GL_STENCIL_BUFFER_BIT) &&
             engine.clear.stencil_write_mask == 0xFFFFFFFFu;
         GLbitfield encoded_clear_mask = engine.has_clear ? engine.clear.mask : 0;
+        if (!draw_target.depth_stencil)
+            encoded_clear_mask &= ~GL_DEPTH_BUFFER_BIT;
+        if (!draw_target.has_stencil)
+            encoded_clear_mask &= ~GL_STENCIL_BUFFER_BIT;
         if (load_color_clear) encoded_clear_mask &= ~GL_COLOR_BUFFER_BIT;
         if (load_depth_clear) encoded_clear_mask &= ~GL_DEPTH_BUFFER_BIT;
         if (load_stencil_clear) encoded_clear_mask &= ~GL_STENCIL_BUFFER_BIT;
@@ -1880,12 +1915,14 @@ bool SubmitInternal(bool wait_for_completion, bool copy_for_readback,
             pass.depthAttachment.loadAction = load_depth_clear
                 ? MTLLoadActionClear : MTLLoadActionLoad;
             pass.depthAttachment.clearDepth = engine.clear.depth;
-            pass.stencilAttachment.texture = draw_target.depth_stencil;
-            pass.stencilAttachment.storeAction = MTLStoreActionStore;
-            pass.stencilAttachment.loadAction =
-                load_stencil_clear
-                    ? MTLLoadActionClear : MTLLoadActionLoad;
-            pass.stencilAttachment.clearStencil = engine.clear.stencil;
+            if (draw_target.has_stencil) {
+                pass.stencilAttachment.texture = draw_target.depth_stencil;
+                pass.stencilAttachment.storeAction = MTLStoreActionStore;
+                pass.stencilAttachment.loadAction =
+                    load_stencil_clear
+                        ? MTLLoadActionClear : MTLLoadActionLoad;
+                pass.stencilAttachment.clearStencil = engine.clear.stencil;
+            }
         }
 
         id<MTLRenderCommandEncoder> encoder =
@@ -2102,6 +2139,7 @@ uint32_t MaxColorTextureSamples() {
         if ([engine.device supportsTextureSampleCount:samples]) return samples;
     return 0;
 }
+bool SupportsDepthTextures() { return EnsureInit(); }
 
 bool Clear(const backend::ClearParams& params) {
     auto& engine = GetEngine();
@@ -2515,9 +2553,14 @@ void CreateRenderbuffer(uint64_t renderbuffer_id, GLenum format,
                        format == GL_DEPTH24_STENCIL8 ||
                        format == GL_DEPTH32F_STENCIL8 ||
                        format == GL_DEPTH_STENCIL;
+    const bool has_stencil = format == GL_DEPTH24_STENCIL8 ||
+                             format == GL_DEPTH32F_STENCIL8 ||
+                             format == GL_DEPTH_STENCIL;
     MTLTextureDescriptor* descriptor = [MTLTextureDescriptor
         texture2DDescriptorWithPixelFormat:depth
-            ? MTLPixelFormatDepth32Float_Stencil8 : MTLPixelFormatRGBA8Unorm
+            ? (has_stencil ? MTLPixelFormatDepth32Float_Stencil8
+                           : MTLPixelFormatDepth32Float)
+            : MTLPixelFormatRGBA8Unorm
                                      width:width height:height mipmapped:NO];
     descriptor.storageMode = MTLStorageModePrivate;
     descriptor.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
@@ -2549,6 +2592,7 @@ void CreateRenderbuffer(uint64_t renderbuffer_id, GLenum format,
     renderbuffer.height = height;
     renderbuffer.samples = sample_count;
     renderbuffer.depth_stencil = depth;
+    renderbuffer.has_stencil = has_stencil;
     engine.renderbuffers[renderbuffer_id] = std::move(renderbuffer);
 }
 void DestroyRenderbuffer(uint64_t id) {

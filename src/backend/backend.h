@@ -20,6 +20,7 @@ uint32_t TargetWidth();
 uint32_t TargetHeight();
 uint32_t MaxFramebufferSamples();
 uint32_t MaxColorTextureSamples();
+bool SupportsDepthTextures();
 bool Clear(const ClearParams& params);
 
 uint64_t CreateProgram(const std::vector<uint32_t>& vs,

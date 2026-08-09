@@ -140,6 +140,18 @@ uint32_t MaxColorTextureSamples() {
         default: return 0;
     }
 }
+bool SupportsDepthTextures() {
+    switch (SelectedKind()) {
+        // The Vulkan reference texture path still creates only RGBA8 images.
+        // Reject depth texture storage at the frontend boundary instead of
+        // constructing an image that cannot be attached or sampled correctly.
+        case Kind::Vulkan: return false;
+#if defined(MITHRIL_HAS_DIRECT_METAL)
+        case Kind::DirectMetal: return metal::SupportsDepthTextures();
+#endif
+        default: return false;
+    }
+}
 bool Clear(const ClearParams& params) { DISPATCH_RET(Clear, false, params); }
 uint64_t CreateProgram(const std::vector<uint32_t>& vs, const std::vector<uint32_t>& fs) {
     DISPATCH_RET(CreateProgram, 0, vs, fs);

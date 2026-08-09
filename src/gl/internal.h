@@ -110,6 +110,7 @@ struct TexState {
     uint32_t width = 0, height = 0, depth = 1;  // depth: 3D z / array layers
     uint32_t samples = 1;
     GLenum internal_format = GL_RGBA8;
+    v::TexelFormat image_backend_format = v::TexelFormat::RGBA8Unorm;
     GLboolean fixed_sample_locations = GL_TRUE;
     std::vector<std::vector<uint8_t>> mip;      // [level] slices concatenated
     bool has_image = false;                    // level 0 present
@@ -174,6 +175,7 @@ GLuint TextureBindingForUnit(GLuint unit, GLenum target);
 // Buffer mutations are versioned, so unchanged data never uploads per draw.
 void PrepareTextureForDraw(GLuint texture);
 void DetachBufferTextures(GLuint buffer);
+void NotifyTextureStorageChanged(GLuint texture);
 
 // Texture ids whose CPU mirror changed while the backend was not yet
 // initialized; flushed to the engine at the next draw (see DrawCommon).

@@ -97,6 +97,30 @@ static bool AttachSampleCount(const Attach& attachment, GLsizei* samples) {
     return true;
 }
 
+static bool IsDepthRenderbufferFormat(GLenum format) {
+    return format == GL_DEPTH_COMPONENT || format == GL_DEPTH_COMPONENT16 ||
+           format == GL_DEPTH_COMPONENT24 || format == GL_DEPTH_COMPONENT32F ||
+           format == GL_DEPTH_STENCIL || format == GL_DEPTH24_STENCIL8 ||
+           format == GL_DEPTH32F_STENCIL8;
+}
+
+static bool AttachIsDepth(const Attach& attachment, bool* is_depth) {
+    if (!attachment.present || !is_depth) return false;
+    if (attachment.is_texture) {
+        auto texture = g_textures.find(attachment.tex_id);
+        if (texture == g_textures.end() || !texture->second.has_image)
+            return false;
+        *is_depth = texture->second.image_backend_format ==
+                    v::TexelFormat::Depth32Float;
+        return true;
+    }
+    auto renderbuffer = g_renderbuffers.find(attachment.rbo_id);
+    if (renderbuffer == g_renderbuffers.end() || !renderbuffer->second.defined)
+        return false;
+    *is_depth = IsDepthRenderbufferFormat(renderbuffer->second.internalformat);
+    return true;
+}
+
 // Push the current attachments into the Vulkan engine (idempotent unless the
 // FBO changed); marks `complete` for glCheckFramebufferStatus. A GL FBO must
 // have at least one colour attachment to be renderable (the backend has a
@@ -133,8 +157,10 @@ static void PushVkFramebuffer(GLuint id) {
         if (FillAttach(f->color[i], &ca)) {
             spec.color.push_back(ca);
             GLsizei width = 0, height = 0, samples = 0;
+            bool is_depth = false;
             if (!AttachDimensions(f->color[i], &width, &height) ||
-                !AttachSampleCount(f->color[i], &samples)) {
+                !AttachSampleCount(f->color[i], &samples) ||
+                !AttachIsDepth(f->color[i], &is_depth) || is_depth) {
                 attachments_match = false;
             } else if (!col_ok) {
                 cw = width;
@@ -152,9 +178,11 @@ static void PushVkFramebuffer(GLuint id) {
     }
     if (col_ok && f->has_depth && f->depth.present) {
         GLsizei dw = 0, dh = 0, depth_samples = 0;
+        bool is_depth = false;
         if (AttachDimensions(f->depth, &dw, &dh) && dw == cw && dh == ch &&
             AttachSampleCount(f->depth, &depth_samples) &&
-            depth_samples == framebuffer_samples) {
+            depth_samples == framebuffer_samples &&
+            AttachIsDepth(f->depth, &is_depth) && is_depth) {
             spec.has_depth = true;
             FillAttach(f->depth, &spec.depth);
         } else {
@@ -175,6 +203,22 @@ static void PushVkFramebuffer(GLuint id) {
     f->width = cw;
     f->height = ch;
     f->dirty = false;
+}
+
+void NotifyTextureStorageChanged(GLuint texture) {
+    for (auto& entry : g_framebuffers) {
+        FbState& framebuffer = entry.second;
+        bool references_texture = framebuffer.has_depth &&
+            framebuffer.depth.present && framebuffer.depth.is_texture &&
+            framebuffer.depth.tex_id == texture;
+        for (const Attach& color : framebuffer.color)
+            references_texture = references_texture ||
+                (color.present && color.is_texture && color.tex_id == texture);
+        if (references_texture) framebuffer.dirty = true;
+    }
+    if (g_bound_draw_fbo) PushVkFramebuffer(g_bound_draw_fbo);
+    if (g_bound_read_fbo && g_bound_read_fbo != g_bound_draw_fbo)
+        PushVkFramebuffer(g_bound_read_fbo);
 }
 
 // The framebuffer an attachment call targets (GL_FRAMEBUFFER / DRAW uses the

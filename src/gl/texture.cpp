@@ -364,6 +364,13 @@ bool IsS3TC(GLenum fmt) {
            fmt == GL_COMPRESSED_RGBA_S3TC_DXT5_EXT;
 }
 
+bool IsDepthInternalFormat(GLenum format) {
+    return format == GL_DEPTH_COMPONENT || format == GL_DEPTH_COMPONENT16 ||
+           format == GL_DEPTH_COMPONENT24 || format == GL_DEPTH_COMPONENT32 ||
+           format == GL_DEPTH_COMPONENT32F || format == GL_DEPTH_STENCIL ||
+           format == GL_DEPTH24_STENCIL8 || format == GL_DEPTH32F_STENCIL8;
+}
+
 bool BufferTexelFormat(GLenum internalformat, v::TexelFormat* format,
                        uint32_t* bytes_per_texel) {
     switch (internalformat) {
@@ -455,7 +462,7 @@ void ReUpload(TexState& st, GLuint id) {
     img.is_cube = st.IsCube();
     img.is_buffer = st.has_tex_buffer;
     img.format = st.has_tex_buffer ? st.tex_buffer_backend_format
-                                   : v::TexelFormat::RGBA8Unorm;
+                                   : st.image_backend_format;
     img.content_version = st.content_version;
     if (multisample) {
         v::UploadTexture(id, img);
@@ -725,6 +732,7 @@ void MarkTextureDirty(TexState& st, GLuint id, bool sampler_only = false) {
         // ownership is unchanged by texture sampling-parameter mutations.
         return;
     }
+    NotifyTextureStorageChanged(id);
     ++st.content_version;
     if (!st.has_image ||
         (st.target != GL_TEXTURE_2D_MULTISAMPLE && st.mip.empty())) return;
@@ -1005,7 +1013,6 @@ void APIENTRY glActiveTexture(GLenum texture) {
 void APIENTRY glTexImage2D(GLenum target, GLint level, GLint internalformat,
                            GLsizei width, GLsizei height, GLint border,
                            GLenum format, GLenum type, const void* pixels) {
-    (void)internalformat;   // everything is normalized to RGBA8 in the mirror
     if (border != 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
     if (width < 0 || height < 0 || level < 0) {
         PUSH_ERROR(GL_INVALID_VALUE);
@@ -1019,6 +1026,44 @@ void APIENTRY glTexImage2D(GLenum target, GLint level, GLint internalformat,
     GLuint id = ActiveBound(target);
     if (id == 0) return;
     TexState& st = g_textures[id];
+
+    if (IsDepthInternalFormat((GLenum)internalformat)) {
+        // The first DirectMetal depth-texture slice has one exact, native
+        // representation. Do not silently reinterpret D16/D24, packed
+        // depth/stencil, mip levels, or client payloads as Depth32Float.
+        if (target != GL_TEXTURE_2D || level != 0 ||
+            internalformat != GL_DEPTH_COMPONENT32F ||
+            format != GL_DEPTH_COMPONENT || type != GL_FLOAT || pixels ||
+            !v::SupportsDepthTextures()) {
+            PUSH_ERROR(GL_INVALID_OPERATION);
+            return;
+        }
+        st.width = static_cast<uint32_t>(width);
+        st.height = static_cast<uint32_t>(height);
+        st.depth = 1;
+        st.samples = 1;
+        st.internal_format = GL_DEPTH_COMPONENT32F;
+        st.image_backend_format = v::TexelFormat::Depth32Float;
+        st.fixed_sample_locations = GL_TRUE;
+        st.has_image = width > 0 && height > 0;
+        st.mip.clear();
+        st.comp.clear();
+        st.has_comp = false;
+        st.has_tex_buffer = false;
+        if (!st.has_image) {
+            NotifyTextureStorageChanged(id);
+            ++st.content_version;
+            g_dirty_textures.erase(id);
+            if (v::IsInitialized()) v::DestroyResidentTexture(id);
+            return;
+        }
+        // One placeholder level records definition/versioning. The Metal
+        // backend allocates private depth storage and never uploads these
+        // bytes as authoritative depth contents.
+        st.mip.emplace_back(static_cast<size_t>(width) * height * 4, 0);
+        MarkTextureDirty(st, id);
+        return;
+    }
 
     if (level == 0) {
         if (st.has_image && !face && st.SliceCount() > 1) {
@@ -1035,6 +1080,7 @@ void APIENTRY glTexImage2D(GLenum target, GLint level, GLint internalformat,
         st.depth = target == GL_TEXTURE_1D_ARRAY ? (uint32_t)height : 1;
         st.samples = 1;
         st.internal_format = GL_RGBA8;
+        st.image_backend_format = v::TexelFormat::RGBA8Unorm;
         st.has_image = width > 0 && height > 0;
     }
     if (!st.has_image) return;
@@ -1184,6 +1230,10 @@ void APIENTRY glTexSubImage2D(GLenum target, GLint level, GLint xoffset,
     GLuint id = ActiveBound(target);
     if (!id) return;
     TexState& st = g_textures[id];
+    if (st.image_backend_format == v::TexelFormat::Depth32Float) {
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return;
+    }
     if (!st.has_image || st.mip.size() <= (size_t)level) {
         PUSH_ERROR(GL_INVALID_OPERATION);
         return;
@@ -1220,6 +1270,10 @@ void APIENTRY glTexSubImage3D(GLenum target, GLint level, GLint xoffset,
     GLuint id = ActiveBound(target);
     if (!id) return;
     TexState& st = g_textures[id];
+    if (st.image_backend_format == v::TexelFormat::Depth32Float) {
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return;
+    }
     if (!st.has_image || st.mip.size() <= (size_t)level) {
         PUSH_ERROR(GL_INVALID_OPERATION);
         return;
@@ -1278,6 +1332,10 @@ void APIENTRY glGenerateMipmap(GLenum target) {
     GLuint id = ActiveBound(target);
     if (id == 0) return;
     TexState& st = g_textures[id];
+    if (st.image_backend_format == v::TexelFormat::Depth32Float) {
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return;
+    }
     if (!st.has_image || st.mip.empty()) {
         PUSH_ERROR(GL_INVALID_OPERATION);
         return;
@@ -1311,6 +1369,13 @@ void APIENTRY glGetTexImage(GLenum target, GLint level, GLenum format,
     GLuint id = ActiveBound(target);
     if (!id) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
     TexState& st = g_textures[id];
+    if (st.image_backend_format == v::TexelFormat::Depth32Float) {
+        // Depth contents are authoritative in private GPU storage. Until a
+        // typed backend readback exists, returning the allocation placeholder
+        // would be observably false.
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return;
+    }
     if (!st.has_image || level < 0 || st.mip.size() <= (size_t)level) {
         PUSH_ERROR(GL_INVALID_VALUE);
         return;
@@ -1553,10 +1618,14 @@ void APIENTRY glGetTexLevelParameteriv(GLenum target, GLint level, GLenum pname,
                     : 0;
             break;
         case GL_TEXTURE_RED_TYPE:
+            *params = st.image_backend_format == v::TexelFormat::Depth32Float
+                ? GL_FLOAT : GL_UNSIGNED_NORMALIZED;
+            break;
         case GL_TEXTURE_GREEN_TYPE:
         case GL_TEXTURE_BLUE_TYPE:
         case GL_TEXTURE_ALPHA_TYPE:
-            *params = GL_UNSIGNED_NORMALIZED;
+            *params = st.image_backend_format == v::TexelFormat::Depth32Float
+                ? GL_NONE : GL_UNSIGNED_NORMALIZED;
             break;
         default: PUSH_ERROR(GL_INVALID_ENUM); return;
     }
@@ -1814,8 +1883,12 @@ void CopyFramebufferToTexture(TexState& st, GLint level,
 void APIENTRY glCopyTexImage1D(GLenum target, GLint level,
                                GLenum internalformat, GLint x, GLint y,
                                GLsizei width, GLint border) {
-    (void)target; (void)internalformat;
+    (void)target;
     if (border != 0 || width < 0 || level < 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+    if (IsDepthInternalFormat(internalformat)) {
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return;
+    }
     GLuint id = ActiveBound(target);
     if (!id) return;
     TexState& st = g_textures[id];
@@ -1832,8 +1905,12 @@ void APIENTRY glCopyTexImage1D(GLenum target, GLint level,
 void APIENTRY glCopyTexImage2D(GLenum target, GLint level,
                                GLenum internalformat, GLint x, GLint y,
                                GLsizei width, GLsizei height, GLint border) {
-    (void)internalformat;
     if (border != 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+    if (IsDepthInternalFormat(internalformat)) {
+        // Color readback cannot define truthful depth storage.
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return;
+    }
     bool face = IsCubeFace(target);
     if (target != GL_TEXTURE_2D && !face) { PUSH_ERROR(GL_INVALID_ENUM); return; }
     if (width < 0 || height < 0 || level < 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
@@ -1843,6 +1920,8 @@ void APIENTRY glCopyTexImage2D(GLenum target, GLint level,
     uint32_t slice = face ? CubeFaceIndex(target) : 0;
     if (slice >= st.SliceCount()) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
     if (level == 0) {
+        st.internal_format = GL_RGBA8;
+        st.image_backend_format = v::TexelFormat::RGBA8Unorm;
         if (face) {
             st.width = (uint32_t)width;
             st.height = (uint32_t)height;
@@ -1878,8 +1957,13 @@ void APIENTRY glCopyTexSubImage1D(GLenum target, GLint level, GLint xoffset,
     GLuint id = ActiveBound(target);
     if (!id) return;
     TexState& st = g_textures[id];
+    if (st.image_backend_format == v::TexelFormat::Depth32Float) {
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return;
+    }
     if (!st.has_image || st.mip.size() <= (size_t)level) {
         PUSH_ERROR(GL_INVALID_OPERATION);
+        return;
     }
     CopyFramebufferToTexture(st, level, xoffset, 0, x, y, width, 1);
 }
@@ -1895,6 +1979,10 @@ void APIENTRY glCopyTexSubImage2D(GLenum target, GLint level, GLint xoffset,
     GLuint id = ActiveBound(target);
     if (!id) return;
     TexState& st = g_textures[id];
+    if (st.image_backend_format == v::TexelFormat::Depth32Float) {
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return;
+    }
     if (!st.has_image || st.mip.size() <= (size_t)level) {
         PUSH_ERROR(GL_INVALID_OPERATION);
         return;

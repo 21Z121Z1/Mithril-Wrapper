@@ -34,6 +34,7 @@
 #define GL_STENCIL_BUFFER_BIT 0x00000400
 #define GL_COLOR              0x1800
 #define GL_RGBA               0x1908
+#define GL_DEPTH_COMPONENT    0x1902
 #define GL_UNSIGNED_BYTE      0x1401
 #define GL_DEPTH_TEST         0x0B71
 #define GL_BLEND              0x0BE2
@@ -71,6 +72,9 @@
 #define GL_TEXTURE_SAMPLES     0x9106
 #define GL_TEXTURE_FIXED_SAMPLE_LOCATIONS 0x9107
 #define GL_RGBA8               0x8058
+#define GL_DEPTH_COMPONENT32F  0x8CAC
+#define GL_TEXTURE_INTERNAL_FORMAT 0x1003
+#define GL_TEXTURE_RED_TYPE    0x8C10
 #define GL_NEAREST             0x2600
 #define GL_LINEAR              0x2601
 #define GL_COLOR_ATTACHMENT0   0x8CE0
@@ -221,6 +225,15 @@ static const char* FS_MULTISAMPLE =
     "layout(location=0) out vec4 fragColor;\n"
     "void main() {\n"
     "    fragColor = texelFetch(msColor, ivec2(16, 16), 0);\n"
+    "}\n";
+
+static const char* FS_DEPTH_TEXTURE =
+    "#version 150\n"
+    "uniform sampler2D depthImage;\n"
+    "layout(location=0) out vec4 fragColor;\n"
+    "void main() {\n"
+    "    float d = texelFetch(depthImage, ivec2(16, 16), 0).r;\n"
+    "    fragColor = vec4(d, 0.0, 0.0, 1.0);\n"
     "}\n";
 
 int main(void) {
@@ -1110,6 +1123,107 @@ int main(void) {
 
             deleteFramebuffers(1, &fbo);
             deleteTextures(1, &texture);
+        }
+    }
+
+    /* -- depth texture: native attachment write -> shader read ------------ */
+    {
+        /* The Vulkan reference backend reports this capability marker as 0;
+           this focused vertical slice executes only on DirectMetal. */
+        GLint direct_metal_marker = 0;
+        getIntegerv(GL_MAX_COLOR_TEXTURE_SAMPLES, &direct_metal_marker);
+        if (direct_metal_marker > 0) {
+            GLuint color = 0, depth = 0, fbo = 0;
+            genTextures(1, &color);
+            bindTexture(GL_TEXTURE_2D, color);
+            texImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 32, 32, 0, GL_RGBA,
+                       GL_UNSIGNED_BYTE, 0);
+            genTextures(1, &depth);
+            bindTexture(GL_TEXTURE_2D, depth);
+            texImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT32F, 32, 32, 0,
+                       GL_DEPTH_COMPONENT, GL_FLOAT, 0);
+            GLint depth_format = 0, depth_type = 0;
+            getTexLevelParameteriv(GL_TEXTURE_2D, 0,
+                                   GL_TEXTURE_INTERNAL_FORMAT, &depth_format);
+            getTexLevelParameteriv(GL_TEXTURE_2D, 0,
+                                   GL_TEXTURE_RED_TYPE, &depth_type);
+            CHECK(depth_format == GL_DEPTH_COMPONENT32F &&
+                      depth_type == GL_FLOAT,
+                  "depth texture preserves its Depth32F storage ABI");
+
+            genFramebuffers(1, &fbo);
+            bindFramebuffer(GL_FRAMEBUFFER, fbo);
+            framebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                 GL_TEXTURE_2D, color, 0);
+            framebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                                 GL_TEXTURE_2D, depth, 0);
+            CHECK(checkFramebufferStatus(GL_FRAMEBUFFER) ==
+                      GL_FRAMEBUFFER_COMPLETE,
+                  "color plus Depth32F texture forms a complete Metal FBO");
+
+            framebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                 GL_TEXTURE_2D, depth, 0);
+            CHECK(checkFramebufferStatus(GL_FRAMEBUFFER) !=
+                      GL_FRAMEBUFFER_COMPLETE,
+                  "depth texture is rejected from a color attachment");
+            framebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                 GL_TEXTURE_2D, color, 0);
+            framebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                                 GL_TEXTURE_2D, color, 0);
+            CHECK(checkFramebufferStatus(GL_FRAMEBUFFER) !=
+                      GL_FRAMEBUFFER_COMPLETE,
+                  "color texture is rejected from a depth attachment");
+            framebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                                 GL_TEXTURE_2D, depth, 0);
+            CHECK(checkFramebufferStatus(GL_FRAMEBUFFER) ==
+                      GL_FRAMEBUFFER_COMPLETE,
+                  "restoring typed attachments restores completeness");
+
+            useProgram(prog);
+            viewport(0, 0, 32, 32);
+            enable(GL_DEPTH_TEST);
+            depthFunc(GL_LEQUAL);
+            const float full_screen[3][7] = {
+                {-1, -1, 0.0f, 1, 1, 1, 1},
+                { 3, -1, 0.0f, 1, 1, 1, 1},
+                {-1,  3, 0.0f, 1, 1, 1, 1},
+            };
+            bufferData(GL_ARRAY_BUFFER, (GLsizeiptr)sizeof(full_screen),
+                       full_screen, 0x88E4);
+            clearColor(0, 0, 0, 1);
+            clear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT |
+                  GL_STENCIL_BUFFER_BIT);
+            drawArrays(GL_TRIANGLES, 0, 3);
+
+            /* Binding the default target orders the producing command first.
+               The next draw samples the same resident Metal depth texture. */
+            bindFramebuffer(GL_FRAMEBUFFER, 0);
+            bindTexture(GL_TEXTURE_2D, depth);
+            viewport(0, 0, 512, 512);
+            disable(GL_DEPTH_TEST);
+            GLuint vs_depth = createShader(GL_VERTEX_SHADER);
+            shaderSource(vs_depth, 1, &VS, 0);
+            compileShader(vs_depth);
+            GLuint fs_depth = createShader(GL_FRAGMENT_SHADER);
+            shaderSource(fs_depth, 1, &FS_DEPTH_TEXTURE, 0);
+            compileShader(fs_depth);
+            GLuint program_depth = createProgram();
+            attachShader(program_depth, vs_depth);
+            attachShader(program_depth, fs_depth);
+            linkProgram(program_depth);
+            useProgram(program_depth);
+            clearColor(0, 0, 0, 1);
+            clear(GL_COLOR_BUFFER_BIT);
+            drawArrays(GL_TRIANGLES, 0, 3);
+            finish();
+            readPixels(256, 256, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+            CHECK(px_match(px, 128, 0, 0, 255),
+                  "shader reads GL z=0 as 0.5 from native Metal depth storage "
+                  "(r=%d g=%d b=%d)", px[0], px[1], px[2]);
+
+            deleteFramebuffers(1, &fbo);
+            deleteTextures(1, &color);
+            deleteTextures(1, &depth);
         }
     }
 
