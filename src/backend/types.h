@@ -115,6 +115,19 @@ struct UniformBufferBinding {
 enum class TexFilter { Nearest = 0, Linear = 1 };
 enum class TexMipFilter { None = 0, Nearest = 1, Linear = 2 };
 
+// Pixel representation is part of a texture-buffer binding's ABI. Ordinary
+// image uploads currently normalize to RGBA8Unorm; texel buffers keep their
+// declared scalar/integer type so samplerBuffer/isamplerBuffer/usamplerBuffer
+// cannot silently reinterpret the same bytes differently per backend.
+enum class TexelFormat {
+    RGBA8Unorm = 0,
+    R8Sint,
+    R8Uint,
+    R32Sint,
+    R32Uint,
+    R32Float,
+};
+
 // Fully resolved sampling state. It is captured with each draw because a GL
 // sampler object is bound to a texture unit, not owned by the texture, and the
 // same image may be sampled through different state in one deferred batch.
@@ -173,6 +186,8 @@ struct TexUpload {
     uint32_t depth = 1;
     bool is_3d = false;
     bool is_cube = false;
+    bool is_buffer = false;
+    TexelFormat format = TexelFormat::RGBA8Unorm;
     std::vector<std::vector<uint8_t>> mip;
     uint64_t content_version = 0;
 };

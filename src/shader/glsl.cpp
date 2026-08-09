@@ -151,7 +151,7 @@ bool is_in_comment(const std::string& s, size_t off) {
 // builds the descriptor set layout.
 void assign_sampler_bindings(std::string& source) {
     static const std::regex re(
-        R"((layout\s*\([^)]*\))?\s*uniform\s+(sampler(?:2D|2DArray|3D|Cube|CubeArray|2DRect|1D|1DArray))\s+(\w+)\s*;)");
+        R"((layout\s*\([^)]*\))?\s*uniform\s+((?:[iu]?sampler)(?:2DMSArray|2DArray|CubeArray|2DRect|1DArray|2DMS|2D|3D|Cube|1D|Buffer)(?:Shadow)?)\s+(\w+)\s*;)");
     struct Edit { size_t pos; size_t len; std::string text; };
     std::vector<Edit> edits;
     {

@@ -79,6 +79,7 @@ void APIENTRY glDeleteBuffers(GLsizei n, const GLuint* buffers) {
     for (GLsizei i = 0; i < n; ++i) {
         auto it = g_buffers.find(buffers[i]);
         if (it == g_buffers.end()) continue;
+        DetachBufferTextures(buffers[i]);
         v::DestroyBuffer(it->second.lifetime_id);
         if (g_bound_array_buffer == buffers[i]) g_bound_array_buffer = 0;
         if (g_bound_element_buffer == buffers[i]) g_bound_element_buffer = 0;

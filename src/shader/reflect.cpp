@@ -58,6 +58,73 @@ GLenum GLTypeFor(const spirv_cross::SPIRType& type) {
     }
 }
 
+GLenum SamplerTypeFor(spirv_cross::Compiler& compiler,
+                      const spirv_cross::Resource& resource) {
+    using Base = spirv_cross::SPIRType::BaseType;
+    const auto& type = compiler.get_type(resource.type_id);
+    const Base sampled_base = compiler.get_type(type.image.type).basetype;
+    auto scalar = [&](GLenum floating, GLenum signed_integer,
+                      GLenum unsigned_integer) {
+        if (sampled_base == Base::Int) return signed_integer;
+        if (sampled_base == Base::UInt) return unsigned_integer;
+        return floating;
+    };
+    switch (type.image.dim) {
+        case spv::DimBuffer:
+            return scalar(GL_SAMPLER_BUFFER, GL_INT_SAMPLER_BUFFER,
+                          GL_UNSIGNED_INT_SAMPLER_BUFFER);
+        case spv::Dim1D:
+            if (type.image.arrayed)
+                return type.image.depth
+                    ? GL_SAMPLER_1D_ARRAY_SHADOW
+                    : scalar(GL_SAMPLER_1D_ARRAY, GL_INT_SAMPLER_1D_ARRAY,
+                             GL_UNSIGNED_INT_SAMPLER_1D_ARRAY);
+            return type.image.depth
+                ? GL_SAMPLER_1D_SHADOW
+                : scalar(GL_SAMPLER_1D, GL_INT_SAMPLER_1D,
+                         GL_UNSIGNED_INT_SAMPLER_1D);
+        case spv::Dim2D:
+            if (type.image.ms)
+                return type.image.arrayed
+                    ? scalar(GL_SAMPLER_2D_MULTISAMPLE_ARRAY,
+                             GL_INT_SAMPLER_2D_MULTISAMPLE_ARRAY,
+                             GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE_ARRAY)
+                    : scalar(GL_SAMPLER_2D_MULTISAMPLE,
+                             GL_INT_SAMPLER_2D_MULTISAMPLE,
+                             GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE);
+            if (type.image.arrayed)
+                return type.image.depth
+                    ? GL_SAMPLER_2D_ARRAY_SHADOW
+                    : scalar(GL_SAMPLER_2D_ARRAY, GL_INT_SAMPLER_2D_ARRAY,
+                             GL_UNSIGNED_INT_SAMPLER_2D_ARRAY);
+            return type.image.depth
+                ? GL_SAMPLER_2D_SHADOW
+                : scalar(GL_SAMPLER_2D, GL_INT_SAMPLER_2D,
+                         GL_UNSIGNED_INT_SAMPLER_2D);
+        case spv::Dim3D:
+            return scalar(GL_SAMPLER_3D, GL_INT_SAMPLER_3D,
+                          GL_UNSIGNED_INT_SAMPLER_3D);
+        case spv::DimCube:
+            if (type.image.arrayed)
+                return type.image.depth
+                    ? GL_SAMPLER_CUBE_MAP_ARRAY_SHADOW
+                    : scalar(GL_SAMPLER_CUBE_MAP_ARRAY,
+                             GL_INT_SAMPLER_CUBE_MAP_ARRAY,
+                             GL_UNSIGNED_INT_SAMPLER_CUBE_MAP_ARRAY);
+            return type.image.depth
+                ? GL_SAMPLER_CUBE_SHADOW
+                : scalar(GL_SAMPLER_CUBE, GL_INT_SAMPLER_CUBE,
+                         GL_UNSIGNED_INT_SAMPLER_CUBE);
+        case spv::DimRect:
+            return type.image.depth
+                ? GL_SAMPLER_2D_RECT_SHADOW
+                : scalar(GL_SAMPLER_2D_RECT, GL_INT_SAMPLER_2D_RECT,
+                         GL_UNSIGNED_INT_SAMPLER_2D_RECT);
+        default:
+            return GL_SAMPLER_2D;
+    }
+}
+
 GLint ArraySize(const spirv_cross::SPIRType& type) {
     uint64_t size = 1;
     for (uint32_t dimension : type.array) size *= std::max(dimension, 1u);
@@ -208,6 +275,7 @@ bool ReflectProgram(Program& prog, std::string& error) {
             auto add_sampler = [&](spirv_cross::Resource& resource) {
                 const std::string name = resource.name;
                 if (name.empty()) return;
+                const GLenum sampler_type = SamplerTypeFor(compiler, resource);
                 const uint32_t binding = compiler.get_decoration(
                     resource.id, spv::DecorationBinding);
                 const bool duplicate = std::any_of(
@@ -217,10 +285,10 @@ bool ReflectProgram(Program& prog, std::string& error) {
                     });
                 if (!duplicate)
                     prog.samplers.push_back(
-                        {name, GL_SAMPLER_2D, binding, -1});
+                        {name, sampler_type, binding, -1});
                 Uniform uniform;
                 uniform.name = name;
-                uniform.type = GL_SAMPLER_2D;
+                uniform.type = sampler_type;
                 loose_uniforms.emplace(name, std::move(uniform));
             };
             for (auto& resource : resources.sampled_images) add_sampler(resource);

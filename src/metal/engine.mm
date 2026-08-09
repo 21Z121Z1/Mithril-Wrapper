@@ -98,6 +98,9 @@ struct ResidentBuffer {
 
 struct ResidentTexture {
     id<MTLTexture> texture = nil;
+    // Texture-buffer views share this allocation. Retain it explicitly so
+    // GL name deletion cannot invalidate deferred draws.
+    id<MTLBuffer> backing_buffer = nil;
     uint64_t content_version = 0;
     uint32_t width = 0;
     uint32_t height = 0;
@@ -105,6 +108,8 @@ struct ResidentTexture {
     uint32_t levels = 0;
     bool is_3d = false;
     bool is_cube = false;
+    bool is_buffer = false;
+    backend::TexelFormat format = backend::TexelFormat::RGBA8Unorm;
 };
 
 struct CachedSampler {
@@ -116,6 +121,7 @@ struct BoundTexture {
     NSUInteger slot = 0;
     id<MTLTexture> texture = nil;
     id<MTLSamplerState> sampler = nil;
+    id<MTLBuffer> backing_buffer = nil;
 };
 
 struct BoundUniformBuffer {
@@ -378,16 +384,40 @@ id<MTLSamplerState> GetOrCreateSampler(const backend::TexSamplerInfo& info,
     return sampler;
 }
 
+MTLPixelFormat MetalTexelFormat(backend::TexelFormat format) {
+    switch (format) {
+        case backend::TexelFormat::RGBA8Unorm: return MTLPixelFormatRGBA8Unorm;
+        case backend::TexelFormat::R8Sint: return MTLPixelFormatR8Sint;
+        case backend::TexelFormat::R8Uint: return MTLPixelFormatR8Uint;
+        case backend::TexelFormat::R32Sint: return MTLPixelFormatR32Sint;
+        case backend::TexelFormat::R32Uint: return MTLPixelFormatR32Uint;
+        case backend::TexelFormat::R32Float: return MTLPixelFormatR32Float;
+    }
+    return MTLPixelFormatInvalid;
+}
+
+NSUInteger TexelBytes(backend::TexelFormat format) {
+    switch (format) {
+        case backend::TexelFormat::R8Sint:
+        case backend::TexelFormat::R8Uint:
+            return 1;
+        default:
+            return 4;
+    }
+}
+
 bool TextureShapeMatches(const ResidentTexture& resident,
                          const backend::TexUpload& image) {
     return resident.texture && resident.width == image.width &&
            resident.height == image.height && resident.depth == image.depth &&
            resident.levels == image.mip.size() &&
-           resident.is_3d == image.is_3d && resident.is_cube == image.is_cube;
+           resident.is_3d == image.is_3d && resident.is_cube == image.is_cube &&
+           resident.is_buffer == image.is_buffer && resident.format == image.format;
 }
 
 bool HasCompleteMipChain(const ResidentTexture& texture,
                          const backend::TexSamplerInfo& sampler) {
+    if (texture.is_buffer) return true;
     if (sampler.mip == backend::TexMipFilter::None) return true;
     uint32_t largest = std::max(texture.width, texture.height);
     if (texture.is_3d) largest = std::max(largest, texture.depth);
@@ -399,8 +429,42 @@ bool HasCompleteMipChain(const ResidentTexture& texture,
     return texture.levels >= expected;
 }
 
-id<MTLTexture> CreateTexture(const backend::TexUpload& image) {
+id<MTLTexture> CreateTexture(const backend::TexUpload& image,
+                             id<MTLBuffer>* backing_buffer) {
     if (!image.width || !image.height || image.mip.empty()) return nil;
+    if (backing_buffer) *backing_buffer = nil;
+    if (image.is_buffer) {
+        const MTLPixelFormat pixel_format = MetalTexelFormat(image.format);
+        const NSUInteger row_bytes = static_cast<NSUInteger>(image.width) *
+                                     TexelBytes(image.format);
+        if (pixel_format == MTLPixelFormatInvalid || image.mip.size() != 1 ||
+            image.height != 1 || image.depth != 1 ||
+            image.mip.front().size() != row_bytes)
+            return nil;
+        auto& engine = GetEngine();
+        const NSUInteger alignment = [engine.device
+            minimumLinearTextureAlignmentForPixelFormat:pixel_format];
+        if (!alignment) return nil;
+        const NSUInteger aligned_row =
+            (row_bytes + alignment - 1) / alignment * alignment;
+        id<MTLBuffer> buffer = [engine.device
+            newBufferWithLength:aligned_row options:MTLResourceStorageModeShared];
+        if (!buffer) return nil;
+        std::memcpy(buffer.contents, image.mip.front().data(), row_bytes);
+        buffer.label = @"Mithril GL texture-buffer storage";
+        MTLTextureDescriptor* descriptor = [MTLTextureDescriptor
+            textureBufferDescriptorWithPixelFormat:pixel_format
+                                            width:image.width
+                                  resourceOptions:MTLResourceStorageModeShared
+                                            usage:MTLTextureUsageShaderRead];
+        id<MTLTexture> texture = [buffer newTextureWithDescriptor:descriptor
+                                                           offset:0
+                                                      bytesPerRow:aligned_row];
+        if (!texture) return nil;
+        texture.label = @"Mithril GL texture-buffer view";
+        if (backing_buffer) *backing_buffer = buffer;
+        return texture;
+    }
     if (image.is_3d && image.mip.size() > 1) {
         WarnUnsupported("mipmapped 3D textures");
         return nil;
@@ -670,6 +734,7 @@ bool TranslateStage(const std::vector<uint32_t>& words,
         msl_options.platform = spirv_cross::CompilerMSL::Options::macOS;
 #endif
         msl_options.set_msl_version(2, 3);
+        msl_options.texture_buffer_native = true;
         compiler.set_msl_options(msl_options);
 
         auto common_options = compiler.get_common_options();
@@ -1942,8 +2007,8 @@ bool Draw(const backend::DrawParams& params) {
                          bind.binding);
             return false;
         }
-        pending.textures.push_back(
-            {slot, texture->second.texture, sampler});
+        pending.textures.push_back({slot, texture->second.texture, sampler,
+                                    texture->second.backing_buffer});
     }
     engine.draws.push_back(std::move(pending));
     engine.frame_dirty = true;
@@ -2006,8 +2071,10 @@ void UploadTexture(uint64_t texture_id, const backend::TexUpload& image) {
                                 TextureShapeMatches(existing->second, image);
         const bool needs_texture = !same_shape ||
             existing->second.content_version != image.content_version;
-        id<MTLTexture> texture = needs_texture ? CreateTexture(image)
-            : existing->second.texture;
+        id<MTLBuffer> backing = same_shape
+            ? existing->second.backing_buffer : nil;
+        id<MTLTexture> texture = needs_texture
+            ? CreateTexture(image, &backing) : existing->second.texture;
         if (!texture) {
             ML_LOG_ERROR("metal: failed to make texture %llu resident",
                          (unsigned long long)texture_id);
@@ -2017,6 +2084,7 @@ void UploadTexture(uint64_t texture_id, const backend::TexUpload& image) {
 
         ResidentTexture resident;
         resident.texture = texture;
+        resident.backing_buffer = backing;
         resident.content_version = image.content_version;
         resident.width = image.width;
         resident.height = image.height;
@@ -2024,6 +2092,8 @@ void UploadTexture(uint64_t texture_id, const backend::TexUpload& image) {
         resident.levels = image.mip.size();
         resident.is_3d = image.is_3d;
         resident.is_cube = image.is_cube;
+        resident.is_buffer = image.is_buffer;
+        resident.format = image.format;
         engine.textures[texture_id] = std::move(resident);
     }
 }

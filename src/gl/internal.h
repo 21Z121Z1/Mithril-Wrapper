@@ -91,12 +91,13 @@ extern std::unordered_map<GLuint, uint64_t> g_backend_programs;
 // beyond this only as a no-op.
 constexpr GLuint kMaxTexUnits = v::kMaxTextureUnits;
 
-// CPU-side image of one GL texture object (M4). Pixels are kept as an RGBA8
-// mip chain so TexSubImage/GenerateMipmap can rebuild the upload cheaply.
+// CPU-side image of one GL texture object (M4). Ordinary pixels are kept as
+// an RGBA8 mip chain so TexSubImage/GenerateMipmap can rebuild the upload
+// cheaply. Buffer textures keep their declared typed texel bytes instead.
 // Layered targets concatenate their slices inside each level buffer in the
 // same order backend::TexUpload expects (3D: z; array: layers; cube: 6 faces).
 struct TexState {
-    GLenum target = GL_TEXTURE_2D;       // target bound at creation
+    GLenum target = 0;                   // first non-zero bind fixes the target
     GLenum min_filter = GL_LINEAR;       // sampler state (GL enums)
     GLenum mag_filter = GL_LINEAR;
     GLenum wrap_s = GL_REPEAT, wrap_t = GL_REPEAT, wrap_r = GL_REPEAT;
@@ -116,6 +117,9 @@ struct TexState {
     bool has_tex_buffer = false;
     GLuint tex_buffer = 0;
     GLenum tex_buffer_format = 0;
+    uint32_t tex_buffer_bytes_per_texel = 0;
+    uint64_t tex_buffer_source_version = UINT64_MAX;
+    v::TexelFormat tex_buffer_backend_format = v::TexelFormat::RGBA8Unorm;
 
     bool IsCube() const { return target == GL_TEXTURE_CUBE_MAP; }
     bool Is3D() const { return target == GL_TEXTURE_3D; }
@@ -134,7 +138,10 @@ struct TexState {
 };
 
 extern std::unordered_map<GLuint, TexState> g_textures;
-extern std::array<GLuint, kMaxTexUnits> g_texture_units;  // unit -> texture id
+constexpr size_t kTextureTargetSlots = 7;
+using TextureUnitBindings = std::array<GLuint, kTextureTargetSlots>;
+// GL texture bindings are independent per target within each texture unit.
+extern std::array<TextureUnitBindings, kMaxTexUnits> g_texture_units;
 extern GLuint g_next_texture;
 
 struct SamplerData {
@@ -153,6 +160,16 @@ extern GLuint g_next_sampler;
 
 // Resolve texture parameters vs a sampler-object override at draw time.
 v::TexSamplerInfo ResolveSamplerInfo(GLuint unit, const TexState& texture);
+
+// Resolve the texture target implied by a reflected sampler type, and the
+// object bound to that target in a given unit.
+GLenum TextureTargetForSampler(GLenum sampler_type);
+GLuint TextureBindingForUnit(GLuint unit, GLenum target);
+
+// Lazily refresh a buffer texture from its authoritative GL buffer storage.
+// Buffer mutations are versioned, so unchanged data never uploads per draw.
+void PrepareTextureForDraw(GLuint texture);
+void DetachBufferTextures(GLuint buffer);
 
 // Texture ids whose CPU mirror changed while the backend was not yet
 // initialized; flushed to the engine at the next draw (see DrawCommon).

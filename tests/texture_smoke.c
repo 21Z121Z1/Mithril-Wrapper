@@ -49,6 +49,7 @@
 #define GL_CLAMP_TO_EDGE      0x812F
 #define GL_REPEAT             0x2901
 #define GL_TEXTURE_DEPTH      0x8071
+#define GL_TEXTURE_WIDTH      0x1000
 #define GL_TEXTURE_COMPRESSED 0x86A1
 #define GL_TEXTURE_COMPRESSED_IMAGE_SIZE 0x86A0
 #define GL_COMPRESSED_RGB_S3TC_DXT1_EXT 0x83F0
@@ -458,11 +459,10 @@ int main(void) {
         genTextures(1, &btex);
         bindTexture(GL_TEXTURE_BUFFER, btex);
         texBuffer(GL_TEXTURE_BUFFER, GL_RGBA8, b);
-        unsigned char back[4 * 4];
-        getTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, back);
-        CHECK(px_match(back, 255, 0, 0, 255),
-              "glTexBuffer mirror uploads the buffer texels (r=%d g=%d b=%d)",
-              back[0], back[1], back[2]);
+        GLint texel_count = 0;
+        getLevelParam(GL_TEXTURE_BUFFER, 0, GL_TEXTURE_WIDTH, &texel_count);
+        CHECK(texel_count == 4,
+              "glTexBuffer exposes four RGBA8 texels (got %d)", texel_count);
         bindTexture(GL_TEXTURE_BUFFER, 0);
     }
 

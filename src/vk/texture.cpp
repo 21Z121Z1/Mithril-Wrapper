@@ -284,6 +284,11 @@ void DestroyTexObj(TexObj& t) {
 
 void UploadTexture(uint64_t gl_id, const TexUpload& img) {
     if (!g.initialized || img.mip.empty()) return;
+    if (img.is_buffer) {
+        ML_LOG_ERROR("vk: texture-buffer views are not supported by the "
+                     "reference backend yet");
+        return;
+    }
 
     // Replace any previous resident image for this id.
     if (!g.frame_draws.empty()) SubmitFlush();

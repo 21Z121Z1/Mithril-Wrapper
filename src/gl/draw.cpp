@@ -439,8 +439,10 @@ void DrawCommon(GLenum mode, const std::vector<uint32_t>& idx, GLint first,
         if (uit != prog->uniform_by_location.end() &&
             !prog->uniforms[uit->second].value.empty())
             unit = (GLint)prog->uniforms[uit->second].value[0];
-        GLuint tex =
-            (unit >= 0 && (GLuint)unit < kMaxTexUnits) ? g_texture_units[unit] : 0;
+        const GLenum target = TextureTargetForSampler(smp.type);
+        GLuint tex = unit >= 0
+            ? TextureBindingForUnit(static_cast<GLuint>(unit), target) : 0;
+        if (tex) PrepareTextureForDraw(tex);
         const auto texture = g_textures.find(tex);
         const TexState default_texture;
         const TexState& texture_state = texture == g_textures.end()

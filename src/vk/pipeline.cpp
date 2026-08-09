@@ -351,13 +351,27 @@ uint64_t CreateProgram(const std::vector<uint32_t>& vs,
             }
             return false;
         };
+        auto has_buffer_sampler = [](const std::vector<uint32_t>& words) {
+            spirv_cross::Compiler compiler(words.data(), words.size());
+            for (const auto& sampled :
+                 compiler.get_shader_resources().sampled_images)
+                if (compiler.get_type(sampled.type_id).image.dim ==
+                    spv::DimBuffer)
+                    return true;
+            return false;
+        };
         if (has_user_uniform_block(vs) || has_user_uniform_block(fs)) {
             ML_LOG_ERROR("vk: explicit GL uniform blocks are not supported by "
                          "the reference backend yet");
             return 0;
         }
+        if (has_buffer_sampler(vs) || has_buffer_sampler(fs)) {
+            ML_LOG_ERROR("vk: texture-buffer samplers are not supported by "
+                         "the reference backend yet");
+            return 0;
+        }
     } catch (const std::exception& error) {
-        ML_LOG_ERROR("vk: uniform-block reflection failed: %s", error.what());
+        ML_LOG_ERROR("vk: program resource reflection failed: %s", error.what());
         return 0;
     }
 
