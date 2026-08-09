@@ -94,6 +94,10 @@ struct Program {
     std::unordered_map<GLint, size_t> uniform_by_location;     // location -> uniforms idx
     std::unordered_map<std::string, GLuint> active_uniform_by_name;
     std::unordered_map<std::string, GLint> attrib_locations;   // name -> location
+    std::unordered_map<std::string, GLuint> requested_attrib_locations;
+    std::unordered_map<std::string, GLint> frag_data_locations;
+    std::unordered_map<std::string, GLint> frag_data_indices;
+    std::unordered_map<std::string, GLuint> requested_frag_data_locations;
     std::vector<SamplerRef> samplers;      // M4: active sampler uniforms
     std::vector<UniformBlock> uniform_blocks;
     std::unordered_map<std::string, GLuint> uniform_block_by_name;
@@ -111,6 +115,14 @@ bool CompileStage(GLenum stage, const std::string& source,
 // Returns false rather than exposing a program whose native resource views
 // would disagree.
 bool ReflectProgram(Program& prog, std::string& error);
+
+// Apply pre-link GL attribute/fragment-output bindings to the shared SPIR-V
+// Location decorations. Explicit layout(location=) declarations retain
+// precedence; unbound active interfaces are moved away from collisions.
+bool ApplyStageLocationBindings(
+    std::vector<uint32_t>& spirv, GLenum stage, const std::string& source,
+    const std::unordered_map<std::string, GLuint>& requested,
+    uint32_t max_locations, std::string& error);
 
 // Parse only source-level uniform-block names and optional layout(binding=N)
 // values. GLSL compilation uses a separate backend-neutral internal namespace.

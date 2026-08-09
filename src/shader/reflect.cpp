@@ -12,8 +12,10 @@
 #include <util/log.h>
 
 #include <algorithm>
+#include <regex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace mithril::shader {
@@ -155,12 +157,220 @@ Uniform ReflectMember(spirv_cross::Compiler& compiler,
 
 } // namespace
 
+namespace {
+
+std::string WithoutComments(const std::string& source) {
+    std::string output = source;
+    bool line = false;
+    bool block = false;
+    for (size_t i = 0; i < output.size(); ++i) {
+        if (line) {
+            if (output[i] == '\n') line = false;
+            else output[i] = ' ';
+        } else if (block) {
+            if (i + 1 < output.size() && output[i] == '*' &&
+                output[i + 1] == '/') {
+                output[i] = output[i + 1] = ' ';
+                block = false;
+                ++i;
+            } else if (output[i] != '\n') {
+                output[i] = ' ';
+            }
+        } else if (i + 1 < output.size() && output[i] == '/' &&
+                   output[i + 1] == '/') {
+            output[i] = output[i + 1] = ' ';
+            line = true;
+            ++i;
+        } else if (i + 1 < output.size() && output[i] == '/' &&
+                   output[i + 1] == '*') {
+            output[i] = output[i + 1] = ' ';
+            block = true;
+            ++i;
+        }
+    }
+    return output;
+}
+
+std::unordered_set<std::string> ExplicitLocationNames(
+    const std::string& source, const char* storage) {
+    const std::string clean = WithoutComments(source);
+    static const std::regex location(
+        R"(\blayout\s*\([^)]*\blocation\s*=\s*[0-9]+[^)]*\))",
+        std::regex::optimize);
+    static const std::regex identifier(
+        R"([A-Za-z_]\w*)", std::regex::optimize);
+    const std::regex storage_word(
+        "\\b" + std::string(storage) + "\\b", std::regex::optimize);
+    std::unordered_set<std::string> names;
+    size_t begin = 0;
+    while (begin < clean.size()) {
+        const size_t semicolon = clean.find(';', begin);
+        const std::string statement = clean.substr(
+            begin, semicolon == std::string::npos ? std::string::npos
+                                                   : semicolon - begin);
+        if (std::regex_search(statement, location) &&
+            std::regex_search(statement, storage_word)) {
+            for (std::sregex_iterator it(statement.begin(), statement.end(),
+                                         identifier), end;
+                 it != end; ++it)
+                names.insert(it->str());
+        }
+        if (semicolon == std::string::npos) break;
+        begin = semicolon + 1;
+    }
+    return names;
+}
+
+uint32_t InterfaceLocationSpan(const spirv_cross::SPIRType& type) {
+    uint64_t span = std::max<uint32_t>(type.columns, 1);
+    for (uint32_t dimension : type.array)
+        span *= std::max<uint32_t>(dimension, 1);
+    return span > UINT32_MAX ? UINT32_MAX : static_cast<uint32_t>(span);
+}
+
+bool RewriteLocation(std::vector<uint32_t>& words, uint32_t id,
+                     uint32_t location) {
+    for (size_t cursor = 5; cursor < words.size();) {
+        const uint32_t header = words[cursor];
+        const uint16_t count = static_cast<uint16_t>(header >> 16);
+        const uint16_t opcode = static_cast<uint16_t>(header & 0xffffu);
+        if (!count || cursor + count > words.size()) return false;
+        if (opcode == spv::OpDecorate && count >= 4 &&
+            words[cursor + 1] == id &&
+            words[cursor + 2] == spv::DecorationLocation) {
+            words[cursor + 3] = location;
+            return true;
+        }
+        cursor += count;
+    }
+    return false;
+}
+
+} // namespace
+
+bool ApplyStageLocationBindings(
+    std::vector<uint32_t>& words, GLenum stage, const std::string& source,
+    const std::unordered_map<std::string, GLuint>& requested,
+    uint32_t max_locations, std::string& error) {
+    if (words.empty() || !max_locations ||
+        (stage != GL_VERTEX_SHADER && stage != GL_FRAGMENT_SHADER)) {
+        error = "invalid shader stage for interface-location binding";
+        return false;
+    }
+    try {
+        spirv_cross::Compiler compiler(words);
+        const auto resources = compiler.get_shader_resources();
+        const auto& interface = stage == GL_VERTEX_SHADER
+            ? resources.stage_inputs : resources.stage_outputs;
+        const auto explicit_names = ExplicitLocationNames(
+            source, stage == GL_VERTEX_SHADER ? "in" : "out");
+        struct Interface {
+            uint32_t id = 0;
+            std::string name;
+            uint32_t current = 0;
+            uint32_t desired = 0;
+            uint32_t span = 1;
+            bool explicit_location = false;
+            bool requested_location = false;
+        };
+        std::vector<Interface> entries;
+        entries.reserve(interface.size());
+        for (const auto& resource : interface) {
+            if (resource.name.empty()) continue;
+            if (stage == GL_FRAGMENT_SHADER &&
+                compiler.has_decoration(resource.id, spv::DecorationIndex) &&
+                compiler.get_decoration(resource.id, spv::DecorationIndex) != 0) {
+                error = "dual-source fragment outputs are not supported: " +
+                        resource.name;
+                return false;
+            }
+            Interface entry;
+            entry.id = resource.id;
+            entry.name = resource.name;
+            entry.current = compiler.get_decoration(
+                resource.id, spv::DecorationLocation);
+            entry.desired = entry.current;
+            entry.span = InterfaceLocationSpan(
+                compiler.get_type(resource.type_id));
+            entry.explicit_location = explicit_names.count(entry.name) != 0;
+            auto binding = requested.find(entry.name);
+            entry.requested_location = !entry.explicit_location &&
+                                       binding != requested.end();
+            if (entry.requested_location) entry.desired = binding->second;
+            entries.push_back(std::move(entry));
+        }
+
+        std::vector<int> occupied(max_locations, -1);
+        auto reserve = [&](size_t index, uint32_t location) {
+            const uint32_t span = entries[index].span;
+            if (!span || location >= max_locations ||
+                span > max_locations - location)
+                return false;
+            for (uint32_t slot = location; slot < location + span; ++slot)
+                if (occupied[slot] >= 0) return false;
+            for (uint32_t slot = location; slot < location + span; ++slot)
+                occupied[slot] = static_cast<int>(index);
+            entries[index].desired = location;
+            return true;
+        };
+
+        for (size_t i = 0; i < entries.size(); ++i) {
+            if (!entries[i].explicit_location) continue;
+            if (!reserve(i, entries[i].current)) {
+                error = "conflicting explicit location for shader interface " +
+                        entries[i].name;
+                return false;
+            }
+        }
+        for (size_t i = 0; i < entries.size(); ++i) {
+            if (!entries[i].requested_location) continue;
+            if (!reserve(i, entries[i].desired)) {
+                error = "conflicting requested location for shader interface " +
+                        entries[i].name;
+                return false;
+            }
+        }
+        for (size_t i = 0; i < entries.size(); ++i) {
+            if (entries[i].explicit_location || entries[i].requested_location)
+                continue;
+            if (reserve(i, entries[i].current)) continue;
+            bool assigned = false;
+            for (uint32_t location = 0; location < max_locations; ++location) {
+                if (reserve(i, location)) {
+                    assigned = true;
+                    break;
+                }
+            }
+            if (!assigned) {
+                error = "no free location for shader interface " +
+                        entries[i].name;
+                return false;
+            }
+        }
+        for (const auto& entry : entries) {
+            if (entry.desired == entry.current) continue;
+            if (!RewriteLocation(words, entry.id, entry.desired)) {
+                error = "SPIR-V interface has no mutable Location decoration: " +
+                        entry.name;
+                return false;
+            }
+        }
+        return true;
+    } catch (const std::exception& exception) {
+        error = std::string("SPIR-V interface remap failed: ") +
+                exception.what();
+        return false;
+    }
+}
+
 bool ReflectProgram(Program& prog, std::string& error) {
     prog.uniforms.clear();
     prog.uniform_by_name.clear();
     prog.uniform_by_location.clear();
     prog.active_uniform_by_name.clear();
     prog.attrib_locations.clear();
+    prog.frag_data_locations.clear();
+    prog.frag_data_indices.clear();
     prog.samplers.clear();
     prog.uniform_blocks.clear();
     prog.uniform_block_by_name.clear();
@@ -300,6 +510,17 @@ bool ReflectProgram(Program& prog, std::string& error) {
                 const int location = static_cast<int>(compiler.get_decoration(
                     resource.id, spv::DecorationLocation));
                 prog.attrib_locations[resource.name] = location;
+            }
+            for (auto& resource : resources.stage_outputs) {
+                if (vertex_stage || resource.name.empty()) continue;
+                const int location = static_cast<int>(compiler.get_decoration(
+                    resource.id, spv::DecorationLocation));
+                prog.frag_data_locations[resource.name] = location;
+                prog.frag_data_indices[resource.name] =
+                    compiler.has_decoration(resource.id, spv::DecorationIndex)
+                    ? static_cast<int>(compiler.get_decoration(
+                          resource.id, spv::DecorationIndex))
+                    : 0;
             }
         } catch (const std::exception& exception) {
             ML_LOG_WARN("SPIRV-Cross reflection failed: %s", exception.what());

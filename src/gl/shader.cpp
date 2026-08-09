@@ -154,10 +154,38 @@ void APIENTRY glDetachShader(GLuint program, GLuint shader) {
 }
 
 void APIENTRY glBindAttribLocation(GLuint program, GLuint index, const GLchar* name) {
-    (void)index; (void)name;
-    // Recorded attribute bindings feed vertex SPIR-V re-translation in M3
-    // (vertex input); accepted without error here so startup shaders pass.
-    if (!sh::GetProgram(program)) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+    auto* p = sh::GetProgram(program);
+    if (!p) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
+    if (index >= kMaxAttribs || !name) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+    if (std::strncmp(name, "gl_", 3) == 0) {
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return;
+    }
+    p->requested_attrib_locations[name] = index;
+}
+
+void APIENTRY glBindFragDataLocation(GLuint program, GLuint color,
+                                     const GLchar* name) {
+    auto* p = sh::GetProgram(program);
+    if (!p) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
+    if (color >= 8 || !name) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+    if (std::strncmp(name, "gl_", 3) == 0) {
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return;
+    }
+    p->requested_frag_data_locations[name] = color;
+}
+
+void APIENTRY glBindFragDataLocationIndexed(GLuint program, GLuint color,
+                                            GLuint index,
+                                            const GLchar* name) {
+    if (index != 0) {
+        // Dual-source fragment outputs require matching Metal blend-factor and
+        // pipeline support. Reject them until that path is implemented.
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return;
+    }
+    glBindFragDataLocation(program, color, name);
 }
 
 void APIENTRY glLinkProgram(GLuint program) {
@@ -169,6 +197,7 @@ void APIENTRY glLinkProgram(GLuint program) {
     p->linked = false;
     p->info_log.clear();
     bool have_vs = false, have_fs = false;
+    std::string vertex_source, fragment_source;
     std::unordered_map<std::string, sh::UniformBlockDeclaration>
         block_declarations;
     for (GLuint sid : p->attached) {
@@ -180,8 +209,15 @@ void APIENTRY glLinkProgram(GLuint program) {
             ML_LOG_WARN("glLinkProgram(%u): %s", program, p->info_log.c_str());
             return;
         }
-        if (s->type == GL_VERTEX_SHADER) { p->vertex_spirv = s->spirv; have_vs = true; }
-        else if (s->type == GL_FRAGMENT_SHADER) { p->fragment_spirv = s->spirv; have_fs = true; }
+        if (s->type == GL_VERTEX_SHADER) {
+            p->vertex_spirv = s->spirv;
+            vertex_source = s->source;
+            have_vs = true;
+        } else if (s->type == GL_FRAGMENT_SHADER) {
+            p->fragment_spirv = s->spirv;
+            fragment_source = s->source;
+            have_fs = true;
+        }
         for (const auto& declaration : sh::DiscoverUniformBlocks(s->source)) {
             if (declaration.has_explicit_binding &&
                 declaration.binding >= kMaxUniformBufferBindings) {
@@ -219,6 +255,16 @@ void APIENTRY glLinkProgram(GLuint program) {
     }
 
     std::string reflection_error;
+    if (!sh::ApplyStageLocationBindings(
+            p->vertex_spirv, GL_VERTEX_SHADER, vertex_source,
+            p->requested_attrib_locations, kMaxAttribs, reflection_error) ||
+        !sh::ApplyStageLocationBindings(
+            p->fragment_spirv, GL_FRAGMENT_SHADER, fragment_source,
+            p->requested_frag_data_locations, 8, reflection_error)) {
+        p->info_log = "link failed: " + reflection_error;
+        ML_LOG_WARN("glLinkProgram(%u): %s", program, p->info_log.c_str());
+        return;
+    }
     if (!sh::ReflectProgram(*p, reflection_error)) {
         p->info_log = "link failed: " + reflection_error;
         ML_LOG_WARN("glLinkProgram(%u): %s", program, p->info_log.c_str());
@@ -334,6 +380,22 @@ GLint APIENTRY glGetAttribLocation(GLuint program, const GLchar* name) {
     if (!p->linked || !name) return -1;
     auto it = p->attrib_locations.find(name);
     return it == p->attrib_locations.end() ? -1 : it->second;
+}
+
+GLint APIENTRY glGetFragDataLocation(GLuint program, const GLchar* name) {
+    auto* p = sh::GetProgram(program);
+    if (!p) { PUSH_ERROR(GL_INVALID_OPERATION); return -1; }
+    if (!p->linked || !name) return -1;
+    auto it = p->frag_data_locations.find(name);
+    return it == p->frag_data_locations.end() ? -1 : it->second;
+}
+
+GLint APIENTRY glGetFragDataIndex(GLuint program, const GLchar* name) {
+    auto* p = sh::GetProgram(program);
+    if (!p) { PUSH_ERROR(GL_INVALID_OPERATION); return -1; }
+    if (!p->linked || !name) return -1;
+    auto it = p->frag_data_indices.find(name);
+    return it == p->frag_data_indices.end() ? -1 : it->second;
 }
 
 void APIENTRY glGetActiveUniform(GLuint program, GLuint index, GLsizei bufSize,

@@ -16,30 +16,12 @@ extern "C" {
     mithril::GlStubCalled("glBeginTransformFeedback");
   }
 
-  void APIENTRY glBindFragDataLocation(GLuint program, GLuint color, const GLchar *name) {
-    mithril::GlStubCalled("glBindFragDataLocation");
-  }
-
-  void APIENTRY glBindFragDataLocationIndexed(GLuint program, GLuint colorNumber, GLuint index, const GLchar *name) {
-    mithril::GlStubCalled("glBindFragDataLocationIndexed");
-  }
-
   void APIENTRY glEndConditionalRender(void) {
     mithril::GlStubCalled("glEndConditionalRender");
   }
 
   void APIENTRY glEndTransformFeedback(void) {
     mithril::GlStubCalled("glEndTransformFeedback");
-  }
-
-  GLint APIENTRY glGetFragDataIndex(GLuint program, const GLchar *name) {
-    mithril::GlStubCalled("glGetFragDataIndex");
-    return 0;
-  }
-
-  GLint APIENTRY glGetFragDataLocation(GLuint program, const GLchar *name) {
-    mithril::GlStubCalled("glGetFragDataLocation");
-    return 0;
   }
 
   void APIENTRY glGetMultisamplefv(GLenum pname, GLuint index, GLfloat *val) {

@@ -74,6 +74,8 @@
 #define GL_DEPTH_STENCIL       0x84F9
 #define GL_DEPTH_ATTACHMENT    0x8D00
 #define GL_STENCIL_ATTACHMENT  0x8D20
+#define GL_MAX_DRAW_BUFFERS     0x8824
+#define GL_MAX_DUAL_SOURCE_DRAW_BUFFERS 0x88FC
 
 typedef unsigned int GLuint;
 typedef unsigned int GLenum;
@@ -106,6 +108,13 @@ typedef void (*fn_glShaderSource)(GLuint, GLsizei, const char* const*, const GLi
 typedef void (*fn_glCompileShader)(GLuint);
 typedef GLuint (*fn_glCreateProgram)(void);
 typedef void (*fn_glAttachShader)(GLuint, GLuint);
+typedef void (*fn_glBindAttribLocation)(GLuint, GLuint, const char*);
+typedef GLint (*fn_glGetAttribLocation)(GLuint, const char*);
+typedef void (*fn_glBindFragDataLocation)(GLuint, GLuint, const char*);
+typedef void (*fn_glBindFragDataLocationIndexed)(GLuint, GLuint, GLuint,
+                                                  const char*);
+typedef GLint (*fn_glGetFragDataLocation)(GLuint, const char*);
+typedef GLint (*fn_glGetFragDataIndex)(GLuint, const char*);
 typedef void (*fn_glLinkProgram)(GLuint);
 typedef void (*fn_glUseProgram)(GLuint);
 typedef GLint (*fn_glGetUniformLocation)(GLuint, const char*);
@@ -173,14 +182,26 @@ static const char* FS =
     "    fragColor = vColor;\n"
     "}\n";
 
+/* Declaration order deliberately disagrees with the requested vertex slots.
+ * A pre-link binding must map pos to slot 0 and col to slot 1. */
+static const char* VS_BOUND =
+    "#version 150\n"
+    "in vec4 col;\n"
+    "in vec3 pos;\n"
+    "out vec4 vColor;\n"
+    "void main() {\n"
+    "    vColor = col;\n"
+    "    gl_Position = vec4(pos, 1.0);\n"
+    "}\n";
+
 /* S5-MRT: writes the input color to colour attachment 0 and a fixed green
  * to attachment 1. Both outputs come from a uniforms-free constant path so
  * the fixed-function MRT plumbing is what's exercised. */
 static const char* FS_MRT =
     "#version 150\n"
     "in vec4 vColor;\n"
-    "layout(location=0) out vec4 fragColor0;\n"
-    "layout(location=1) out vec4 fragColor1;\n"
+    "out vec4 fragColor1;\n"
+    "out vec4 fragColor0;\n"
     "void main() {\n"
     "    fragColor0 = vColor;\n"
     "    fragColor1 = vec4(0.0, 1.0, 0.0, 1.0);\n"
@@ -212,6 +233,19 @@ int main(void) {
     fn_glCompileShader compileShader = (fn_glCompileShader)dlsym(h, "glCompileShader");
     fn_glCreateProgram createProgram = (fn_glCreateProgram)dlsym(h, "glCreateProgram");
     fn_glAttachShader attachShader = (fn_glAttachShader)dlsym(h, "glAttachShader");
+    fn_glBindAttribLocation bindAttribLocation =
+        (fn_glBindAttribLocation)dlsym(h, "glBindAttribLocation");
+    fn_glGetAttribLocation getAttribLocation =
+        (fn_glGetAttribLocation)dlsym(h, "glGetAttribLocation");
+    fn_glBindFragDataLocation bindFragDataLocation =
+        (fn_glBindFragDataLocation)dlsym(h, "glBindFragDataLocation");
+    fn_glBindFragDataLocationIndexed bindFragDataLocationIndexed =
+        (fn_glBindFragDataLocationIndexed)dlsym(
+            h, "glBindFragDataLocationIndexed");
+    fn_glGetFragDataLocation getFragDataLocation =
+        (fn_glGetFragDataLocation)dlsym(h, "glGetFragDataLocation");
+    fn_glGetFragDataIndex getFragDataIndex =
+        (fn_glGetFragDataIndex)dlsym(h, "glGetFragDataIndex");
     fn_glLinkProgram linkProgram = (fn_glLinkProgram)dlsym(h, "glLinkProgram");
     fn_glUseProgram useProgram = (fn_glUseProgram)dlsym(h, "glUseProgram");
     fn_glGetUniformLocation getUniformLoc = (fn_glGetUniformLocation)dlsym(h, "glGetUniformLocation");
@@ -252,7 +286,9 @@ int main(void) {
           cullFace && frontFace && stencilFunc && stencilOp && stencilMask &&
           colorMask && polygonMode &&
           createShader && shaderSource && compileShader && createProgram &&
-          attachShader && linkProgram && useProgram && getUniformLoc &&
+          attachShader && bindAttribLocation && getAttribLocation &&
+          bindFragDataLocation && bindFragDataLocationIndexed &&
+          getFragDataLocation && getFragDataIndex && linkProgram && useProgram && getUniformLoc &&
           uniform4f && genVertexArrays && bindVertexArray && genBuffers &&
           bindBuffer && bufferData && enableAttrib && vertexAttribPtr &&
           drawArrays && finish && readPixels &&
@@ -274,7 +310,12 @@ int main(void) {
     GLuint prog = createProgram();
     attachShader(prog, vs);
     attachShader(prog, fs);
+    bindAttribLocation(prog, 5, "pos");
+    bindFragDataLocation(prog, 1, "fragColor");
     linkProgram(prog);
+    CHECK(getAttribLocation(prog, "pos") == 0 &&
+              getFragDataLocation(prog, "fragColor") == 0,
+          "explicit layout(location=) overrides pre-link API bindings");
     useProgram(prog);
 
     /* -- vertex setup ------------------------------------------- */
@@ -831,13 +872,30 @@ int main(void) {
               "MRT FBO with two colour textures is complete");
 
         /* Swap in the MRT fragment shader (re-link a fresh program). */
+        GLuint vs2 = createShader(GL_VERTEX_SHADER);
+        shaderSource(vs2, 1, &VS_BOUND, 0);
+        compileShader(vs2);
         GLuint fs2 = createShader(GL_FRAGMENT_SHADER);
         shaderSource(fs2, 1, &FS_MRT, 0);
         compileShader(fs2);
         GLuint prog2 = createProgram();
-        attachShader(prog2, vs);
+        attachShader(prog2, vs2);
         attachShader(prog2, fs2);
+        bindAttribLocation(prog2, 0, "pos");
+        bindAttribLocation(prog2, 1, "col");
+        bindFragDataLocation(prog2, 0, "fragColor0");
+        bindFragDataLocationIndexed(prog2, 1, 0, "fragColor1");
         linkProgram(prog2);
+        GLint max_draw_buffers = 0, max_dual_source = -1;
+        getIntegerv(GL_MAX_DRAW_BUFFERS, &max_draw_buffers);
+        getIntegerv(GL_MAX_DUAL_SOURCE_DRAW_BUFFERS, &max_dual_source);
+        CHECK(getAttribLocation(prog2, "pos") == 0 &&
+                  getAttribLocation(prog2, "col") == 1 &&
+                  getFragDataLocation(prog2, "fragColor0") == 0 &&
+                  getFragDataLocation(prog2, "fragColor1") == 1 &&
+                  getFragDataIndex(prog2, "fragColor1") == 0 &&
+                  max_draw_buffers == 8 && max_dual_source == 0,
+              "pre-link shader I/O bindings survive shared SPIR-V lowering");
         useProgram(prog2);
 
         clearColor(0, 0, 0, 1.0f);

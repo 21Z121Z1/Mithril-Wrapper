@@ -533,6 +533,10 @@ void APIENTRY glGetIntegerv(GLenum pname, GLint* data) {
         case GL_MAX_3D_TEXTURE_SIZE: *data = 2048; break;
         case GL_MAX_CUBE_MAP_TEXTURE_SIZE: *data = 16384; break;
         case GL_MAX_ARRAY_TEXTURE_LAYERS: *data = 2048; break;
+        case GL_MAX_VERTEX_ATTRIBS: *data = kMaxAttribs; break;
+        case GL_MAX_DRAW_BUFFERS: *data = 8; break;
+        case GL_MAX_COLOR_ATTACHMENTS: *data = 8; break;
+        case GL_MAX_DUAL_SOURCE_DRAW_BUFFERS: *data = 0; break;
         case GL_MAX_VERTEX_UNIFORM_BLOCKS: *data = 12; break;
         case GL_MAX_FRAGMENT_UNIFORM_BLOCKS: *data = 12; break;
         case GL_MAX_GEOMETRY_UNIFORM_BLOCKS: *data = 0; break;
