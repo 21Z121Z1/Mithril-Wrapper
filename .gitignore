@@ -12,6 +12,7 @@ tests/shader_smoke
 tests/draw_smoke
 tests/texture_smoke
 tests/fbo_smoke
+tests/3d_smoke
 
 # legacy / tooling
 .trae/

@@ -40,6 +40,8 @@ gcc -o tests/texture_smoke tests/texture_smoke.c -ldl
 LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu ./tests/texture_smoke   # M4 纹理全链（需 lavapipe/loader）
 gcc -o tests/fbo_smoke tests/fbo_smoke.c -ldl
 LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu ./tests/fbo_smoke      # M5 S5 FBO/渲染缓冲 + 状态管线（depth/scissor/blend/cull/stencil/colorMask）
+gcc -o tests/3d_smoke tests/3d_smoke.c -ldl -lm
+LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu ./tests/3d_smoke       # 3D 深度排序 + 透视投影（mat4 uniform 全链）
 ```
 
 > 本开发容器 ldd 找不到 libstdc++/libm/libgcc_s，运行 .so 相关程序需
@@ -58,5 +60,5 @@ src/shader  glslang GLSL→SPIR-V + SPIRV-Cross 反射（M2 完成）
 src/state   GL 状态引擎（Context 结构、错误队列、capability 表）
 src/vk      Vulkan 后端（dlsym 加载器、离屏渲染、动态 UBO 池、读回；engine/dispatch/target/pipeline/draw 按域拆分）
 scripts/    gen_gl_stubs.py（stub 生成器）、exported_symbols.txt
-tests/      contract_smoke.c / state_smoke.c / shader_smoke.c / draw_smoke.c / texture_smoke.c
+tests/      contract_smoke.c / state_smoke.c / shader_smoke.c / draw_smoke.c / texture_smoke.c / fbo_smoke.c / 3d_smoke.c
 ```
