@@ -54,10 +54,25 @@
 #define GL_REPLACE            0x1E01
 #define GL_LINE               0x1B01
 #define GL_FILL               0x1B02
+/* S5 FBO / renderbuffer */
+#define GL_FRAMEBUFFER        0x8D40
+#define GL_DRAW_FRAMEBUFFER    0x8CA9
+#define GL_READ_FRAMEBUFFER    0x8CA8
+#define GL_FRAMEBUFFER_COMPLETE 0x8CD5
+#define GL_RENDERBUFFER        0x8D41
+#define GL_TEXTURE_2D          0x0DE1
+#define GL_NEAREST             0x2600
+#define GL_LINEAR              0x2601
+#define GL_COLOR_ATTACHMENT0   0x8CE0
+#define GL_FRAMEBUFFER_DEFAULT 0x8218
+#define GL_DEPTH_STENCIL       0x84F9
+#define GL_DEPTH_ATTACHMENT    0x8D00
+#define GL_STENCIL_ATTACHMENT  0x8D20
 
 typedef unsigned int GLuint;
 typedef unsigned int GLenum;
 typedef unsigned int GLsizei;
+typedef unsigned int GLbitfield;
 typedef unsigned char GLboolean;
 typedef int GLint;
 typedef int GLsizeiptr;
@@ -97,6 +112,21 @@ typedef void (*fn_glVertexAttribPointer)(GLuint, GLint, GLenum, GLboolean, GLsiz
 typedef void (*fn_glDrawArrays)(GLenum, GLint, GLsizei);
 typedef void (*fn_glFinish)(void);
 typedef void (*fn_glReadPixels)(GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, void*);
+typedef void (*fn_glGenFramebuffers)(GLsizei, GLuint*);
+typedef void (*fn_glBindFramebuffer)(GLenum, GLuint);
+typedef void (*fn_glDeleteFramebuffers)(GLsizei, const GLuint*);
+typedef void (*fn_glFramebufferTexture2D)(GLenum, GLenum, GLenum, GLuint, GLint);
+typedef void (*fn_glFramebufferRenderbuffer)(GLenum, GLenum, GLenum, GLuint);
+typedef GLenum (*fn_glCheckFramebufferStatus)(GLenum);
+typedef void (*fn_glGenRenderbuffers)(GLsizei, GLuint*);
+typedef void (*fn_glBindRenderbuffer)(GLenum, GLuint);
+typedef void (*fn_glDeleteRenderbuffers)(GLsizei, const GLuint*);
+typedef void (*fn_glRenderbufferStorage)(GLenum, GLenum, GLsizei, GLsizei);
+typedef void (*fn_glGenTextures)(GLsizei, GLuint*);
+typedef void (*fn_glBindTexture)(GLenum, GLuint);
+typedef void (*fn_glDeleteTextures)(GLsizei, const GLuint*);
+typedef void (*fn_glTexImage2D)(GLenum, GLint, GLint, GLsizei, GLsizei, GLint, GLenum, GLenum, const void*);
+typedef void (*fn_glBlitFramebuffer)(GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLbitfield, GLenum);
 
 static int failures = 0;
 
@@ -166,6 +196,21 @@ int main(void) {
     fn_glDrawArrays drawArrays = (fn_glDrawArrays)dlsym(h, "glDrawArrays");
     fn_glFinish finish = (fn_glFinish)dlsym(h, "glFinish");
     fn_glReadPixels readPixels = (fn_glReadPixels)dlsym(h, "glReadPixels");
+    fn_glGenFramebuffers genFramebuffers = (fn_glGenFramebuffers)dlsym(h, "glGenFramebuffers");
+    fn_glBindFramebuffer bindFramebuffer = (fn_glBindFramebuffer)dlsym(h, "glBindFramebuffer");
+    fn_glDeleteFramebuffers deleteFramebuffers = (fn_glDeleteFramebuffers)dlsym(h, "glDeleteFramebuffers");
+    fn_glFramebufferTexture2D framebufferTexture2D = (fn_glFramebufferTexture2D)dlsym(h, "glFramebufferTexture2D");
+    fn_glFramebufferRenderbuffer framebufferRenderbuffer = (fn_glFramebufferRenderbuffer)dlsym(h, "glFramebufferRenderbuffer");
+    fn_glCheckFramebufferStatus checkFramebufferStatus = (fn_glCheckFramebufferStatus)dlsym(h, "glCheckFramebufferStatus");
+    fn_glGenRenderbuffers genRenderbuffers = (fn_glGenRenderbuffers)dlsym(h, "glGenRenderbuffers");
+    fn_glBindRenderbuffer bindRenderbuffer = (fn_glBindRenderbuffer)dlsym(h, "glBindRenderbuffer");
+    fn_glDeleteRenderbuffers deleteRenderbuffers = (fn_glDeleteRenderbuffers)dlsym(h, "glDeleteRenderbuffers");
+    fn_glRenderbufferStorage renderbufferStorage = (fn_glRenderbufferStorage)dlsym(h, "glRenderbufferStorage");
+    fn_glGenTextures genTextures = (fn_glGenTextures)dlsym(h, "glGenTextures");
+    fn_glBindTexture bindTexture = (fn_glBindTexture)dlsym(h, "glBindTexture");
+    fn_glDeleteTextures deleteTextures = (fn_glDeleteTextures)dlsym(h, "glDeleteTextures");
+    fn_glTexImage2D texImage2D = (fn_glTexImage2D)dlsym(h, "glTexImage2D");
+    fn_glBlitFramebuffer blitFramebuffer = (fn_glBlitFramebuffer)dlsym(h, "glBlitFramebuffer");
 
     CHECK(clearColor && clear && enable && depthFunc && scissor && blendFunc &&
           cullFace && frontFace && stencilFunc && stencilOp && stencilMask &&
@@ -174,7 +219,12 @@ int main(void) {
           attachShader && linkProgram && useProgram && getUniformLoc &&
           uniform4f && genVertexArrays && bindVertexArray && genBuffers &&
           bindBuffer && bufferData && enableAttrib && vertexAttribPtr &&
-          drawArrays && finish && readPixels,
+          drawArrays && finish && readPixels &&
+          genFramebuffers && bindFramebuffer && deleteFramebuffers &&
+          framebufferTexture2D && framebufferRenderbuffer &&
+          checkFramebufferStatus && genRenderbuffers && bindRenderbuffer &&
+          renderbufferStorage && genTextures && bindTexture && texImage2D &&
+          blitFramebuffer,
           "all required GL symbols resolved");
 
     /* -- program ------------------------------------------------ */
@@ -500,6 +550,139 @@ int main(void) {
               "polygonMode GL_FILL restores the fill (r=%d g=%d b=%d)",
               px[0], px[1], px[2]);
         polygonMode(GL_FRONT_AND_BACK, GL_FILL);
+    }
+
+    /* -- S5: offscreen render to an FBO, then readback ---------------- */
+    {
+        /* Default framebuffer stays unaffected by an FBO round-trip. */
+        clearColor(0.10f, 0.20f, 0.30f, 1.0f);
+        clear(GL_COLOR_BUFFER_BIT);
+        finish();
+
+        GLuint fbo, tex;
+        genFramebuffers(1, &fbo);
+        genTextures(1, &tex);
+        bindTexture(GL_TEXTURE_2D, tex);
+        texImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 32, 32, 0, GL_RGBA,
+                   GL_UNSIGNED_BYTE, 0);
+        /* FBO with only a colour texture must be complete. */
+        bindFramebuffer(GL_FRAMEBUFFER, fbo);
+        framebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                             GL_TEXTURE_2D, tex, 0);
+        CHECK(checkFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE,
+              "FBO with a colour texture is complete");
+
+        /* Render a full red triangle into the 32x32 FBO. */
+        enable(GL_DEPTH_TEST);
+        depthFunc(GL_LEQUAL);
+        disable(GL_SCISSOR_TEST);
+        clearColor(0, 0, 0, 1.0f);
+        clear(GL_COLOR_BUFFER_BIT);
+        float red[3][7] = {
+            {-1, -1, 0.0f, 1, 0, 0, 1},
+            { 3, -1, 0.0f, 1, 0, 0, 1},
+            {-1,  3, 0.0f, 1, 0, 0, 1},
+        };
+        bufferData(GL_ARRAY_BUFFER, (GLsizeiptr)sizeof(red), red, 0x88E4);
+        drawArrays(GL_TRIANGLES, 0, 3);
+        finish();
+        /* ReadPixels reads from the *read* framebuffer; FBO bound for both. */
+        readPixels(16, 16, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        CHECK(px_match(px, 255, 0, 0, 255),
+              "FBO offscreen render reads back red (r=%d g=%d b=%d)",
+              px[0], px[1], px[2]);
+
+        /* Unbind back to the default framebuffer: default is untouched. */
+        bindFramebuffer(GL_FRAMEBUFFER, 0);
+        readPixels(16, 300, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        CHECK(px_match(px, 26, 51, 77, 255),
+              "default framebuffer unaffected by FBO render (r=%d g=%d b=%d)",
+              px[0], px[1], px[2]);
+
+        deleteFramebuffers(1, &fbo);
+        deleteTextures(1, &tex);
+    }
+
+    /* -- S5: renderbuffer colour attachment --------------------------- */
+    {
+        GLuint rbo, fbo;
+        genRenderbuffers(1, &rbo);
+        bindRenderbuffer(GL_RENDERBUFFER, rbo);
+        renderbufferStorage(GL_RENDERBUFFER, GL_RGBA, 32, 32);
+        genFramebuffers(1, &fbo);
+        bindFramebuffer(GL_FRAMEBUFFER, fbo);
+        framebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                GL_RENDERBUFFER, rbo);
+        CHECK(checkFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE,
+              "FBO with a colour renderbuffer is complete");
+
+        clearColor(0, 1, 0, 1.0f);
+        clear(GL_COLOR_BUFFER_BIT);
+        finish();
+        /* ReadPixels is bound to the FBO still; green fill reads back. */
+        readPixels(5, 5, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        CHECK(px_match(px, 0, 255, 0, 255),
+              "renderbuffer colour attachment reads back green (r=%d g=%d b=%d)",
+              px[0], px[1], px[2]);
+
+        bindFramebuffer(GL_FRAMEBUFFER, 0);
+        deleteFramebuffers(1, &fbo);
+        deleteRenderbuffers(1, &rbo);
+    }
+
+    /* -- S5: target switching + framebuffer blit ----------------------- */
+    {
+        /* Solid red into FBO A, solid blue into FBO B, then blit B into A. */
+        GLuint fboA, fboB, texA, texB;
+        genFramebuffers(1, &fboA);
+        genFramebuffers(1, &fboB);
+        genTextures(1, &texA);
+        genTextures(1, &texB);
+        bindTexture(GL_TEXTURE_2D, texA);
+        texImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 32, 32, 0, GL_RGBA,
+                   GL_UNSIGNED_BYTE, 0);
+        bindTexture(GL_TEXTURE_2D, texB);
+        texImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 32, 32, 0, GL_RGBA,
+                   GL_UNSIGNED_BYTE, 0);
+
+        bindFramebuffer(GL_DRAW_FRAMEBUFFER, fboA);
+        framebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                             GL_TEXTURE_2D, texA, 0);
+        bindFramebuffer(GL_DRAW_FRAMEBUFFER, fboB);
+        framebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                             GL_TEXTURE_2D, texB, 0);
+        CHECK(checkFramebufferStatus(GL_DRAW_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE,
+              "both draw/read FBO targets are complete");
+
+        /* draw red into A */
+        bindFramebuffer(GL_FRAMEBUFFER, fboA);
+        enable(GL_DEPTH_TEST);  /* leave as-is; reuse red triangle */
+        clearColor(1, 0, 0, 1.0f);
+        clear(GL_COLOR_BUFFER_BIT);
+        /* draw blue into B */
+        bindFramebuffer(GL_FRAMEBUFFER, fboB);
+        clearColor(0, 0, 1, 1.0f);
+        clear(GL_COLOR_BUFFER_BIT);
+        finish();
+
+        /* blit B (read) -> A (draw): full rects, GL_NEAREST */
+        bindFramebuffer(GL_READ_FRAMEBUFFER, fboB);
+        bindFramebuffer(GL_DRAW_FRAMEBUFFER, fboA);
+        blitFramebuffer(0, 0, 32, 32, 0, 0, 32, 32,
+                        GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        finish();
+
+        bindFramebuffer(GL_READ_FRAMEBUFFER, fboA);
+        readPixels(16, 16, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        CHECK(px_match(px, 0, 0, 255, 255),
+              "blit made A show B's blue at the centre (r=%d g=%d b=%d)",
+              px[0], px[1], px[2]);
+
+        bindFramebuffer(GL_FRAMEBUFFER, 0);
+        deleteFramebuffers(1, &fboA);
+        deleteFramebuffers(1, &fboB);
+        deleteTextures(1, &texA);
+        deleteTextures(1, &texB);
     }
 
     dlclose(h);

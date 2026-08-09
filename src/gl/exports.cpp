@@ -36,25 +36,8 @@ extern "C" {
     mithril::GlStubCalled("glBindFragDataLocationIndexed");
   }
 
-  void APIENTRY glBindFramebuffer(GLenum target, GLuint framebuffer) {
-    mithril::GlStubCalled("glBindFramebuffer");
-  }
-
-  void APIENTRY glBindRenderbuffer(GLenum target, GLuint renderbuffer) {
-    mithril::GlStubCalled("glBindRenderbuffer");
-  }
-
   void APIENTRY glBindSampler(GLuint unit, GLuint sampler) {
     mithril::GlStubCalled("glBindSampler");
-  }
-
-  void APIENTRY glBlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1, GLint dstX0, GLint dstY0, GLint dstX1, GLint dstY1, GLbitfield mask, GLenum filter) {
-    mithril::GlStubCalled("glBlitFramebuffer");
-  }
-
-  GLenum APIENTRY glCheckFramebufferStatus(GLenum target) {
-    mithril::GlStubCalled("glCheckFramebufferStatus");
-    return 0;
   }
 
   void APIENTRY glClearBufferfi(GLenum buffer, GLint drawbuffer, GLfloat depth, GLint stencil) {
@@ -78,16 +61,8 @@ extern "C" {
     return 0;
   }
 
-  void APIENTRY glDeleteFramebuffers(GLsizei n, const GLuint *framebuffers) {
-    mithril::GlStubCalled("glDeleteFramebuffers");
-  }
-
   void APIENTRY glDeleteQueries(GLsizei n, const GLuint *ids) {
     mithril::GlStubCalled("glDeleteQueries");
-  }
-
-  void APIENTRY glDeleteRenderbuffers(GLsizei n, const GLuint *renderbuffers) {
-    mithril::GlStubCalled("glDeleteRenderbuffers");
   }
 
   void APIENTRY glDeleteSamplers(GLsizei count, const GLuint *samplers) {
@@ -123,40 +98,8 @@ extern "C" {
     return nullptr;
   }
 
-  void APIENTRY glFramebufferRenderbuffer(GLenum target, GLenum attachment, GLenum renderbuffertarget, GLuint renderbuffer) {
-    mithril::GlStubCalled("glFramebufferRenderbuffer");
-  }
-
-  void APIENTRY glFramebufferTexture(GLenum target, GLenum attachment, GLuint texture, GLint level) {
-    mithril::GlStubCalled("glFramebufferTexture");
-  }
-
-  void APIENTRY glFramebufferTexture1D(GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level) {
-    mithril::GlStubCalled("glFramebufferTexture1D");
-  }
-
-  void APIENTRY glFramebufferTexture2D(GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level) {
-    mithril::GlStubCalled("glFramebufferTexture2D");
-  }
-
-  void APIENTRY glFramebufferTexture3D(GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level, GLint zoffset) {
-    mithril::GlStubCalled("glFramebufferTexture3D");
-  }
-
-  void APIENTRY glFramebufferTextureLayer(GLenum target, GLenum attachment, GLuint texture, GLint level, GLint layer) {
-    mithril::GlStubCalled("glFramebufferTextureLayer");
-  }
-
-  void APIENTRY glGenFramebuffers(GLsizei n, GLuint *framebuffers) {
-    mithril::GlStubCalled("glGenFramebuffers");
-  }
-
   void APIENTRY glGenQueries(GLsizei n, GLuint *ids) {
     mithril::GlStubCalled("glGenQueries");
-  }
-
-  void APIENTRY glGenRenderbuffers(GLsizei n, GLuint *renderbuffers) {
-    mithril::GlStubCalled("glGenRenderbuffers");
   }
 
   void APIENTRY glGenSamplers(GLsizei count, GLuint *samplers) {
@@ -189,10 +132,6 @@ extern "C" {
     return 0;
   }
 
-  void APIENTRY glGetFramebufferAttachmentParameteriv(GLenum target, GLenum attachment, GLenum pname, GLint *params) {
-    mithril::GlStubCalled("glGetFramebufferAttachmentParameteriv");
-  }
-
   void APIENTRY glGetMultisamplefv(GLenum pname, GLuint index, GLfloat *val) {
     mithril::GlStubCalled("glGetMultisamplefv");
   }
@@ -215,10 +154,6 @@ extern "C" {
 
   void APIENTRY glGetQueryiv(GLenum target, GLenum pname, GLint *params) {
     mithril::GlStubCalled("glGetQueryiv");
-  }
-
-  void APIENTRY glGetRenderbufferParameteriv(GLenum target, GLenum pname, GLint *params) {
-    mithril::GlStubCalled("glGetRenderbufferParameteriv");
   }
 
   void APIENTRY glGetSamplerParameterIiv(GLuint sampler, GLenum pname, GLint *params) {
@@ -254,18 +189,8 @@ extern "C" {
     mithril::GlStubCalled("glGetUniformIndices");
   }
 
-  GLboolean APIENTRY glIsFramebuffer(GLuint framebuffer) {
-    mithril::GlStubCalled("glIsFramebuffer");
-    return 0;
-  }
-
   GLboolean APIENTRY glIsQuery(GLuint id) {
     mithril::GlStubCalled("glIsQuery");
-    return 0;
-  }
-
-  GLboolean APIENTRY glIsRenderbuffer(GLuint renderbuffer) {
-    mithril::GlStubCalled("glIsRenderbuffer");
     return 0;
   }
 
@@ -309,14 +234,6 @@ extern "C" {
 
   void APIENTRY glReadBuffer(GLenum src) {
     mithril::GlStubCalled("glReadBuffer");
-  }
-
-  void APIENTRY glRenderbufferStorage(GLenum target, GLenum internalformat, GLsizei width, GLsizei height) {
-    mithril::GlStubCalled("glRenderbufferStorage");
-  }
-
-  void APIENTRY glRenderbufferStorageMultisample(GLenum target, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height) {
-    mithril::GlStubCalled("glRenderbufferStorageMultisample");
   }
 
   void APIENTRY glSamplerParameterIiv(GLuint sampler, GLenum pname, const GLint *param) {

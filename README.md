@@ -13,7 +13,9 @@ GL → Vulkan → Metal（MoltenVK），无 OpenGL ES 参与。
   - `tests/draw_smoke.c` 全链通过（llvmpipe）：GL 层着色 + glDrawArrays → Vulkan 绘制 → glReadPixels 校验（白三角形、tint 驱动变色、背景色）。
 - **M3 完成：顶点数据**：S3 组 76/114 真实现（顶点属性全家族：pointer/IPointer/常量 1-4 系/Divisor、buffer 映射与查询家族、10 个 draw 入口：DrawArrays(Instanced)/DrawElements(Instanced/BaseVertex/Range 双变体)/MultiDraw 全系）；引擎新增双顶点流（顶点+实例）、索引缓冲（统一 UINT32 staging）、TriangleStrip/Fan 拓扑；实例化采用 CPU 逐实例打包（divisor 行复制）；非 4 字节对齐 stride/offset 由 CPU 规整为 float32 打包；`draw_smoke` 扩展 8 个 M3 断言全部通过。
 - **M4 纹理完成（S4 42/42 函数）**：`src/vk/texture.cpp` 上传路径扩展（staging→CmdCopyBufferToImage 全 mip 逐切片、image/view/sampler 覆盖 2D/1D、3D volume、2D/1D array、cubemap、wrap_r、白 dummy 兜底）；`src/gl/texture.cpp` 全量真实现（TexImage1D/2D/3D + TexSub 全系含 cubemap face/array 分层、GetTexImage PACK 回读、GenerateMipmap 逐切片滤波、TexParameter/GetTexParameter/GetTexLevelParameter 全系、S3TC DXT1/3/5 CPU 解压 + GetCompressedTexImage、CopyTexImage/CopyTexSubImage 帧读回、glTexBuffer、glPixelStoref）；`texture_smoke` 26 断言全通过（llvmpipe：红纹理采样/mip/dummy 白/GetTexImage 往返/3D 切片/数组分层/cubemap 6 面/拷贝/texBuffer/压缩）。
-- **M5 进行中（stage A+B 完成）**：状态管线 `src/vk/pipeline.cpp`（深度附件 D24S8、`PipelineState` 烘焙进 pipeline 缓存 key + `Vk*CreateInfo`、显式 `CmdClearDepthStencilImage`/`CmdClearColorImage` 统一清除、动态 scissor Y 翻转、depth/blend/cull/frontFace/stencil 域（含读/写掩码、ref）/colorMask/polygon 枚举映射；stage B 补 stencil 写掩码独立字段、depth view S8 aspect、renderpass stencil loadOp=LOAD、frontFace GL→VK 取反）；GL 侧 `BuildPipelineState` 快照与状态 setter 全接入。`tests/fbo_smoke.c` 18 行 ok（17 状态断言）：depth 近者胜/LEQUAL、scissor 中心清屏+角落收色、blend off/src-alpha（mobilegl 非预乘）、cull GL_BACK 保留 + GL_FRONT/GL_CW 剔除、stencil REPLACE→EQUAL 读回 + ref 不匹配拦截、colorMask 分通道门控、polygonMode GL_LINE 留空；五冒烟回归通过，CI Linux job 已接 fbo_smoke。待办：S5 FBO/渲染缓冲 + MRT、MSAA。
+- **M5 进行中（stage C S5 FBO 完成；MRT/MSAA 待办）**：
+  - stage A+B 状态管线：`src/vk/pipeline.cpp` 深度附件 D24S8、`PipelineState` 烘焙进 pipeline 缓存 key、显式清除、动态 scissor Y 翻转、depth/blend/cull/frontFace/stencil 域、colorMask/polygon；GL 侧 `BuildPipelineState` 快照接入。
+  - stage C（本提交）S5 FBO/渲染缓冲：`src/vk/fbo.cpp` 新建（renderbuffer 表 CreateRbImage/Rb view、FBO 表 SetFramebuffer + 懒重建 Vk framebuffer/renderpass，`ResolveDrawFbo` 脏检测 + 纹理重传跟随、`BlitFramebuffer` 经 CmdCopyImage/CmdBlitImage）；`draw.cpp` SubmitFlush 按当前 target（默认或 FBO）清屏-渲染-回读，readback buffer 按目标尺寸重建，read/draw 分离绑定，binding 切换强制下一帧回读刷新；`pipeline.cpp` 用 op 的 renderpass 建管（FBO pipeline 键含 rp 签名）；`texture.cpp` 纹理 image 加 COLOR/DEPTH_STENCIL attachment 用途；`src/gl/fbo.cpp` 对象表 + 20 函数真实现（Gen/Delete/Bind FBO+RBO、FramebufferTexture*Layer/1D/2D/3D/Renderbuffer、CheckFramebufferStatus、Attachment/Renderbuffer 参数查询、BlitFramebuffer）。`tests/fbo_smoke.c` 现有 18 状态断言全过 + 新增 5 S5 断言（FBO 纹理附件离屏渲染回读红、默认帧不受污染、RBO 颜色附件回读绿、draw/read 双绑定 complete、blit B→A 中心变蓝）；全六冒烟（contract/state/shader/draw/texture/fbo）回归通过。待办：MRT（多颜色附件）、MSAA samples>1 renderbuffer。
 
 ## 快速构建（Linux 开发循环）
 
@@ -37,7 +39,7 @@ LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu ./tests/draw_smoke       # GL→Vulkan
 gcc -o tests/texture_smoke tests/texture_smoke.c -ldl
 LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu ./tests/texture_smoke   # M4 纹理全链（需 lavapipe/loader）
 gcc -o tests/fbo_smoke tests/fbo_smoke.c -ldl
-LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu ./tests/fbo_smoke      # M5 状态管线（depth/scissor/blend/cull/stencil/colorMask）
+LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu ./tests/fbo_smoke      # M5 S5 FBO/渲染缓冲 + 状态管线（depth/scissor/blend/cull/stencil/colorMask）
 ```
 
 > 本开发容器 ldd 找不到 libstdc++/libm/libgcc_s，运行 .so 相关程序需

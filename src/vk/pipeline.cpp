@@ -299,7 +299,7 @@ VkPipeline GetOrCreatePipeline(const Program& prog, const DrawOp& op) {
     pg.pColorBlendState = &cb;
     pg.pDynamicState = &dyn_s;
     pg.layout = g.pipeline_layout;
-    pg.renderPass = g.renderpass;
+    pg.renderPass = op.has_render_pass ? op.render_pass : g.renderpass;
     pg.subpass = 0;
 
     VkPipeline pipe = VK_NULL_HANDLE;

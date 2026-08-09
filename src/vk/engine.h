@@ -179,4 +179,59 @@ void SubmitFlush();
 // Copy a finished frame region (RGBA8, GL-style bottom-up origin) into `out`.
 void ReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, void* out);
 
+// ---------------------------------------------------------------------------
+// S5: FBO / renderbuffer support.
+// ---------------------------------------------------------------------------
+
+// One attachment reference for a GL framebuffer: a texture image (tex_id +
+// mip level / array layer) or a renderbuffer (rbo_id).
+struct FboAttach {
+    bool is_texture = false;
+    uint64_t tex_id = 0;
+    uint32_t level = 0;
+    uint32_t layer = 0;
+    uint64_t rbo_id = 0;
+};
+
+// Complete attachment set for a GL framebuffer object. `width`/`height` are
+// the resolved render-target size (from the attached textures/renderbuffers).
+struct FboSpec {
+    FboAttach color;             // MUST be present for a complete FBO
+    bool has_depth = false;
+    FboAttach depth;             // optional depth/stencil attachment
+    uint32_t width = 0, height = 0;
+};
+
+// Create/replace a resident renderbuffer image (glRenderbufferStorage).
+// `internalformat` is a GL internal format (rgba8, depth24_stencil8, ...).
+void CreateRenderbuffer(uint64_t rbo_id, GLenum internalformat,
+                        uint32_t width, uint32_t height, uint32_t samples);
+
+// Tear down a renderbuffer image (glDeleteRenderbuffers).
+void DestroyRenderbuffer(uint64_t rbo_id);
+
+// (Re)configure a framebuffer object. Idempotent; rebuilds the Vk
+// framebuffer + render pass lazily on the next use.
+void SetFramebuffer(uint64_t fbo_id, const FboSpec& spec);
+
+// Tear down a framebuffer's device resources (glDeleteFramebuffers).
+void DestroyFramebuffer(uint64_t fbo_id);
+
+// Select the draw/read framebuffer for the next frame (0 => default).
+void BindDrawFramebuffer(uint64_t fbo_id);
+void BindReadFramebuffer(uint64_t fbo_id);
+
+// Size of the framebuffer bound for drawing (for viewport/scissor clamps).
+uint32_t DrawTargetWidth();
+uint32_t DrawTargetHeight();
+
+// Copy (blit) a rect from the src draw/read framebuffer to the dst draw
+// framebuffer. The GL layer passes both framebuffer ids (0 = default);
+// `color` handles GL_COLOR_BUFFER_BIT, `depth_src/depth_dst` can be null for
+// no-op. Called between GL flushes on its own command buffer.
+void BlitFramebuffer(uint64_t src_fbo, uint64_t dst_fbo,
+                     GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1,
+                     GLint dstX0, GLint dstY0, GLint dstX1, GLint dstY1,
+                     GLbitfield mask, GLenum filter);
+
 } // namespace mithril::vk

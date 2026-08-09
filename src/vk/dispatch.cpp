@@ -75,6 +75,9 @@ void LoadDeviceFunctions() {
     LOAD_DEV(CmdPipelineBarrier);
     LOAD_DEV(CmdCopyImageToBuffer);
     LOAD_DEV(CmdCopyBufferToImage);
+    LOAD_DEV(CmdCopyImage);
+    LOAD_DEV(CmdBlitImage);
+    LOAD_DEV(CmdResolveImage);
     LOAD_DEV(CreateSampler);
     LOAD_DEV(DestroySampler);
     LOAD_DEV(CmdSetViewport);

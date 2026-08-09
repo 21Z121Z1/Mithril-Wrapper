@@ -99,6 +99,15 @@ MGL_IMPL = frozenset({
     "glCopyTexImage1D", "glCopyTexImage2D", "glCopyTexSubImage1D",
     "glCopyTexSubImage2D", "glCopyTexSubImage3D", "glTexBuffer",
     "glPixelStoref",
+    # S5 FBO/renderbuffer (M5): object tables + attachment + status + blit.
+    "glBindFramebuffer", "glBindRenderbuffer", "glBlitFramebuffer",
+    "glCheckFramebufferStatus", "glDeleteFramebuffers", "glDeleteRenderbuffers",
+    "glFramebufferRenderbuffer", "glFramebufferTexture", "glFramebufferTexture1D",
+    "glFramebufferTexture2D", "glFramebufferTexture3D", "glFramebufferTextureLayer",
+    "glGenFramebuffers", "glGenRenderbuffers",
+    "glGetFramebufferAttachmentParameteriv", "glGetRenderbufferParameteriv",
+    "glIsFramebuffer", "glIsRenderbuffer",
+    "glRenderbufferStorage", "glRenderbufferStorageMultisample",
 })
 
 

@@ -104,6 +104,9 @@ struct FnTable {
     ML_FN(CmdClearDepthStencilImage);
     ML_FN(CmdPipelineBarrier);
     ML_FN(CmdCopyImageToBuffer);
+    ML_FN(CmdCopyImage);
+    ML_FN(CmdBlitImage);
+    ML_FN(CmdResolveImage);
     ML_FN(CmdSetViewport);
     ML_FN(CmdSetScissor);
 };
@@ -143,6 +146,53 @@ struct TexObj {
     uint32_t levels = 1;
 };
 
+// S5: renderbuffer object (glRenderbufferStorage). Backed by a device-local
+// image that the FBO attachment views reference.
+struct RbObj {
+    VkImage image = VK_NULL_HANDLE;
+    VkDeviceMemory mem = VK_NULL_HANDLE;
+    VkImageView view = VK_NULL_HANDLE;
+    VkFormat format = VK_FORMAT_UNDEFINED;
+    uint32_t samples = 1;
+};
+
+// S5: one live render attachment for an FBO. Either a texture (tex_id, the
+// resident TexObj image is referenced) or a renderbuffer (rbo_id into
+// g.renderbuffers). `level`/`layer` select the mip/array slice for textures.
+struct FboSlot {
+    bool is_texture = false;
+    uint64_t tex_id = 0;
+    uint64_t rbo_id = 0;
+    uint32_t level = 0;
+    uint32_t layer = 0;
+
+    FboSlot() = default;
+    FboSlot(const FboAttach& a)
+        : is_texture(a.is_texture), tex_id(a.tex_id), rbo_id(a.rbo_id),
+          level(a.level), layer(a.layer) {}
+};
+
+// S5: a configured (GL) framebuffer object, keyed by gl id. The Vk
+// framebuffer + render pass are rebuilt lazily before each draw flush so a
+// texture re-upload pops a fresh image view automatically.
+struct FboObj {
+    FboSlot color;                 // attachment 0 (a GL FBO needs >=1 color)
+    bool has_depth = false;
+    FboSlot depth;                 // depth/stencil attachment
+    VkFormat color_fmt = VK_FORMAT_R8G8B8A8_UNORM;
+    VkFormat depth_fmt = VK_FORMAT_D24_UNORM_S8_UINT;
+    uint32_t width = 0, height = 0;
+    VkImageView color_view = VK_NULL_HANDLE;
+    VkImageView depth_view = VK_NULL_HANDLE;
+    VkRenderPass pass = VK_NULL_HANDLE;
+    VkFramebuffer fb = VK_NULL_HANDLE;
+    std::string sig;               // render-pass signature (pipeline keys)
+    uint64_t last_tex_gen = 0;      // cache stamp of the colour texture
+    bool dirty = true;              // rebuild pass+framebuffer next use
+    VkImageLayout color_layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    VkImageLayout depth_layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+};
+
 struct DrawOp {
     uint64_t program = 0;
     VkBuffer vertex_buffer = VK_NULL_HANDLE;
@@ -167,6 +217,12 @@ struct DrawOp {
     std::vector<std::pair<uint32_t, VkDescriptorImageInfo>> tex_binds;
     // M5: pipeline-affecting state captured at draw-record time.
     PipelineState pipe;
+    // S5: render pass signature for the target this draw records into
+    // (empty => default framebuffer). Included in the pipeline cache key and
+    // the VkGraphicsPipelineCreateInfo.renderPass.
+    bool has_render_pass = false;
+    VkRenderPass render_pass = VK_NULL_HANDLE;
+    std::string rp_sig;
 };
 
 struct Engine {
@@ -197,6 +253,15 @@ struct Engine {
     VkCommandBuffer cmd = VK_NULL_HANDLE;
     VkFence fence = VK_NULL_HANDLE;
 
+    // S5: FBO/renderbuffer tables + current draw/read framebuffer bindings.
+    std::unordered_map<uint64_t, RbObj> renderbuffers;
+    std::unordered_map<uint64_t, FboObj> framebuffers;
+    uint64_t bound_draw_fbo = 0;   // 0 => default framebuffer
+    uint64_t bound_read_fbo = 0;   // 0 => default framebuffer
+    // Extra FBO render passes (framebuffers revive their own when formats
+    // differ from the default color+depth); keyed by their signature.
+    std::unordered_map<std::string, VkRenderPass> fbo_passes;
+
     VkDescriptorSetLayout set_layout = VK_NULL_HANDLE;
     VkDescriptorPool desc_pool = VK_NULL_HANDLE;
     VkPipelineLayout pipeline_layout = VK_NULL_HANDLE;
@@ -214,6 +279,7 @@ struct Engine {
     VkBuffer readback = VK_NULL_HANDLE;
     VkDeviceMemory readback_mem = VK_NULL_HANDLE;
     uint8_t* readback_map = nullptr;
+    uint32_t read_w = 0, read_h = 0;   // dims the readback buffer holds
 
     bool initialized = false;
     bool frame_dirty = false;
@@ -259,6 +325,19 @@ bool CreateTarget();
 bool CreateDepthTarget();
 
 void CreateDummyTexture();
+
+// Resolve the currently bound draw framebuffer's Vk resources, rebuilding
+// the framebuffer + render pass when dirty. Returns false if it can't render;
+// when the default framebuffer is bound it returns true and leaves out=0.
+bool ResolveDrawFbo(FboObj* out);
+
+// Render pass for an FBO signature ("RGBA8:D24S8" -> the default pass).
+VkRenderPass GetOrCreateFboPass(const std::string& sig, bool has_depth);
+
+// Live image handle for an FBO colour/depth attachment (texture or
+// renderbuffer resolution). Returns VK_NULL_HANDLE when unattached.
+VkImage FboColorImage(const FboObj& f);
+VkImage FboDepthImage(const FboObj& f);
 
 // ---- texture helpers (defined in texture.cpp) ----------------------------
 
