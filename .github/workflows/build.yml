@@ -96,6 +96,7 @@ jobs:
           gcc -o tests/texture_smoke tests/texture_smoke.c -ldl
           gcc -o tests/fbo_smoke     tests/fbo_smoke.c     -ldl
           gcc -o tests/3d_smoke      tests/3d_smoke.c      -ldl -lm
+          gcc -o tests/render3d_smoke tests/render3d_smoke.c -ldl -lm
 
       - name: Run EGL contract smoke
         run: |
@@ -138,6 +139,12 @@ jobs:
           output=$(./tests/3d_smoke)
           echo "$output"
           echo "$output" | grep -F "3D SMOKE ALL PASSED"
+
+      - name: Run 3D scene render smoke (lavapipe)
+        run: |
+          output=$(./tests/render3d_smoke)
+          echo "$output"
+          echo "$output" | grep -F "RENDER SMOKE ALL PASSED"
 
       - name: Verify GL symbol table (Linux .so)
         run: |

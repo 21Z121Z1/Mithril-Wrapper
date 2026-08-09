@@ -13,6 +13,9 @@ tests/draw_smoke
 tests/texture_smoke
 tests/fbo_smoke
 tests/3d_smoke
+tests/render3d_smoke
+tests/render3d.ppm
+tests/render3d.png
 
 # legacy / tooling
 .trae/
