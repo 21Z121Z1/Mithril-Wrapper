@@ -4,6 +4,7 @@
 
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
+#import <QuartzCore/CAMetalLayer.h>
 
 #include "engine.h"
 
@@ -148,6 +149,7 @@ struct FrameContext {
 struct Engine {
     id<MTLDevice> device = nil;
     id<MTLCommandQueue> queue = nil;
+    CAMetalLayer* layer = nil;
     id<MTLTexture> color = nil;
     id<MTLTexture> depth_stencil = nil;
     id<MTLCommandBuffer> last_submitted = nil;
@@ -1302,6 +1304,70 @@ bool EnsureInit() {
 }
 
 bool IsInitialized() { return GetEngine().initialized; }
+
+bool SetNativeWindow(void* native_window) {
+    if (!native_window) {
+        GetEngine().layer = nil;
+        return true;
+    }
+    if ((reinterpret_cast<uintptr_t>(native_window) & (alignof(void*) - 1)) != 0)
+        return false;
+    if (!EnsureInit()) return false;
+    id object = (__bridge id)native_window;
+    if (![object isKindOfClass:[CAMetalLayer class]]) {
+        ML_LOG_ERROR("metal: EGL native window is not a CAMetalLayer");
+        return false;
+    }
+    auto& engine = GetEngine();
+    CAMetalLayer* layer = (CAMetalLayer*)object;
+    layer.device = engine.device;
+    layer.pixelFormat = MTLPixelFormatRGBA8Unorm;
+    // The current presentation seam keeps the GL default framebuffer in a
+    // private texture and copies it into the drawable.  A framebuffer-only
+    // drawable cannot be a blit destination; this can become YES once the
+    // default framebuffer renders directly into the CAMetalDrawable.
+    layer.framebufferOnly = NO;
+    if (layer.drawableSize.width <= 0 || layer.drawableSize.height <= 0)
+        layer.drawableSize = CGSizeMake(engine.width, engine.height);
+    const uint32_t width = (uint32_t)std::max<CGFloat>(1, layer.drawableSize.width);
+    const uint32_t height = (uint32_t)std::max<CGFloat>(1, layer.drawableSize.height);
+    if (!SetTargetSize(width, height)) return false;
+    engine.layer = layer;
+    return true;
+}
+
+bool Present() {
+    auto& engine = GetEngine();
+    if (!engine.initialized || !engine.layer) {
+        ML_LOG_ERROR("metal: eglSwapBuffers has no CAMetalLayer surface");
+        return false;
+    }
+    @autoreleasepool {
+        if (!SubmitInternal(false, false, nullptr)) return false;
+        id<CAMetalDrawable> drawable = [engine.layer nextDrawable];
+        if (!drawable) {
+            ML_LOG_ERROR("metal: CAMetalLayer returned no drawable");
+            return false;
+        }
+        if (drawable.texture.width != engine.width ||
+            drawable.texture.height != engine.height) {
+            ML_LOG_ERROR("metal: drawable size changed without a surface resize");
+            return false;
+        }
+        id<MTLCommandBuffer> command = [engine.queue commandBuffer];
+        id<MTLBlitCommandEncoder> blit = [command blitCommandEncoder];
+        [blit copyFromTexture:engine.color sourceSlice:0 sourceLevel:0
+                 sourceOrigin:MTLOriginMake(0, 0, 0)
+                   sourceSize:MTLSizeMake(engine.width, engine.height, 1)
+                    toTexture:drawable.texture destinationSlice:0
+             destinationLevel:0 destinationOrigin:MTLOriginMake(0, 0, 0)];
+        [blit endEncoding];
+        [command presentDrawable:drawable];
+        [command commit];
+        engine.last_submitted = command;
+        return true;
+    }
+}
 
 bool SetTargetSize(uint32_t width, uint32_t height) {
     if (!width || !height || !EnsureInit()) return false;

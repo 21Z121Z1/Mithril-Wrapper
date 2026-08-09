@@ -14,6 +14,8 @@ const char* RendererName();
 bool EnsureInit();
 bool IsInitialized();
 bool SetTargetSize(uint32_t w, uint32_t h);
+bool SetNativeWindow(void* native_window);
+bool SwapBuffers();
 uint32_t TargetWidth();
 uint32_t TargetHeight();
 void SetClearColor(float r, float g, float b, float a);

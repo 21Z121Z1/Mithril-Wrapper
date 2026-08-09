@@ -75,7 +75,8 @@ if(APPLE)
     target_link_libraries(mithril PRIVATE
         spirv-cross-msl
         "-framework Metal"
-        "-framework Foundation")
+        "-framework Foundation"
+        "-framework QuartzCore")
 endif()
 
 set_target_properties(mithril PROPERTIES

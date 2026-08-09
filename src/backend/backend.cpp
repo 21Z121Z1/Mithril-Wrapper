@@ -101,6 +101,23 @@ bool IsInitialized() {
 #endif
 
 bool SetTargetSize(uint32_t w, uint32_t h) { DISPATCH_RET(SetTargetSize, false, w, h); }
+bool SetNativeWindow(void* native_window) {
+#if defined(MITHRIL_HAS_DIRECT_METAL)
+    if (SelectedKind() == Kind::DirectMetal)
+        return metal::SetNativeWindow(native_window);
+#endif
+    (void)native_window;
+    return true;
+}
+bool SwapBuffers() {
+    switch (SelectedKind()) {
+        case Kind::Vulkan: vk::SubmitFlush(); return true;
+#if defined(MITHRIL_HAS_DIRECT_METAL)
+        case Kind::DirectMetal: return metal::Present();
+#endif
+        default: return false;
+    }
+}
 uint32_t TargetWidth() { DISPATCH_RET(TargetWidth, 0); }
 uint32_t TargetHeight() { DISPATCH_RET(TargetHeight, 0); }
 void SetClearColor(float r, float g, float b, float a) { DISPATCH_VOID(SetClearColor, r, g, b, a); }
