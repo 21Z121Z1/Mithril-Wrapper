@@ -139,6 +139,9 @@ struct SampledTextureBinding {
 
 struct ClearParams {
     GLbitfield mask = 0;
+    // -1 broadcasts glClear to every active draw buffer. Non-negative values
+    // identify GL_DRAW_BUFFERi for glClearBuffer*(GL_COLOR, i, ...).
+    int32_t color_drawbuffer = -1;
     std::array<float, 4> color{0.f, 0.f, 0.f, 0.f};
     double depth = 1.0;
     uint32_t stencil = 0;

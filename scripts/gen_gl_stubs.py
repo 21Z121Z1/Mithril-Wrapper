@@ -19,7 +19,8 @@ OUT = ROOT / "src" / "gl" / "exports.cpp"
 # Functions that have real implementations in src/gl/.
 MGL_IMPL = frozenset({
     "glBlendColor", "glBlendEquation", "glBlendEquationSeparate", "glBlendFunc",
-    "glBlendFuncSeparate", "glClear", "glClearColor", "glClearDepth", "glClearStencil",
+    "glBlendFuncSeparate", "glClear", "glClearBufferfi", "glClearBufferfv",
+    "glClearBufferiv", "glClearBufferuiv", "glClearColor", "glClearDepth", "glClearStencil",
     "glColorMask", "glColorMaski", "glCullFace", "glDepthFunc", "glDepthMask",
     "glDepthRange", "glDisable", "glDisablei", "glEnable", "glEnablei",
     "glFinish", "glFlush", "glFrontFace", "glGetBooleanv", "glGetDoublev",

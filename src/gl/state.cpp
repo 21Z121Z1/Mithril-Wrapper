@@ -38,6 +38,30 @@ static void SetCap(GLenum cap, bool on) {
     st.caps.bits[idx] = on;
 }
 
+static bool SubmitClear(v::ClearParams clear) {
+    if (!v::EnsureInit()) {
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return false;
+    }
+    auto& st = s::GetState();
+    clear.scissor_test = st.caps.Test(GL_SCISSOR_TEST);
+    if (st.scissor.initialized) {
+        clear.scissor = {st.scissor.x, st.scissor.y,
+                         st.scissor.w, st.scissor.h};
+    } else {
+        clear.scissor = {0, 0, static_cast<int32_t>(v::DrawTargetWidth()),
+                         static_cast<int32_t>(v::DrawTargetHeight())};
+    }
+    clear.color_write = st.color_wmask;
+    clear.depth_write = st.depth.mask;
+    clear.stencil_write_mask = st.stencil_front.write_mask;
+    if (!v::Clear(clear)) {
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return false;
+    }
+    return true;
+}
+
 // --- capabilities -----------------------------------------------------------
 
 extern "C" {
@@ -114,7 +138,6 @@ void APIENTRY glClear(GLbitfield mask) {
     const GLbitfield valid = GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT;
     if (mask & ~valid) { PUSH_ERROR(GL_INVALID_VALUE); return; }
     if (!mask) return;
-    if (!v::EnsureInit()) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
     auto& st = s::GetState();
     v::ClearParams clear;
     clear.mask = mask;
@@ -122,18 +145,83 @@ void APIENTRY glClear(GLbitfield mask) {
                    st.clear_color[2], st.clear_color[3]};
     clear.depth = st.clear_depth;
     clear.stencil = static_cast<uint32_t>(st.clear_stencil);
-    clear.scissor_test = st.caps.Test(GL_SCISSOR_TEST);
-    if (st.scissor.initialized) {
-        clear.scissor = {st.scissor.x, st.scissor.y,
-                         st.scissor.w, st.scissor.h};
-    } else {
-        clear.scissor = {0, 0, static_cast<int32_t>(v::DrawTargetWidth()),
-                         static_cast<int32_t>(v::DrawTargetHeight())};
+    (void)SubmitClear(clear);
+}
+
+void APIENTRY glClearBufferfv(GLenum buffer, GLint drawbuffer,
+                              const GLfloat* value) {
+    if (!value) return;
+    v::ClearParams clear;
+    switch (buffer) {
+        case GL_COLOR:
+            if (drawbuffer < 0 || drawbuffer >= 8) {
+                PUSH_ERROR(GL_INVALID_VALUE);
+                return;
+            }
+            clear.mask = GL_COLOR_BUFFER_BIT;
+            clear.color_drawbuffer = drawbuffer;
+            std::copy(value, value + 4, clear.color.begin());
+            break;
+        case GL_DEPTH:
+            if (drawbuffer != 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+            clear.mask = GL_DEPTH_BUFFER_BIT;
+            clear.depth = std::clamp<double>(value[0], 0.0, 1.0);
+            break;
+        default: PUSH_ERROR(GL_INVALID_ENUM); return;
     }
-    clear.color_write = st.color_wmask;
-    clear.depth_write = st.depth.mask;
-    clear.stencil_write_mask = st.stencil_front.write_mask;
-    if (!v::Clear(clear)) PUSH_ERROR(GL_INVALID_OPERATION);
+    (void)SubmitClear(clear);
+}
+
+void APIENTRY glClearBufferiv(GLenum buffer, GLint drawbuffer,
+                              const GLint* value) {
+    if (!value) return;
+    v::ClearParams clear;
+    switch (buffer) {
+        case GL_COLOR:
+            if (drawbuffer < 0 || drawbuffer >= 8) {
+                PUSH_ERROR(GL_INVALID_VALUE);
+                return;
+            }
+            clear.mask = GL_COLOR_BUFFER_BIT;
+            clear.color_drawbuffer = drawbuffer;
+            for (size_t i = 0; i < 4; ++i)
+                clear.color[i] = static_cast<float>(value[i]);
+            break;
+        case GL_STENCIL:
+            if (drawbuffer != 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+            clear.mask = GL_STENCIL_BUFFER_BIT;
+            clear.stencil = static_cast<uint32_t>(value[0]);
+            break;
+        default: PUSH_ERROR(GL_INVALID_ENUM); return;
+    }
+    (void)SubmitClear(clear);
+}
+
+void APIENTRY glClearBufferuiv(GLenum buffer, GLint drawbuffer,
+                               const GLuint* value) {
+    if (!value) return;
+    if (buffer != GL_COLOR) { PUSH_ERROR(GL_INVALID_ENUM); return; }
+    if (drawbuffer < 0 || drawbuffer >= 8) {
+        PUSH_ERROR(GL_INVALID_VALUE);
+        return;
+    }
+    v::ClearParams clear;
+    clear.mask = GL_COLOR_BUFFER_BIT;
+    clear.color_drawbuffer = drawbuffer;
+    for (size_t i = 0; i < 4; ++i)
+        clear.color[i] = static_cast<float>(value[i]);
+    (void)SubmitClear(clear);
+}
+
+void APIENTRY glClearBufferfi(GLenum buffer, GLint drawbuffer,
+                              GLfloat depth, GLint stencil) {
+    if (buffer != GL_DEPTH_STENCIL) { PUSH_ERROR(GL_INVALID_ENUM); return; }
+    if (drawbuffer != 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+    v::ClearParams clear;
+    clear.mask = GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT;
+    clear.depth = std::clamp<double>(depth, 0.0, 1.0);
+    clear.stencil = static_cast<uint32_t>(stencil);
+    (void)SubmitClear(clear);
 }
 
 // ---- face / polygon --------------------------------------------------------

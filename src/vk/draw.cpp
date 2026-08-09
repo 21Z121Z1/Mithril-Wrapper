@@ -22,6 +22,19 @@ static bool OpDrawBufEnabled(const FboObj& f, size_t i) {
     return false;
 }
 
+static bool OpClearColorEnabled(const FboObj* f,
+                                const ClearParams& clear, size_t attachment) {
+    if (clear.color_drawbuffer < 0)
+        return !f || OpDrawBufEnabled(*f, attachment);
+    if (!f)
+        return clear.color_drawbuffer == 0 && attachment == 0;
+    const size_t draw_index = static_cast<size_t>(clear.color_drawbuffer);
+    if (draw_index >= f->draw_bufs.size()) return false;
+    const GLenum selected = f->draw_bufs[draw_index];
+    return selected != GL_NONE &&
+           selected == GL_COLOR_ATTACHMENT0 + attachment;
+}
+
 // Create a host-visible staging buffer of `size` bytes and copy `data` in.
 bool StageBytes(const void* data, VkDeviceSize size, VkBufferUsageFlags usage,
                 VkBuffer* buf, VkDeviceMemory* mem) {
@@ -315,10 +328,11 @@ void SubmitFlush() {
                                         &c, 1, &color_range);
             };
             if (!fbo) {
-                clear_img(color_img, *color_layout);
+                if (OpClearColorEnabled(nullptr, g.clear, 0))
+                    clear_img(color_img, *color_layout);
             } else {
                 for (size_t i = 0; i < fbo->colors.size(); ++i) {
-                    if (!(OpDrawBufEnabled(*fbo, i))) continue;
+                    if (!OpClearColorEnabled(fbo, g.clear, i)) continue;
                     clear_img(FboColorImage(*fbo, (int)i),
                               VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
                     if (fbo->color_msaa[i])
@@ -392,7 +406,7 @@ void SubmitFlush() {
                 const uint32_t color_count = fbo
                     ? static_cast<uint32_t>(fbo->colors.size()) : 1;
                 for (uint32_t i = 0; i < color_count; ++i) {
-                    if (fbo && !OpDrawBufEnabled(*fbo, i)) continue;
+                    if (!OpClearColorEnabled(fbo, g.clear, i)) continue;
                     VkClearAttachment attachment{};
                     attachment.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
                     attachment.colorAttachment = i;

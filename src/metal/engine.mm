@@ -1183,6 +1183,20 @@ bool ColorAttachmentEnabled(const backend::FboSpec* spec, NSUInteger index) {
     return false;
 }
 
+bool ColorAttachmentSelected(const backend::FboSpec* spec,
+                             const backend::ClearParams& clear,
+                             NSUInteger attachment_index) {
+    if (clear.color_drawbuffer < 0)
+        return ColorAttachmentEnabled(spec, attachment_index);
+    if (!spec)
+        return clear.color_drawbuffer == 0 && attachment_index == 0;
+    const size_t draw_index = static_cast<size_t>(clear.color_drawbuffer);
+    if (draw_index >= spec->draw_bufs.size()) return false;
+    const GLenum selected = spec->draw_bufs[draw_index];
+    return selected != GL_NONE &&
+           selected == GL_COLOR_ATTACHMENT0 + attachment_index;
+}
+
 MTLColorWriteMask ClearColorWriteMask(const backend::ClearParams& clear) {
     MTLColorWriteMask mask = MTLColorWriteMaskNone;
     if (clear.color_write[0]) mask |= MTLColorWriteMaskRed;
@@ -1219,7 +1233,7 @@ ClearPipeline* GetOrCreateClearPipeline(
     if ((encoded_mask & GL_COLOR_BUFFER_BIT) &&
         ClearColorWriteMask(clear) != MTLColorWriteMaskNone) {
         for (NSUInteger i = 0; i < target.colors.size() && i < 32; ++i)
-            if (target.colors[i] && ColorAttachmentEnabled(spec, i))
+            if (target.colors[i] && ColorAttachmentSelected(spec, clear, i))
                 color_output_mask |= 1u << i;
     }
     const bool clear_depth = target.depth_stencil &&
@@ -1566,7 +1580,8 @@ bool SubmitInternal(bool wait_for_completion, bool copy_for_readback,
             } else {
                 color.storeAction = MTLStoreActionStore;
             }
-            const bool draw_buffer_enabled = ColorAttachmentEnabled(draw_spec, i);
+            const bool draw_buffer_enabled =
+                ColorAttachmentSelected(draw_spec, engine.clear, i);
             if (load_color_clear && draw_buffer_enabled) {
                 color.loadAction = MTLLoadActionClear;
                 color.clearColor = MTLClearColorMake(engine.clear.color[0],

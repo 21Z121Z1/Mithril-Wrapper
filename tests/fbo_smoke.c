@@ -32,6 +32,7 @@
 #define GL_COLOR_BUFFER_BIT   0x00004000
 #define GL_DEPTH_BUFFER_BIT   0x00000100
 #define GL_STENCIL_BUFFER_BIT 0x00000400
+#define GL_COLOR              0x1800
 #define GL_RGBA               0x1908
 #define GL_UNSIGNED_BYTE      0x1401
 #define GL_DEPTH_TEST         0x0B71
@@ -86,6 +87,7 @@ typedef void* GLvoid;
 
 typedef void (*fn_glClearColor)(float, float, float, float);
 typedef void (*fn_glClear)(GLenum);
+typedef void (*fn_glClearBufferfv)(GLenum, GLint, const float*);
 typedef void (*fn_glEnable)(GLenum);
 typedef void (*fn_glDisable)(GLenum);
 typedef void (*fn_glDepthFunc)(GLenum);
@@ -190,6 +192,8 @@ int main(void) {
 
     fn_glClearColor clearColor = (fn_glClearColor)dlsym(h, "glClearColor");
     fn_glClear clear = (fn_glClear)dlsym(h, "glClear");
+    fn_glClearBufferfv clearBufferfv =
+        (fn_glClearBufferfv)dlsym(h, "glClearBufferfv");
     fn_glEnable enable = (fn_glEnable)dlsym(h, "glEnable");
     fn_glDisable disable = (fn_glDisable)dlsym(h, "glDisable");
     fn_glDepthFunc depthFunc = (fn_glDepthFunc)dlsym(h, "glDepthFunc");
@@ -244,7 +248,7 @@ int main(void) {
     fn_glGetRenderbufferParameteriv getRboParam = (fn_glGetRenderbufferParameteriv)dlsym(h, "glGetRenderbufferParameteriv");
     fn_glGetIntegerv getIntegerv = (fn_glGetIntegerv)dlsym(h, "glGetIntegerv");
 
-    CHECK(clearColor && clear && enable && depthFunc && viewport && scissor && blendFunc &&
+    CHECK(clearColor && clear && clearBufferfv && enable && depthFunc && viewport && scissor && blendFunc &&
           cullFace && frontFace && stencilFunc && stencilOp && stencilMask &&
           colorMask && polygonMode &&
           createShader && shaderSource && compileShader && createProgram &&
@@ -839,6 +843,25 @@ int main(void) {
         clearColor(0, 0, 0, 1.0f);
         GLenum bufs2[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
         drawBuffers(2, bufs2);
+
+        /* Clear GL_DRAW_BUFFER0 and GL_DRAW_BUFFER1 to different values.
+           This is the MRT behavior glClear cannot express. */
+        const float clear_red[4] = {1, 0, 0, 1};
+        const float clear_blue[4] = {0, 0, 1, 1};
+        clearBufferfv(GL_COLOR, 0, clear_red);
+        clearBufferfv(GL_COLOR, 1, clear_blue);
+        finish();
+        readBuffer(GL_COLOR_ATTACHMENT0);
+        readPixels(16, 16, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        CHECK(px_match(px, 255, 0, 0, 255),
+              "glClearBufferfv targets MRT draw buffer 0 (r=%d g=%d b=%d)",
+              px[0], px[1], px[2]);
+        readBuffer(GL_COLOR_ATTACHMENT1);
+        readPixels(16, 16, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        CHECK(px_match(px, 0, 0, 255, 255),
+              "glClearBufferfv targets MRT draw buffer 1 (r=%d g=%d b=%d)",
+              px[0], px[1], px[2]);
+
         clear(GL_COLOR_BUFFER_BIT);
         /* full-viewport red triangle; both attachments receive it. */
         float red[3][7] = {

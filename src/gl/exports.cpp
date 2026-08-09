@@ -28,22 +28,6 @@ extern "C" {
     mithril::GlStubCalled("glBindFragDataLocationIndexed");
   }
 
-  void APIENTRY glClearBufferfi(GLenum buffer, GLint drawbuffer, GLfloat depth, GLint stencil) {
-    mithril::GlStubCalled("glClearBufferfi");
-  }
-
-  void APIENTRY glClearBufferfv(GLenum buffer, GLint drawbuffer, const GLfloat *value) {
-    mithril::GlStubCalled("glClearBufferfv");
-  }
-
-  void APIENTRY glClearBufferiv(GLenum buffer, GLint drawbuffer, const GLint *value) {
-    mithril::GlStubCalled("glClearBufferiv");
-  }
-
-  void APIENTRY glClearBufferuiv(GLenum buffer, GLint drawbuffer, const GLuint *value) {
-    mithril::GlStubCalled("glClearBufferuiv");
-  }
-
   GLenum APIENTRY glClientWaitSync(GLsync sync, GLbitfield flags, GLuint64 timeout) {
     mithril::GlStubCalled("glClientWaitSync");
     return 0;
