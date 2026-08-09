@@ -383,6 +383,7 @@ v::TexSamplerInfo ToSamplerInfo(const TexState& st) {
     si.wrap_s = st.wrap_s;
     si.wrap_t = st.wrap_t;
     si.wrap_r = st.wrap_r;
+    si.state_version = st.sampler_version;
     return si;
 }
 
@@ -404,6 +405,7 @@ void ReUpload(TexState& st, GLuint id) {
     img.depth = st.IsCube() ? 1 : st.depth;
     img.is_3d = st.Is3D();
     img.is_cube = st.IsCube();
+    img.content_version = st.content_version;
     uint32_t w = st.width, h = st.height;
     size_t slices = st.SliceCount();
     for (uint32_t l = 0; l < st.mip.size(); ++l) {
@@ -476,7 +478,14 @@ void FlushDirtyTextureUploads() {
 // Mark `id` as needing a (re)upload and try it immediately when the backend
 // is already up. Uploads made before backend::EnsureInit are replayed by
 // FlushDirtyTextureUploads at the first draw.
-void MarkTextureDirty(TexState& st, GLuint id) {
+void MarkTextureDirty(TexState& st, GLuint id, bool sampler_only = false) {
+    if (sampler_only) {
+        ++st.sampler_version;
+        if (st.has_image && !st.mip.empty() && v::IsInitialized())
+            v::UpdateTextureSampler(id, ToSamplerInfo(st));
+        return;
+    }
+    ++st.content_version;
     if (!st.has_image || st.mip.empty()) return;
     g_dirty_textures.insert(id);
     if (v::IsInitialized()) FlushDirtyTextureUploads();
@@ -600,7 +609,7 @@ void APIENTRY glTexImage2D(GLenum target, GLint level, GLint internalformat,
         StoreSlices(st, (uint32_t)level, 0, st.depth, 0, 0, (uint32_t)width, 1,
                     format, type, pixels);
 
-    if (level == 0) MarkTextureDirty(st, id);
+    MarkTextureDirty(st, id);
 }
 
 void APIENTRY glTexImage1D(GLenum target, GLint level, GLint internalformat,
@@ -644,7 +653,7 @@ void APIENTRY glTexImage3D(GLenum target, GLint level, GLint internalformat,
         (uint32_t)depth == st.depth)
         StoreSlices(st, (uint32_t)level, 0, st.depth, 0, 0, (uint32_t)width,
                     (uint32_t)height, format, type, pixels);
-    if (level == 0) MarkTextureDirty(st, id);
+    MarkTextureDirty(st, id);
 }
 
 void APIENTRY glTexSubImage2D(GLenum target, GLint level, GLint xoffset,
@@ -679,7 +688,7 @@ void APIENTRY glTexSubImage2D(GLenum target, GLint level, GLint xoffset,
         StoreSlices(st, (uint32_t)level, slice, 1, (uint32_t)xoffset,
                     (uint32_t)yoffset, (uint32_t)width, (uint32_t)height,
                     format, type, pixels);
-    if (level == 0) MarkTextureDirty(st, id);
+    MarkTextureDirty(st, id);
 }
 
 void APIENTRY glTexSubImage3D(GLenum target, GLint level, GLint xoffset,
@@ -714,7 +723,7 @@ void APIENTRY glTexSubImage3D(GLenum target, GLint level, GLint xoffset,
         StoreSlices(st, (uint32_t)level, (uint32_t)zoffset, (uint32_t)depth,
                     (uint32_t)xoffset, (uint32_t)yoffset, (uint32_t)width,
                     (uint32_t)height, format, type, pixels);
-    if (level == 0) MarkTextureDirty(st, id);
+    MarkTextureDirty(st, id);
 }
 
 void APIENTRY glTexSubImage1D(GLenum target, GLint level, GLint xoffset,
@@ -824,12 +833,28 @@ void APIENTRY glTexParameteri(GLenum target, GLenum pname, GLint param) {
     GLuint id = ActiveBound();
     if (id == 0) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
     TexState& st = g_textures[id];
+    bool changed = false;
     switch (pname) {
-        case GL_TEXTURE_MIN_FILTER: st.min_filter = (GLenum)param; break;
-        case GL_TEXTURE_MAG_FILTER: st.mag_filter = (GLenum)param; break;
-        case GL_TEXTURE_WRAP_S: st.wrap_s = (GLenum)param; break;
-        case GL_TEXTURE_WRAP_T: st.wrap_t = (GLenum)param; break;
-        case GL_TEXTURE_WRAP_R: st.wrap_r = (GLenum)param; break;
+        case GL_TEXTURE_MIN_FILTER:
+            changed = st.min_filter != (GLenum)param;
+            st.min_filter = (GLenum)param;
+            break;
+        case GL_TEXTURE_MAG_FILTER:
+            changed = st.mag_filter != (GLenum)param;
+            st.mag_filter = (GLenum)param;
+            break;
+        case GL_TEXTURE_WRAP_S:
+            changed = st.wrap_s != (GLenum)param;
+            st.wrap_s = (GLenum)param;
+            break;
+        case GL_TEXTURE_WRAP_T:
+            changed = st.wrap_t != (GLenum)param;
+            st.wrap_t = (GLenum)param;
+            break;
+        case GL_TEXTURE_WRAP_R:
+            changed = st.wrap_r != (GLenum)param;
+            st.wrap_r = (GLenum)param;
+            break;
         case GL_TEXTURE_MIN_LOD:
         case GL_TEXTURE_MAX_LOD:
         case GL_TEXTURE_LOD_BIAS:
@@ -840,7 +865,7 @@ void APIENTRY glTexParameteri(GLenum target, GLenum pname, GLint param) {
             PUSH_ERROR(GL_INVALID_ENUM);
             return;
     }
-    MarkTextureDirty(st, id);
+    if (changed) MarkTextureDirty(st, id, true);
 }
 
 void APIENTRY glTexParameteriv(GLenum target, GLenum pname, const GLint* param) {
@@ -1006,7 +1031,7 @@ void APIENTRY glCompressedTexImage2D(GLenum target, GLint level,
         DecodeCompressedPlane(SlicePtr(st, level, slice), (const uint8_t*)data,
                               lvl_w, lvl_h, internalformat);
     }
-    if (level == 0) MarkTextureDirty(st, id);
+    MarkTextureDirty(st, id);
 }
 
 void APIENTRY glCompressedTexImage1D(GLenum target, GLint level,
@@ -1051,7 +1076,7 @@ void APIENTRY glCompressedTexImage3D(GLenum target, GLint level,
         st.has_comp = true;
         st.comp_format = internalformat;
     }
-    if (level == 0) MarkTextureDirty(st, id);
+    MarkTextureDirty(st, id);
 }
 
 void APIENTRY glCompressedTexSubImage2D(GLenum target, GLint level,
@@ -1095,7 +1120,7 @@ void APIENTRY glCompressedTexSubImage2D(GLenum target, GLint level,
             st.comp_format = format;
         }
     }
-    if (level == 0) MarkTextureDirty(st, id);
+    MarkTextureDirty(st, id);
 }
 
 void APIENTRY glCompressedTexSubImage3D(GLenum target, GLint level,
@@ -1140,7 +1165,7 @@ void APIENTRY glCompressedTexSubImage3D(GLenum target, GLint level,
                 (uint32_t)height, format);
         }
     }
-    if (level == 0) MarkTextureDirty(st, id);
+    MarkTextureDirty(st, id);
 }
 
 void APIENTRY glGetCompressedTexImage(GLenum target, GLint level, void* pixels) {
@@ -1193,7 +1218,7 @@ void APIENTRY glCopyTexImage1D(GLenum target, GLint level,
     if (!st.has_image) return;
     AllocLevel(st, (uint32_t)level);
     CopyFramebufferToTexture(st, level, 0, 0, x, y, width, 1);
-    if (level == 0) MarkTextureDirty(st, id);
+    MarkTextureDirty(st, id);
 }
 
 void APIENTRY glCopyTexImage2D(GLenum target, GLint level,
@@ -1236,7 +1261,7 @@ void APIENTRY glCopyTexImage2D(GLenum target, GLint level,
     } else {
         CopyFramebufferToTexture(st, (GLint)level, 0, 0, x, y, width, height);
     }
-    if (level == 0) MarkTextureDirty(st, id);
+    MarkTextureDirty(st, id);
 }
 
 void APIENTRY glCopyTexSubImage1D(GLenum target, GLint level, GLint xoffset,
@@ -1285,7 +1310,7 @@ void APIENTRY glCopyTexSubImage2D(GLenum target, GLint level, GLint xoffset,
     } else {
         CopyFramebufferToTexture(st, level, xoffset, yoffset, x, y, width, height);
     }
-    if (level == 0) MarkTextureDirty(st, id);
+    MarkTextureDirty(st, id);
 }
 
 void APIENTRY glCopyTexSubImage3D(GLenum target, GLint level, GLint xoffset,
@@ -1314,7 +1339,7 @@ void APIENTRY glCopyTexSubImage3D(GLenum target, GLint level, GLint xoffset,
         std::memcpy(SlicePtr(st, (uint32_t)level, (uint32_t)zoffset) +
                         ((size_t)(yoffset + r) * lvl_w + xoffset) * 4,
                     tmp.data() + (size_t)r * width * 4, (size_t)width * 4);
-    if (level == 0) MarkTextureDirty(st, id);
+    MarkTextureDirty(st, id);
 }
 
 // ---- buffer textures (glTexBuffer) ------------------------------------------

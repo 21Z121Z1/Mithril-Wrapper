@@ -86,11 +86,31 @@ struct ResidentBuffer {
     size_t size = 0;
 };
 
+struct ResidentTexture {
+    id<MTLTexture> texture = nil;
+    id<MTLSamplerState> sampler = nil;
+    uint64_t content_version = 0;
+    uint64_t sampler_version = 0;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    uint32_t depth = 0;
+    uint32_t levels = 0;
+    bool is_3d = false;
+    bool is_cube = false;
+};
+
+struct BoundTexture {
+    NSUInteger slot = 0;
+    id<MTLTexture> texture = nil;
+    id<MTLSamplerState> sampler = nil;
+};
+
 struct PendingDraw {
     backend::DrawParams params;
     // Strong references make GL deletion safe for already-recorded work.
     id<MTLBuffer> resident_vertex = nil;
     id<MTLBuffer> resident_instance = nil;
+    std::vector<BoundTexture> textures;
 };
 
 struct FrameContext {
@@ -115,6 +135,7 @@ struct Engine {
     std::unordered_map<uint64_t, Program> programs;
     std::unordered_map<std::string, PipelineBundle> pipelines;
     std::unordered_map<uint64_t, ResidentBuffer> resident_buffers;
+    std::unordered_map<uint64_t, ResidentTexture> textures;
     uint64_t pipeline_clock = 0;
     std::vector<PendingDraw> draws;
     std::vector<uint8_t> readback_pixels;
@@ -139,6 +160,8 @@ Engine& GetEngine() {
     return engine;
 }
 
+void WarnUnsupported(const char* feature);
+
 id<MTLBuffer> RetainResidentBuffer(const backend::VertexStream& stream) {
     if (!stream.HasResidentSource()) return nil;
     auto& engine = GetEngine();
@@ -162,6 +185,105 @@ id<MTLBuffer> RetainResidentBuffer(const backend::VertexStream& stream) {
         }
     }
     return resident.buffer;
+}
+
+MTLSamplerMinMagFilter SamplerFilter(backend::TexFilter filter) {
+    return filter == backend::TexFilter::Nearest
+        ? MTLSamplerMinMagFilterNearest : MTLSamplerMinMagFilterLinear;
+}
+
+MTLSamplerAddressMode SamplerAddress(GLenum wrap) {
+    switch (wrap) {
+        case GL_CLAMP_TO_EDGE: return MTLSamplerAddressModeClampToEdge;
+        case GL_CLAMP_TO_BORDER: return MTLSamplerAddressModeClampToBorderColor;
+        case GL_MIRRORED_REPEAT: return MTLSamplerAddressModeMirrorRepeat;
+        default: return MTLSamplerAddressModeRepeat;
+    }
+}
+
+id<MTLSamplerState> CreateSampler(const backend::TexSamplerInfo& info,
+                                  NSUInteger levels) {
+    MTLSamplerDescriptor* descriptor = [[MTLSamplerDescriptor alloc] init];
+    descriptor.minFilter = SamplerFilter(info.min);
+    descriptor.magFilter = SamplerFilter(info.mag);
+    descriptor.mipFilter = info.mip ? MTLSamplerMipFilterLinear
+                                    : MTLSamplerMipFilterNotMipmapped;
+    descriptor.sAddressMode = SamplerAddress(info.wrap_s);
+    descriptor.tAddressMode = SamplerAddress(info.wrap_t);
+    descriptor.rAddressMode = SamplerAddress(info.wrap_r);
+    descriptor.borderColor = MTLSamplerBorderColorOpaqueWhite;
+    descriptor.lodMinClamp = 0.0f;
+    descriptor.lodMaxClamp = levels ? (float)(levels - 1) : 0.0f;
+    return [GetEngine().device newSamplerStateWithDescriptor:descriptor];
+}
+
+bool TextureShapeMatches(const ResidentTexture& resident,
+                         const backend::TexUpload& image) {
+    return resident.texture && resident.width == image.width &&
+           resident.height == image.height && resident.depth == image.depth &&
+           resident.levels == image.mip.size() &&
+           resident.is_3d == image.is_3d && resident.is_cube == image.is_cube;
+}
+
+id<MTLTexture> CreateTexture(const backend::TexUpload& image) {
+    if (!image.width || !image.height || image.mip.empty()) return nil;
+    if (image.is_3d && image.mip.size() > 1) {
+        WarnUnsupported("mipmapped 3D textures");
+        return nil;
+    }
+    MTLTextureDescriptor* descriptor = [[MTLTextureDescriptor alloc] init];
+    descriptor.pixelFormat = MTLPixelFormatRGBA8Unorm;
+    descriptor.width = image.width;
+    descriptor.height = image.height;
+    descriptor.mipmapLevelCount = image.mip.size();
+    descriptor.storageMode = MTLStorageModeShared;
+    descriptor.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
+    const NSUInteger slices = std::max<uint32_t>(image.depth, 1);
+    if (image.is_cube) {
+        descriptor.textureType = MTLTextureTypeCube;
+        descriptor.arrayLength = 1;
+    } else if (image.is_3d) {
+        descriptor.textureType = MTLTextureType3D;
+        descriptor.depth = slices;
+    } else if (slices > 1) {
+        descriptor.textureType = MTLTextureType2DArray;
+        descriptor.arrayLength = slices;
+    } else {
+        descriptor.textureType = MTLTextureType2D;
+    }
+    id<MTLTexture> texture = [GetEngine().device newTextureWithDescriptor:descriptor];
+    if (!texture) return nil;
+    texture.label = @"Mithril resident GL texture";
+
+    for (NSUInteger level = 0; level < image.mip.size(); ++level) {
+        const NSUInteger width = std::max<NSUInteger>(1, image.width >> level);
+        const NSUInteger height = std::max<NSUInteger>(1, image.height >> level);
+        const NSUInteger row_bytes = width * 4;
+        const NSUInteger plane_bytes = row_bytes * height;
+        const auto& bytes = image.mip[level];
+        if (image.is_3d) {
+            const NSUInteger expected = plane_bytes * slices;
+            if (bytes.size() != expected) return nil;
+            [texture replaceRegion:MTLRegionMake3D(0, 0, 0, width, height, slices)
+                       mipmapLevel:level
+                              slice:0
+                         withBytes:bytes.data()
+                       bytesPerRow:row_bytes
+                     bytesPerImage:plane_bytes];
+        } else {
+            const NSUInteger layer_count = image.is_cube ? 6 : slices;
+            if (bytes.size() != plane_bytes * layer_count) return nil;
+            for (NSUInteger slice = 0; slice < layer_count; ++slice) {
+                [texture replaceRegion:MTLRegionMake2D(0, 0, width, height)
+                           mipmapLevel:level
+                                  slice:slice
+                              withBytes:bytes.data() + slice * plane_bytes
+                            bytesPerRow:row_bytes
+                          bytesPerImage:plane_bytes];
+            }
+        }
+    }
+    return texture;
 }
 
 void WarnUnsupported(const char* feature) {
@@ -797,6 +919,12 @@ bool EncodeDraws(id<MTLRenderCommandEncoder> encoder, FrameContext& frame) {
         if (fragment_ubo != NSNotFound)
             [encoder setFragmentBuffer:frame.upload offset:fragment_ubo
                                atIndex:kUniformBufferIndex];
+        for (const auto& binding : pending.textures) {
+            [encoder setVertexTexture:binding.texture atIndex:binding.slot];
+            [encoder setVertexSamplerState:binding.sampler atIndex:binding.slot];
+            [encoder setFragmentTexture:binding.texture atIndex:binding.slot];
+            [encoder setFragmentSamplerState:binding.sampler atIndex:binding.slot];
+        }
 
         const NSUInteger vertex_count = draw.vertex_stream.record_count
             ? draw.vertex_stream.record_count
@@ -941,6 +1069,18 @@ bool EnsureInit() {
             return false;
         }
         engine.initialized = true;
+        backend::TexUpload dummy;
+        dummy.width = dummy.height = dummy.depth = 1;
+        dummy.mip.push_back({255, 255, 255, 255});
+        dummy.content_version = 1;
+        backend::TexSamplerInfo dummy_sampler;
+        dummy_sampler.state_version = 1;
+        UploadTexture(0, dummy, dummy_sampler);
+        if (!engine.textures.count(0)) {
+            engine.initialized = false;
+            ML_LOG_ERROR("metal: failed to create fallback texture");
+            return false;
+        }
         ML_LOG_INFO("metal: DirectMetal initialized on %s",
                     engine.device.name.UTF8String ?: "unknown Metal device");
         return true;
@@ -1051,12 +1191,9 @@ bool Draw(const backend::DrawParams& params) {
         WarnUnsupported("user framebuffer rendering");
         return false;
     }
-    if (program->second.vertex.uses_sampled_images ||
-        program->second.fragment.uses_sampled_images ||
-        !params.sampler_binds.empty()) {
-        WarnUnsupported("sampled textures and samplers");
-        return false;
-    }
+    const bool uses_sampled_images = program->second.vertex.uses_sampled_images ||
+                                     program->second.fragment.uses_sampled_images;
+    if (uses_sampled_images && params.sampler_binds.empty()) return false;
     if (params.pipeline.polygon_mode == GL_POINT) {
         WarnUnsupported("GL_POINT polygon mode");
         return false;
@@ -1078,6 +1215,22 @@ bool Draw(const backend::DrawParams& params) {
         if (!pending.resident_instance) return false;
         pending.params.instance_stream.source_data = nullptr;
         pending.params.instance_stream.source_size = 0;
+    }
+    for (const auto& bind : params.sampler_binds) {
+        const NSUInteger slot = bind.first ? bind.first - 1 : 0;
+        if (slot >= backend::kMaxTextureUnits) {
+            WarnUnsupported("sampled-image binding beyond the frontend limit");
+            return false;
+        }
+        auto texture = engine.textures.find(bind.second);
+        if (texture == engine.textures.end() || !texture->second.texture ||
+            !texture->second.sampler) {
+            ML_LOG_ERROR("metal: texture %llu is not resident for binding %u",
+                         (unsigned long long)bind.second, bind.first);
+            return false;
+        }
+        pending.textures.push_back(
+            {slot, texture->second.texture, texture->second.sampler});
     }
     engine.draws.push_back(std::move(pending));
     engine.frame_dirty = true;
@@ -1128,11 +1281,65 @@ void ReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, void* output) {
     }
 }
 
-void UploadTexture(uint64_t, const backend::TexUpload&,
-                   const backend::TexSamplerInfo&) {
-    WarnUnsupported("texture upload");
+void UploadTexture(uint64_t texture_id, const backend::TexUpload& image,
+                   const backend::TexSamplerInfo& sampler_info) {
+    auto& engine = GetEngine();
+    if (!engine.initialized || image.mip.empty()) return;
+    @autoreleasepool {
+        auto existing = engine.textures.find(texture_id);
+        const bool same_shape = existing != engine.textures.end() &&
+                                TextureShapeMatches(existing->second, image);
+        const bool needs_texture = !same_shape ||
+            existing->second.content_version != image.content_version;
+        const bool needs_sampler = existing == engine.textures.end() ||
+            !existing->second.sampler ||
+            existing->second.sampler_version != sampler_info.state_version ||
+            existing->second.levels != image.mip.size();
+
+        id<MTLTexture> texture = needs_texture ? CreateTexture(image)
+            : existing->second.texture;
+        id<MTLSamplerState> sampler = needs_sampler
+            ? CreateSampler(sampler_info, image.mip.size())
+            : existing->second.sampler;
+        if (!texture || !sampler) {
+            ML_LOG_ERROR("metal: failed to make texture %llu resident",
+                         (unsigned long long)texture_id);
+            engine.textures.erase(texture_id);
+            return;
+        }
+
+        ResidentTexture resident;
+        resident.texture = texture;
+        resident.sampler = sampler;
+        resident.content_version = image.content_version;
+        resident.sampler_version = sampler_info.state_version;
+        resident.width = image.width;
+        resident.height = image.height;
+        resident.depth = image.depth;
+        resident.levels = image.mip.size();
+        resident.is_3d = image.is_3d;
+        resident.is_cube = image.is_cube;
+        engine.textures[texture_id] = std::move(resident);
+    }
 }
-void DestroyResidentTexture(uint64_t) {}
+void UpdateTextureSampler(uint64_t texture_id,
+                          const backend::TexSamplerInfo& sampler_info) {
+    auto& engine = GetEngine();
+    auto texture = engine.textures.find(texture_id);
+    if (texture == engine.textures.end()) return;
+    @autoreleasepool {
+        id<MTLSamplerState> sampler = CreateSampler(
+            sampler_info, texture->second.levels);
+        if (!sampler) {
+            ML_LOG_ERROR("metal: failed to update sampler for texture %llu",
+                         (unsigned long long)texture_id);
+            return;
+        }
+        texture->second.sampler = sampler;
+        texture->second.sampler_version = sampler_info.state_version;
+    }
+}
+void DestroyResidentTexture(uint64_t id) { GetEngine().textures.erase(id); }
 void CreateRenderbuffer(uint64_t, GLenum, uint32_t, uint32_t, uint32_t) {
     WarnUnsupported("renderbuffers");
 }

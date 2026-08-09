@@ -87,6 +87,8 @@ struct TexState {
     GLenum min_filter = GL_LINEAR;       // sampler state (GL enums)
     GLenum mag_filter = GL_LINEAR;
     GLenum wrap_s = GL_REPEAT, wrap_t = GL_REPEAT, wrap_r = GL_REPEAT;
+    uint64_t content_version = 0;
+    uint64_t sampler_version = 0;
     uint32_t width = 0, height = 0, depth = 1;  // depth: 3D z / array layers
     std::vector<std::vector<uint8_t>> mip;      // [level] slices concatenated
     bool has_image = false;                    // level 0 present

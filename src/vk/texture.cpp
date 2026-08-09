@@ -29,6 +29,25 @@ VkSamplerAddressMode ToVkWrap(GLenum wrap) {
     }
 }
 
+VkSampler CreateSamplerState(const TexSamplerInfo& sampler, uint32_t levels) {
+    VkSamplerCreateInfo si{};
+    si.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    si.magFilter = ToVkFilter(sampler.mag);
+    si.minFilter = ToVkFilter(sampler.min);
+    si.mipmapMode = sampler.mip ? VK_SAMPLER_MIPMAP_MODE_LINEAR
+                                : VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    si.addressModeU = ToVkWrap(sampler.wrap_s);
+    si.addressModeV = ToVkWrap(sampler.wrap_t);
+    si.addressModeW = ToVkWrap(sampler.wrap_r);
+    si.maxAnisotropy = 1.0f;
+    si.compareOp = VK_COMPARE_OP_ALWAYS;
+    si.maxLod = levels ? static_cast<float>(levels - 1) : 0.0f;
+    si.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
+    VkSampler result = VK_NULL_HANDLE;
+    return g.fn.CreateSampler(g.device, &si, nullptr, &result) == VK_SUCCESS
+        ? result : VK_NULL_HANDLE;
+}
+
 // One-shot staging copy: writable buffer -> image (all mip levels), then
 // leave the image in SHADER_READ_ONLY_OPTIMAL for sampling.
 void UploadImageData(VkImage image, const TexUpload& img) {
@@ -168,6 +187,7 @@ void UploadTexture(uint64_t gl_id, const TexUpload& img,
     if (!g.initialized || img.mip.empty()) return;
 
     // Replace any previous resident image for this id.
+    if (!g.frame_draws.empty()) SubmitFlush();
     auto it = g.textures.find(gl_id);
     if (it != g.textures.end())
         DestroyTexObj(it->second);
@@ -254,29 +274,36 @@ void UploadTexture(uint64_t gl_id, const TexUpload& img,
         return;
     }
 
-    VkSamplerCreateInfo si{};
-    si.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-    si.magFilter = ToVkFilter(sampler.mag);
-    si.minFilter = ToVkFilter(sampler.min);
-    si.mipmapMode = sampler.mip ? VK_SAMPLER_MIPMAP_MODE_LINEAR
-                                : VK_SAMPLER_MIPMAP_MODE_NEAREST;
-    si.addressModeU = ToVkWrap(sampler.wrap_s);
-    si.addressModeV = ToVkWrap(sampler.wrap_t);
-    si.addressModeW = ToVkWrap(sampler.wrap_r);
-    si.mipLodBias = 0.0f;
-    si.anisotropyEnable = VK_FALSE;
-    si.maxAnisotropy = 1.0f;
-    si.compareEnable = VK_FALSE;
-    si.compareOp = VK_COMPARE_OP_ALWAYS;
-    si.minLod = 0.0f;
-    si.maxLod = static_cast<float>(mips - 1);
-    si.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
-    if (g.fn.CreateSampler(g.device, &si, nullptr, &it->second.sampler) !=
-        VK_SUCCESS) {
+    it->second.sampler = CreateSamplerState(sampler, mips);
+    if (!it->second.sampler) {
         ML_LOG_WARN("vk: sampler creation failed for texture %llu",
                     (unsigned long long)gl_id);
     }
     it->second.levels = mips;
+}
+
+void UpdateTextureSampler(uint64_t gl_id, const TexSamplerInfo& sampler) {
+    auto it = g.textures.find(gl_id);
+    if (it == g.textures.end()) return;
+    VkSampler replacement = CreateSamplerState(sampler, it->second.levels);
+    if (!replacement) {
+        ML_LOG_WARN("vk: sampler update failed for texture %llu",
+                    (unsigned long long)gl_id);
+        return;
+    }
+    // Vulkan descriptors retain the old sampler for already queued draws;
+    // this reference backend has no deferred-destruction queue yet.
+    if (!g.frame_draws.empty()) {
+        SubmitFlush();
+        it = g.textures.find(gl_id);
+        if (it == g.textures.end()) {
+            g.fn.DestroySampler(g.device, replacement, nullptr);
+            return;
+        }
+    }
+    if (it->second.sampler)
+        g.fn.DestroySampler(g.device, it->second.sampler, nullptr);
+    it->second.sampler = replacement;
 }
 
 void CreateDummyTexture() {
@@ -294,6 +321,7 @@ void CreateDummyTexture() {
 }
 
 void DestroyResidentTexture(uint64_t gl_id) {
+    if (!g.frame_draws.empty()) SubmitFlush();
     auto it = g.textures.find(gl_id);
     if (it != g.textures.end()) {
         DestroyTexObj(it->second);

@@ -108,6 +108,7 @@ struct TexUpload {
     bool is_3d = false;
     bool is_cube = false;
     std::vector<std::vector<uint8_t>> mip;
+    uint64_t content_version = 0;
 };
 
 enum class TexFilter { Nearest = 0, Linear = 1 };
@@ -117,6 +118,7 @@ struct TexSamplerInfo {
     TexFilter min = TexFilter::Linear;
     bool mip = false;
     GLenum wrap_s = GL_REPEAT, wrap_t = GL_REPEAT, wrap_r = GL_REPEAT;
+    uint64_t state_version = 0;
 };
 
 struct FboAttach {
