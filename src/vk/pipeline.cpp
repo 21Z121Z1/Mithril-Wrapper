@@ -281,6 +281,7 @@ VkPipeline GetOrCreatePipeline(const Program& prog, const DrawOp& op) {
     VkPipelineInputAssemblyStateCreateInfo ia{};
     ia.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
     ia.topology = kTopologyMap[op.topology % 3];
+    ia.primitiveRestartEnable = op.primitive_restart ? VK_TRUE : VK_FALSE;
 
     VkPipelineViewportStateCreateInfo vp{};
     vp.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;

@@ -351,7 +351,13 @@ void DrawCommon(GLenum mode, const std::vector<uint32_t>& idx, GLint first,
         v_count = count;
     } else {
         uint32_t m = 0;
-        for (uint32_t i : idx) m = std::max(m, i);
+        bool has_vertex = false;
+        for (uint32_t i : idx) {
+            if (i == UINT32_MAX) continue;
+            m = std::max(m, i);
+            has_vertex = true;
+        }
+        if (!has_vertex) return;
         v_count = (GLsizei)(m + 1);
     }
 
@@ -477,6 +483,8 @@ void DrawCommon(GLenum mode, const std::vector<uint32_t>& idx, GLint first,
     dp.vertex_stream = std::move(vstream);
     dp.instance_stream = std::move(istream);
     dp.indices = idx;  // raw u32 indices into the payload rows
+    dp.primitive_restart = std::find(idx.begin(), idx.end(), UINT32_MAX) !=
+                           idx.end();
     dp.instance_count = (uint32_t)instance_count;
     dp.topology = (v::Topology)topo;
     dp.uniforms = ComposeUniforms(prog);
@@ -592,11 +600,24 @@ std::vector<uint32_t> LoadIndices(GLenum type, const void* indices,
     }
     const uint8_t* p = raw.data() + off;
     out.resize((size_t)count);
+    const auto& state = s::GetState();
+    const bool restart_enabled = state.caps.Test(GL_PRIMITIVE_RESTART);
     for (GLsizei i = 0; i < count; ++i) {
         GLuint v;
         if (idx_sz == 1) v = p[i];
         else if (idx_sz == 2) v = ((const uint16_t*)p)[i];
         else v = ((const uint32_t*)p)[i];
+        if (restart_enabled && v == state.primitive_restart_index) {
+            out[i] = UINT32_MAX;
+            continue;
+        }
+        // Metal reserves the largest uint32 index as its fixed native restart
+        // sentinel. A real vertex at that impossible-to-reside index cannot be
+        // represented by this slice, so reject it instead of silently restart.
+        if (v == UINT32_MAX) {
+            *err = GL_INVALID_OPERATION;
+            return {};
+        }
         if (start != end && (v < start || v > end)) {
             *err = GL_INVALID_VALUE;
             return {};
@@ -614,6 +635,27 @@ void DrawElementsImpl(GLenum mode, GLsizei count, GLenum type,
     std::vector<uint32_t> idx = LoadIndices(type, indices, count, start, end, &err);
     if (err) { PUSH_ERROR(err); return; }
     if (idx.empty()) return;
+    const bool has_restart = std::find(idx.begin(), idx.end(), UINT32_MAX) !=
+                             idx.end();
+    if (has_restart && mode != GL_TRIANGLE_STRIP) {
+        // Metal has no native triangle-fan primitive, and Vulkan list restart
+        // is not universally available. Split these modes at the shared
+        // semantic layer; each segment keeps the original baseVertex and
+        // instance parameters, and no restart vertex is ever fetched.
+        size_t begin = 0;
+        for (size_t i = 0; i <= idx.size(); ++i) {
+            if (i != idx.size() && idx[i] != UINT32_MAX) continue;
+            if (i > begin) {
+                std::vector<uint32_t> segment(idx.begin() + begin,
+                                              idx.begin() + i);
+                DrawCommon(mode, segment, 0,
+                           static_cast<GLsizei>(segment.size()),
+                           base_vertex, instance_count);
+            }
+            begin = i + 1;
+        }
+        return;
+    }
     DrawCommon(mode, idx, 0, count, base_vertex, instance_count);
 }
 

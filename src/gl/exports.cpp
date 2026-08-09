@@ -107,10 +107,6 @@ extern "C" {
     mithril::GlStubCalled("glPointParameteriv");
   }
 
-  void APIENTRY glPrimitiveRestartIndex(GLuint index) {
-    mithril::GlStubCalled("glPrimitiveRestartIndex");
-  }
-
   void APIENTRY glProvokingVertex(GLenum mode) {
     mithril::GlStubCalled("glProvokingVertex");
   }

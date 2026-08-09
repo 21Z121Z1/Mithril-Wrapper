@@ -22,6 +22,7 @@ static bool CapValid(GLenum cap) {
         case GL_RASTERIZER_DISCARD:
         case GL_PROGRAM_POINT_SIZE:
         case GL_LOGIC_OP_MODE:
+        case GL_PRIMITIVE_RESTART:
             return true;
         default:
             return false;
@@ -100,6 +101,10 @@ GLboolean APIENTRY glIsEnabledi(GLenum cap, GLuint index) {
 
 void APIENTRY glFinish() { v::SubmitFlush(true); }
 void APIENTRY glFlush() { v::SubmitFlush(false); }
+
+void APIENTRY glPrimitiveRestartIndex(GLuint index) {
+    s::GetState().primitive_restart_index = index;
+}
 
 // ---- viewport / scissor ----------------------------------------------------
 
@@ -500,6 +505,7 @@ void APIENTRY glGetBooleanv(GLenum pname, GLboolean* data) {
         case GL_SAMPLE_COVERAGE: *data = st.caps.Test(GL_SAMPLE_COVERAGE) ? GL_TRUE : GL_FALSE; break;
         case GL_POLYGON_OFFSET_FILL: *data = st.caps.Test(GL_POLYGON_OFFSET_FILL) ? GL_TRUE : GL_FALSE; break;
         case GL_LOGIC_OP_MODE:       *data = st.caps.Test(GL_LOGIC_OP_MODE) ? GL_TRUE : GL_FALSE; break;
+        case GL_PRIMITIVE_RESTART:    *data = st.caps.Test(GL_PRIMITIVE_RESTART) ? GL_TRUE : GL_FALSE; break;
         case GL_DEPTH_WRITEMASK: *data = st.depth.mask; break;
         default: PUSH_ERROR(GL_INVALID_ENUM);
     }
@@ -553,6 +559,10 @@ void APIENTRY glGetIntegerv(GLenum pname, GLint* data) {
         case GL_MINOR_VERSION: *data = 3; break;
         case GL_CONTEXT_PROFILE_MASK: *data = GL_CONTEXT_CORE_PROFILE_BIT; break;
         case GL_SAMPLE_MASK: *data = st.sample_masks[0] ? 1 : 0; break;
+        case GL_PRIMITIVE_RESTART:
+            *data = st.caps.Test(GL_PRIMITIVE_RESTART) ? 1 : 0; break;
+        case GL_PRIMITIVE_RESTART_INDEX:
+            *data = static_cast<GLint>(st.primitive_restart_index); break;
         default: PUSH_ERROR(GL_INVALID_ENUM);
     }
 }

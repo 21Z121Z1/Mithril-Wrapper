@@ -135,6 +135,7 @@ void Draw(const DrawParams& params) {
     op.vertex_offset = params.vertex_stream.binding_offset;
     op.instance_offset = params.instance_stream.binding_offset;
     op.index_count = (uint32_t)params.indices.size();
+    op.primitive_restart = params.primitive_restart;
     op.pipe = params.pipeline;
     op.dynamic = params.dynamic;
     if (g.bound_draw_fbo) {
@@ -154,7 +155,8 @@ void Draw(const DrawParams& params) {
     std::string base_key =
         BuildPipelineKey(params.program, op.topology, op.v_attrs, op.v_stride,
                          op.i_attrs, op.i_stride) +
-        StateSignature(params.pipeline);
+        StateSignature(params.pipeline) +
+        "|PR" + std::to_string(op.primitive_restart);
     op.pipeline_key = base_key + "|RP" + (op.rp_sig.empty() ? "default" : op.rp_sig);
 
     if (!StageStream(params.vertex_stream, &op.vertex_buffer,

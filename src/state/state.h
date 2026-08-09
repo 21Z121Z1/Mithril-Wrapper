@@ -118,6 +118,7 @@ struct GLState {
     ErrorQueue errors;
     GLenum active_texture = GL_TEXTURE0;
     GLuint current_program = 0;   // set by glUseProgram; uniform setters target it
+    GLuint primitive_restart_index = 0;
 };
 
 // The global context instance.

@@ -33,7 +33,7 @@ MGL_IMPL = frozenset({
     "glGetPointerv", "glClampColor",
     # GL 3.2 execution sync objects.
     "glClientWaitSync", "glDeleteSync", "glFenceSync", "glGetSynciv",
-    "glIsSync", "glWaitSync",
+    "glIsSync", "glPrimitiveRestartIndex", "glWaitSync",
     # S2 shaders/programs/uniforms implemented in src/gl/.
     "glAttachShader", "glBindAttribLocation", "glCompileShader", "glCreateProgram",
     "glCreateShader", "glDeleteProgram", "glDeleteShader", "glDetachShader",

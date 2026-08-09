@@ -207,6 +207,10 @@ struct DrawParams {
     VertexStream vertex_stream;
     VertexStream instance_stream;
     std::vector<uint32_t> indices;
+    // Index values matching the GL restart index are normalized by the
+    // frontend to UINT32_MAX. Metal consumes that sentinel natively; Vulkan
+    // uses this flag to enable its matching input-assembly behavior.
+    bool primitive_restart = false;
     uint32_t instance_count = 1;
     Topology topology = Topology::Triangles;
     std::unordered_map<std::string, std::vector<float>> uniforms;

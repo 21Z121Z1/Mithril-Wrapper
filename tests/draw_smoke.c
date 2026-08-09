@@ -43,6 +43,8 @@
 #define GL_VERTEX_ATTRIB_ARRAY_SIZE   0x8623
 #define GL_VERTEX_ATTRIB_ARRAY_STRIDE 0x8624
 #define GL_READ_WRITE         0x88BA
+#define GL_PRIMITIVE_RESTART  0x8F9D
+#define GL_PRIMITIVE_RESTART_INDEX 0x8F9E
 
 typedef unsigned int GLuint;
 typedef unsigned int GLenum;
@@ -57,6 +59,11 @@ typedef unsigned int GLbitfield;
 
 typedef void (*fn_glClearColor)(float, float, float, float);
 typedef void (*fn_glClear)(GLenum);
+typedef void (*fn_glEnable)(GLenum);
+typedef void (*fn_glDisable)(GLenum);
+typedef GLboolean (*fn_glIsEnabled)(GLenum);
+typedef void (*fn_glGetIntegerv)(GLenum, GLint*);
+typedef void (*fn_glPrimitiveRestartIndex)(GLuint);
 typedef GLuint (*fn_glCreateShader)(GLenum);
 typedef void (*fn_glShaderSource)(GLuint, GLsizei, const char* const*, const GLint*);
 typedef void (*fn_glCompileShader)(GLuint);
@@ -133,6 +140,12 @@ int main(void) {
 
     fn_glClearColor        clearColor        = (fn_glClearColor)dlsym(h, "glClearColor");
     fn_glClear             clear             = (fn_glClear)dlsym(h, "glClear");
+    fn_glEnable            enable            = (fn_glEnable)dlsym(h, "glEnable");
+    fn_glDisable           disable           = (fn_glDisable)dlsym(h, "glDisable");
+    fn_glIsEnabled         isEnabled         = (fn_glIsEnabled)dlsym(h, "glIsEnabled");
+    fn_glGetIntegerv       getIntegerv       = (fn_glGetIntegerv)dlsym(h, "glGetIntegerv");
+    fn_glPrimitiveRestartIndex primitiveRestartIndex =
+        (fn_glPrimitiveRestartIndex)dlsym(h, "glPrimitiveRestartIndex");
     fn_glCreateShader      createShader      = (fn_glCreateShader)dlsym(h, "glCreateShader");
     fn_glShaderSource      shaderSource      = (fn_glShaderSource)dlsym(h, "glShaderSource");
     fn_glCompileShader     compileShader     = (fn_glCompileShader)dlsym(h, "glCompileShader");
@@ -168,7 +181,8 @@ int main(void) {
           createProgram && attachShader && linkProgram && useProgram &&
           getUniformLoc && uniform4f && genVertexArrays && bindVertexArray &&
           genBuffers && bindBuffer && bufferData && enableAttrib &&
-          vertexAttribPtr && drawArrays && finish && readPixels,
+          vertexAttribPtr && drawArrays && finish && readPixels && enable &&
+          disable && isEnabled && getIntegerv && primitiveRestartIndex,
           "all required GL symbols resolved");
 
     const char* expected_renderer = getenv("MITHRIL_EXPECT_RENDERER");
@@ -373,6 +387,58 @@ int main(void) {
         CHECK(px_match(px, 255, 255, 255, 255),
               "GL_TRIANGLE_STRIP renders the same triangle (r=%d g=%d b=%d)",
               px[0], px[1], px[2]);
+        bindVertexArray(vao);
+    }
+
+    /* -- GL 3.1: custom primitive restart on indexed strip ----------------- */
+    {
+        const struct Vertex restart_verts[6] = {
+            {-0.90f, -0.60f, 0, 1, 0, 0, 1},
+            {-0.20f, -0.60f, 0, 1, 0, 0, 1},
+            {-0.55f,  0.60f, 0, 1, 0, 0, 1},
+            { 0.20f, -0.60f, 0, 0, 1, 0, 1},
+            { 0.90f, -0.60f, 0, 0, 1, 0, 1},
+            { 0.55f,  0.60f, 0, 0, 1, 0, 1},
+        };
+        const GLushort restart_indices[7] = {0, 1, 2, 42, 3, 4, 5};
+        GLuint restart_vao = 0, restart_vbo = 0, restart_ibo = 0;
+        genVertexArrays(1, &restart_vao);
+        bindVertexArray(restart_vao);
+        genBuffers(1, &restart_vbo);
+        bindBuffer(GL_ARRAY_BUFFER, restart_vbo);
+        bufferData(GL_ARRAY_BUFFER, (GLsizeiptr)sizeof(restart_verts),
+                   restart_verts, 0x88E4);
+        enableAttrib(0);
+        vertexAttribPtr(0, 3, GL_FLOAT, GL_FALSE,
+                        sizeof(restart_verts[0]), 0);
+        enableAttrib(1);
+        vertexAttribPtr(1, 4, GL_FLOAT, GL_FALSE,
+                        sizeof(restart_verts[0]), (const GLvoid*)12);
+        genBuffers(1, &restart_ibo);
+        bindBuffer(GL_ELEMENT_ARRAY_BUFFER, restart_ibo);
+        bufferData(GL_ELEMENT_ARRAY_BUFFER, (GLsizeiptr)sizeof(restart_indices),
+                   restart_indices, 0x88E4);
+
+        primitiveRestartIndex(42);
+        enable(GL_PRIMITIVE_RESTART);
+        GLint queried_restart = -1;
+        getIntegerv(GL_PRIMITIVE_RESTART_INDEX, &queried_restart);
+        CHECK(queried_restart == 42 && isEnabled(GL_PRIMITIVE_RESTART),
+              "custom primitive restart state is observable (index=%d)",
+              queried_restart);
+        clear(GL_COLOR_BUFFER_BIT);
+        drawElements(GL_TRIANGLE_STRIP, 7, GL_UNSIGNED_SHORT,
+                     (const GLvoid*)0);
+        finish();
+        unsigned char left[4], right[4];
+        readPixels(115, 256, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, left);
+        readPixels(397, 256, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, right);
+        CHECK(px_match(left, 255, 0, 0, 255) &&
+                  px_match(right, 0, 255, 0, 255),
+              "custom restart becomes native Metal sentinel "
+              "(left=%d,%d,%d right=%d,%d,%d)",
+              left[0], left[1], left[2], right[0], right[1], right[2]);
+        disable(GL_PRIMITIVE_RESTART);
         bindVertexArray(vao);
     }
 
