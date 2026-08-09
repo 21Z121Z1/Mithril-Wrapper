@@ -81,6 +81,22 @@ static bool AttachDimensions(const Attach& a, GLsizei* w, GLsizei* h) {
     return true;
 }
 
+static bool AttachSampleCount(const Attach& attachment, GLsizei* samples) {
+    if (!attachment.present || !samples) return false;
+    if (attachment.is_texture) {
+        auto texture = g_textures.find(attachment.tex_id);
+        if (texture == g_textures.end() || !texture->second.has_image)
+            return false;
+        *samples = static_cast<GLsizei>(texture->second.samples);
+        return true;
+    }
+    auto renderbuffer = g_renderbuffers.find(attachment.rbo_id);
+    if (renderbuffer == g_renderbuffers.end() || !renderbuffer->second.defined)
+        return false;
+    *samples = std::max<GLsizei>(renderbuffer->second.samples, 1);
+    return true;
+}
+
 // Push the current attachments into the Vulkan engine (idempotent unless the
 // FBO changed); marks `complete` for glCheckFramebufferStatus. A GL FBO must
 // have at least one colour attachment to be renderable (the backend has a
@@ -109,37 +125,53 @@ static void PushVkFramebuffer(GLuint id) {
     if (!f || !f->dirty) return;
 
     v::FboSpec spec;
-    GLsizei cw = 0, ch = 0;
+    GLsizei cw = 0, ch = 0, framebuffer_samples = 0;
     bool col_ok = false;
+    bool attachments_match = true;
     for (int i = 0; i < f->n_color; ++i) {
         v::FboAttach ca;
         if (FillAttach(f->color[i], &ca)) {
             spec.color.push_back(ca);
-            col_ok = true;
+            GLsizei width = 0, height = 0, samples = 0;
+            if (!AttachDimensions(f->color[i], &width, &height) ||
+                !AttachSampleCount(f->color[i], &samples)) {
+                attachments_match = false;
+            } else if (!col_ok) {
+                cw = width;
+                ch = height;
+                framebuffer_samples = samples;
+                col_ok = true;
+            } else if (width != cw || height != ch ||
+                       samples != framebuffer_samples) {
+                attachments_match = false;
+            }
         } else {
             v::FboAttach empty;
             spec.color.push_back(empty);
         }
-        if (i == 0) AttachDimensions(f->color[i], &cw, &ch);
     }
     if (col_ok && f->has_depth && f->depth.present) {
-        GLsizei dw = 0, dh = 0;
-        if (AttachDimensions(f->depth, &dw, &dh) && dw == cw && dh == ch) {
+        GLsizei dw = 0, dh = 0, depth_samples = 0;
+        if (AttachDimensions(f->depth, &dw, &dh) && dw == cw && dh == ch &&
+            AttachSampleCount(f->depth, &depth_samples) &&
+            depth_samples == framebuffer_samples) {
             spec.has_depth = true;
             FillAttach(f->depth, &spec.depth);
+        } else {
+            attachments_match = false;
         }
     }
 
     spec.read_buf = f->read_buf;
     for (int i = 0; i < f->n_draw; ++i) spec.draw_bufs.push_back(f->draw_bufs[i]);
 
-    if (col_ok) {
+    if (col_ok && attachments_match) {
         spec.width = cw;
         spec.height = ch;
     }
 
     v::SetFramebuffer(id, spec);
-    f->complete = col_ok;
+    f->complete = col_ok && attachments_match;
     f->width = cw;
     f->height = ch;
     f->dirty = false;
@@ -438,14 +470,24 @@ void APIENTRY glFramebufferTexture2D(GLenum target, GLenum attachment,
     }
     if (level < 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
     GLint layer = 0;
+    GLenum object_target = textarget;
     if (textarget >= GL_TEXTURE_CUBE_MAP_POSITIVE_X &&
         textarget <= GL_TEXTURE_CUBE_MAP_NEGATIVE_Z) {
         layer = textarget - (GLint)GL_TEXTURE_CUBE_MAP_POSITIVE_X;
+        object_target = GL_TEXTURE_CUBE_MAP;
         textarget = GL_TEXTURE_2D;
     }
-    if (texture && textarget != GL_TEXTURE_2D) {
+    if (texture && textarget != GL_TEXTURE_2D &&
+        textarget != GL_TEXTURE_2D_MULTISAMPLE) {
         PUSH_ERROR(GL_INVALID_ENUM);
         return;
+    }
+    if (texture) {
+        auto object = g_textures.find(texture);
+        if (object == g_textures.end() || object->second.target != object_target) {
+            PUSH_ERROR(GL_INVALID_OPERATION);
+            return;
+        }
     }
     GLuint fbo = AttachmentFbo(target);
     if (texture && !fbo) { PUSH_ERROR(GL_INVALID_OPERATION); return; }

@@ -536,6 +536,19 @@ void APIENTRY glGetIntegerv(GLenum pname, GLint* data) {
         case GL_MAX_VERTEX_ATTRIBS: *data = kMaxAttribs; break;
         case GL_MAX_DRAW_BUFFERS: *data = 8; break;
         case GL_MAX_COLOR_ATTACHMENTS: *data = 8; break;
+        case GL_MAX_SAMPLES:
+            *data = static_cast<GLint>(v::MaxFramebufferSamples()); break;
+        case GL_MAX_COLOR_TEXTURE_SAMPLES:
+            *data = static_cast<GLint>(v::MaxColorTextureSamples()); break;
+        case GL_MAX_DEPTH_TEXTURE_SAMPLES:
+        case GL_MAX_INTEGER_SAMPLES: *data = 0; break;
+        case GL_TEXTURE_BINDING_2D_MULTISAMPLE: {
+            const GLuint unit = static_cast<GLuint>(
+                st.active_texture - GL_TEXTURE0);
+            *data = static_cast<GLint>(
+                TextureBindingForUnit(unit, GL_TEXTURE_2D_MULTISAMPLE));
+            break;
+        }
         case GL_MAX_DUAL_SOURCE_DRAW_BUFFERS: *data = 0; break;
         case GL_MAX_VERTEX_UNIFORM_BLOCKS: *data = 12; break;
         case GL_MAX_FRAGMENT_UNIFORM_BLOCKS: *data = 12; break;

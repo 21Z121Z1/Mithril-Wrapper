@@ -110,6 +110,8 @@ struct ResidentTexture {
     uint32_t height = 0;
     uint32_t depth = 0;
     uint32_t levels = 0;
+    uint32_t samples = 1;
+    bool is_multisample = false;
     bool is_3d = false;
     bool is_cube = false;
     bool is_buffer = false;
@@ -441,16 +443,19 @@ NSUInteger TexelBytes(backend::TexelFormat format) {
 
 bool TextureShapeMatches(const ResidentTexture& resident,
                          const backend::TexUpload& image) {
+    const uint32_t levels = image.is_multisample
+        ? 1 : static_cast<uint32_t>(image.mip.size());
     return resident.texture && resident.width == image.width &&
            resident.height == image.height && resident.depth == image.depth &&
-           resident.levels == image.mip.size() &&
+           resident.levels == levels && resident.samples == image.samples &&
+           resident.is_multisample == image.is_multisample &&
            resident.is_3d == image.is_3d && resident.is_cube == image.is_cube &&
            resident.is_buffer == image.is_buffer && resident.format == image.format;
 }
 
 bool HasCompleteMipChain(const ResidentTexture& texture,
                          const backend::TexSamplerInfo& sampler) {
-    if (texture.is_buffer) return true;
+    if (texture.is_buffer || texture.is_multisample) return true;
     if (sampler.mip == backend::TexMipFilter::None) return true;
     uint32_t largest = std::max(texture.width, texture.height);
     if (texture.is_3d) largest = std::max(largest, texture.depth);
@@ -464,8 +469,29 @@ bool HasCompleteMipChain(const ResidentTexture& texture,
 
 id<MTLTexture> CreateTexture(const backend::TexUpload& image,
                              id<MTLBuffer>* backing_buffer) {
-    if (!image.width || !image.height || image.mip.empty()) return nil;
+    if (!image.width || !image.height ||
+        (!image.is_multisample && image.mip.empty())) return nil;
     if (backing_buffer) *backing_buffer = nil;
+    if (image.is_multisample) {
+        if (image.is_buffer || image.is_3d || image.is_cube || image.depth != 1 ||
+            !image.mip.empty() ||
+            ![GetEngine().device supportsTextureSampleCount:image.samples])
+            return nil;
+        MTLTextureDescriptor* descriptor = [MTLTextureDescriptor
+            texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                         width:image.width
+                                        height:image.height
+                                     mipmapped:NO];
+        descriptor.textureType = MTLTextureType2DMultisample;
+        descriptor.sampleCount = image.samples;
+        descriptor.storageMode = MTLStorageModePrivate;
+        descriptor.usage = MTLTextureUsageShaderRead |
+                           MTLTextureUsageRenderTarget;
+        id<MTLTexture> texture =
+            [GetEngine().device newTextureWithDescriptor:descriptor];
+        texture.label = @"Mithril resident GL multisample texture";
+        return texture;
+    }
     if (image.is_buffer) {
         const MTLPixelFormat pixel_format = MetalTexelFormat(image.format);
         const NSUInteger row_bytes = static_cast<NSUInteger>(image.width) *
@@ -597,19 +623,28 @@ bool ResolveTarget(uint64_t fbo_id, ResolvedTarget* target) {
         return false;
     target->width = found->second.spec.width;
     target->height = found->second.spec.height;
+    bool sample_count_set = false;
+    auto merge_sample_count = [&](id<MTLTexture> texture) {
+        if (!texture) return true;
+        const NSUInteger samples = texture.sampleCount;
+        if (sample_count_set && target->samples != samples) return false;
+        target->samples = samples;
+        sample_count_set = true;
+        return true;
+    };
     for (const auto& color : found->second.spec.color) {
         id<MTLTexture> texture = nil;
         ResolveAttachment(color, &texture);
+        if (!merge_sample_count(texture)) return false;
         target->colors.push_back(texture);
         id<MTLTexture> resolve = nil;
-        if (!color.is_texture && color.rbo_id) {
+        if (color.is_texture) {
+            if (engine.textures.find(color.tex_id) == engine.textures.end())
+                return false;
+        } else if (color.rbo_id) {
             auto renderbuffer = engine.renderbuffers.find(color.rbo_id);
             if (renderbuffer != engine.renderbuffers.end()) {
                 resolve = renderbuffer->second.resolve;
-                if (target->samples != 1 &&
-                    target->samples != renderbuffer->second.samples)
-                    return false;
-                target->samples = renderbuffer->second.samples;
             }
         }
         target->resolve_colors.push_back(resolve);
@@ -620,6 +655,7 @@ bool ResolveTarget(uint64_t fbo_id, ResolvedTarget* target) {
         if (!ResolveAttachment(found->second.spec.depth,
                                &depth_texture, &depth) || !depth)
             return false;
+        if (!merge_sample_count(depth_texture)) return false;
         target->depth_stencil = depth_texture;
     }
     return !target->colors.empty() && target->colors.front() != nil;
@@ -2059,6 +2095,13 @@ uint32_t TargetHeight() {
     return LayerDrawableSize(engine.layer, &width, &height)
         ? height : static_cast<uint32_t>(engine.height);
 }
+uint32_t MaxColorTextureSamples() {
+    if (!EnsureInit()) return 0;
+    auto& engine = GetEngine();
+    for (uint32_t samples : {8u, 4u, 2u, 1u})
+        if ([engine.device supportsTextureSampleCount:samples]) return samples;
+    return 0;
+}
 
 bool Clear(const backend::ClearParams& params) {
     auto& engine = GetEngine();
@@ -2407,7 +2450,8 @@ void ReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, void* output) {
 
 void UploadTexture(uint64_t texture_id, const backend::TexUpload& image) {
     auto& engine = GetEngine();
-    if (!engine.initialized || image.mip.empty()) return;
+    if (!engine.initialized ||
+        (!image.is_multisample && image.mip.empty())) return;
     if (engine.frame_dirty && CurrentTargetUsesTexture(texture_id) &&
         !SubmitInternal(false, false, nullptr))
         return;
@@ -2435,7 +2479,9 @@ void UploadTexture(uint64_t texture_id, const backend::TexUpload& image) {
         resident.width = image.width;
         resident.height = image.height;
         resident.depth = image.depth;
-        resident.levels = image.mip.size();
+        resident.levels = image.is_multisample ? 1 : image.mip.size();
+        resident.samples = image.samples;
+        resident.is_multisample = image.is_multisample;
         resident.is_3d = image.is_3d;
         resident.is_cube = image.is_cube;
         resident.is_buffer = image.is_buffer;

@@ -120,6 +120,26 @@ bool SwapBuffers() {
 }
 uint32_t TargetWidth() { DISPATCH_RET(TargetWidth, 0); }
 uint32_t TargetHeight() { DISPATCH_RET(TargetHeight, 0); }
+uint32_t MaxFramebufferSamples() {
+    switch (SelectedKind()) {
+        case Kind::Vulkan: return vk::MaxFramebufferSamples();
+#if defined(MITHRIL_HAS_DIRECT_METAL)
+        case Kind::DirectMetal: return metal::MaxColorTextureSamples();
+#endif
+        default: return 0;
+    }
+}
+uint32_t MaxColorTextureSamples() {
+    switch (SelectedKind()) {
+        // Multisample texture storage has not been migrated to the Vulkan
+        // reference path. Keep the per-context capability boundary honest.
+        case Kind::Vulkan: return 0;
+#if defined(MITHRIL_HAS_DIRECT_METAL)
+        case Kind::DirectMetal: return metal::MaxColorTextureSamples();
+#endif
+        default: return 0;
+    }
+}
 bool Clear(const ClearParams& params) { DISPATCH_RET(Clear, false, params); }
 uint64_t CreateProgram(const std::vector<uint32_t>& vs, const std::vector<uint32_t>& fs) {
     DISPATCH_RET(CreateProgram, 0, vs, fs);

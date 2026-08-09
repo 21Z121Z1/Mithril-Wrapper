@@ -229,6 +229,10 @@ struct TexUpload {
     uint32_t width = 0;
     uint32_t height = 0;
     uint32_t depth = 1;
+    // Multisample images have one implicit level and no CPU pixel payload.
+    // Ordinary uploads keep samples == 1 and provide mip storage below.
+    uint32_t samples = 1;
+    bool is_multisample = false;
     bool is_3d = false;
     bool is_cube = false;
     bool is_buffer = false;

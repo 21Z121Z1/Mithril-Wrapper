@@ -67,6 +67,10 @@
 #define GL_FRAMEBUFFER_COMPLETE 0x8CD5
 #define GL_RENDERBUFFER        0x8D41
 #define GL_TEXTURE_2D          0x0DE1
+#define GL_TEXTURE_2D_MULTISAMPLE 0x9100
+#define GL_TEXTURE_SAMPLES     0x9106
+#define GL_TEXTURE_FIXED_SAMPLE_LOCATIONS 0x9107
+#define GL_RGBA8               0x8058
 #define GL_NEAREST             0x2600
 #define GL_LINEAR              0x2601
 #define GL_COLOR_ATTACHMENT0   0x8CE0
@@ -75,6 +79,7 @@
 #define GL_DEPTH_ATTACHMENT    0x8D00
 #define GL_STENCIL_ATTACHMENT  0x8D20
 #define GL_MAX_DRAW_BUFFERS     0x8824
+#define GL_MAX_COLOR_TEXTURE_SAMPLES 0x910E
 #define GL_MAX_DUAL_SOURCE_DRAW_BUFFERS 0x88FC
 
 typedef unsigned int GLuint;
@@ -143,6 +148,9 @@ typedef void (*fn_glGenTextures)(GLsizei, GLuint*);
 typedef void (*fn_glBindTexture)(GLenum, GLuint);
 typedef void (*fn_glDeleteTextures)(GLsizei, const GLuint*);
 typedef void (*fn_glTexImage2D)(GLenum, GLint, GLint, GLsizei, GLsizei, GLint, GLenum, GLenum, const void*);
+typedef void (*fn_glTexImage2DMultisample)(GLenum, GLsizei, GLenum, GLsizei,
+                                           GLsizei, GLboolean);
+typedef void (*fn_glGetTexLevelParameteriv)(GLenum, GLint, GLenum, GLint*);
 typedef void (*fn_glBlitFramebuffer)(GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLbitfield, GLenum);
 typedef void (*fn_glDrawBuffers)(GLsizei, const GLenum*);
 typedef void (*fn_glDrawBuffer)(GLenum);
@@ -205,6 +213,14 @@ static const char* FS_MRT =
     "void main() {\n"
     "    fragColor0 = vColor;\n"
     "    fragColor1 = vec4(0.0, 1.0, 0.0, 1.0);\n"
+    "}\n";
+
+static const char* FS_MULTISAMPLE =
+    "#version 150\n"
+    "uniform sampler2DMS msColor;\n"
+    "layout(location=0) out vec4 fragColor;\n"
+    "void main() {\n"
+    "    fragColor = texelFetch(msColor, ivec2(16, 16), 0);\n"
     "}\n";
 
 int main(void) {
@@ -274,6 +290,10 @@ int main(void) {
     fn_glBindTexture bindTexture = (fn_glBindTexture)dlsym(h, "glBindTexture");
     fn_glDeleteTextures deleteTextures = (fn_glDeleteTextures)dlsym(h, "glDeleteTextures");
     fn_glTexImage2D texImage2D = (fn_glTexImage2D)dlsym(h, "glTexImage2D");
+    fn_glTexImage2DMultisample texImage2DMultisample =
+        (fn_glTexImage2DMultisample)dlsym(h, "glTexImage2DMultisample");
+    fn_glGetTexLevelParameteriv getTexLevelParameteriv =
+        (fn_glGetTexLevelParameteriv)dlsym(h, "glGetTexLevelParameteriv");
     fn_glBlitFramebuffer blitFramebuffer = (fn_glBlitFramebuffer)dlsym(h, "glBlitFramebuffer");
     fn_glDrawBuffers drawBuffers = (fn_glDrawBuffers)dlsym(h, "glDrawBuffers");
     fn_glDrawBuffer drawBuffer = (fn_glDrawBuffer)dlsym(h, "glDrawBuffer");
@@ -296,6 +316,7 @@ int main(void) {
           framebufferTexture2D && framebufferRenderbuffer &&
           checkFramebufferStatus && genRenderbuffers && bindRenderbuffer &&
           renderbufferStorage && genTextures && bindTexture && texImage2D &&
+          texImage2DMultisample && getTexLevelParameteriv &&
           blitFramebuffer && drawBuffers && drawBuffer && readBuffer &&
           rboMultisample && getRboParam && getIntegerv,
           "all required GL symbols resolved");
@@ -996,6 +1017,100 @@ int main(void) {
         bindFramebuffer(GL_FRAMEBUFFER, 0);
         deleteFramebuffers(1, &fbo);
         deleteRenderbuffers(1, &rbo);
+    }
+
+    /* -- multisample texture: render attachment -> sampler2DMS ------------ */
+    {
+        GLint max_samples = 0;
+        getIntegerv(GL_MAX_COLOR_TEXTURE_SAMPLES, &max_samples);
+        if (max_samples < 4) {
+            CHECK(max_samples == 0,
+                  "backend explicitly leaves multisample textures unavailable");
+        } else {
+            CHECK(max_samples >= 4,
+                  "DirectMetal reports a usable color texture sample count (%d)",
+                  max_samples);
+
+            GLuint texture = 0, fbo = 0;
+            genTextures(1, &texture);
+            bindTexture(GL_TEXTURE_2D_MULTISAMPLE, texture);
+            texImage2DMultisample(GL_TEXTURE_2D_MULTISAMPLE, 4, GL_RGBA8,
+                                  32, 32, GL_TRUE);
+            GLint texture_samples = 0, fixed_locations = 0;
+            getTexLevelParameteriv(GL_TEXTURE_2D_MULTISAMPLE, 0,
+                                   GL_TEXTURE_SAMPLES, &texture_samples);
+            getTexLevelParameteriv(GL_TEXTURE_2D_MULTISAMPLE, 0,
+                                   GL_TEXTURE_FIXED_SAMPLE_LOCATIONS,
+                                   &fixed_locations);
+            CHECK(texture_samples == 4 && fixed_locations == GL_TRUE,
+                  "multisample texture reports 4 fixed samples");
+
+            genFramebuffers(1, &fbo);
+            bindFramebuffer(GL_FRAMEBUFFER, fbo);
+            framebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                 GL_TEXTURE_2D_MULTISAMPLE, texture, 0);
+            CHECK(checkFramebufferStatus(GL_FRAMEBUFFER) ==
+                      GL_FRAMEBUFFER_COMPLETE,
+                  "4-sample texture is a complete Metal FBO attachment");
+
+            GLuint single_sample = 0;
+            genTextures(1, &single_sample);
+            bindTexture(GL_TEXTURE_2D, single_sample);
+            texImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 32, 32, 0, GL_RGBA,
+                       GL_UNSIGNED_BYTE, 0);
+            framebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1,
+                                 GL_TEXTURE_2D, single_sample, 0);
+            CHECK(checkFramebufferStatus(GL_FRAMEBUFFER) !=
+                      GL_FRAMEBUFFER_COMPLETE,
+                  "mixed sample-count attachments are not reported complete");
+            framebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1,
+                                 GL_TEXTURE_2D, 0, 0);
+            CHECK(checkFramebufferStatus(GL_FRAMEBUFFER) ==
+                      GL_FRAMEBUFFER_COMPLETE,
+                  "detaching the mismatched image restores completeness");
+            deleteTextures(1, &single_sample);
+
+            useProgram(prog);
+            disable(GL_DEPTH_TEST);
+            viewport(0, 0, 32, 32);
+            const float magenta[3][7] = {
+                {-1, -1, 0.0f, 1, 0, 1, 1},
+                { 3, -1, 0.0f, 1, 0, 1, 1},
+                {-1,  3, 0.0f, 1, 0, 1, 1},
+            };
+            bufferData(GL_ARRAY_BUFFER, (GLsizeiptr)sizeof(magenta), magenta,
+                       0x88E4);
+            clearColor(0, 0, 0, 1);
+            clear(GL_COLOR_BUFFER_BIT);
+            drawArrays(GL_TRIANGLES, 0, 3);
+
+            /* Switching targets submits the producer on the same Metal queue;
+               the consumer reads the native multisample texture directly. */
+            bindFramebuffer(GL_FRAMEBUFFER, 0);
+            viewport(0, 0, 512, 512);
+            GLuint vs_ms = createShader(GL_VERTEX_SHADER);
+            shaderSource(vs_ms, 1, &VS, 0);
+            compileShader(vs_ms);
+            GLuint fs_ms = createShader(GL_FRAGMENT_SHADER);
+            shaderSource(fs_ms, 1, &FS_MULTISAMPLE, 0);
+            compileShader(fs_ms);
+            GLuint program_ms = createProgram();
+            attachShader(program_ms, vs_ms);
+            attachShader(program_ms, fs_ms);
+            linkProgram(program_ms);
+            useProgram(program_ms);
+            clearColor(0, 0, 0, 1);
+            clear(GL_COLOR_BUFFER_BIT);
+            drawArrays(GL_TRIANGLES, 0, 3);
+            finish();
+            readPixels(256, 256, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+            CHECK(px_match(px, 255, 0, 255, 255),
+                  "sampler2DMS reads the texture rendered by native Metal "
+                  "(r=%d g=%d b=%d)", px[0], px[1], px[2]);
+
+            deleteFramebuffers(1, &fbo);
+            deleteTextures(1, &texture);
+        }
     }
 
     dlclose(h);

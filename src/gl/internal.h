@@ -108,6 +108,9 @@ struct TexState {
     GLenum compare_func = GL_LEQUAL;
     uint64_t content_version = 0;
     uint32_t width = 0, height = 0, depth = 1;  // depth: 3D z / array layers
+    uint32_t samples = 1;
+    GLenum internal_format = GL_RGBA8;
+    GLboolean fixed_sample_locations = GL_TRUE;
     std::vector<std::vector<uint8_t>> mip;      // [level] slices concatenated
     bool has_image = false;                    // level 0 present
     // Compressed mirror: raw S3TC bytes per level (kept for GetCompressedTexImage).
@@ -139,7 +142,7 @@ struct TexState {
 };
 
 extern std::unordered_map<GLuint, TexState> g_textures;
-constexpr size_t kTextureTargetSlots = 7;
+constexpr size_t kTextureTargetSlots = 8;
 using TextureUnitBindings = std::array<GLuint, kTextureTargetSlots>;
 // GL texture bindings are independent per target within each texture unit.
 extern std::array<TextureUnitBindings, kMaxTexUnits> g_texture_units;

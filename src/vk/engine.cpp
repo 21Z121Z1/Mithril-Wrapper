@@ -61,6 +61,22 @@ bool SetTargetSize(uint32_t w, uint32_t h) {
 
 uint32_t TargetWidth() { return g.width; }
 uint32_t TargetHeight() { return g.height; }
+uint32_t MaxFramebufferSamples() {
+    if (!EnsureInit()) return 0;
+    VkPhysicalDeviceProperties properties{};
+    g.fn.GetPhysicalDeviceProperties(g.physical, &properties);
+    const VkSampleCountFlags counts =
+        properties.limits.framebufferColorSampleCounts &
+        properties.limits.framebufferDepthSampleCounts;
+    if (counts & VK_SAMPLE_COUNT_64_BIT) return 64;
+    if (counts & VK_SAMPLE_COUNT_32_BIT) return 32;
+    if (counts & VK_SAMPLE_COUNT_16_BIT) return 16;
+    if (counts & VK_SAMPLE_COUNT_8_BIT) return 8;
+    if (counts & VK_SAMPLE_COUNT_4_BIT) return 4;
+    if (counts & VK_SAMPLE_COUNT_2_BIT) return 2;
+    if (counts & VK_SAMPLE_COUNT_1_BIT) return 1;
+    return 0;
+}
 
 bool Clear(const ClearParams& params) {
     // A clear is ordered with previous draws.  Submit the old batch first;

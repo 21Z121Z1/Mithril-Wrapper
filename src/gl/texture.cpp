@@ -432,11 +432,13 @@ v::TexSamplerInfo ToSamplerInfo(const T& st) {
 
 // Push the CPU mirror of `id` (level 0 + any explicit chain) to the engine.
 void ReUpload(TexState& st, GLuint id) {
-    if (!st.has_image || st.mip.empty()) return;
+    const bool multisample = st.target == GL_TEXTURE_2D_MULTISAMPLE;
+    if (!st.has_image || (!multisample && st.mip.empty())) return;
     bool served = st.target == GL_TEXTURE_2D || st.target == GL_TEXTURE_1D ||
                   st.target == GL_TEXTURE_3D || st.target == GL_TEXTURE_CUBE_MAP ||
                   st.target == GL_TEXTURE_2D_ARRAY ||
                   st.target == GL_TEXTURE_1D_ARRAY ||
+                  st.target == GL_TEXTURE_2D_MULTISAMPLE ||
                   st.target == GL_TEXTURE_BUFFER;
     if (!served) {
         ML_LOG_DEBUG("gl: target %x not served yet; texture %u stays dummy",
@@ -447,12 +449,18 @@ void ReUpload(TexState& st, GLuint id) {
     img.width = st.width;
     img.height = st.height;
     img.depth = st.IsCube() ? 1 : st.depth;
+    img.samples = st.samples;
+    img.is_multisample = multisample;
     img.is_3d = st.Is3D();
     img.is_cube = st.IsCube();
     img.is_buffer = st.has_tex_buffer;
     img.format = st.has_tex_buffer ? st.tex_buffer_backend_format
                                    : v::TexelFormat::RGBA8Unorm;
     img.content_version = st.content_version;
+    if (multisample) {
+        v::UploadTexture(id, img);
+        return;
+    }
     if (st.has_tex_buffer) {
         img.mip.push_back(st.mip.front());
         v::UploadTexture(id, img);
@@ -516,6 +524,7 @@ size_t TextureTargetSlot(GLenum target) {
         case GL_TEXTURE_1D_ARRAY: return 4;
         case GL_TEXTURE_2D_ARRAY: return 5;
         case GL_TEXTURE_BUFFER: return 6;
+        case GL_TEXTURE_2D_MULTISAMPLE: return 7;
         default: return kTextureTargetSlots;
     }
 }
@@ -663,6 +672,10 @@ GLenum TextureTargetForSampler(GLenum sampler_type) {
         case GL_INT_SAMPLER_BUFFER:
         case GL_UNSIGNED_INT_SAMPLER_BUFFER:
             return GL_TEXTURE_BUFFER;
+        case GL_SAMPLER_2D_MULTISAMPLE:
+        case GL_INT_SAMPLER_2D_MULTISAMPLE:
+        case GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE:
+            return GL_TEXTURE_2D_MULTISAMPLE;
         default:
             return GL_TEXTURE_2D;
     }
@@ -713,7 +726,8 @@ void MarkTextureDirty(TexState& st, GLuint id, bool sampler_only = false) {
         return;
     }
     ++st.content_version;
-    if (!st.has_image || st.mip.empty()) return;
+    if (!st.has_image ||
+        (st.target != GL_TEXTURE_2D_MULTISAMPLE && st.mip.empty())) return;
     g_dirty_textures.insert(id);
     if (v::IsInitialized()) FlushDirtyTextureUploads();
 }
@@ -955,7 +969,8 @@ void APIENTRY glBindTexture(GLenum target, GLuint texture) {
     bool valid = target == GL_TEXTURE_1D || target == GL_TEXTURE_2D ||
                  target == GL_TEXTURE_3D || target == GL_TEXTURE_CUBE_MAP ||
                  target == GL_TEXTURE_1D_ARRAY || target == GL_TEXTURE_2D_ARRAY ||
-                 target == GL_TEXTURE_BUFFER;
+                 target == GL_TEXTURE_BUFFER ||
+                 target == GL_TEXTURE_2D_MULTISAMPLE;
     if (!valid) { PUSH_ERROR(GL_INVALID_ENUM); return; }
     if (texture != 0 && !g_textures.count(texture)) {
         PUSH_ERROR(GL_INVALID_OPERATION);   // not a generated name
@@ -1018,6 +1033,8 @@ void APIENTRY glTexImage2D(GLenum target, GLint level, GLint internalformat,
         st.width = (uint32_t)width;
         st.height = target == GL_TEXTURE_1D_ARRAY ? 1 : (uint32_t)height;
         st.depth = target == GL_TEXTURE_1D_ARRAY ? (uint32_t)height : 1;
+        st.samples = 1;
+        st.internal_format = GL_RGBA8;
         st.has_image = width > 0 && height > 0;
     }
     if (!st.has_image) return;
@@ -1041,6 +1058,53 @@ void APIENTRY glTexImage2D(GLenum target, GLint level, GLint internalformat,
                     format, type, pixels);
 
     MarkTextureDirty(st, id);
+}
+
+void APIENTRY glTexImage2DMultisample(GLenum target, GLsizei samples,
+                                      GLenum internalformat, GLsizei width,
+                                      GLsizei height,
+                                      GLboolean fixedsamplelocations) {
+    if (target != GL_TEXTURE_2D_MULTISAMPLE) {
+        PUSH_ERROR(GL_INVALID_ENUM);
+        return;
+    }
+    if (samples <= 0 || width < 0 || height < 0 ||
+        width > 16384 || height > 16384) {
+        PUSH_ERROR(GL_INVALID_VALUE);
+        return;
+    }
+    // This slice has one native color representation. Reject other sized
+    // formats instead of silently changing the texture's observable ABI.
+    if (internalformat != GL_RGBA8) {
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return;
+    }
+    const uint32_t maximum = v::MaxColorTextureSamples();
+    if (!maximum || static_cast<uint32_t>(samples) > maximum) {
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return;
+    }
+    const GLuint id = ActiveBound(target);
+    if (!id) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
+    TexState& state = g_textures[id];
+    state.width = static_cast<uint32_t>(width);
+    state.height = static_cast<uint32_t>(height);
+    state.depth = 1;
+    state.samples = static_cast<uint32_t>(samples);
+    state.internal_format = internalformat;
+    state.fixed_sample_locations = fixedsamplelocations ? GL_TRUE : GL_FALSE;
+    state.has_image = width > 0 && height > 0;
+    state.mip.clear();
+    state.comp.clear();
+    state.has_comp = false;
+    state.has_tex_buffer = false;
+    if (!state.has_image) {
+        ++state.content_version;
+        g_dirty_textures.erase(id);
+        if (v::IsInitialized()) v::DestroyResidentTexture(id);
+        return;
+    }
+    MarkTextureDirty(state, id);
 }
 
 void APIENTRY glTexImage1D(GLenum target, GLint level, GLint internalformat,
@@ -1439,15 +1503,21 @@ void APIENTRY glGetTexLevelParameteriv(GLenum target, GLint level, GLenum pname,
     bool ok = target == GL_TEXTURE_2D || target == GL_TEXTURE_3D ||
               target == GL_TEXTURE_2D_ARRAY || target == GL_TEXTURE_CUBE_MAP ||
               IsCubeFace(target) || target == GL_TEXTURE_1D_ARRAY ||
-              target == GL_TEXTURE_1D || target == GL_TEXTURE_BUFFER;
+              target == GL_TEXTURE_1D || target == GL_TEXTURE_BUFFER ||
+              target == GL_TEXTURE_2D_MULTISAMPLE;
     if (!ok || level < 0) { PUSH_ERROR(GL_INVALID_ENUM); return; }
     if (!params) return;
     GLuint id = ActiveBound(target);
     if (id == 0) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
     TexState& st = g_textures[id];
     if (st.has_tex_buffer) SyncBufferTexture(st, id);
-    if (st.mip.size() <= (size_t)level &&
+    if ((!st.has_image || (st.target != GL_TEXTURE_2D_MULTISAMPLE &&
+         st.mip.size() <= (size_t)level)) &&
         !(st.has_tex_buffer && level == 0)) {
+        PUSH_ERROR(GL_INVALID_VALUE);
+        return;
+    }
+    if (st.target == GL_TEXTURE_2D_MULTISAMPLE && level != 0) {
         PUSH_ERROR(GL_INVALID_VALUE);
         return;
     }
@@ -1466,7 +1536,12 @@ void APIENTRY glGetTexLevelParameteriv(GLenum target, GLint level, GLenum pname,
             break;
         case GL_TEXTURE_INTERNAL_FORMAT:
             *params = st.has_tex_buffer ? (GLint)st.tex_buffer_format
-                    : st.has_comp ? (GLint)st.comp_format : GL_RGBA8;
+                    : st.has_comp ? (GLint)st.comp_format
+                                  : (GLint)st.internal_format;
+            break;
+        case GL_TEXTURE_SAMPLES: *params = static_cast<GLint>(st.samples); break;
+        case GL_TEXTURE_FIXED_SAMPLE_LOCATIONS:
+            *params = st.fixed_sample_locations;
             break;
         case GL_TEXTURE_COMPRESSED:
             *params = st.has_comp ? GL_TRUE : GL_FALSE;

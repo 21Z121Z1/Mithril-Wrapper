@@ -52,10 +52,6 @@ extern "C" {
     mithril::GlStubCalled("glProvokingVertex");
   }
 
-  void APIENTRY glTexImage2DMultisample(GLenum target, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height, GLboolean fixedsamplelocations) {
-    mithril::GlStubCalled("glTexImage2DMultisample");
-  }
-
   void APIENTRY glTexImage3DMultisample(GLenum target, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height, GLsizei depth, GLboolean fixedsamplelocations) {
     mithril::GlStubCalled("glTexImage3DMultisample");
   }
