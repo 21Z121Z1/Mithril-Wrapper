@@ -35,6 +35,7 @@ constexpr NSUInteger kFrameCount = 3;
 constexpr NSUInteger kUniformBufferIndex = 16;
 constexpr NSUInteger kInitialUploadCapacity = 1u << 20;
 constexpr size_t kMaxPipelineCacheEntries = 512;
+constexpr size_t kMaxClearPipelineCacheEntries = 64;
 
 NSUInteger AlignUp(NSUInteger value, NSUInteger alignment) {
     return (value + alignment - 1) & ~(alignment - 1);
@@ -79,6 +80,12 @@ struct PipelineBundle {
     id<MTLDepthStencilState> depth_stencil = nil;
     uint64_t program = 0;
     uint64_t last_use = 0;
+};
+
+struct ClearPipeline {
+    id<MTLLibrary> library = nil;
+    id<MTLRenderPipelineState> pipeline = nil;
+    id<MTLDepthStencilState> depth_stencil = nil;
 };
 
 struct ResidentBuffer {
@@ -159,6 +166,7 @@ struct Engine {
     NSUInteger height = kDefaultHeight;
     std::unordered_map<uint64_t, Program> programs;
     std::unordered_map<std::string, PipelineBundle> pipelines;
+    std::unordered_map<std::string, ClearPipeline> clear_pipelines;
     std::unordered_map<uint64_t, ResidentBuffer> resident_buffers;
     std::unordered_map<uint64_t, ResidentTexture> textures;
     std::unordered_map<uint64_t, Renderbuffer> renderbuffers;
@@ -170,10 +178,8 @@ struct Engine {
     bool frame_dirty = false;
     bool color_initialized = false;
     bool depth_initialized = false;
-    GLbitfield clear_mask = 0;
-    float clear_color[4] = {0.f, 0.f, 0.f, 0.f};
-    double clear_depth = 1.0;
-    uint32_t clear_stencil = 0;
+    bool has_clear = false;
+    backend::ClearParams clear;
     uint64_t bound_draw_fbo = 0;
     uint64_t bound_read_fbo = 0;
 };
@@ -770,11 +776,13 @@ PipelineBundle* GetOrCreatePipeline(const backend::DrawParams& params) {
     }
 
     MTLDepthStencilDescriptor* depth_descriptor = [MTLDepthStencilDescriptor new];
-    depth_descriptor.depthCompareFunction = params.pipeline.depth_test
+    depth_descriptor.depthCompareFunction = target.depth_stencil &&
+                                             params.pipeline.depth_test
         ? CompareFunction(params.pipeline.depth_func) : MTLCompareFunctionAlways;
-    depth_descriptor.depthWriteEnabled = params.pipeline.depth_test &&
+    depth_descriptor.depthWriteEnabled = target.depth_stencil &&
+                                         params.pipeline.depth_test &&
                                          params.pipeline.depth_write;
-    if (params.pipeline.stencil_test) {
+    if (target.depth_stencil && params.pipeline.stencil_test) {
         depth_descriptor.frontFaceStencil = MakeStencilDescriptor(
             params.pipeline.stencil_front_func,
             params.pipeline.stencil_front_op_fail,
@@ -1016,6 +1024,202 @@ void ApplyDynamicState(id<MTLRenderCommandEncoder> encoder,
                         backReferenceValue:(uint32_t)state.stencil_back_ref];
 }
 
+bool ColorAttachmentEnabled(const backend::FboSpec* spec, NSUInteger index) {
+    if (!spec || spec->draw_bufs.empty()) return true;
+    for (GLenum draw_buffer : spec->draw_bufs)
+        if (draw_buffer == GL_COLOR_ATTACHMENT0 + index) return true;
+    return false;
+}
+
+MTLColorWriteMask ClearColorWriteMask(const backend::ClearParams& clear) {
+    MTLColorWriteMask mask = MTLColorWriteMaskNone;
+    if (clear.color_write[0]) mask |= MTLColorWriteMaskRed;
+    if (clear.color_write[1]) mask |= MTLColorWriteMaskGreen;
+    if (clear.color_write[2]) mask |= MTLColorWriteMaskBlue;
+    if (clear.color_write[3]) mask |= MTLColorWriteMaskAlpha;
+    return mask;
+}
+
+bool ClearCoversTarget(const backend::ClearParams& clear,
+                       NSUInteger width, NSUInteger height) {
+    if (!clear.scissor_test) return true;
+    const int64_t x0 = std::max<int64_t>(0, clear.scissor[0]);
+    const int64_t y0 = std::max<int64_t>(0, clear.scissor[1]);
+    const int64_t x1 = std::min<int64_t>(width,
+        static_cast<int64_t>(clear.scissor[0]) + clear.scissor[2]);
+    const int64_t y1 = std::min<int64_t>(height,
+        static_cast<int64_t>(clear.scissor[1]) + clear.scissor[3]);
+    return x0 == 0 && y0 == 0 && x1 >= static_cast<int64_t>(width) &&
+           y1 >= static_cast<int64_t>(height);
+}
+
+struct alignas(16) ClearUniforms {
+    float color[4];
+    float depth;
+    float padding[3]{};
+};
+
+ClearPipeline* GetOrCreateClearPipeline(
+    const ResolvedTarget& target, const backend::FboSpec* spec,
+    const backend::ClearParams& clear, GLbitfield encoded_mask) {
+    auto& engine = GetEngine();
+    uint32_t color_output_mask = 0;
+    if ((encoded_mask & GL_COLOR_BUFFER_BIT) &&
+        ClearColorWriteMask(clear) != MTLColorWriteMaskNone) {
+        for (NSUInteger i = 0; i < target.colors.size() && i < 32; ++i)
+            if (target.colors[i] && ColorAttachmentEnabled(spec, i))
+                color_output_mask |= 1u << i;
+    }
+    const bool clear_depth = target.depth_stencil &&
+        (encoded_mask & GL_DEPTH_BUFFER_BIT) && clear.depth_write;
+    const bool clear_stencil = target.depth_stencil &&
+        (encoded_mask & GL_STENCIL_BUFFER_BIT) && clear.stencil_write_mask;
+    if (!color_output_mask && !clear_depth && !clear_stencil) return nullptr;
+
+    std::ostringstream key;
+    key << color_output_mask << ':' << ClearColorWriteMask(clear) << ':'
+        << clear_depth << ':' << clear_stencil << ':'
+        << clear.stencil_write_mask << ':' << target.samples;
+    for (id<MTLTexture> texture : target.colors)
+        key << ':' << (texture ? texture.pixelFormat : MTLPixelFormatInvalid);
+    key << ":d" << (target.depth_stencil
+        ? target.depth_stencil.pixelFormat : MTLPixelFormatInvalid);
+    const std::string cache_key = key.str();
+    auto cached = engine.clear_pipelines.find(cache_key);
+    if (cached != engine.clear_pipelines.end()) return &cached->second;
+
+    std::ostringstream source;
+    source << "#include <metal_stdlib>\nusing namespace metal;\n"
+              "struct ClearUniforms { float4 color; float depth; };\n"
+              "vertex float4 clear_vertex(uint id [[vertex_id]], "
+              "constant ClearUniforms& u [[buffer(0)]]) {\n"
+              "  const float2 p[3] = {float2(-1,-1), float2(3,-1), "
+              "float2(-1,3)};\n"
+              "  return float4(p[id], u.depth, 1.0);\n}\n";
+    if (color_output_mask) {
+        source << "struct ClearOutput {\n";
+        for (NSUInteger i = 0; i < target.colors.size(); ++i)
+            if (color_output_mask & (1u << i))
+                source << "  float4 c" << i << " [[color(" << i << ")]];\n";
+        source << "};\nfragment ClearOutput clear_fragment("
+                  "constant ClearUniforms& u [[buffer(0)]]) {\n"
+                  "  ClearOutput o;\n";
+        for (NSUInteger i = 0; i < target.colors.size(); ++i)
+            if (color_output_mask & (1u << i))
+                source << "  o.c" << i << " = u.color;\n";
+        source << "  return o;\n}\n";
+    }
+
+    NSError* library_error = nil;
+    id<MTLLibrary> library = [engine.device
+        newLibraryWithSource:ToNSString(source.str())
+                     options:nil error:&library_error];
+    if (!library) {
+        ML_LOG_ERROR("metal: clear MSL compile failed: %s",
+                     library_error.localizedDescription.UTF8String ?: "unknown error");
+        return nullptr;
+    }
+    id<MTLFunction> vertex = [library newFunctionWithName:@"clear_vertex"];
+    id<MTLFunction> fragment = color_output_mask
+        ? [library newFunctionWithName:@"clear_fragment"] : nil;
+    if (!vertex || (color_output_mask && !fragment)) return nullptr;
+
+    MTLRenderPipelineDescriptor* descriptor = [MTLRenderPipelineDescriptor new];
+    descriptor.vertexFunction = vertex;
+    descriptor.fragmentFunction = fragment;
+    descriptor.rasterSampleCount = target.samples;
+    if (target.depth_stencil) {
+        descriptor.depthAttachmentPixelFormat = target.depth_stencil.pixelFormat;
+        descriptor.stencilAttachmentPixelFormat = target.depth_stencil.pixelFormat;
+    }
+    for (NSUInteger i = 0; i < target.colors.size(); ++i) {
+        if (!target.colors[i]) continue;
+        descriptor.colorAttachments[i].pixelFormat = target.colors[i].pixelFormat;
+        descriptor.colorAttachments[i].writeMask =
+            (color_output_mask & (1u << i))
+                ? ClearColorWriteMask(clear) : MTLColorWriteMaskNone;
+    }
+    NSError* pipeline_error = nil;
+    id<MTLRenderPipelineState> pipeline =
+        [engine.device newRenderPipelineStateWithDescriptor:descriptor
+                                                       error:&pipeline_error];
+    if (!pipeline) {
+        ML_LOG_ERROR("metal: clear pipeline creation failed: %s",
+                     pipeline_error.localizedDescription.UTF8String ?: "unknown error");
+        return nullptr;
+    }
+
+    MTLDepthStencilDescriptor* depth = [MTLDepthStencilDescriptor new];
+    depth.depthCompareFunction = MTLCompareFunctionAlways;
+    depth.depthWriteEnabled = clear_depth;
+    if (clear_stencil) {
+        depth.frontFaceStencil = MakeStencilDescriptor(
+            GL_ALWAYS, GL_KEEP, GL_KEEP, GL_REPLACE,
+            0xFFFFFFFFu, clear.stencil_write_mask);
+        depth.backFaceStencil = depth.frontFaceStencil;
+    }
+    id<MTLDepthStencilState> depth_state =
+        [engine.device newDepthStencilStateWithDescriptor:depth];
+    if (!depth_state) return nullptr;
+
+    if (engine.clear_pipelines.size() >= kMaxClearPipelineCacheEntries)
+        engine.clear_pipelines.erase(engine.clear_pipelines.begin());
+    ClearPipeline bundle;
+    bundle.library = library;
+    bundle.pipeline = pipeline;
+    bundle.depth_stencil = depth_state;
+    auto inserted = engine.clear_pipelines.emplace(cache_key, std::move(bundle));
+    return &inserted.first->second;
+}
+
+bool EncodeClear(id<MTLRenderCommandEncoder> encoder,
+                 const ResolvedTarget& target, const backend::FboSpec* spec,
+                 const backend::ClearParams& clear, GLbitfield encoded_mask) {
+    if (!encoded_mask) return true;
+    ClearPipeline* pipeline = GetOrCreateClearPipeline(
+        target, spec, clear, encoded_mask);
+    if (!pipeline) {
+        const bool has_effective_clear =
+            ((encoded_mask & GL_COLOR_BUFFER_BIT) &&
+             ClearColorWriteMask(clear) != MTLColorWriteMaskNone) ||
+            ((encoded_mask & GL_DEPTH_BUFFER_BIT) && clear.depth_write) ||
+            ((encoded_mask & GL_STENCIL_BUFFER_BIT) && clear.stencil_write_mask);
+        return !has_effective_clear;
+    }
+
+    MTLScissorRect scissor{0, 0, target.width, target.height};
+    if (clear.scissor_test) {
+        const int64_t x0 = std::clamp<int64_t>(clear.scissor[0], 0, target.width);
+        const int64_t y0 = std::clamp<int64_t>(clear.scissor[1], 0, target.height);
+        const int64_t x1 = std::clamp<int64_t>(
+            static_cast<int64_t>(clear.scissor[0]) + clear.scissor[2],
+            0, target.width);
+        const int64_t y1 = std::clamp<int64_t>(
+            static_cast<int64_t>(clear.scissor[1]) + clear.scissor[3],
+            0, target.height);
+        if (x1 <= x0 || y1 <= y0) return true;
+        scissor = {static_cast<NSUInteger>(x0),
+                   target.height - static_cast<NSUInteger>(y1),
+                   static_cast<NSUInteger>(x1 - x0),
+                   static_cast<NSUInteger>(y1 - y0)};
+    }
+
+    ClearUniforms uniforms{};
+    std::copy(clear.color.begin(), clear.color.end(), uniforms.color);
+    uniforms.depth = static_cast<float>(std::clamp(clear.depth, 0.0, 1.0));
+    [encoder setRenderPipelineState:pipeline->pipeline];
+    [encoder setDepthStencilState:pipeline->depth_stencil];
+    [encoder setViewport:MTLViewport{0.0, 0.0, (double)target.width,
+                                     (double)target.height, 0.0, 1.0}];
+    [encoder setScissorRect:scissor];
+    [encoder setCullMode:MTLCullModeNone];
+    [encoder setStencilReferenceValue:clear.stencil];
+    [encoder setVertexBytes:&uniforms length:sizeof(uniforms) atIndex:0];
+    [encoder setFragmentBytes:&uniforms length:sizeof(uniforms) atIndex:0];
+    [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+    return true;
+}
+
 bool EncodeDraws(id<MTLRenderCommandEncoder> encoder, FrameContext& frame) {
     auto& engine = GetEngine();
     ResolvedTarget target;
@@ -1178,6 +1382,20 @@ bool SubmitInternal(bool wait_for_completion, bool copy_for_readback,
             auto fbo = engine.framebuffers.find(engine.bound_draw_fbo);
             if (fbo != engine.framebuffers.end()) draw_spec = &fbo->second.spec;
         }
+        const bool full_clear = engine.has_clear &&
+            ClearCoversTarget(engine.clear, draw_target.width, draw_target.height);
+        const bool load_color_clear = full_clear &&
+            (engine.clear.mask & GL_COLOR_BUFFER_BIT) &&
+            ClearColorWriteMask(engine.clear) == MTLColorWriteMaskAll;
+        const bool load_depth_clear = full_clear &&
+            (engine.clear.mask & GL_DEPTH_BUFFER_BIT) && engine.clear.depth_write;
+        const bool load_stencil_clear = full_clear &&
+            (engine.clear.mask & GL_STENCIL_BUFFER_BIT) &&
+            engine.clear.stencil_write_mask == 0xFFFFFFFFu;
+        GLbitfield encoded_clear_mask = engine.has_clear ? engine.clear.mask : 0;
+        if (load_color_clear) encoded_clear_mask &= ~GL_COLOR_BUFFER_BIT;
+        if (load_depth_clear) encoded_clear_mask &= ~GL_DEPTH_BUFFER_BIT;
+        if (load_stencil_clear) encoded_clear_mask &= ~GL_STENCIL_BUFFER_BIT;
         for (NSUInteger i = 0; i < draw_target.colors.size(); ++i) {
             if (!draw_target.colors[i]) continue;
             auto* color = pass.colorAttachments[i];
@@ -1188,19 +1406,13 @@ bool SubmitInternal(bool wait_for_completion, bool copy_for_readback,
             } else {
                 color.storeAction = MTLStoreActionStore;
             }
-            bool draw_buffer_enabled = true;
-            if (draw_spec && !draw_spec->draw_bufs.empty()) {
-                draw_buffer_enabled = false;
-                for (GLenum draw_buffer : draw_spec->draw_bufs)
-                    if (draw_buffer == GL_COLOR_ATTACHMENT0 + i)
-                        draw_buffer_enabled = true;
-            }
-            if ((engine.clear_mask & GL_COLOR_BUFFER_BIT) && draw_buffer_enabled) {
+            const bool draw_buffer_enabled = ColorAttachmentEnabled(draw_spec, i);
+            if (load_color_clear && draw_buffer_enabled) {
                 color.loadAction = MTLLoadActionClear;
-                color.clearColor = MTLClearColorMake(engine.clear_color[0],
-                                                      engine.clear_color[1],
-                                                      engine.clear_color[2],
-                                                      engine.clear_color[3]);
+                color.clearColor = MTLClearColorMake(engine.clear.color[0],
+                                                      engine.clear.color[1],
+                                                      engine.clear.color[2],
+                                                      engine.clear.color[3]);
             } else {
                 color.loadAction = (!engine.bound_draw_fbo && !engine.color_initialized)
                     ? MTLLoadActionDontCare : MTLLoadActionLoad;
@@ -1210,21 +1422,27 @@ bool SubmitInternal(bool wait_for_completion, bool copy_for_readback,
         if (draw_target.depth_stencil) {
             pass.depthAttachment.texture = draw_target.depth_stencil;
             pass.depthAttachment.storeAction = MTLStoreActionStore;
-            pass.depthAttachment.loadAction = (engine.clear_mask & GL_DEPTH_BUFFER_BIT)
+            pass.depthAttachment.loadAction = load_depth_clear
                 ? MTLLoadActionClear : MTLLoadActionLoad;
-            pass.depthAttachment.clearDepth = engine.clear_depth;
+            pass.depthAttachment.clearDepth = engine.clear.depth;
             pass.stencilAttachment.texture = draw_target.depth_stencil;
             pass.stencilAttachment.storeAction = MTLStoreActionStore;
             pass.stencilAttachment.loadAction =
-                (engine.clear_mask & GL_STENCIL_BUFFER_BIT)
+                load_stencil_clear
                     ? MTLLoadActionClear : MTLLoadActionLoad;
-            pass.stencilAttachment.clearStencil = engine.clear_stencil;
+            pass.stencilAttachment.clearStencil = engine.clear.stencil;
         }
 
         id<MTLRenderCommandEncoder> encoder =
             [command renderCommandEncoderWithDescriptor:pass];
         if (!encoder) return false;
         encoder.label = @"Mithril DirectMetal GL render pass";
+        if (engine.has_clear && !EncodeClear(
+                encoder, draw_target, draw_spec, engine.clear,
+                encoded_clear_mask)) {
+            [encoder endEncoding];
+            return false;
+        }
         if (!EncodeDraws(encoder, frame)) {
             [encoder endEncoding];
             return false;
@@ -1255,7 +1473,7 @@ bool SubmitInternal(bool wait_for_completion, bool copy_for_readback,
     engine.last_submitted = command;
     engine.draws.clear();
     engine.frame_dirty = false;
-    engine.clear_mask = 0;
+    engine.has_clear = false;
     if (submitted_frame) *submitted_frame = &frame;
 
     if (wait_for_completion) {
@@ -1419,22 +1637,17 @@ uint32_t TargetHeight() {
         ? height : static_cast<uint32_t>(engine.height);
 }
 
-void SetClearColor(float r, float g, float b, float a) {
+bool Clear(const backend::ClearParams& params) {
     auto& engine = GetEngine();
-    engine.clear_color[0] = r;
-    engine.clear_color[1] = g;
-    engine.clear_color[2] = b;
-    engine.clear_color[3] = a;
-}
-
-void SetClearMask(GLbitfield mask) {
-    auto& engine = GetEngine();
-    engine.clear_mask |= mask;
+    // Keep clears ordered with already-recorded draws while preserving the
+    // common one-clear-per-frame path as a single render submission.
+    if (engine.frame_dirty && !SubmitInternal(false, false, nullptr))
+        return false;
+    engine.clear = params;
+    engine.has_clear = true;
     engine.frame_dirty = true;
+    return true;
 }
-
-void SetClearDepth(double depth) { GetEngine().clear_depth = depth; }
-void SetClearStencil(GLint value) { GetEngine().clear_stencil = (uint32_t)value; }
 
 uint64_t CreateProgram(const std::vector<uint32_t>& vs,
                        const std::vector<uint32_t>& fs) {

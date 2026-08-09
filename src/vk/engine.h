@@ -7,6 +7,7 @@
 namespace mithril::vk {
 
 using backend::DrawParams;
+using backend::ClearParams;
 using backend::FboAttach;
 using backend::FboSpec;
 using backend::PipelineState;
@@ -29,10 +30,7 @@ bool IsInitialized();
 bool SetTargetSize(uint32_t w, uint32_t h);
 uint32_t TargetWidth();
 uint32_t TargetHeight();
-void SetClearColor(float r, float g, float b, float a);
-void SetClearMask(GLbitfield mask);
-void SetClearDepth(double depth);
-void SetClearStencil(GLint value);
+bool Clear(const ClearParams& params);
 uint64_t CreateProgram(const std::vector<uint32_t>& vs,
                        const std::vector<uint32_t>& fs);
 void DestroyProgram(uint64_t program);

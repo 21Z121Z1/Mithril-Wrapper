@@ -33,20 +33,26 @@ bool SetTargetSize(uint32_t w, uint32_t h) {
 uint32_t TargetWidth() { return g.width; }
 uint32_t TargetHeight() { return g.height; }
 
-void SetClearColor(float r, float g2, float b, float a2) {
-    g.clear_r = r;
-    g.clear_g = g2;
-    g.clear_b = b;
-    g.clear_a = a2;
-}
-
-void SetClearMask(GLbitfield mask) {
+bool Clear(const ClearParams& params) {
+    // A clear is ordered with previous draws.  Submit the old batch first;
+    // the reference backend's queue behavior is otherwise unchanged.
+    if (g.frame_dirty) SubmitFlush();
+    const bool partial_color =
+        params.color_write[0] != params.color_write[1] ||
+        params.color_write[0] != params.color_write[2] ||
+        params.color_write[0] != params.color_write[3];
+    const bool partial_stencil =
+        (params.mask & GL_STENCIL_BUFFER_BIT) &&
+        params.stencil_write_mask != 0 &&
+        params.stencil_write_mask != 0xFFFFFFFFu;
+    if (partial_color || partial_stencil) {
+        ML_LOG_ERROR("vk: partial channel/stencil clear is unsupported");
+        return false;
+    }
+    g.clear = params;
     g.pending_clear = true;
     g.frame_dirty = true;
-    g.clear_mask = mask;
+    return true;
 }
-
-void SetClearDepth(double depth) { g.clear_depth = depth; }
-void SetClearStencil(GLint value) { g.clear_stencil = value; }
 
 } // namespace mithril::vk

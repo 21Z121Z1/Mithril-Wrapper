@@ -340,10 +340,11 @@ int main(void) {
             {-1,  3, 0.0f, 1, 1, 1, 1},
         };
         bufferData(GL_ARRAY_BUFFER, (GLsizeiptr)sizeof(white), white, 0x88E4);
-        enable(GL_SCISSOR_TEST);
         scissor(0, 0, 3, 3);
         clearColor(0.10f, 0.20f, 0.30f, 1.0f);
+        disable(GL_SCISSOR_TEST);
         clear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        enable(GL_SCISSOR_TEST);
         drawArrays(GL_TRIANGLES, 0, 3);
         finish();
         readPixels(256, 300, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
@@ -358,6 +359,47 @@ int main(void) {
         readPixels(1, 1, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
         CHECK(px_match(px, 255, 255, 255, 255),
               "scissored region still receives the triangle (r=%d g=%d b=%d)",
+              px[0], px[1], px[2]);
+
+        /* glClear itself is scissored: clear a red 16x16 corner over blue. */
+        disable(GL_SCISSOR_TEST);
+        clearColor(0, 0, 1, 1);
+        clear(GL_COLOR_BUFFER_BIT);
+        enable(GL_SCISSOR_TEST);
+        scissor(0, 0, 16, 16);
+        clearColor(1, 0, 0, 1);
+        clear(GL_COLOR_BUFFER_BIT);
+        finish();
+        readPixels(8, 8, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        CHECK(px_match(px, 255, 0, 0, 255),
+              "scissored clear updates its rectangle (r=%d g=%d b=%d)",
+              px[0], px[1], px[2]);
+        readPixels(32, 32, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        CHECK(px_match(px, 0, 0, 255, 255),
+              "scissored clear preserves pixels outside (r=%d g=%d b=%d)",
+              px[0], px[1], px[2]);
+
+        /* A later clear is ordered after prior draws, and its value is a
+           snapshot: changing clearColor again must not rewrite it. */
+        disable(GL_SCISSOR_TEST);
+        disable(GL_DEPTH_TEST);
+        float ordered_red[3][7] = {
+            {-1, -1, 0.0f, 1, 0, 0, 1},
+            { 3, -1, 0.0f, 1, 0, 0, 1},
+            {-1,  3, 0.0f, 1, 0, 0, 1},
+        };
+        clearColor(0, 0, 0, 1);
+        clear(GL_COLOR_BUFFER_BIT);
+        bufferData(GL_ARRAY_BUFFER, (GLsizeiptr)sizeof(ordered_red),
+                   ordered_red, 0x88E4);
+        drawArrays(GL_TRIANGLES, 0, 3);
+        clearColor(0, 0, 1, 1);
+        clear(GL_COLOR_BUFFER_BIT);
+        clearColor(0, 1, 0, 1); /* state change only; no third clear */
+        finish();
+        readPixels(256, 256, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        CHECK(px_match(px, 0, 0, 255, 255),
+              "ordered clear keeps its captured value after prior draw (r=%d g=%d b=%d)",
               px[0], px[1], px[2]);
     }
 

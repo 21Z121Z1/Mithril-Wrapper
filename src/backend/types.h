@@ -96,6 +96,19 @@ struct DynamicState {
     std::array<float, 4> scissor{0.f, 0.f, 0.f, 0.f};
 };
 
+struct ClearParams {
+    GLbitfield mask = 0;
+    std::array<float, 4> color{0.f, 0.f, 0.f, 0.f};
+    double depth = 1.0;
+    uint32_t stencil = 0;
+    bool scissor_test = false;
+    std::array<int32_t, 4> scissor{0, 0, 0, 0};
+    std::array<GLboolean, 4> color_write{
+        GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE};
+    GLboolean depth_write = GL_TRUE;
+    uint32_t stencil_write_mask = 0xFFFFFFFFu;
+};
+
 struct DrawParams {
     uint64_t program = 0;
     VertexStream vertex_stream;

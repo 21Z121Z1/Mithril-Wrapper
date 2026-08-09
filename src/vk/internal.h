@@ -102,6 +102,7 @@ struct FnTable {
     ML_FN(CmdEndRenderPass);
     ML_FN(CmdClearColorImage);
     ML_FN(CmdClearDepthStencilImage);
+    ML_FN(CmdClearAttachments);
     ML_FN(CmdPipelineBarrier);
     ML_FN(CmdCopyImageToBuffer);
     ML_FN(CmdCopyImage);
@@ -306,10 +307,7 @@ struct Engine {
     bool initialized = false;
     bool frame_dirty = false;
     bool pending_clear = false;
-    GLbitfield clear_mask = 0;
-    float clear_r = 0, clear_g = 0, clear_b = 0, clear_a = 0;
-    double clear_depth = 1.0;
-    int clear_stencil = 0;
+    ClearParams clear;
     std::vector<DrawOp> frame_draws;
 };
 

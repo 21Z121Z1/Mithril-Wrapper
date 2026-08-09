@@ -259,13 +259,16 @@ void SubmitFlush() {
     // Optional explicit clear of the current target. MRT: one clear per
     // colour attachment (only those selected by the draw buffers).
     VkImageSubresourceRange color_range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-    if (g.pending_clear) {
-        if (g.clear_mask & GL_COLOR_BUFFER_BIT) {
+    const bool clear_in_render_pass = g.pending_clear && g.clear.scissor_test;
+    if (g.pending_clear && !clear_in_render_pass) {
+        if ((g.clear.mask & GL_COLOR_BUFFER_BIT) &&
+            (g.clear.color_write[0] || g.clear.color_write[1] ||
+             g.clear.color_write[2] || g.clear.color_write[3])) {
             VkClearColorValue c{};
-            c.float32[0] = g.clear_r;
-            c.float32[1] = g.clear_g;
-            c.float32[2] = g.clear_b;
-            c.float32[3] = g.clear_a;
+            c.float32[0] = g.clear.color[0];
+            c.float32[1] = g.clear.color[1];
+            c.float32[2] = g.clear.color[2];
+            c.float32[3] = g.clear.color[3];
             auto clear_img = [&](VkImage img, VkImageLayout lay) {
                 if (img == VK_NULL_HANDLE) return;
                 TransitionLayout(g.cmd, img, lay,
@@ -288,11 +291,14 @@ void SubmitFlush() {
             }
         }
     }
-    if (g.pending_clear && has_depth &&
-        (g.clear_mask & (GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT))) {
-        VkImageAspectFlags aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
-        if (g.clear_mask & GL_STENCIL_BUFFER_BIT)
-            aspect |= VK_IMAGE_ASPECT_STENCIL_BIT;
+    VkImageAspectFlags clear_depth_stencil_aspects = 0;
+    if ((g.clear.mask & GL_DEPTH_BUFFER_BIT) && g.clear.depth_write)
+        clear_depth_stencil_aspects |= VK_IMAGE_ASPECT_DEPTH_BIT;
+    if ((g.clear.mask & GL_STENCIL_BUFFER_BIT) && g.clear.stencil_write_mask)
+        clear_depth_stencil_aspects |= VK_IMAGE_ASPECT_STENCIL_BIT;
+    if (g.pending_clear && !clear_in_render_pass && has_depth &&
+        clear_depth_stencil_aspects) {
+        VkImageAspectFlags aspect = clear_depth_stencil_aspects;
         if (*depth_layout != VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
             TransitionLayoutAspect(g.cmd, depth_img, {aspect, 0, 1, 0, 1},
                                    *depth_layout,
@@ -300,8 +306,8 @@ void SubmitFlush() {
             *depth_layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
         }
         VkClearDepthStencilValue c{};
-        c.depth = (float)g.clear_depth;
-        c.stencil = (uint32_t)g.clear_stencil;
+        c.depth = (float)g.clear.depth;
+        c.stencil = g.clear.stencil;
         VkImageSubresourceRange depth_range{aspect, 0, 1, 0, 1};
         g.fn.CmdClearDepthStencilImage(g.cmd, depth_img,
                                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
@@ -333,13 +339,66 @@ void SubmitFlush() {
         *depth_layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
     }
 
-    if (!g.frame_draws.empty()) {
+    if (!g.frame_draws.empty() || clear_in_render_pass) {
         VkRenderPassBeginInfo rbi{};
         rbi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
         rbi.renderPass = rp;
         rbi.framebuffer = fb_handle;
         rbi.renderArea = {0, 0, pw, ph};
         g.fn.CmdBeginRenderPass(g.cmd, &rbi, VK_SUBPASS_CONTENTS_INLINE);
+
+        if (clear_in_render_pass) {
+            std::vector<VkClearAttachment> attachments;
+            if ((g.clear.mask & GL_COLOR_BUFFER_BIT) &&
+                (g.clear.color_write[0] || g.clear.color_write[1] ||
+                 g.clear.color_write[2] || g.clear.color_write[3])) {
+                const uint32_t color_count = fbo
+                    ? static_cast<uint32_t>(fbo->colors.size()) : 1;
+                for (uint32_t i = 0; i < color_count; ++i) {
+                    if (fbo && !OpDrawBufEnabled(*fbo, i)) continue;
+                    VkClearAttachment attachment{};
+                    attachment.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+                    attachment.colorAttachment = i;
+                    std::copy(g.clear.color.begin(), g.clear.color.end(),
+                              attachment.clearValue.color.float32);
+                    attachments.push_back(attachment);
+                }
+            }
+            VkImageAspectFlags aspects = 0;
+            if (has_depth && (g.clear.mask & GL_DEPTH_BUFFER_BIT) &&
+                g.clear.depth_write)
+                aspects |= VK_IMAGE_ASPECT_DEPTH_BIT;
+            if (has_depth && (g.clear.mask & GL_STENCIL_BUFFER_BIT) &&
+                g.clear.stencil_write_mask)
+                aspects |= VK_IMAGE_ASPECT_STENCIL_BIT;
+            if (aspects) {
+                VkClearAttachment attachment{};
+                attachment.aspectMask = aspects;
+                attachment.clearValue.depthStencil.depth =
+                    static_cast<float>(g.clear.depth);
+                attachment.clearValue.depthStencil.stencil = g.clear.stencil;
+                attachments.push_back(attachment);
+            }
+
+            const int32_t x0 = std::clamp<int32_t>(g.clear.scissor[0], 0, pw);
+            const int32_t y0_bottom = std::clamp<int32_t>(
+                g.clear.scissor[1], 0, ph);
+            const int32_t x1 = std::clamp<int32_t>(
+                g.clear.scissor[0] + g.clear.scissor[2], 0, pw);
+            const int32_t y1_bottom = std::clamp<int32_t>(
+                g.clear.scissor[1] + g.clear.scissor[3], 0, ph);
+            if (!attachments.empty() && x1 > x0 && y1_bottom > y0_bottom) {
+                VkClearRect rect{};
+                rect.rect.offset = {x0, static_cast<int32_t>(ph) - y1_bottom};
+                rect.rect.extent = {static_cast<uint32_t>(x1 - x0),
+                                    static_cast<uint32_t>(y1_bottom - y0_bottom)};
+                rect.baseArrayLayer = 0;
+                rect.layerCount = 1;
+                g.fn.CmdClearAttachments(g.cmd,
+                    static_cast<uint32_t>(attachments.size()),
+                    attachments.data(), 1, &rect);
+            }
+        }
 
         // Viewport and scissor are captured per draw. A whole GL batch can
         // therefore be encoded later without collapsing state transitions.

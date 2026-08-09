@@ -18,10 +18,7 @@ bool SetNativeWindow(void* native_window);
 bool SwapBuffers();
 uint32_t TargetWidth();
 uint32_t TargetHeight();
-void SetClearColor(float r, float g, float b, float a);
-void SetClearMask(GLbitfield mask);
-void SetClearDepth(double depth);
-void SetClearStencil(GLint value);
+bool Clear(const ClearParams& params);
 
 uint64_t CreateProgram(const std::vector<uint32_t>& vs,
                        const std::vector<uint32_t>& fs);

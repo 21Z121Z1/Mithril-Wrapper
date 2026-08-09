@@ -120,10 +120,7 @@ bool SwapBuffers() {
 }
 uint32_t TargetWidth() { DISPATCH_RET(TargetWidth, 0); }
 uint32_t TargetHeight() { DISPATCH_RET(TargetHeight, 0); }
-void SetClearColor(float r, float g, float b, float a) { DISPATCH_VOID(SetClearColor, r, g, b, a); }
-void SetClearMask(GLbitfield mask) { DISPATCH_VOID(SetClearMask, mask); }
-void SetClearDepth(double depth) { DISPATCH_VOID(SetClearDepth, depth); }
-void SetClearStencil(GLint value) { DISPATCH_VOID(SetClearStencil, value); }
+bool Clear(const ClearParams& params) { DISPATCH_RET(Clear, false, params); }
 uint64_t CreateProgram(const std::vector<uint32_t>& vs, const std::vector<uint32_t>& fs) {
     DISPATCH_RET(CreateProgram, 0, vs, fs);
 }

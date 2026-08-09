@@ -99,13 +99,14 @@ void APIENTRY glScissor(GLint x, GLint y, GLsizei width, GLsizei height) {
 
 void APIENTRY glClearColor(GLfloat r, GLfloat g, GLfloat b, GLfloat a) {
     auto& st = s::GetState();
-    st.clear_color[0] = r; st.clear_color[1] = g;
-    st.clear_color[2] = b; st.clear_color[3] = a;
-    if (v::IsInitialized())
-        v::SetClearColor(r, g, b, a);
+    auto clamp = [](GLfloat value) { return std::max(0.f, std::min(1.f, value)); };
+    st.clear_color[0] = clamp(r); st.clear_color[1] = clamp(g);
+    st.clear_color[2] = clamp(b); st.clear_color[3] = clamp(a);
 }
 
-void APIENTRY glClearDepth(GLdouble depth) { s::GetState().clear_depth = depth; }
+void APIENTRY glClearDepth(GLdouble depth) {
+    s::GetState().clear_depth = std::max(0.0, std::min(1.0, depth));
+}
 
 void APIENTRY glClearStencil(GLint sval) { s::GetState().clear_stencil = sval; }
 
@@ -113,13 +114,26 @@ void APIENTRY glClear(GLbitfield mask) {
     const GLbitfield valid = GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT;
     if (mask & ~valid) { PUSH_ERROR(GL_INVALID_VALUE); return; }
     if (!mask) return;
-    v::EnsureInit();
+    if (!v::EnsureInit()) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
     auto& st = s::GetState();
-    v::SetClearColor(st.clear_color[0], st.clear_color[1], st.clear_color[2],
-                     st.clear_color[3]);
-    v::SetClearDepth(st.clear_depth);
-    v::SetClearStencil(st.clear_stencil);
-    v::SetClearMask(mask);
+    v::ClearParams clear;
+    clear.mask = mask;
+    clear.color = {st.clear_color[0], st.clear_color[1],
+                   st.clear_color[2], st.clear_color[3]};
+    clear.depth = st.clear_depth;
+    clear.stencil = static_cast<uint32_t>(st.clear_stencil);
+    clear.scissor_test = st.caps.Test(GL_SCISSOR_TEST);
+    if (st.scissor.initialized) {
+        clear.scissor = {st.scissor.x, st.scissor.y,
+                         st.scissor.w, st.scissor.h};
+    } else {
+        clear.scissor = {0, 0, static_cast<int32_t>(v::DrawTargetWidth()),
+                         static_cast<int32_t>(v::DrawTargetHeight())};
+    }
+    clear.color_write = st.color_wmask;
+    clear.depth_write = st.depth.mask;
+    clear.stencil_write_mask = st.stencil_front.write_mask;
+    if (!v::Clear(clear)) PUSH_ERROR(GL_INVALID_OPERATION);
 }
 
 // ---- face / polygon --------------------------------------------------------
