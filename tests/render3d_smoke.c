@@ -115,14 +115,14 @@ static void LookAt(float ex, float ey, float ez,
     float fl = sqrtf(fw[0]*fw[0]+fw[1]*fw[1]+fw[2]*fw[2]);
     fw[0]/=fl; fw[1]/=fl; fw[2]/=fl;
     float up[3] = {0,1,0};
-    float s[3] = { up[1]*fw[2]-up[2]*fw[1],
-                   up[2]*fw[0]-up[0]*fw[2],
-                   up[0]*fw[1]-up[1]*fw[0] };
+    float s[3] = { fw[1]*up[2]-fw[2]*up[1],
+                   fw[2]*up[0]-fw[0]*up[2],
+                   fw[0]*up[1]-fw[1]*up[0] };
     float sl = 1.0f/(sqrtf(s[0]*s[0]+s[1]*s[1]+s[2]*s[2])+1e-9f);
     s[0]*=sl; s[1]*=sl; s[2]*=sl;
-    float u[3] = { fw[1]*s[2]-fw[2]*s[1],
-                   fw[2]*s[0]-fw[0]*s[2],
-                   fw[0]*s[1]-fw[1]*s[0] };
+    float u[3] = { s[1]*fw[2]-s[2]*fw[1],
+                   s[2]*fw[0]-s[0]*fw[2],
+                   s[0]*fw[1]-s[1]*fw[0] };
     out[0]=s[0]; out[4]=s[1]; out[8]=s[2];
     out[1]=u[0]; out[5]=u[1]; out[9]=u[2];
     out[2]=-fw[0]; out[6]=-fw[1]; out[10]=-fw[2];
@@ -223,7 +223,7 @@ int main(void) {
     for (int i = 0; i < 24; ++i) {
         float x0 = -12.0f + i * 1.0f;
         for (int j = 0; j < 24; ++j) {
-            float z0 = -1.0f - j * 1.0f, z1 = z0 - 1.0f;
+            float z0 = 6.0f - j * 1.0f, z1 = z0 - 1.0f;
             float g = ((i + j) % 2) ? 0.30f : 0.14f;
             float quad[6][7] = {
                 {x0, -1.0f, z0, g,g,g,1},{x0 + 1, -1.0f, z0, g,g,g,1},
@@ -240,16 +240,23 @@ int main(void) {
     float persp[16]; Perspective(0.1f, 100.0f, 55.0f, 1.0f, persp);
     float rot[16], trl[16], cam[16], model[16], mvpTmp[16], mvpM[16];
     MatRotXY(0.5f, rot);
-    MatIdent(trl); trl[14] = -6.0f;          /* eye at origin looking -Z */
+    MatIdent(trl); trl[14] = -4.0f;          /* cube placed at z=-4 */
     MatMul(trl, rot, model);
-    LookAt(0.0f, 5.5f, -0.8f,  0.0f, -0.2f, -6.0f, cam);  /* pitched DOWN */
+    LookAt(0.0f, 5.0f, 7.0f,  0.0f, 0.0f, -4.0f, cam);  /* pitched DOWN, sky on top */
     MatMul(cam, model, mvpTmp);
     MatMul(persp, mvpTmp, mvpM);
-    um(mvp, 1, GL_FALSE, mvpM);
 
     cl(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+
+    /* floor: flat world-space slab (persp*cam only, no model rotation) */
+    float floorMVP[16];
+    MatMul(persp, cam, floorMVP);
+    um(mvp, 1, GL_FALSE, floorMVP);
     bd(GL_ARRAY_BUFFER, (GLsizeiptr)sizeof(grid), grid, 0x88E4);
     da(GL_TRIANGLES, 0, gi);
+
+    /* cube: rotate + translate onto the slab */
+    um(mvp, 1, GL_FALSE, mvpM);
     bd(GL_ARRAY_BUFFER, (GLsizeiptr)sizeof(cube), cube, 0x88E4);
     da(GL_TRIANGLES, 0, 36);
     fi();
