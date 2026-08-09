@@ -38,6 +38,9 @@
 #define GL_NO_ERROR           0
 #define GL_TRIANGLE_STRIP     0x0005
 #define GL_TRIANGLE_FAN       0x0006
+#define GL_LINES              0x0001
+#define GL_LINE_LOOP          0x0002
+#define GL_LINE_STRIP         0x0003
 #define GL_ELEMENT_ARRAY_BUFFER 0x8893
 #define GL_BUFFER_SIZE        0x8764
 #define GL_VERTEX_ATTRIB_ARRAY_SIZE   0x8623
@@ -107,6 +110,14 @@ static int px_match(const unsigned char* got, unsigned char r, unsigned char g,
                     unsigned char b, unsigned char a) {
     return abs((int)got[0] - r) <= 3 && abs((int)got[1] - g) <= 3 &&
            abs((int)got[2] - b) <= 3 && abs((int)got[3] - a) <= 3;
+}
+
+static int patch_has(const unsigned char* pixels, int count,
+                     unsigned char r, unsigned char g, unsigned char b,
+                     unsigned char a) {
+    for (int i = 0; i < count; ++i)
+        if (px_match(pixels + i * 4, r, g, b, a)) return 1;
+    return 0;
 }
 
 static const char* VS =
@@ -439,6 +450,65 @@ int main(void) {
               "(left=%d,%d,%d right=%d,%d,%d)",
               left[0], left[1], left[2], right[0], right[1], right[2]);
         disable(GL_PRIMITIVE_RESTART);
+        bindVertexArray(vao);
+    }
+
+    /* -- native Metal line strip + shared GL_LINE_LOOP lowering ----------- */
+    {
+        const struct Vertex line_verts[4] = {
+            {-0.80f, -0.40f, 0, 1, 0, 0, 1},
+            {-0.20f, -0.40f, 0, 1, 0, 0, 1},
+            { 0.20f,  0.40f, 0, 0, 1, 0, 1},
+            { 0.80f,  0.40f, 0, 0, 1, 0, 1},
+        };
+        const GLushort line_indices[5] = {0, 1, 42, 2, 3};
+        GLuint line_vao = 0, line_vbo = 0, line_ibo = 0;
+        genVertexArrays(1, &line_vao);
+        bindVertexArray(line_vao);
+        genBuffers(1, &line_vbo);
+        bindBuffer(GL_ARRAY_BUFFER, line_vbo);
+        bufferData(GL_ARRAY_BUFFER, (GLsizeiptr)sizeof(line_verts),
+                   line_verts, 0x88E4);
+        enableAttrib(0);
+        vertexAttribPtr(0, 3, GL_FLOAT, GL_FALSE,
+                        sizeof(line_verts[0]), 0);
+        enableAttrib(1);
+        vertexAttribPtr(1, 4, GL_FLOAT, GL_FALSE,
+                        sizeof(line_verts[0]), (const GLvoid*)12);
+        genBuffers(1, &line_ibo);
+        bindBuffer(GL_ELEMENT_ARRAY_BUFFER, line_ibo);
+        bufferData(GL_ELEMENT_ARRAY_BUFFER, (GLsizeiptr)sizeof(line_indices),
+                   line_indices, 0x88E4);
+
+        clear(GL_COLOR_BUFFER_BIT);
+        primitiveRestartIndex(42);
+        enable(GL_PRIMITIVE_RESTART);
+        drawElements(GL_LINE_STRIP, 5, GL_UNSIGNED_SHORT, (const GLvoid*)0);
+        finish();
+        unsigned char red_patch[3 * 3 * 4], green_patch[3 * 3 * 4];
+        readPixels(127, 152, 3, 3, GL_RGBA, GL_UNSIGNED_BYTE, red_patch);
+        readPixels(383, 357, 3, 3, GL_RGBA, GL_UNSIGNED_BYTE, green_patch);
+        CHECK(patch_has(red_patch, 9, 255, 0, 0, 255) &&
+                  patch_has(green_patch, 9, 0, 255, 0, 255),
+              "GL_LINE_STRIP restart produces two native Metal line segments");
+        disable(GL_PRIMITIVE_RESTART);
+
+        const struct Vertex loop_verts[4] = {
+            {-0.50f, -0.50f, 0, 0, 0, 1, 1},
+            { 0.50f, -0.50f, 0, 0, 0, 1, 1},
+            { 0.50f,  0.50f, 0, 0, 0, 1, 1},
+            {-0.50f,  0.50f, 0, 0, 0, 1, 1},
+        };
+        bindBuffer(GL_ARRAY_BUFFER, line_vbo);
+        bufferData(GL_ARRAY_BUFFER, (GLsizeiptr)sizeof(loop_verts),
+                   loop_verts, 0x88E4);
+        clear(GL_COLOR_BUFFER_BIT);
+        drawArrays(GL_LINE_LOOP, 0, 4);
+        finish();
+        unsigned char loop_patch[3 * 3 * 4];
+        readPixels(127, 255, 3, 3, GL_RGBA, GL_UNSIGNED_BYTE, loop_patch);
+        CHECK(patch_has(loop_patch, 9, 0, 0, 255, 255),
+              "GL_LINE_LOOP closes through shared line-list lowering");
         bindVertexArray(vao);
     }
 

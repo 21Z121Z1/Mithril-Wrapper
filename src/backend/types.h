@@ -23,6 +23,8 @@ enum class Topology {
     Triangles = 0,
     TriangleStrip = 1,
     TriangleFan = 2,
+    Lines = 3,
+    LineStrip = 4,
 };
 
 // Result of a client-side wait on a backend execution fence.  The GL layer

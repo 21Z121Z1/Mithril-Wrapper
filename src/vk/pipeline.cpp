@@ -277,10 +277,14 @@ VkPipeline GetOrCreatePipeline(const Program& prog, const DrawOp& op) {
         VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
         VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP,
         VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN,
+        VK_PRIMITIVE_TOPOLOGY_LINE_LIST,
+        VK_PRIMITIVE_TOPOLOGY_LINE_STRIP,
     };
     VkPipelineInputAssemblyStateCreateInfo ia{};
     ia.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
-    ia.topology = kTopologyMap[op.topology % 3];
+    if (op.topology >= sizeof(kTopologyMap) / sizeof(kTopologyMap[0]))
+        return VK_NULL_HANDLE;
+    ia.topology = kTopologyMap[op.topology];
     ia.primitiveRestartEnable = op.primitive_restart ? VK_TRUE : VK_FALSE;
 
     VkPipelineViewportStateCreateInfo vp{};

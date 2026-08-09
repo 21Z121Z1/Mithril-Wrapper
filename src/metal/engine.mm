@@ -1299,8 +1299,16 @@ std::vector<uint32_t> ExpandTriangleFan(const backend::DrawParams& draw) {
 }
 
 MTLPrimitiveType PrimitiveType(backend::Topology topology) {
-    return topology == backend::Topology::TriangleStrip
-        ? MTLPrimitiveTypeTriangleStrip : MTLPrimitiveTypeTriangle;
+    switch (topology) {
+        case backend::Topology::TriangleStrip:
+            return MTLPrimitiveTypeTriangleStrip;
+        case backend::Topology::Lines:
+            return MTLPrimitiveTypeLine;
+        case backend::Topology::LineStrip:
+            return MTLPrimitiveTypeLineStrip;
+        default:
+            return MTLPrimitiveTypeTriangle;
+    }
 }
 
 void ApplyDynamicState(id<MTLRenderCommandEncoder> encoder,

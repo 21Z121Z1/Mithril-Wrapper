@@ -174,6 +174,8 @@ int GLModeToTopology(GLenum mode) {
         case GL_TRIANGLES: return 0;
         case GL_TRIANGLE_STRIP: return 1;
         case GL_TRIANGLE_FAN: return 2;
+        case GL_LINES: return 3;
+        case GL_LINE_STRIP: return 4;
         default: return -1;
     }
 }
@@ -628,6 +630,48 @@ std::vector<uint32_t> LoadIndices(GLenum type, const void* indices,
     return out;
 }
 
+void ExpandLineLoop(const std::vector<uint32_t>& loop,
+                    std::vector<uint32_t>* lines) {
+    lines->clear();
+    if (loop.size() < 2) return;
+    lines->reserve(loop.size() * 2);
+    for (size_t i = 0; i + 1 < loop.size(); ++i) {
+        lines->push_back(loop[i]);
+        lines->push_back(loop[i + 1]);
+    }
+    lines->push_back(loop.back());
+    lines->push_back(loop.front());
+}
+
+void SubmitIndexSegment(GLenum mode, const std::vector<uint32_t>& segment,
+                        GLint base_vertex, GLsizei instance_count) {
+    if (mode == GL_LINE_LOOP) {
+        std::vector<uint32_t> lines;
+        ExpandLineLoop(segment, &lines);
+        if (!lines.empty())
+            DrawCommon(GL_LINES, lines, 0, static_cast<GLsizei>(lines.size()),
+                       base_vertex, instance_count);
+        return;
+    }
+    DrawCommon(mode, segment, 0, static_cast<GLsizei>(segment.size()),
+               base_vertex, instance_count);
+}
+
+void DrawArraysImpl(GLenum mode, GLint first, GLsizei count,
+                    GLsizei instance_count) {
+    if (mode != GL_LINE_LOOP) {
+        DrawCommon(mode, {}, first, count, 0, instance_count);
+        return;
+    }
+    if (count < 0 || first < 0 || instance_count < 0) {
+        PUSH_ERROR(GL_INVALID_VALUE);
+        return;
+    }
+    std::vector<uint32_t> loop(static_cast<size_t>(count));
+    for (uint32_t i = 0; i < loop.size(); ++i) loop[i] = i;
+    SubmitIndexSegment(mode, loop, first, instance_count);
+}
+
 void DrawElementsImpl(GLenum mode, GLsizei count, GLenum type,
                       const void* indices, GLint base_vertex,
                       GLsizei instance_count, GLuint start, GLuint end) {
@@ -638,7 +682,9 @@ void DrawElementsImpl(GLenum mode, GLsizei count, GLenum type,
     if (idx.empty()) return;
     const bool has_restart = std::find(idx.begin(), idx.end(), UINT32_MAX) !=
                              idx.end();
-    if (has_restart && mode != GL_TRIANGLE_STRIP) {
+    const bool native_restart = mode == GL_TRIANGLE_STRIP ||
+                                mode == GL_LINE_STRIP;
+    if (has_restart && !native_restart) {
         // Metal has no native triangle-fan primitive, and Vulkan list restart
         // is not universally available. Split these modes at the shared
         // semantic layer; each segment keeps the original baseVertex and
@@ -649,26 +695,25 @@ void DrawElementsImpl(GLenum mode, GLsizei count, GLenum type,
             if (i > begin) {
                 std::vector<uint32_t> segment(idx.begin() + begin,
                                               idx.begin() + i);
-                DrawCommon(mode, segment, 0,
-                           static_cast<GLsizei>(segment.size()),
-                           base_vertex, instance_count);
+                SubmitIndexSegment(mode, segment, base_vertex,
+                                   instance_count);
             }
             begin = i + 1;
         }
         return;
     }
-    DrawCommon(mode, idx, 0, count, base_vertex, instance_count);
+    SubmitIndexSegment(mode, idx, base_vertex, instance_count);
 }
 
 } // namespace
 
 void APIENTRY glDrawArrays(GLenum mode, GLint first, GLsizei count) {
-    DrawCommon(mode, {}, first, count, 0, 1);
+    DrawArraysImpl(mode, first, count, 1);
 }
 
 void APIENTRY glDrawArraysInstanced(GLenum mode, GLint first, GLsizei count,
                                     GLsizei primcount) {
-    DrawCommon(mode, {}, first, count, 0, primcount);
+    DrawArraysImpl(mode, first, count, primcount);
 }
 
 void APIENTRY glDrawElements(GLenum mode, GLsizei count, GLenum type,
@@ -710,7 +755,7 @@ void APIENTRY glMultiDrawArrays(GLenum mode, const GLint* first,
                                 const GLsizei* count, GLsizei drawcount) {
     if (drawcount < 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
     for (GLsizei i = 0; i < drawcount; ++i)
-        DrawCommon(mode, {}, first[i], count[i], 0, 1);
+        DrawArraysImpl(mode, first[i], count[i], 1);
 }
 
 void APIENTRY glMultiDrawElements(GLenum mode, const GLsizei* count, GLenum type,
