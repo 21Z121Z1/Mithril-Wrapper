@@ -118,7 +118,7 @@ int GLModeToTopology(GLenum mode) {
     }
 }
 
-uint64_t CreateVProgram(sh::Program* prog) {
+uint64_t CreateBackendProgram(sh::Program* prog) {
     auto it = g_backend_programs.find(prog->id);
     if (it != g_backend_programs.end()) return it->second;
     uint64_t handle = v::CreateProgram(prog->vertex_spirv, prog->fragment_spirv);
@@ -203,7 +203,7 @@ bool FetchAttribRow(const AttribData& a, GLint row, GLfloat* out) {
 }
 
 // Core draw: resolve the current VAO into float32 streams and hand them to
-// the Vulkan backend. `idx` holds raw indices (glDrawElements path); when
+// the selected backend. `idx` holds raw indices (glDrawElements path); when
 // empty, `first`/`count` describe a glDrawArrays-style range and `base_vertex`
 // is ignored.
 void DrawCommon(GLenum mode, const std::vector<uint32_t>& idx, GLint first,
@@ -219,7 +219,7 @@ void DrawCommon(GLenum mode, const std::vector<uint32_t>& idx, GLint first,
     if (!v::EnsureInit()) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
     // Replay texture uploads that happened before the backend came up.
     if (!g_dirty_textures.empty()) FlushDirtyTextureUploads();
-    if (!CreateVProgram(prog)) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
+    if (!CreateBackendProgram(prog)) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
 
     const VAOData& vao = g_vaos[g_bound_vao];
 
@@ -291,7 +291,7 @@ void DrawCommon(GLenum mode, const std::vector<uint32_t>& idx, GLint first,
         }
         // Pack one record per instance: instance i reads attribute buffer
         // row (i / divisor), replicating values when divisor > 1 so the
-        // Vulkan per-instance rate matches the GL stepping.
+        // The backend per-instance rate then matches the GL stepping.
         uint32_t ioff = 0;
         for (auto& attr : istream.attrs) {
             attr.offset = ioff;
@@ -318,7 +318,7 @@ void DrawCommon(GLenum mode, const std::vector<uint32_t>& idx, GLint first,
     }
 
     v::DrawParams dp;
-    dp.program = CreateVProgram(prog);
+    dp.program = CreateBackendProgram(prog);
     dp.vertex_stream = std::move(vstream);
     dp.instance_stream = std::move(istream);
     dp.indices = idx;  // raw u32 indices into the payload rows
@@ -471,7 +471,6 @@ void APIENTRY glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height,
     }
     if (!pixels) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
     if (!v::EnsureInit()) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
-    v::SubmitFlush(true);
     v::ReadPixels(x, y, width, height, pixels);
 }
 

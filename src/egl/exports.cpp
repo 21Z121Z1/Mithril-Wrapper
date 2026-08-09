@@ -7,6 +7,7 @@
 
 #include <cstring>
 
+#include <backend/backend.h>
 #include <egl/internal.h>
 #include <util/log.h>
 
@@ -266,6 +267,7 @@ EGLBoolean eglSwapInterval(EGLDisplay dpy, EGLint interval) {
 }
 
 EGLBoolean eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
+    mithril::backend::SubmitFlush(false);
     SetError(EGL_SUCCESS);
     return EGL_TRUE;
 }

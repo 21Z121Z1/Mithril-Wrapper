@@ -1,4 +1,4 @@
-/* M2-VK draw smoke test: GL-driven colored triangle with pixel readback.
+/* Backend draw smoke test: GL-driven colored triangle with pixel readback.
  *
  * Exercises the full chain end to end through the exported GL entry points:
  *   glCreateShader -> glShaderSource -> glCompileShader -> glAttachShader
@@ -8,9 +8,8 @@
  *     -> glEnableVertexAttribArray/glVertexAttribPointer
  *     -> glDrawArrays -> glFinish -> glReadPixels
  *
- * Requires a Vulkan runtime (lavapipe on Linux CI/dev). When no Vulkan
- * loader is present the draw is a no-op and the pixel assertions fail,
- * which is the intended behavior for this milestone.
+ * Linux normally exercises Vulkan/lavapipe. On Apple, setting
+ * MITHRIL_BACKEND=metal exercises the native DirectMetal backend.
  *
  * Build (from project root):
  *   gcc -o tests/draw_smoke tests/draw_smoke.c -ldl
@@ -87,6 +86,7 @@ typedef void (*fn_glBufferSubData)(GLenum, GLintptr, GLsizeiptr, const void*);
 typedef void (*fn_glFinish)(void);
 typedef void (*fn_glReadPixels)(GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, void*);
 typedef void (*fn_glDeleteProgram)(GLuint);
+typedef const unsigned char* (*fn_glGetString)(GLenum);
 
 static int failures = 0;
 
@@ -122,7 +122,13 @@ static const char* FS =
     "}\n";
 
 int main(void) {
-    void* h = dlopen("./output/libmithril.so", RTLD_NOW | RTLD_GLOBAL);
+    const char* library = getenv("MITHRIL_LIBRARY");
+#if defined(__APPLE__)
+    if (!library || !*library) library = "./output/libmithril.dylib";
+#else
+    if (!library || !*library) library = "./output/libmithril.so";
+#endif
+    void* h = dlopen(library, RTLD_NOW | RTLD_GLOBAL);
     if (!h) { printf("dlopen: %s\n", dlerror()); return 2; }
 
     fn_glClearColor        clearColor        = (fn_glClearColor)dlsym(h, "glClearColor");
@@ -156,6 +162,7 @@ int main(void) {
     fn_glFinish            finish            = (fn_glFinish)dlsym(h, "glFinish");
     fn_glReadPixels        readPixels        = (fn_glReadPixels)dlsym(h, "glReadPixels");
     fn_glDeleteProgram     deleteProgram     = (fn_glDeleteProgram)dlsym(h, "glDeleteProgram");
+    fn_glGetString         getString         = (fn_glGetString)dlsym(h, "glGetString");
 
     CHECK(clearColor && clear && createShader && shaderSource && compileShader &&
           createProgram && attachShader && linkProgram && useProgram &&
@@ -163,6 +170,12 @@ int main(void) {
           genBuffers && bindBuffer && bufferData && enableAttrib &&
           vertexAttribPtr && drawArrays && finish && readPixels,
           "all required GL symbols resolved");
+
+    const char* expected_renderer = getenv("MITHRIL_EXPECT_RENDERER");
+    const char* renderer = getString
+        ? (const char*)getString(0x1F01 /* GL_RENDERER */) : NULL;
+    CHECK(renderer && (!expected_renderer || strstr(renderer, expected_renderer)),
+          "selected renderer is explicit (%s)", renderer ? renderer : "null");
 
     CHECK(drawElements && drawArraysInst && drawElementsInst && vertexAttribDivisor &&
           getBufferParam && getVertexAttrib && mapBufferRange && unmapBuffer,

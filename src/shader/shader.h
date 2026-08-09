@@ -1,10 +1,10 @@
 // Mithril-Wrapper shader module -- GLSL -> SPIR-V compilation and
 // program/uniform/attribute reflection (milestone M2-S2).
 //
-// glslang compiles desktop GLSL (Core Profile) to Vulkan SPIR-V; SPIRV-Cross
+// glslang compiles desktop GLSL (Core Profile) to shared SPIR-V; SPIRV-Cross
 // reflects the linked program so glGetUniformLocation/glGetAttribLocation and
-// the uniform getters can answer honestly. The Vulkan backend (M2+) consumes
-// the cached SPIR-V words directly at vkCreateShaderModule time.
+// the uniform getters can answer honestly. Native backends consume the same
+// cached words (VkShaderModule for Vulkan, SPIRV-Cross MSL for DirectMetal).
 
 #pragma once
 
@@ -28,7 +28,7 @@ struct Shader {
 };
 
 // A reflected program uniform. `value` caches the last glUniform* write so
-// glGetUniform* can answer; the Vulkan backend later uploads it into a UBO.
+// glGetUniform* can answer; the selected backend later uploads it into a UBO.
 struct Uniform {
     std::string name;
     GLenum type = GL_FLOAT;
@@ -36,13 +36,13 @@ struct Uniform {
     std::vector<float> value;
 };
 
-// A sampled-image uniform: the sampler's Vulkan binding (assigned by
+// A sampled-image uniform: the shared SPIR-V descriptor binding (assigned by
 // assign_sampler_bindings during compilation, 1-based) and the GL texture
 // unit value written by glUniform1i.
 struct SamplerRef {
     std::string name;
     GLenum type = GL_SAMPLER_2D;
-    uint32_t binding = 0;      // Vulkan descriptor binding for this sampler
+    uint32_t binding = 0;      // shared descriptor binding for this sampler
     GLint location = -1;
 };
 

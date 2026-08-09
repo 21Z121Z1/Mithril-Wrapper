@@ -64,6 +64,20 @@ target_link_libraries(mithril PRIVATE
     Vulkan::Headers
 )
 
+if(APPLE)
+    enable_language(OBJCXX)
+    set(CMAKE_OBJCXX_STANDARD 17)
+    set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
+    target_sources(mithril PRIVATE src/metal/engine.mm)
+    target_compile_definitions(mithril PRIVATE MITHRIL_HAS_DIRECT_METAL=1)
+    set_source_files_properties(src/metal/engine.mm PROPERTIES
+        COMPILE_FLAGS "-fobjc-arc")
+    target_link_libraries(mithril PRIVATE
+        spirv-cross-msl
+        "-framework Metal"
+        "-framework Foundation")
+endif()
+
 set_target_properties(mithril PROPERTIES
     OUTPUT_NAME mithril
     LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/output

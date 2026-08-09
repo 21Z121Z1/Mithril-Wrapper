@@ -140,7 +140,18 @@ void SubmitFlush(bool wait_for_completion) {
 }
 
 void ReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, void* out) {
-    DISPATCH_VOID(ReadPixels, x, y, width, height, out);
+    switch (SelectedKind()) {
+        case Kind::Vulkan:
+            vk::SubmitFlush();
+            vk::ReadPixels(x, y, width, height, out);
+            return;
+#if defined(MITHRIL_HAS_DIRECT_METAL)
+        case Kind::DirectMetal:
+            metal::ReadPixels(x, y, width, height, out);
+            return;
+#endif
+        default: return;
+    }
 }
 void UploadTexture(uint64_t id, const TexUpload& img, const TexSamplerInfo& sampler) {
     DISPATCH_VOID(UploadTexture, id, img, sampler);

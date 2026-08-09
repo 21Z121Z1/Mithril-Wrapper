@@ -1,10 +1,18 @@
 # Mithril-Wrapper
 
-在 iOS 上为 Minecraft Java（LWJGL 3）提供 OpenGL 3.3 Core 实现的自研渲染库。
-GL → Vulkan → Metal（MoltenVK），无 OpenGL ES 参与。
+在 Apple 平台上为 Minecraft Java（LWJGL 3）提供 OpenGL Core 语义实现的自研渲染库。
+
+当前有两条显式 backend 路径：
+
+- `DirectMetal`：GL frontend/state → shared SPIR-V → SPIRV-Cross MSL → Metal；不调用 Vulkan/MoltenVK。Apple 构建默认选择。
+- `Vulkan`：现有 reference/fallback backend；在 Apple 上可通过 MoltenVK，在 Linux 上可通过 Vulkan loader/lavapipe。用 `MITHRIL_BACKEND=vulkan` 显式选择。
+
+可用 `MITHRIL_BACKEND=metal|vulkan` 覆盖默认选择。未知名称或非 Apple 构建请求 `metal` 会明确失败，不会静默切换 backend。
 
 ## 状态
 
+- **DirectMetal 首个真实垂直切片**：frontend 已改为 backend-neutral draw/resource contract；Apple 路径直接创建 `MTLDevice`、command queue、offscreen RGBA8 + depth/stencil target，执行 GLSL→SPIR-V→MSL→`MTLLibrary`/`MTLRenderPipelineState`，支持 clear、vertex/index/instance draw、loose uniform、基础 depth/blend/raster/stencil state 和可靠 readback。program/pipeline 有缓存与销毁边界，pipeline cache 有上限，动态 draw/UBO 数据使用三帧复用 upload arena；`glFlush` 不 wait，`glFinish`/readback 才建立 CPU 完成点。
+- **DirectMetal 当前诚实边界**：sampled texture/sampler、用户 FBO/renderbuffer/blit、MSAA、presentation/CAMetalLayer、compute 尚未接通；相关 draw 明确失败并记录 unsupported，不宣称这些能力。需要这些功能时应显式使用 Vulkan backend。
 - **M0 基建已交付**：CMake 双分支工程、EGL 44 符号 + 契约冒烟、GL 342 符号导出、CI build.yml、契约文档。
 - **M1 状态引擎完成**：`src/state/`（全局 Context、错误 FIFO、capability 表）；`src/gl/state.cpp`（S1 组 48 函数真实现：glClear/glViewport/glEnable/glGetString「3.3 Core Profile」/glGetError 等）；生成脚本 `scripts/gen_gl_stubs.py` 支持实现排除名单重新生成 stub。
 - **M2 完成：着色器管线 + Vulkan 后端接通**：
@@ -26,6 +34,15 @@ GL → Vulkan → Metal（MoltenVK），无 OpenGL ES 参与。
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
 cmake --build build
 # 产物: output/libmithril.so
+```
+
+Apple/DirectMetal 本机构建：
+
+```sh
+cmake -S . -B build-macos -G Ninja -DCMAKE_BUILD_TYPE=Debug
+cmake --build build-macos
+clang -o /tmp/mithril-draw-smoke tests/draw_smoke.c
+MITHRIL_BACKEND=metal MITHRIL_EXPECT_RENDERER=DirectMetal /tmp/mithril-draw-smoke
 ```
 
 ## 冒烟测试
@@ -64,7 +81,9 @@ src/egl     EGL 层（44 符号，display/config/context/surface 生命周期）
 src/gl      分发电层（exports.cpp 生成 + 按域拆分的真实现 state/shader/vertex/draw）
 src/shader  glslang GLSL→SPIR-V + SPIRV-Cross 反射（M2 完成）
 src/state   GL 状态引擎（Context 结构、错误队列、capability 表）
-src/vk      Vulkan 后端（dlsym 加载器、离屏渲染、动态 UBO 池、读回；engine/dispatch/target/pipeline/fbo/draw 按域拆分）
+src/backend backend-neutral draw/resource contract 与显式 backend 选择
+src/metal   DirectMetal（SPIR-V→MSL、program/pipeline cache、frame arena、command encoding/readback）
+src/vk      Vulkan reference/fallback（dlsym 加载器、离屏渲染、动态 UBO 池、读回）
 scripts/    gen_gl_stubs.py（stub 生成器）、exported_symbols.txt
 tests/      contract_smoke.c / state_smoke.c / shader_smoke.c / draw_smoke.c / texture_smoke.c / fbo_smoke.c / 3d_smoke.c / render3d_smoke.c
 ```
