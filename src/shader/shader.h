@@ -52,6 +52,22 @@ struct SamplerRef {
     GLint location = -1;
 };
 
+enum class VertexInputScalar {
+    Float32 = 0,
+    Sint32,
+    Uint32,
+    Unsupported,
+};
+
+// One location consumed by the linked vertex stage. Matrices and arrays are
+// expanded to their individual locations so the draw frontend can provide
+// disabled-array current values without backend-specific shader patches.
+struct VertexInput {
+    GLuint location = 0;
+    uint32_t components = 0;
+    VertexInputScalar scalar = VertexInputScalar::Unsupported;
+};
+
 // Shared resource namespace emitted by the GLSL lowering pass. Binding 0 is
 // reserved for the synthetic loose-uniform block. User blocks are kept away
 // from vertex buffers (Metal indices 0/1) and the loose block (index 16).
@@ -98,6 +114,7 @@ struct Program {
     std::unordered_map<std::string, GLint> frag_data_locations;
     std::unordered_map<std::string, GLint> frag_data_indices;
     std::unordered_map<std::string, GLuint> requested_frag_data_locations;
+    std::vector<VertexInput> vertex_inputs;
     std::vector<SamplerRef> samplers;      // M4: active sampler uniforms
     std::vector<UniformBlock> uniform_blocks;
     std::unordered_map<std::string, GLuint> uniform_block_by_name;

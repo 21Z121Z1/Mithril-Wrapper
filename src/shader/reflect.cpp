@@ -369,6 +369,7 @@ bool ReflectProgram(Program& prog, std::string& error) {
     prog.uniform_by_location.clear();
     prog.active_uniform_by_name.clear();
     prog.attrib_locations.clear();
+    prog.vertex_inputs.clear();
     prog.frag_data_locations.clear();
     prog.frag_data_indices.clear();
     prog.samplers.clear();
@@ -506,10 +507,37 @@ bool ReflectProgram(Program& prog, std::string& error) {
             for (auto& resource : resources.separate_samplers) add_sampler(resource);
 
             for (auto& resource : resources.stage_inputs) {
-                if (!vertex_stage || resource.name.empty()) continue;
-                const int location = static_cast<int>(compiler.get_decoration(
-                    resource.id, spv::DecorationLocation));
-                prog.attrib_locations[resource.name] = location;
+                if (!vertex_stage ||
+                    !compiler.has_decoration(resource.id,
+                                             spv::DecorationLocation))
+                    continue;
+                const uint32_t location = compiler.get_decoration(
+                    resource.id, spv::DecorationLocation);
+                if (!resource.name.empty())
+                    prog.attrib_locations[resource.name] = location;
+                const auto& type = compiler.get_type(resource.type_id);
+                VertexInputScalar scalar = VertexInputScalar::Unsupported;
+                if (type.width == 32) {
+                    using Base = spirv_cross::SPIRType::BaseType;
+                    if (type.basetype == Base::Float)
+                        scalar = VertexInputScalar::Float32;
+                    else if (type.basetype == Base::Int)
+                        scalar = VertexInputScalar::Sint32;
+                    else if (type.basetype == Base::UInt)
+                        scalar = VertexInputScalar::Uint32;
+                }
+                const uint32_t span = InterfaceLocationSpan(type);
+                const uint32_t components = std::clamp<uint32_t>(
+                    type.vecsize, 1, 4);
+                if (span == UINT32_MAX ||
+                    (span && location > UINT32_MAX - (span - 1))) {
+                    fail("vertex input location span overflow: " +
+                         resource.name);
+                    continue;
+                }
+                for (uint32_t index = 0; index < span; ++index)
+                    prog.vertex_inputs.push_back(
+                        {location + index, components, scalar});
             }
             for (auto& resource : resources.stage_outputs) {
                 if (vertex_stage || resource.name.empty()) continue;
@@ -532,6 +560,11 @@ bool ReflectProgram(Program& prog, std::string& error) {
     reflect_stage(prog.vertex_spirv, true);
     reflect_stage(prog.fragment_spirv, false);
     if (!valid) return false;
+
+    std::sort(prog.vertex_inputs.begin(), prog.vertex_inputs.end(),
+              [](const VertexInput& left, const VertexInput& right) {
+                  return left.location < right.location;
+              });
 
     std::vector<std::string> names;
     names.reserve(loose_uniforms.size());

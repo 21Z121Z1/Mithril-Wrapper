@@ -39,7 +39,7 @@ constexpr GLuint kMaxAttribs = 16;
 constexpr GLuint kMaxUniformBufferBindings = 36;
 constexpr GLintptr kUniformBufferOffsetAlignment = 256;
 
-// One enabled/constant vertex attribute slot.
+// One VAO-owned vertex attribute array slot.
 struct AttribData {
     bool enabled = false;
     GLint size = 0;            // 1..4 components
@@ -49,9 +49,17 @@ struct AttribData {
     GLsizeiptr offset = 0;
     GLuint buffer = 0;         // GL_ARRAY_BUFFER bound at glVertexAttribPointer
     GLuint divisor = 0;        // glVertexAttribDivisor
-    bool is_pointer = false;   // array (pointer) vs generic constant value
+    bool is_pointer = false;   // an array pointer/format has been specified
     bool integer = false;      // glVertexAttribIPointer (no float conversion)
+};
+
+// Current generic attribute values are context state, not VAO state. Keeping
+// them separate also makes disabled-array resolution independent of whichever
+// VAO last supplied the array format.
+struct CurrentAttribData {
     std::array<GLfloat, 4> constant{0.0f, 0.0f, 0.0f, 1.0f};
+    std::array<GLint, 4> constant_sint{0, 0, 0, 1};
+    std::array<GLuint, 4> constant_uint{0, 0, 0, 1};
 };
 
 struct VAOData {
@@ -70,6 +78,7 @@ struct BufferData {
 
 // Storage lives in vertex.cpp; the draw path reads these through the header.
 extern std::unordered_map<GLuint, VAOData> g_vaos;
+extern std::array<CurrentAttribData, kMaxAttribs> g_current_attribs;
 extern std::unordered_map<GLuint, BufferData> g_buffers;
 extern GLuint g_bound_vao;           // default VAO is 0
 extern GLuint g_bound_array_buffer;

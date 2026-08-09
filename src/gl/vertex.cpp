@@ -6,6 +6,7 @@
 #include "internal.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <limits>
 #include <utility>
@@ -13,6 +14,7 @@
 // Shared tables (declared extern in internal.h; the draw path reads
 // them through the header).
 std::unordered_map<GLuint, VAOData> g_vaos;
+std::array<CurrentAttribData, kMaxAttribs> g_current_attribs{};
 std::unordered_map<GLuint, BufferData> g_buffers;
 GLuint g_next_vao = 1, g_next_buffer = 1;
 uint64_t g_next_buffer_lifetime = 1;
@@ -38,6 +40,24 @@ bool AddPackProduct(uint64_t* total, uint64_t left, uint64_t right) {
     if (*total > std::numeric_limits<uint64_t>::max() - product) return false;
     *total += product;
     return true;
+}
+
+GLint FloatToSint(GLfloat value) {
+    const double wide = static_cast<double>(value);
+    if (std::isnan(wide)) return 0;
+    if (wide <= static_cast<double>(std::numeric_limits<GLint>::min()))
+        return std::numeric_limits<GLint>::min();
+    if (wide >= static_cast<double>(std::numeric_limits<GLint>::max()))
+        return std::numeric_limits<GLint>::max();
+    return static_cast<GLint>(value);
+}
+
+GLuint FloatToUint(GLfloat value) {
+    const double wide = static_cast<double>(value);
+    if (std::isnan(wide) || wide <= 0.0) return 0;
+    if (wide >= static_cast<double>(std::numeric_limits<GLuint>::max()))
+        return std::numeric_limits<GLuint>::max();
+    return static_cast<GLuint>(value);
 }
 
 } // namespace
@@ -548,7 +568,6 @@ void APIENTRY glVertexAttribPointer(GLuint index, GLint size, GLenum type,
     }
     if (stride < 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
     AttribData& a = g_vaos[g_bound_vao].attribs[index];
-    a.enabled = true;
     a.size = size;
     a.type = type;
     a.normalized = normalized;
@@ -570,7 +589,6 @@ void APIENTRY glVertexAttribIPointer(GLuint index, GLint size, GLenum type,
     }
     if (stride < 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
     AttribData& a = g_vaos[g_bound_vao].attribs[index];
-    a.enabled = true;
     a.size = size;
     a.type = type;
     a.normalized = GL_FALSE;
@@ -592,9 +610,43 @@ void APIENTRY glVertexAttribDivisor(GLuint index, GLuint divisor) {
 // change the enable bit or the array pointer/format state (GL 4.46).
 void SetConstantAttrib(GLuint index, const GLfloat* v, GLsizei n) {
     if (index >= kMaxAttribs || n < 1 || n > 4) { PUSH_ERROR(GL_INVALID_VALUE); return; }
-    AttribData& a = g_vaos[g_bound_vao].attribs[index];
-    for (GLsizei i = 0; i < n; ++i) a.constant[i] = v[i];
-    for (GLsizei i = n; i < 4; ++i) a.constant[i] = i == 3 ? 1.0f : 0.0f;
+    CurrentAttribData& a = g_current_attribs[index];
+    for (GLsizei i = 0; i < 4; ++i) {
+        const GLfloat value = i < n ? v[i] : (i == 3 ? 1.0f : 0.0f);
+        a.constant[i] = value;
+        a.constant_sint[i] = FloatToSint(value);
+        a.constant_uint[i] = FloatToUint(value);
+    }
+}
+
+void SetConstantAttribI(GLuint index, const GLint* values, GLsizei count) {
+    if (index >= kMaxAttribs || count < 1 || count > 4) {
+        PUSH_ERROR(GL_INVALID_VALUE);
+        return;
+    }
+    CurrentAttribData& attribute = g_current_attribs[index];
+    for (GLsizei component = 0; component < 4; ++component) {
+        const GLint value = component < count
+            ? values[component] : (component == 3 ? 1 : 0);
+        attribute.constant_sint[component] = value;
+        attribute.constant_uint[component] = static_cast<GLuint>(value);
+        attribute.constant[component] = static_cast<GLfloat>(value);
+    }
+}
+
+void SetConstantAttribUI(GLuint index, const GLuint* values, GLsizei count) {
+    if (index >= kMaxAttribs || count < 1 || count > 4) {
+        PUSH_ERROR(GL_INVALID_VALUE);
+        return;
+    }
+    CurrentAttribData& attribute = g_current_attribs[index];
+    for (GLsizei component = 0; component < 4; ++component) {
+        const GLuint value = component < count
+            ? values[component] : (component == 3 ? 1u : 0u);
+        attribute.constant_uint[component] = value;
+        attribute.constant_sint[component] = static_cast<GLint>(value);
+        attribute.constant[component] = static_cast<GLfloat>(value);
+    }
 }
 
 void APIENTRY glVertexAttrib1f(GLuint index, GLfloat x) {
@@ -649,16 +701,72 @@ void APIENTRY glVertexAttrib4uiv(GLuint index, const GLuint* v) { GLfloat f[4]; 
 void APIENTRY glVertexAttrib4bv(GLuint index, const GLbyte* v) { GLfloat f[4]; for (int i=0;i<4;++i) f[i]=(GLfloat)v[i]; SetConstantAttrib(index, f, 4); }
 void APIENTRY glVertexAttrib4ubv(GLuint index, const GLubyte* v) { GLfloat f[4]; for (int i=0;i<4;++i) f[i]=(GLfloat)v[i]; SetConstantAttrib(index, f, 4); }
 void APIENTRY glVertexAttrib4usv(GLuint index, const GLushort* v) { GLfloat f[4]; for (int i=0;i<4;++i) f[i]=(GLfloat)v[i]; SetConstantAttrib(index, f, 4); }
-void APIENTRY glVertexAttrib4Nbv(GLuint index, const GLbyte* v) { GLfloat f[4]; for (int i=0;i<4;++i) f[i]=(GLfloat)v[i]/127.0f; SetConstantAttrib(index, f, 4); }
-void APIENTRY glVertexAttrib4Nsv(GLuint index, const GLshort* v) { GLfloat f[4]; for (int i=0;i<4;++i) f[i]=(GLfloat)v[i]/32767.0f; SetConstantAttrib(index, f, 4); }
-void APIENTRY glVertexAttrib4Niv(GLuint index, const GLint* v) { GLfloat f[4]; for (int i=0;i<4;++i) f[i]=(GLfloat)v[i]/2147483647.0f; SetConstantAttrib(index, f, 4); }
+void APIENTRY glVertexAttrib4Nbv(GLuint index, const GLbyte* v) { GLfloat f[4]; for (int i=0;i<4;++i) f[i]=std::max(-1.0f, (GLfloat)v[i]/127.0f); SetConstantAttrib(index, f, 4); }
+void APIENTRY glVertexAttrib4Nsv(GLuint index, const GLshort* v) { GLfloat f[4]; for (int i=0;i<4;++i) f[i]=std::max(-1.0f, (GLfloat)v[i]/32767.0f); SetConstantAttrib(index, f, 4); }
+void APIENTRY glVertexAttrib4Niv(GLuint index, const GLint* v) { GLfloat f[4]; for (int i=0;i<4;++i) f[i]=std::max(-1.0f, (GLfloat)v[i]/2147483647.0f); SetConstantAttrib(index, f, 4); }
 void APIENTRY glVertexAttrib4Nubv(GLuint index, const GLubyte* v) { GLfloat f[4]; for (int i=0;i<4;++i) f[i]=(GLfloat)v[i]/255.0f; SetConstantAttrib(index, f, 4); }
 void APIENTRY glVertexAttrib4Nusv(GLuint index, const GLushort* v) { GLfloat f[4]; for (int i=0;i<4;++i) f[i]=(GLfloat)v[i]/65535.0f; SetConstantAttrib(index, f, 4); }
 void APIENTRY glVertexAttrib4Nuiv(GLuint index, const GLuint* v) { GLfloat f[4]; for (int i=0;i<4;++i) f[i]=(GLfloat)v[i]/4294967295.0f; SetConstantAttrib(index, f, 4); }
 
+void APIENTRY glVertexAttribI1i(GLuint index, GLint x) {
+    const GLint values[1] = {x}; SetConstantAttribI(index, values, 1); }
+void APIENTRY glVertexAttribI2i(GLuint index, GLint x, GLint y) {
+    const GLint values[2] = {x, y}; SetConstantAttribI(index, values, 2); }
+void APIENTRY glVertexAttribI3i(GLuint index, GLint x, GLint y, GLint z) {
+    const GLint values[3] = {x, y, z}; SetConstantAttribI(index, values, 3); }
+void APIENTRY glVertexAttribI4i(GLuint index, GLint x, GLint y, GLint z, GLint w) {
+    const GLint values[4] = {x, y, z, w}; SetConstantAttribI(index, values, 4); }
+void APIENTRY glVertexAttribI1iv(GLuint index, const GLint* values) {
+    SetConstantAttribI(index, values, 1); }
+void APIENTRY glVertexAttribI2iv(GLuint index, const GLint* values) {
+    SetConstantAttribI(index, values, 2); }
+void APIENTRY glVertexAttribI3iv(GLuint index, const GLint* values) {
+    SetConstantAttribI(index, values, 3); }
+void APIENTRY glVertexAttribI4iv(GLuint index, const GLint* values) {
+    SetConstantAttribI(index, values, 4); }
+
+void APIENTRY glVertexAttribI1ui(GLuint index, GLuint x) {
+    const GLuint values[1] = {x}; SetConstantAttribUI(index, values, 1); }
+void APIENTRY glVertexAttribI2ui(GLuint index, GLuint x, GLuint y) {
+    const GLuint values[2] = {x, y}; SetConstantAttribUI(index, values, 2); }
+void APIENTRY glVertexAttribI3ui(GLuint index, GLuint x, GLuint y, GLuint z) {
+    const GLuint values[3] = {x, y, z}; SetConstantAttribUI(index, values, 3); }
+void APIENTRY glVertexAttribI4ui(GLuint index, GLuint x, GLuint y, GLuint z,
+                                 GLuint w) {
+    const GLuint values[4] = {x, y, z, w}; SetConstantAttribUI(index, values, 4); }
+void APIENTRY glVertexAttribI1uiv(GLuint index, const GLuint* values) {
+    SetConstantAttribUI(index, values, 1); }
+void APIENTRY glVertexAttribI2uiv(GLuint index, const GLuint* values) {
+    SetConstantAttribUI(index, values, 2); }
+void APIENTRY glVertexAttribI3uiv(GLuint index, const GLuint* values) {
+    SetConstantAttribUI(index, values, 3); }
+void APIENTRY glVertexAttribI4uiv(GLuint index, const GLuint* values) {
+    SetConstantAttribUI(index, values, 4); }
+
+void APIENTRY glVertexAttribI4bv(GLuint index, const GLbyte* values) {
+    GLint converted[4];
+    for (int i = 0; i < 4; ++i) converted[i] = values[i];
+    SetConstantAttribI(index, converted, 4);
+}
+void APIENTRY glVertexAttribI4sv(GLuint index, const GLshort* values) {
+    GLint converted[4];
+    for (int i = 0; i < 4; ++i) converted[i] = values[i];
+    SetConstantAttribI(index, converted, 4);
+}
+void APIENTRY glVertexAttribI4ubv(GLuint index, const GLubyte* values) {
+    GLuint converted[4];
+    for (int i = 0; i < 4; ++i) converted[i] = values[i];
+    SetConstantAttribUI(index, converted, 4);
+}
+void APIENTRY glVertexAttribI4usv(GLuint index, const GLushort* values) {
+    GLuint converted[4];
+    for (int i = 0; i < 4; ++i) converted[i] = values[i];
+    SetConstantAttribUI(index, converted, 4);
+}
+
 // ---- attribute queries ------------------------------------------------------
 
-void GetConstantAttrib(const AttribData& a, GLfloat* out) {
+void GetConstantAttrib(const CurrentAttribData& a, GLfloat* out) {
     out[0] = a.constant[0]; out[1] = a.constant[1];
     out[2] = a.constant[2]; out[3] = a.constant[3];
 }
@@ -672,10 +780,9 @@ void APIENTRY glGetVertexAttribfv(GLuint index, GLenum pname, GLfloat* params) {
         case GL_VERTEX_ATTRIB_ARRAY_TYPE: params[0] = (GLfloat)a.type; break;
         case GL_VERTEX_ATTRIB_ARRAY_NORMALIZED: params[0] = a.normalized ? 1.f : 0.f; break;
         case GL_VERTEX_ATTRIB_ARRAY_INTEGER: params[0] = a.integer ? 1.f : 0.f; break;
-        default: {
-            const GLfloat* v = a.constant.data();
-            for (int i = 0; i < 4; ++i) params[i] = v[i];
-        }
+        case GL_CURRENT_VERTEX_ATTRIB:
+            GetConstantAttrib(g_current_attribs[index], params); break;
+        default: PUSH_ERROR(GL_INVALID_ENUM);
     }
 }
 void APIENTRY glGetVertexAttribdv(GLuint index, GLenum pname, GLdouble* params) {
@@ -695,6 +802,13 @@ void APIENTRY glGetVertexAttribiv(GLuint index, GLenum pname, GLint* params) {
     for (int i = 0; i < n; ++i) params[i] = (GLint)f[i];
 }
 void APIENTRY glGetVertexAttribIiv(GLuint index, GLenum pname, GLint* params) {
+    if (index >= kMaxAttribs) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+    if (pname == GL_CURRENT_VERTEX_ATTRIB) {
+        const CurrentAttribData& attribute = g_current_attribs[index];
+        for (int component = 0; component < 4; ++component)
+            params[component] = attribute.constant_sint[component];
+        return;
+    }
     GLfloat f[4]; glGetVertexAttribfv(index, pname, f);
     int n = (pname == GL_VERTEX_ATTRIB_ARRAY_ENABLED || pname == GL_VERTEX_ATTRIB_ARRAY_SIZE ||
              pname == GL_VERTEX_ATTRIB_ARRAY_STRIDE || pname == GL_VERTEX_ATTRIB_ARRAY_TYPE ||
@@ -703,6 +817,13 @@ void APIENTRY glGetVertexAttribIiv(GLuint index, GLenum pname, GLint* params) {
     for (int i = 0; i < n; ++i) params[i] = (GLint)f[i];
 }
 void APIENTRY glGetVertexAttribIuiv(GLuint index, GLenum pname, GLuint* params) {
+    if (index >= kMaxAttribs) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+    if (pname == GL_CURRENT_VERTEX_ATTRIB) {
+        const CurrentAttribData& attribute = g_current_attribs[index];
+        for (int component = 0; component < 4; ++component)
+            params[component] = attribute.constant_uint[component];
+        return;
+    }
     GLfloat f[4]; glGetVertexAttribfv(index, pname, f);
     int n = (pname == GL_VERTEX_ATTRIB_ARRAY_ENABLED || pname == GL_VERTEX_ATTRIB_ARRAY_SIZE ||
              pname == GL_VERTEX_ATTRIB_ARRAY_STRIDE || pname == GL_VERTEX_ATTRIB_ARRAY_TYPE ||

@@ -82,7 +82,9 @@ typedef void (*fn_glGenBuffers)(GLsizei, GLuint*);
 typedef void (*fn_glBindBuffer)(GLenum, GLuint);
 typedef void (*fn_glBufferData)(GLenum, GLsizeiptr, const void*, GLenum);
 typedef void (*fn_glEnableVertexAttribArray)(GLuint);
+typedef void (*fn_glDisableVertexAttribArray)(GLuint);
 typedef void (*fn_glVertexAttribPointer)(GLuint, GLint, GLenum, GLboolean, GLsizei, const GLvoid*);
+typedef void (*fn_glVertexAttrib4f)(GLuint, float, float, float, float);
 typedef void (*fn_glDrawArrays)(GLenum, GLint, GLsizei);
 typedef void (*fn_glDrawElements)(GLenum, GLsizei, GLenum, const GLvoid*);
 typedef void (*fn_glDrawArraysInstanced)(GLenum, GLint, GLsizei, GLsizei);
@@ -172,7 +174,9 @@ int main(void) {
     fn_glBindBuffer        bindBuffer        = (fn_glBindBuffer)dlsym(h, "glBindBuffer");
     fn_glBufferData        bufferData        = (fn_glBufferData)dlsym(h, "glBufferData");
     fn_glEnableVertexAttribArray enableAttrib = (fn_glEnableVertexAttribArray)dlsym(h, "glEnableVertexAttribArray");
+    fn_glDisableVertexAttribArray disableAttrib = (fn_glDisableVertexAttribArray)dlsym(h, "glDisableVertexAttribArray");
     fn_glVertexAttribPointer vertexAttribPtr = (fn_glVertexAttribPointer)dlsym(h, "glVertexAttribPointer");
+    fn_glVertexAttrib4f     vertexAttrib4f    = (fn_glVertexAttrib4f)dlsym(h, "glVertexAttrib4f");
     fn_glDrawArrays        drawArrays        = (fn_glDrawArrays)dlsym(h, "glDrawArrays");
     fn_glDrawElements      drawElements      = (fn_glDrawElements)dlsym(h, "glDrawElements");
     fn_glDrawArraysInstanced drawArraysInst = (fn_glDrawArraysInstanced)dlsym(h, "glDrawArraysInstanced");
@@ -192,7 +196,8 @@ int main(void) {
           createProgram && attachShader && linkProgram && useProgram &&
           getUniformLoc && uniform4f && genVertexArrays && bindVertexArray &&
           genBuffers && bindBuffer && bufferData && enableAttrib &&
-          vertexAttribPtr && drawArrays && finish && readPixels && enable &&
+          disableAttrib && vertexAttribPtr && vertexAttrib4f && drawArrays &&
+          finish && readPixels && enable &&
           disable && isEnabled && getIntegerv && primitiveRestartIndex,
           "all required GL symbols resolved");
 
@@ -271,6 +276,22 @@ int main(void) {
     CHECK(px_match(px, 0, 0, 255, 255),
           "tint uniform drives the pixel colour (r=%d g=%d b=%d a=%d)",
           px[0], px[1], px[2], px[3]);
+
+    /* -- disabled array uses the generic current attribute --------- */
+    disableAttrib(1);
+    /* Pointer format changes must not implicitly re-enable the array. */
+    vertexAttribPtr(1, 4, GL_FLOAT, GL_FALSE, sizeof(struct Vertex),
+                    (const GLvoid*)12);
+    vertexAttrib4f(1, 0.0f, 1.0f, 0.0f, 1.0f);
+    uniform4f(tint, 1.0f, 1.0f, 1.0f, 1.0f);
+    clear(GL_COLOR_BUFFER_BIT);
+    drawArrays(GL_TRIANGLES, 0, 3);
+    finish();
+    readPixels(256, 300, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+    CHECK(px_match(px, 0, 255, 0, 255),
+          "disabled colour array uses its current value without vertex repack "
+          "(r=%d g=%d b=%d)", px[0], px[1], px[2]);
+    enableAttrib(1);
 
     /* -- M3: object/state queries ----------------------------------------- */
     {

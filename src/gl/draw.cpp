@@ -246,13 +246,10 @@ v::PipelineState BuildPipelineState() {
 }
 
 // Fetch `size` components of attribute `a` for source buffer row `row`.
-// Applies buffer lookup, stride, type size, normalization, half/double
-// conversion, or the generic constant when the array is disabled/unbound.
+// Applies buffer lookup, stride, type size, normalization, and half/double
+// conversion for an enabled vertex array.
 bool FetchAttribRow(const AttribData& a, GLint row, GLfloat* out) {
-    if (!a.is_pointer || a.buffer == 0) {
-        for (GLuint i = 0; i < (GLuint)a.size; ++i) out[i] = a.constant[i];
-        return true;
-    }
+    if (!a.is_pointer || a.buffer == 0) return false;
     if (row < 0) return false;
     auto bit = g_buffers.find(a.buffer);
     if (bit == g_buffers.end()) return false;
@@ -313,6 +310,50 @@ bool PackTransientAttribRow(const AttribData& source,
     return true;
 }
 
+v::VertexScalarType ConstantScalarType(const sh::VertexInput& input) {
+    switch (input.scalar) {
+        case sh::VertexInputScalar::Float32:
+            return v::VertexScalarType::Float32;
+        case sh::VertexInputScalar::Sint32:
+            return v::VertexScalarType::Sint32;
+        case sh::VertexInputScalar::Uint32:
+            return v::VertexScalarType::Uint32;
+        default:
+            return v::VertexScalarType::Float32;
+    }
+}
+
+bool PackConstantAttrib(const CurrentAttribData& source,
+                        const sh::VertexInput& input, uint8_t* output) {
+    if (input.components < 1 || input.components > 4 ||
+        input.scalar == sh::VertexInputScalar::Unsupported)
+        return false;
+    for (uint32_t component = 0; component < input.components; ++component) {
+        switch (input.scalar) {
+            case sh::VertexInputScalar::Float32: {
+                float value = source.constant[component];
+                std::memcpy(output + component * sizeof(value), &value,
+                            sizeof(value));
+                break;
+            }
+            case sh::VertexInputScalar::Sint32: {
+                int32_t value = source.constant_sint[component];
+                std::memcpy(output + component * sizeof(value), &value,
+                            sizeof(value));
+                break;
+            }
+            case sh::VertexInputScalar::Uint32: {
+                uint32_t value = source.constant_uint[component];
+                std::memcpy(output + component * sizeof(value), &value,
+                            sizeof(value));
+                break;
+            }
+            default: return false;
+        }
+    }
+    return true;
+}
+
 // Core draw: resolve the current VAO into typed streams and hand them to the
 // selected backend. `idx` holds raw indices (glDrawElements path); when
 // empty, `first`/`count` describe a glDrawArrays-style range and `base_vertex`
@@ -341,7 +382,15 @@ void DrawCommon(GLenum mode, const std::vector<uint32_t>& idx, GLint first,
         if (!a.enabled) continue;
         (a.divisor ? instance_slots : vertex_slots).push_back(slot);
     }
-    if (vertex_slots.empty() && instance_slots.empty()) return;
+    std::vector<sh::VertexInput> constant_inputs;
+    for (const sh::VertexInput& input : prog->vertex_inputs) {
+        if (input.location >= kMaxAttribs) {
+            PUSH_ERROR(GL_INVALID_OPERATION);
+            return;
+        }
+        if (!vao.attribs[input.location].enabled)
+            constant_inputs.push_back(input);
+    }
 
     // Rows referenced by each payload record: glDrawArrays maps payload row
     // i to buffer row (first + i); glDrawElements maps payload row i to
@@ -435,10 +484,21 @@ void DrawCommon(GLenum mode, const std::vector<uint32_t>& idx, GLint first,
             }
         }
     }
+    if (vertex_slots.empty()) {
+        // Backends use the vertex stream record count to issue the draw even
+        // when the shader obtains position from gl_VertexID/current values.
+        // A tiny dummy record avoids inventing backend-specific draw-count
+        // side channels and is only used when no enabled per-vertex array
+        // exists.
+        vstream.stride = sizeof(uint32_t);
+        vstream.record_count = static_cast<uint32_t>(v_count);
+        vstream.data.resize(static_cast<size_t>(v_count) * vstream.stride);
+    }
 
     v::VertexStream istream;
-    if (!instance_slots.empty()) {
-        GLuint divisor = vao.attribs[instance_slots.front()].divisor;
+    if (!instance_slots.empty() || !constant_inputs.empty()) {
+        const GLuint divisor = instance_slots.empty()
+            ? 1 : vao.attribs[instance_slots.front()].divisor;
         for (GLuint slot : instance_slots) {
             if (vao.attribs[slot].divisor != divisor) {
                 PUSH_ERROR(GL_INVALID_OPERATION);  // mixed divisors
@@ -453,6 +513,13 @@ void DrawCommon(GLenum mode, const std::vector<uint32_t>& idx, GLint first,
                     : v::VertexScalarType::Uint32)
                 : v::VertexScalarType::Float32;
             istream.attrs.push_back(va);
+        }
+        for (const sh::VertexInput& input : constant_inputs) {
+            v::VertexAttr attribute;
+            attribute.location = input.location;
+            attribute.components = input.components;
+            attribute.scalar_type = ConstantScalarType(input);
+            istream.attrs.push_back(attribute);
         }
         // Pack one record per instance: instance i reads attribute buffer
         // row (i / divisor), replicating values when divisor > 1 so the
@@ -473,6 +540,16 @@ void DrawCommon(GLenum mode, const std::vector<uint32_t>& idx, GLint first,
                                        istream.attrs[k].offset;
                 if (!PackTransientAttribRow(
                         a, istream.attrs[k], src_row, destination)) {
+                    PUSH_ERROR(GL_INVALID_OPERATION);
+                    return;
+                }
+            }
+            for (size_t k = 0; k < constant_inputs.size(); ++k) {
+                const sh::VertexInput& input = constant_inputs[k];
+                uint8_t* destination = istream.data.data() + rec +
+                    istream.attrs[instance_slots.size() + k].offset;
+                if (!PackConstantAttrib(g_current_attribs[input.location], input,
+                                        destination)) {
                     PUSH_ERROR(GL_INVALID_OPERATION);
                     return;
                 }

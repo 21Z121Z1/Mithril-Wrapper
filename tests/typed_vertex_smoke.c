@@ -57,10 +57,12 @@ typedef void (*fnBindBuffer)(GLenum, GLuint);
 typedef void (*fnBufferData)(GLenum, GLsizeiptr, const void*, GLenum);
 typedef void (*fnBufferSubData)(GLenum, GLintptr, GLsizeiptr, const void*);
 typedef void (*fnEnableVertexAttribArray)(GLuint);
+typedef void (*fnDisableVertexAttribArray)(GLuint);
 typedef void (*fnVertexAttribPointer)(GLuint, GLint, GLenum, GLboolean,
                                       GLsizei, const void*);
 typedef void (*fnVertexAttribIPointer)(GLuint, GLint, GLenum, GLsizei,
                                        const void*);
+typedef void (*fnVertexAttribI4ui)(GLuint, GLuint, GLuint, GLuint, GLuint);
 typedef void (*fnGetVertexAttribiv)(GLuint, GLenum, GLint*);
 typedef void (*fnClearColor)(float, float, float, float);
 typedef void (*fnClear)(GLbitfield);
@@ -151,8 +153,11 @@ int main(void) {
     LOAD(fnBufferSubData, bufferSubData, "glBufferSubData");
     LOAD(fnEnableVertexAttribArray, enableVertexAttribArray,
          "glEnableVertexAttribArray");
+    LOAD(fnDisableVertexAttribArray, disableVertexAttribArray,
+         "glDisableVertexAttribArray");
     LOAD(fnVertexAttribPointer, vertexAttribPointer, "glVertexAttribPointer");
     LOAD(fnVertexAttribIPointer, vertexAttribIPointer, "glVertexAttribIPointer");
+    LOAD(fnVertexAttribI4ui, vertexAttribI4ui, "glVertexAttribI4ui");
     LOAD(fnGetVertexAttribiv, getVertexAttribiv, "glGetVertexAttribiv");
     LOAD(fnClearColor, clearColor, "glClearColor");
     LOAD(fnClear, clear, "glClear");
@@ -163,7 +168,8 @@ int main(void) {
               linkProgram && getProgramiv && useProgram && genVertexArrays &&
               bindVertexArray && genBuffers && deleteBuffers && bindBuffer &&
               bufferData && bufferSubData && enableVertexAttribArray &&
-              vertexAttribPointer && vertexAttribIPointer &&
+              disableVertexAttribArray && vertexAttribPointer &&
+              vertexAttribIPointer && vertexAttribI4ui &&
               getVertexAttribiv && clearColor && clear && drawArrays &&
               readPixels,
           "required typed-vertex symbols resolve");
@@ -237,6 +243,17 @@ int main(void) {
     readPixels(256, 256, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
     CHECK(pixel_is(pixel, 0, 0, 255),
           "content-version update refreshes resident typed VBO once");
+
+    set_color(vertices, 0, 255, 0);
+    bufferSubData(GL_ARRAY_BUFFER, 0, sizeof(vertices), vertices);
+    disableVertexAttribArray(1);
+    vertexAttribI4ui(1, 200, 3, 17, 29);
+    clear(GL_COLOR_BUFFER_BIT);
+    drawArrays(GL_TRIANGLES, 0, 3);
+    readPixels(256, 256, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
+    CHECK(pixel_is(pixel, 0, 255, 0),
+          "disabled uvec input consumes exact unsigned current attribute");
+    enableVertexAttribArray(1);
 
     set_color(vertices, 255, 0, 0);
     bufferSubData(GL_ARRAY_BUFFER, 0, sizeof(vertices), vertices);
