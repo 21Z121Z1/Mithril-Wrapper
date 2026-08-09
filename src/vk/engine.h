@@ -50,6 +50,48 @@ struct VertexStream {
     std::vector<VertexAttr> attrs; // sorted by offset, unique locations
 };
 
+// Per-draw pipeline-affecting state derived from the GL context (M5).
+// The GL layer maps its enums straight through; the backend encodes them
+// into the pipeline cache key and the Vk*StateCreateInfo structs. Values
+// are GL-sourced so the GL side can forward without a second mapping table.
+struct PipelineState {
+    // scissor test (dynamic rect; enablement is static)
+    bool scissor_test = false;
+    // depth test / depth buffer writes
+    bool depth_test = false;
+    GLenum depth_func = GL_LESS;
+    GLboolean depth_write = GL_TRUE;
+    // stencil test
+    bool stencil_test = false;
+    GLenum stencil_front_func = GL_ALWAYS;
+    GLenum stencil_back_func = GL_ALWAYS;
+    GLint stencil_front_ref = 0;
+    GLint stencil_back_ref = 0;
+    GLuint stencil_front_read_mask = 0xFFFFFFFFu;
+    GLuint stencil_back_read_mask = 0xFFFFFFFFu;
+    GLenum stencil_front_op_fail = GL_KEEP;
+    GLenum stencil_front_op_zfail = GL_KEEP;
+    GLenum stencil_front_op_zpass = GL_KEEP;
+    GLenum stencil_back_op_fail = GL_KEEP;
+    GLenum stencil_back_op_zfail = GL_KEEP;
+    GLenum stencil_back_op_zpass = GL_KEEP;
+    // blend
+    bool blend_enable = false;
+    GLenum blend_src_rgb = GL_ONE, blend_dst_rgb = GL_ZERO;
+    GLenum blend_src_alpha = GL_ONE, blend_dst_alpha = GL_ZERO;
+    GLenum blend_eq_rgb = GL_FUNC_ADD, blend_eq_alpha = GL_FUNC_ADD;
+    float blend_color[4] = {0, 0, 0, 0};
+    // cull / polygon mode
+    bool cull_test = false;
+    GLenum cull_face = GL_BACK;
+    GLenum front_face = GL_CCW;
+    GLenum polygon_mode = GL_FILL;
+    float poly_offset_factor = 0.f, poly_offset_units = 0.f;
+    // per-channel color write mask
+    GLboolean color_wmask_r = GL_TRUE, color_wmask_g = GL_TRUE;
+    GLboolean color_wmask_b = GL_TRUE, color_wmask_a = GL_TRUE;
+};
+
 // Everything one GL draw call needs. `uniforms` maps mithril_GlobalBlock
 // member name -> flat float values. `sampler_binds` holds the active
 // sampler assignments for this program: Vulkan descriptor binding ->
@@ -63,6 +105,7 @@ struct DrawParams {
     Topology topology = Topology::Triangles;
     std::unordered_map<std::string, std::vector<float>> uniforms;
     std::vector<std::pair<uint32_t, uint64_t>> sampler_binds; // (binding, gl id)
+    PipelineState pipeline;                        // M5 depth/blend/cull/... state
 };
 
 // GL texture mip chain ready for upload (M4). Each level is R8G8B8A8
@@ -109,10 +152,15 @@ uint32_t TargetHeight();
 
 // Colour used by the next render pass clear (glClearColor/glClear).
 void SetClearColor(float r, float g, float b, float a);
-// Mark the next flush to clear the target (glClear(GL_COLOR_BUFFER_BIT)).
-void MarkClear();
+// GLbitfield from glClear: decide which buffer(s) get cleared next flush.
+void SetClearMask(GLbitfield mask);
+// Clear values for GL_DEPTH_BUFFER_BIT / GL_STENCIL_BUFFER_BIT.
+void SetClearDepth(double depth);
+void SetClearStencil(GLint value);
 // Viewport in target coordinates (glViewport), clamped to the target.
 void SetViewport(float x, float y, float w, float h);
+// Scissor rect for the next frame (GL_SCISSOR_TEST).
+void SetScissor(float x, float y, float w, float h);
 
 // Feed SPIR-V for a linked program; returns a stable handle.
 uint64_t CreateProgram(const std::vector<uint32_t>& vs,

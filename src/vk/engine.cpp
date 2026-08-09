@@ -36,15 +36,26 @@ void SetClearColor(float r, float g2, float b, float a2) {
     g.clear_a = a2;
 }
 
-void MarkClear() {
+void SetClearMask(GLbitfield mask) {
     g.pending_clear = true;
     g.frame_dirty = true;
+    g.clear_mask = mask;
 }
+
+void SetClearDepth(double depth) { g.clear_depth = depth; }
+void SetClearStencil(GLint value) { g.clear_stencil = value; }
 
 void SetViewport(float x, float y, float w, float h) {
     g.vp_x = x;
     g.vp_y = y;
     g.vp_w = w;
     g.vp_h = h;
+}
+
+void SetScissor(float x, float y, float w, float h) {
+    g.sc_x = x;
+    g.sc_y = y;
+    g.sc_w = w;
+    g.sc_h = h;
 }
 } // namespace mithril::vk

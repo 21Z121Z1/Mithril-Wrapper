@@ -101,6 +101,7 @@ struct FnTable {
     ML_FN(CmdBeginRenderPass);
     ML_FN(CmdEndRenderPass);
     ML_FN(CmdClearColorImage);
+    ML_FN(CmdClearDepthStencilImage);
     ML_FN(CmdPipelineBarrier);
     ML_FN(CmdCopyImageToBuffer);
     ML_FN(CmdSetViewport);
@@ -164,6 +165,8 @@ struct DrawOp {
     VkDeviceSize ubo_range = 0;
     // Sampler descriptor images for this draw (one per samper bound).
     std::vector<std::pair<uint32_t, VkDescriptorImageInfo>> tex_binds;
+    // M5: pipeline-affecting state captured at draw-record time.
+    PipelineState pipe;
 };
 
 struct Engine {
@@ -182,6 +185,12 @@ struct Engine {
     VkImageView target_view = VK_NULL_HANDLE;
     VkFramebuffer target_fb = VK_NULL_HANDLE;
     VkImageLayout target_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    // M5: depth attachment for the default framebuffer (D24S8).
+    VkFormat depth_format = VK_FORMAT_D24_UNORM_S8_UINT;
+    VkImage depth_image = VK_NULL_HANDLE;
+    VkDeviceMemory depth_mem = VK_NULL_HANDLE;
+    VkImageView depth_view = VK_NULL_HANDLE;
+    VkImageLayout depth_layout = VK_IMAGE_LAYOUT_UNDEFINED;
 
     VkRenderPass renderpass = VK_NULL_HANDLE;
     VkCommandPool pool = VK_NULL_HANDLE;
@@ -209,8 +218,12 @@ struct Engine {
     bool initialized = false;
     bool frame_dirty = false;
     bool pending_clear = false;
+    GLbitfield clear_mask = 0;
     float clear_r = 0, clear_g = 0, clear_b = 0, clear_a = 0;
+    double clear_depth = 1.0;
+    int clear_stencil = 0;
     float vp_x = 0, vp_y = 0, vp_w = 512, vp_h = 512;
+    float sc_x = 0, sc_y = 0, sc_w = 512, sc_h = 512;
     std::vector<DrawOp> frame_draws;
 };
 
@@ -234,9 +247,16 @@ VkResult CreateTargetImage(VkImage* img, VkDeviceMemory* mem);
 void TransitionLayout(VkCommandBuffer cb, VkImage image,
                       VkImageLayout old_layout, VkImageLayout new_layout);
 
+void TransitionLayoutAspect(VkCommandBuffer cb, VkImage image,
+                            VkImageSubresourceRange range,
+                            VkImageLayout old_layout,
+                            VkImageLayout new_layout);
+
 bool CreateRenderPass();
 
 bool CreateTarget();
+
+bool CreateDepthTarget();
 
 void CreateDummyTexture();
 
@@ -251,6 +271,10 @@ std::string BuildPipelineKey(uint64_t program, uint32_t topology,
                              uint32_t v_stride,
                              const std::vector<VertexAttr>& i_attrs,
                              uint32_t i_stride);
+
+// Textual signature of the pipeline-affecting GL state (depth/blend/cull/
+// stencil/color-mask/scissor/mode). Appended to the geometry key.
+std::string StateSignature(const PipelineState& ps);
 
 VkFormat AttrFormat(uint32_t components);
 

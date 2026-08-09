@@ -91,6 +91,8 @@ void APIENTRY glScissor(GLint x, GLint y, GLsizei width, GLsizei height) {
     auto& st = s::GetState();
     st.scissor.x = x; st.scissor.y = y;
     st.scissor.w = width; st.scissor.h = height;
+    if (v::IsInitialized())
+        v::SetScissor((float)x, (float)y, (float)width, (float)height);
 }
 
 // ---- clear state -----------------------------------------------------------
@@ -110,14 +112,14 @@ void APIENTRY glClearStencil(GLint sval) { s::GetState().clear_stencil = sval; }
 void APIENTRY glClear(GLbitfield mask) {
     const GLbitfield valid = GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT;
     if (mask & ~valid) { PUSH_ERROR(GL_INVALID_VALUE); return; }
-    if (mask & GL_COLOR_BUFFER_BIT) {
-        v::EnsureInit();
-        auto& st = s::GetState();
-        v::SetClearColor(st.clear_color[0], st.clear_color[1], st.clear_color[2],
-                         st.clear_color[3]);
-        v::MarkClear();
-    }
-    // Depth/stencil bits are accepted but have no Vulkan attachments yet.
+    if (!mask) return;
+    v::EnsureInit();
+    auto& st = s::GetState();
+    v::SetClearColor(st.clear_color[0], st.clear_color[1], st.clear_color[2],
+                     st.clear_color[3]);
+    v::SetClearDepth(st.clear_depth);
+    v::SetClearStencil(st.clear_stencil);
+    v::SetClearMask(mask);
 }
 
 // ---- face / polygon --------------------------------------------------------
@@ -294,9 +296,11 @@ void APIENTRY glBlendColor(GLfloat r, GLfloat g, GLfloat b, GLfloat a) {
 // ---- color mask ---------------------------------------------------------------
 
 void APIENTRY glColorMask(GLboolean r, GLboolean g, GLboolean b, GLboolean a) {
-    // M1 keeps color masks in the state object; per-draw-buffer arrays in M5.
-    // This is intentionally a no-op beyond validity: stores nothing for now.
-    (void)r; (void)g; (void)b; (void)a;
+    auto& st = s::GetState();
+    st.color_wmask[0] = r;
+    st.color_wmask[1] = g;
+    st.color_wmask[2] = b;
+    st.color_wmask[3] = a;
 }
 
 void APIENTRY glColorMaski(GLuint index, GLboolean r, GLboolean g, GLboolean b, GLboolean a) {

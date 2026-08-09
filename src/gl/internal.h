@@ -134,3 +134,6 @@ uint32_t AttribTypeSize(GLenum type);
 // (kept exact for |v| < 2^24, which covers MC's attribute usage).
 void FetchComponents(const uint8_t* p, GLenum type, GLboolean normalized,
                      float* out, GLuint count);
+
+// Snapshot the current GL context into the backend pipeline state (M5).
+v::PipelineState BuildPipelineState();

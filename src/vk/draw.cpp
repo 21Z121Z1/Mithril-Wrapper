@@ -60,9 +60,11 @@ void Draw(const DrawParams& params) {
         (uint32_t)(params.vertex_stream.data.size() * sizeof(float) /
                    op.v_stride);
     op.index_count = (uint32_t)params.indices.size();
+    op.pipe = params.pipeline;
     op.pipeline_key =
         BuildPipelineKey(params.program, op.topology, op.v_attrs, op.v_stride,
-                         op.i_attrs, op.i_stride);
+                         op.i_attrs, op.i_stride) +
+        StateSignature(params.pipeline);
 
     if (!StageStream(params.vertex_stream, &op.vertex_buffer,
                      &op.vertex_mem))
@@ -180,26 +182,56 @@ void SubmitFlush() {
     g.fn.BeginCommandBuffer(g.cmd, &bi);
 
     // Optional explicit clear.
+    VkImageSubresourceRange color_range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
     if (g.pending_clear) {
-        if (g.target_layout != VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
-            TransitionLayout(g.cmd, g.target_image, g.target_layout,
-                             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-            g.target_layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        if (g.clear_mask & GL_COLOR_BUFFER_BIT) {
+            if (g.target_layout != VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
+                TransitionLayout(g.cmd, g.target_image, g.target_layout,
+                                 VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+                g.target_layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            }
+            VkClearColorValue c{};
+            c.float32[0] = g.clear_r;
+            c.float32[1] = g.clear_g;
+            c.float32[2] = g.clear_b;
+            c.float32[3] = g.clear_a;
+            g.fn.CmdClearColorImage(g.cmd, g.target_image,
+                                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &c, 1,
+                                    &color_range);
         }
-        VkClearColorValue c{};
-        c.float32[0] = g.clear_r;
-        c.float32[1] = g.clear_g;
-        c.float32[2] = g.clear_b;
-        c.float32[3] = g.clear_a;
-        VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-        g.fn.CmdClearColorImage(g.cmd, g.target_image,
-                                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &c, 1,
-                                &range);
+        if (g.clear_mask &
+            (GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT)) {
+            VkImageAspectFlags aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
+            if (g.clear_mask & GL_STENCIL_BUFFER_BIT)
+                aspect |= VK_IMAGE_ASPECT_STENCIL_BIT;
+            if (g.depth_layout != VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
+                TransitionLayoutAspect(
+                    g.cmd, g.depth_image, {aspect, 0, 1, 0, 1}, g.depth_layout,
+                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+                g.depth_layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            }
+            VkClearDepthStencilValue c{};
+            c.depth = (float)g.clear_depth;
+            c.stencil = (uint32_t)g.clear_stencil;
+            VkImageSubresourceRange depth_range{aspect, 0, 1, 0, 1};
+            g.fn.CmdClearDepthStencilImage(g.cmd, g.depth_image,
+                                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                           &c, 1, &depth_range);
+        }
     }
     if (g.target_layout != VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
         TransitionLayout(g.cmd, g.target_image, g.target_layout,
                          VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
         g.target_layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    }
+    if (g.depth_layout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL) {
+        TransitionLayoutAspect(g.cmd, g.depth_image,
+                               {VK_IMAGE_ASPECT_DEPTH_BIT |
+                                    VK_IMAGE_ASPECT_STENCIL_BIT,
+                                0, 1, 0, 1},
+                               g.depth_layout,
+                               VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+        g.depth_layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
     }
 
     if (!g.frame_draws.empty()) {
@@ -217,16 +249,37 @@ void SubmitFlush() {
         vp.height = std::min<float>(g.vp_h, g.height);
         vp.minDepth = 0.f;
         vp.maxDepth = 1.f;
-        VkRect2D sc{};
-        sc.extent = {g.width, g.height};
         g.fn.CmdSetViewport(g.cmd, 0, 1, &vp);
-        g.fn.CmdSetScissor(g.cmd, 0, 1, &sc);
 
+        // Per-draw scissor: GL_SCISSOR_TEST gates a per-draw rectangle
+        // (dynamic state), otherwise the full target.
         for (const auto& op : g.frame_draws) {
             VkPipeline pipe =
                 GetOrCreatePipeline(g_programs.at(op.program), op);
             if (pipe == VK_NULL_HANDLE) continue;
             g.fn.CmdBindPipeline(g.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+
+            // Dynamic scissor for this draw (GL_SCISSOR_TEST).
+            VkRect2D sc;
+            if (op.pipe.scissor_test && g.sc_w > 0 && g.sc_h > 0) {
+                // GL scissor has a bottom-left origin; Vulkan is top-left, so
+                // flip Y and clamp the rectangle to the target.
+                int32_t sx = std::clamp<int32_t>((int32_t)g.sc_x, 0,
+                                                 (int32_t)g.width);
+                int32_t sy = std::clamp<int32_t>(
+                    (int32_t)g.height - ((int32_t)g.sc_y + (int32_t)g.sc_h),
+                    0, (int32_t)g.height);
+                uint32_t sw = std::min<uint32_t>((uint32_t)g.sc_w,
+                                                 g.width - (uint32_t)sx);
+                uint32_t sh = std::min<uint32_t>((uint32_t)g.sc_h,
+                                                 g.height - (uint32_t)sy);
+                sc.offset = {sx, sy};
+                sc.extent = {sw, sh};
+            } else {
+                sc.offset = {0, 0};
+                sc.extent = {g.width, g.height};
+            }
+            g.fn.CmdSetScissor(g.cmd, 0, 1, &sc);
 
             const VkBuffer binds[2] = {op.vertex_buffer, op.instance_buffer};
             const VkDeviceSize zeros[2] = {0, 0};

@@ -12,6 +12,111 @@
 
 namespace mithril::vk {
 
+namespace {
+// GL fog/depth/stencil/blend enums -> Vulkan. These are the only places the
+// backend maps GL values; everything else arrives pre-interleaved.
+
+VkCompareOp ToVkCompare(GLenum f) {
+    switch (f) {
+        case GL_NEVER: return VK_COMPARE_OP_NEVER;
+        case GL_LESS: return VK_COMPARE_OP_LESS;
+        case GL_EQUAL: return VK_COMPARE_OP_EQUAL;
+        case GL_LEQUAL: return VK_COMPARE_OP_LESS_OR_EQUAL;
+        case GL_GREATER: return VK_COMPARE_OP_GREATER;
+        case GL_NOTEQUAL: return VK_COMPARE_OP_NOT_EQUAL;
+        case GL_GEQUAL: return VK_COMPARE_OP_GREATER_OR_EQUAL;
+        default: return VK_COMPARE_OP_ALWAYS;
+    }
+}
+
+VkStencilOp StencilOp(GLenum op) {
+    switch (op) {
+        case GL_KEEP: return VK_STENCIL_OP_KEEP;
+        case GL_ZERO: return VK_STENCIL_OP_ZERO;
+        case GL_REPLACE: return VK_STENCIL_OP_REPLACE;
+        case GL_INCR: return VK_STENCIL_OP_INCREMENT_AND_CLAMP;
+        case GL_DECR: return VK_STENCIL_OP_DECREMENT_AND_CLAMP;
+        case GL_INVERT: return VK_STENCIL_OP_INVERT;
+        case GL_INCR_WRAP: return VK_STENCIL_OP_INCREMENT_AND_WRAP;
+        default: return VK_STENCIL_OP_DECREMENT_AND_WRAP;
+    }
+}
+
+VkColorComponentFlags ColorMask(const PipelineState& ps) {
+    VkColorComponentFlags f = 0;
+    if (ps.color_wmask_r) f |= VK_COLOR_COMPONENT_R_BIT;
+    if (ps.color_wmask_g) f |= VK_COLOR_COMPONENT_G_BIT;
+    if (ps.color_wmask_b) f |= VK_COLOR_COMPONENT_B_BIT;
+    if (ps.color_wmask_a) f |= VK_COLOR_COMPONENT_A_BIT;
+    return f;
+}
+
+VkBlendFactor ToVkBlend(GLenum f) {
+    switch (f) {
+        case GL_ZERO: return VK_BLEND_FACTOR_ZERO;
+        case GL_ONE: return VK_BLEND_FACTOR_ONE;
+        case GL_SRC_COLOR: return VK_BLEND_FACTOR_SRC_COLOR;
+        case GL_ONE_MINUS_SRC_COLOR: return VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR;
+        case GL_DST_COLOR: return VK_BLEND_FACTOR_DST_COLOR;
+        case GL_ONE_MINUS_DST_COLOR: return VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR;
+        case GL_SRC_ALPHA: return VK_BLEND_FACTOR_SRC_ALPHA;
+        case GL_ONE_MINUS_SRC_ALPHA: return VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        case GL_DST_ALPHA: return VK_BLEND_FACTOR_DST_ALPHA;
+        case GL_ONE_MINUS_DST_ALPHA: return VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA;
+        case GL_CONSTANT_COLOR: return VK_BLEND_FACTOR_CONSTANT_COLOR;
+        case GL_ONE_MINUS_CONSTANT_COLOR:
+            return VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_COLOR;
+        case GL_CONSTANT_ALPHA: return VK_BLEND_FACTOR_CONSTANT_ALPHA;
+        case GL_ONE_MINUS_CONSTANT_ALPHA:
+            return VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_ALPHA;
+        case GL_SRC_ALPHA_SATURATE: return VK_BLEND_FACTOR_SRC_ALPHA_SATURATE;
+        default: return VK_BLEND_FACTOR_ONE;
+    }
+}
+
+VkBlendOp ToBlendOp(GLenum op) {
+    switch (op) {
+        case GL_FUNC_SUBTRACT: return VK_BLEND_OP_SUBTRACT;
+        case GL_FUNC_REVERSE_SUBTRACT: return VK_BLEND_OP_REVERSE_SUBTRACT;
+        case GL_MIN: return VK_BLEND_OP_MIN;
+        case GL_MAX: return VK_BLEND_OP_MAX;
+        default: return VK_BLEND_OP_ADD;
+    }
+}
+
+} // namespace
+
+// Stable textual signature of every pipeline-affecting GL state field.
+// Appended to the geometry key so state changes bake a fresh pipeline.
+std::string StateSignature(const PipelineState& ps) {
+    std::string k;
+    k += "|D" + std::string(ps.depth_test ? "1" : "0") +
+         std::to_string(ps.depth_func) + (ps.depth_write ? "1" : "0");
+    k += "|S" + std::string(ps.stencil_test ? "1" : "0") +
+         std::to_string(ps.stencil_front_func) + std::to_string(ps.stencil_back_func) +
+         std::to_string(ps.stencil_front_read_mask) +
+         std::to_string(ps.stencil_back_read_mask) +
+         std::to_string(ps.stencil_front_op_fail) +
+         std::to_string(ps.stencil_front_op_zfail) +
+         std::to_string(ps.stencil_front_op_zpass) +
+         std::to_string(ps.stencil_back_op_fail) +
+         std::to_string(ps.stencil_back_op_zfail) +
+         std::to_string(ps.stencil_back_op_zpass);
+    k += "|B" + std::string(ps.blend_enable ? "1" : "0") +
+         std::to_string(ps.blend_src_rgb) + std::to_string(ps.blend_dst_rgb) +
+         std::to_string(ps.blend_src_alpha) + std::to_string(ps.blend_dst_alpha) +
+         std::to_string(ps.blend_eq_rgb) + std::to_string(ps.blend_eq_alpha);
+    k += "|C" + std::string(ps.cull_test ? "1" : "0") +
+         std::to_string(ps.cull_face) + std::to_string(ps.front_face);
+    k += "|P" + std::to_string(ps.polygon_mode);
+    k += "|W" + std::string(ps.color_wmask_r ? "1" : "0") +
+         std::string(ps.color_wmask_g ? "1" : "0") +
+         std::string(ps.color_wmask_b ? "1" : "0") +
+         std::string(ps.color_wmask_a ? "1" : "0");
+    k += "|R" + std::string(ps.scissor_test ? "1" : "0");
+    return k;
+}
+
 std::string BuildPipelineKey(uint64_t program, uint32_t topology,
                              const std::vector<VertexAttr>& v_attrs,
                              uint32_t v_stride,
@@ -100,17 +205,60 @@ VkPipeline GetOrCreatePipeline(const Program& prog, const DrawOp& op) {
 
     VkPipelineRasterizationStateCreateInfo rs{};
     rs.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
-    rs.polygonMode = VK_POLYGON_MODE_FILL;
-    rs.cullMode = VK_CULL_MODE_NONE;
-    rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    rs.rasterizerDiscardEnable = VK_FALSE;
+    rs.polygonMode = op.pipe.polygon_mode == GL_LINE   ? VK_POLYGON_MODE_LINE
+                     : op.pipe.polygon_mode == GL_POINT ? VK_POLYGON_MODE_POINT
+                                                        : VK_POLYGON_MODE_FILL;
+    rs.cullMode =
+        !op.pipe.cull_test ? VK_CULL_MODE_NONE
+        : op.pipe.cull_face == GL_FRONT
+            ? VK_CULL_MODE_FRONT_BIT
+            : op.pipe.cull_face == GL_FRONT_AND_BACK
+                  ? VK_CULL_MODE_FRONT_AND_BACK
+                  : VK_CULL_MODE_BACK_BIT;
+    rs.frontFace = op.pipe.front_face == GL_CW ? VK_FRONT_FACE_CLOCKWISE
+                                               : VK_FRONT_FACE_COUNTER_CLOCKWISE;
     rs.lineWidth = 1.0f;
 
     VkPipelineMultisampleStateCreateInfo ms{};
     ms.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
     ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
 
+    VkPipelineDepthStencilStateCreateInfo ds{};
+    ds.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    ds.depthTestEnable = op.pipe.depth_test ? VK_TRUE : VK_FALSE;
+    ds.depthWriteEnable = op.pipe.depth_write ? VK_TRUE : VK_FALSE;
+    ds.depthCompareOp = ToVkCompare(op.pipe.depth_func);
+    ds.depthBoundsTestEnable = VK_FALSE;
+    ds.stencilTestEnable = op.pipe.stencil_test ? VK_TRUE : VK_FALSE;
+
+    VkStencilOpState front_st{};
+    front_st.failOp = StencilOp(op.pipe.stencil_front_op_fail);
+    front_st.passOp = StencilOp(op.pipe.stencil_front_op_zpass);
+    front_st.depthFailOp = StencilOp(op.pipe.stencil_front_op_zfail);
+    front_st.compareOp = ToVkCompare(op.pipe.stencil_front_func);
+    front_st.compareMask = op.pipe.stencil_front_read_mask;
+    front_st.writeMask = 0xFFFFFFFFu;
+    front_st.reference = (uint32_t)op.pipe.stencil_front_ref;
+    VkStencilOpState back_st = front_st;   // copy, override fields
+    back_st.compareOp = ToVkCompare(op.pipe.stencil_back_func);
+    back_st.compareMask = op.pipe.stencil_back_read_mask;
+    back_st.failOp = StencilOp(op.pipe.stencil_back_op_fail);
+    back_st.passOp = StencilOp(op.pipe.stencil_back_op_zpass);
+    back_st.depthFailOp = StencilOp(op.pipe.stencil_back_op_zfail);
+    back_st.reference = (uint32_t)op.pipe.stencil_back_ref;
+    ds.front = front_st;
+    ds.back = back_st;
+
     VkPipelineColorBlendAttachmentState cb_att{};
-    cb_att.colorWriteMask = 0xF;
+    cb_att.blendEnable = op.pipe.blend_enable ? VK_TRUE : VK_FALSE;
+    cb_att.srcColorBlendFactor = ToVkBlend(op.pipe.blend_src_rgb);
+    cb_att.dstColorBlendFactor = ToVkBlend(op.pipe.blend_dst_rgb);
+    cb_att.colorBlendOp = ToBlendOp(op.pipe.blend_eq_rgb);
+    cb_att.srcAlphaBlendFactor = ToVkBlend(op.pipe.blend_src_alpha);
+    cb_att.dstAlphaBlendFactor = ToVkBlend(op.pipe.blend_dst_alpha);
+    cb_att.alphaBlendOp = ToBlendOp(op.pipe.blend_eq_alpha);
+    cb_att.colorWriteMask = ColorMask(op.pipe);
     VkPipelineColorBlendStateCreateInfo cb{};
     cb.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
     cb.attachmentCount = 1;
@@ -141,6 +289,7 @@ VkPipeline GetOrCreatePipeline(const Program& prog, const DrawOp& op) {
     pg.pViewportState = &vp;
     pg.pRasterizationState = &rs;
     pg.pMultisampleState = &ms;
+    pg.pDepthStencilState = &ds;
     pg.pColorBlendState = &cb;
     pg.pDynamicState = &dyn_s;
     pg.layout = g.pipeline_layout;

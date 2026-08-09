@@ -100,6 +100,7 @@ struct GLState {
     GLfloat poly_offset_factor = 0.0f, poly_offset_units = 0.0f;
     GLfloat sample_coverage_value = 0.5f;
     GLboolean sample_coverage_invert = GL_FALSE;
+    std::array<GLboolean, 4> color_wmask{GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE};
     GLenum logicop = GL_COPY;
     GLenum hint_derivative = GL_DONT_CARE;
     GLenum clamp_color_mode = GL_FIXED_ONLY;

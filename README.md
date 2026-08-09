@@ -13,7 +13,7 @@ GL → Vulkan → Metal（MoltenVK），无 OpenGL ES 参与。
   - `tests/draw_smoke.c` 全链通过（llvmpipe）：GL 层着色 + glDrawArrays → Vulkan 绘制 → glReadPixels 校验（白三角形、tint 驱动变色、背景色）。
 - **M3 完成：顶点数据**：S3 组 76/114 真实现（顶点属性全家族：pointer/IPointer/常量 1-4 系/Divisor、buffer 映射与查询家族、10 个 draw 入口：DrawArrays(Instanced)/DrawElements(Instanced/BaseVertex/Range 双变体)/MultiDraw 全系）；引擎新增双顶点流（顶点+实例）、索引缓冲（统一 UINT32 staging）、TriangleStrip/Fan 拓扑；实例化采用 CPU 逐实例打包（divisor 行复制）；非 4 字节对齐 stride/offset 由 CPU 规整为 float32 打包；`draw_smoke` 扩展 8 个 M3 断言全部通过。
 - **M4 纹理完成（S4 42/42 函数）**：`src/vk/texture.cpp` 上传路径扩展（staging→CmdCopyBufferToImage 全 mip 逐切片、image/view/sampler 覆盖 2D/1D、3D volume、2D/1D array、cubemap、wrap_r、白 dummy 兜底）；`src/gl/texture.cpp` 全量真实现（TexImage1D/2D/3D + TexSub 全系含 cubemap face/array 分层、GetTexImage PACK 回读、GenerateMipmap 逐切片滤波、TexParameter/GetTexParameter/GetTexLevelParameter 全系、S3TC DXT1/3/5 CPU 解压 + GetCompressedTexImage、CopyTexImage/CopyTexSubImage 帧读回、glTexBuffer、glPixelStoref）；`texture_smoke` 26 断言全通过（llvmpipe：红纹理采样/mip/dummy 白/GetTexImage 往返/3D 切片/数组分层/cubemap 6 面/拷贝/texBuffer/压缩）。
-- **M5 待办：状态管线**（depth/stencil/blend/cull/FBO/MSAA → pipeline 缓存）。
+- **M5 进行中（stage A 完成）**：状态管线 `src/vk/pipeline.cpp`（深度附件 D24S8、`PipelineState` 烘焙进 pipeline 缓存 key + `Vk*CreateInfo`、显式 `CmdClearDepthStencilImage`/`CmdClearColorImage` 统一清除、动态 scissor Y 翻转、depth/blend/cull 枚举映射）；GL 侧 `BuildPipelineState` 快照与 `glScissor`/`glColorMask`/`glClear(mask)` 接入。`tests/fbo_smoke.c` 6 断言全通过（depth 近者胜/LEQUAL 同 z、scissor 中心清屏+角落收色、blend off/src-alpha）。待办：cull/stencil/colorMask/polygon 断言断层、FBO/S5、MSAA。
 
 ## 快速构建（Linux 开发循环）
 

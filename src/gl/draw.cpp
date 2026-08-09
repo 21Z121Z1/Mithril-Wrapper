@@ -133,6 +133,53 @@ std::unordered_map<std::string, std::vector<float>> ComposeUniforms(
     return uniforms;
 }
 
+// Snapshot the current GL context into the backend's pipeline state. The
+// engine bakes these into the pipeline cache key and the Vk*CreateInfo
+// structs; values are forwarded as GL enums (backend maps them once).
+v::PipelineState BuildPipelineState() {
+    const s::GLState& st = s::GetState();
+    v::PipelineState ps;
+    ps.scissor_test = st.caps.Test(GL_SCISSOR_TEST);
+    ps.depth_test = st.caps.Test(GL_DEPTH_TEST);
+    ps.depth_func = st.depth.func;
+    ps.depth_write = st.depth.mask;
+    ps.stencil_test = st.caps.Test(GL_STENCIL_TEST);
+    ps.stencil_front_func = st.stencil_front.func;
+    ps.stencil_back_func = st.stencil_back.func;
+    ps.stencil_front_ref = st.stencil_front.ref;
+    ps.stencil_back_ref = st.stencil_back.ref;
+    ps.stencil_front_read_mask = st.stencil_front.mask;
+    ps.stencil_back_read_mask = st.stencil_back.mask;
+    ps.stencil_front_op_fail = st.stencil_front.op_fail;
+    ps.stencil_front_op_zfail = st.stencil_front.op_zfail;
+    ps.stencil_front_op_zpass = st.stencil_front.op_zpass;
+    ps.stencil_back_op_fail = st.stencil_back.op_fail;
+    ps.stencil_back_op_zfail = st.stencil_back.op_zfail;
+    ps.stencil_back_op_zpass = st.stencil_back.op_zpass;
+    ps.blend_enable = st.caps.Test(GL_BLEND);
+    ps.blend_src_rgb = st.blend.src_rgb;
+    ps.blend_dst_rgb = st.blend.dst_rgb;
+    ps.blend_src_alpha = st.blend.src_alpha;
+    ps.blend_dst_alpha = st.blend.dst_alpha;
+    ps.blend_eq_rgb = st.blend.eq_rgb;
+    ps.blend_eq_alpha = st.blend.eq_alpha;
+    ps.blend_color[0] = st.blend.color[0];
+    ps.blend_color[1] = st.blend.color[1];
+    ps.blend_color[2] = st.blend.color[2];
+    ps.blend_color[3] = st.blend.color[3];
+    ps.cull_test = st.caps.Test(GL_CULL_FACE);
+    ps.cull_face = st.cull_face;
+    ps.front_face = st.front_face;
+    ps.polygon_mode = st.polygon_mode;
+    ps.poly_offset_factor = st.poly_offset_factor;
+    ps.poly_offset_units = st.poly_offset_units;
+    ps.color_wmask_r = st.color_wmask[0];
+    ps.color_wmask_g = st.color_wmask[1];
+    ps.color_wmask_b = st.color_wmask[2];
+    ps.color_wmask_a = st.color_wmask[3];
+    return ps;
+}
+
 // Fetch `size` components of attribute `a` for source buffer row `row`.
 // Applies buffer lookup, stride, type size, normalization, half/double
 // conversion, or the generic constant when the array is disabled/unbound.
@@ -276,6 +323,7 @@ void DrawCommon(GLenum mode, const std::vector<uint32_t>& idx, GLint first,
     dp.instance_count = (uint32_t)instance_count;
     dp.topology = (v::Topology)topo;
     dp.uniforms = ComposeUniforms(prog);
+    dp.pipeline = BuildPipelineState();
     // Resolve each sampler uniform to the texture bound at its GL unit
     // (the framebelike value glUniform1i wrote; absent -> unit 0).
     dp.sampler_binds.clear();
