@@ -19,6 +19,7 @@ GLuint g_bound_vao = 0;
 GLuint g_bound_array_buffer = 0;
 GLuint g_bound_element_buffer = 0;
 GLuint g_bound_uniform_buffer = 0;
+GLuint g_bound_pixel_unpack_buffer = 0;
 std::array<IndexedBufferBinding, kMaxUniformBufferBindings>
     g_uniform_buffer_bindings{};
 
@@ -84,6 +85,8 @@ void APIENTRY glDeleteBuffers(GLsizei n, const GLuint* buffers) {
         if (g_bound_array_buffer == buffers[i]) g_bound_array_buffer = 0;
         if (g_bound_element_buffer == buffers[i]) g_bound_element_buffer = 0;
         if (g_bound_uniform_buffer == buffers[i]) g_bound_uniform_buffer = 0;
+        if (g_bound_pixel_unpack_buffer == buffers[i])
+            g_bound_pixel_unpack_buffer = 0;
         for (auto& binding : g_uniform_buffer_bindings)
             if (binding.buffer == buffers[i]) binding = {};
         g_buffers.erase(it);
@@ -100,6 +103,7 @@ void APIENTRY glBindBuffer(GLenum target, GLuint buffer) {
         case GL_ARRAY_BUFFER: g_bound_array_buffer = buffer; break;
         case GL_ELEMENT_ARRAY_BUFFER: g_bound_element_buffer = buffer; break;
         case GL_UNIFORM_BUFFER: g_bound_uniform_buffer = buffer; break;
+        case GL_PIXEL_UNPACK_BUFFER: g_bound_pixel_unpack_buffer = buffer; break;
         default:
             PUSH_ERROR(GL_INVALID_ENUM);
             return;
@@ -113,11 +117,13 @@ void APIENTRY glBufferData(GLenum target, GLsizeiptr size, const void* data, GLe
         case GL_ARRAY_BUFFER: bound = &g_bound_array_buffer; break;
         case GL_ELEMENT_ARRAY_BUFFER: bound = &g_bound_element_buffer; break;
         case GL_UNIFORM_BUFFER: bound = &g_bound_uniform_buffer; break;
+        case GL_PIXEL_UNPACK_BUFFER: bound = &g_bound_pixel_unpack_buffer; break;
         default: PUSH_ERROR(GL_INVALID_ENUM); return;
     }
     if (*bound == 0) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
     if (size < 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
     auto it = g_buffers.find(*bound);
+    if (it->second.mapped) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
     if (data) {
         it->second.data.assign((const uint8_t*)data, (const uint8_t*)data + size);
     } else {
@@ -133,11 +139,13 @@ void APIENTRY glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, c
         case GL_ARRAY_BUFFER: bound = &g_bound_array_buffer; break;
         case GL_ELEMENT_ARRAY_BUFFER: bound = &g_bound_element_buffer; break;
         case GL_UNIFORM_BUFFER: bound = &g_bound_uniform_buffer; break;
+        case GL_PIXEL_UNPACK_BUFFER: bound = &g_bound_pixel_unpack_buffer; break;
         default: PUSH_ERROR(GL_INVALID_ENUM); return;
     }
     if (*bound == 0) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
     if (offset < 0 || size < 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
     auto it = g_buffers.find(*bound);
+    if (it->second.mapped) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
     if (offset + size > (GLintptr)it->second.data.size()) {
         PUSH_ERROR(GL_INVALID_VALUE);
         return;
@@ -159,6 +167,7 @@ BufferData* BoundBufferForTarget(GLenum target, GLenum* error) {
         case GL_ARRAY_BUFFER: bound = &g_bound_array_buffer; break;
         case GL_ELEMENT_ARRAY_BUFFER: bound = &g_bound_element_buffer; break;
         case GL_UNIFORM_BUFFER: bound = &g_bound_uniform_buffer; break;
+        case GL_PIXEL_UNPACK_BUFFER: bound = &g_bound_pixel_unpack_buffer; break;
         default: *error = GL_INVALID_ENUM; return nullptr;
     }
     if (*bound == 0) { *error = GL_INVALID_OPERATION; return nullptr; }
@@ -268,6 +277,10 @@ void APIENTRY glCopyBufferSubData(GLenum readtarget, GLenum writetarget,
         PUSH_ERROR(GL_INVALID_VALUE);
         return;
     }
+    if (src->mapped || dst->mapped) {
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return;
+    }
     std::memmove(dst->data.data() + writeoffset, src->data.data() + readoffset,
                  size);
     ++dst->content_version;
@@ -282,7 +295,7 @@ void APIENTRY glGetBufferParameteriv(GLenum target, GLenum pname, GLint* params)
         case GL_BUFFER_SIZE: *params = (GLint)b->data.size(); break;
         case GL_BUFFER_USAGE: *params = GL_STATIC_DRAW; break;
         case GL_BUFFER_ACCESS: *params = GL_WRITE_ONLY; break;
-        case GL_BUFFER_MAPPED: *params = GL_FALSE; break;
+        case GL_BUFFER_MAPPED: *params = b->mapped ? GL_TRUE : GL_FALSE; break;
         default: PUSH_ERROR(GL_INVALID_ENUM);
     }
 }
@@ -305,7 +318,7 @@ void APIENTRY glGetBufferPointerv(GLenum target, GLenum pname, void** params) {
     GLenum err = GL_NO_ERROR;
     BufferData* b = BoundBufferForTarget(target, &err);
     if (err) { PUSH_ERROR(err); return; }
-    *params = b->data.data();
+    *params = b->mapped ? b->data.data() + b->map_offset : nullptr;
 }
 
 void APIENTRY glGetBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size,
@@ -328,8 +341,12 @@ void* APIENTRY glMapBuffer(GLenum target, GLenum access) {
     GLenum err = GL_NO_ERROR;
     BufferData* b = BoundBufferForTarget(target, &err);
     if (err) { PUSH_ERROR(err); return nullptr; }
+    if (b->mapped) { PUSH_ERROR(GL_INVALID_OPERATION); return nullptr; }
     if (b->data.empty()) { PUSH_ERROR(GL_OUT_OF_MEMORY); return nullptr; }
-    if (access != GL_READ_ONLY) {
+    b->mapped = true;
+    b->map_offset = 0;
+    b->map_writable = access != GL_READ_ONLY;
+    if (b->map_writable) {
         ++b->content_version;
         b->defined = true;
     }
@@ -342,8 +359,12 @@ void* APIENTRY glMapBufferRange(GLenum target, GLintptr offset, GLsizeiptr lengt
     GLenum err = GL_NO_ERROR;
     BufferData* b = BoundBufferForTarget(target, &err);
     if (err) { PUSH_ERROR(err); return nullptr; }
+    if (b->mapped) { PUSH_ERROR(GL_INVALID_OPERATION); return nullptr; }
     if (offset + length > (GLintptr)b->data.size()) { PUSH_ERROR(GL_INVALID_VALUE); return nullptr; }
-    if (access != GL_MAP_READ_BIT) {
+    b->mapped = true;
+    b->map_offset = static_cast<size_t>(offset);
+    b->map_writable = access != GL_MAP_READ_BIT;
+    if (b->map_writable) {
         ++b->content_version;
         b->defined = true;
     }
@@ -354,8 +375,10 @@ GLboolean APIENTRY glUnmapBuffer(GLenum target) {
     GLenum err = GL_NO_ERROR;
     BufferData* b = BoundBufferForTarget(target, &err);
     if (err) { PUSH_ERROR(err); return GL_FALSE; }
-    ++b->content_version;
-    b->defined = true;
+    if (!b->mapped) { PUSH_ERROR(GL_INVALID_OPERATION); return GL_FALSE; }
+    b->mapped = false;
+    b->map_writable = false;
+    b->map_offset = 0;
     return GL_TRUE;  // host-coherent staging: nothing to flush
 }
 

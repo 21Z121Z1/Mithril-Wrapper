@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <limits>
 
 #include <util/log.h>
 
@@ -163,20 +164,21 @@ void EncodeRowRGBA8(const uint8_t* src, uint8_t* dst, GLsizei width,
 
 // Row stride of `w`-wide pixels using the UNPACK_* pixel store state; the
 // PACK variant reads pack_* instead.
-uint32_t RowBytes(uint32_t w, GLenum format, GLenum type, bool pack) {
+size_t RowBytes(uint32_t w, GLenum format, GLenum type, bool pack) {
     const s::PixelStore& ps = s::GetState().pixels;
     uint32_t row_px = (pack ? ps.pack_row_length : ps.unpack_row_length)
                           ? (pack ? (uint32_t)ps.pack_row_length
                                   : (uint32_t)ps.unpack_row_length)
                           : w;
-    uint32_t bytes = row_px * FormatComponents(format) * TypeBytes(type);
-    uint32_t align =
-        std::max<uint32_t>(1, (uint32_t)(pack ? ps.pack_alignment
-                                              : ps.unpack_alignment));
+    const size_t bytes = static_cast<size_t>(row_px) *
+                         FormatComponents(format) * TypeBytes(type);
+    const size_t align = std::max<size_t>(
+        1, static_cast<size_t>(pack ? ps.pack_alignment
+                                    : ps.unpack_alignment));
     return ((bytes + align - 1) / align) * align;
 }
 
-uint32_t UnpackRowBytes(uint32_t w, GLenum format, GLenum type) {
+size_t UnpackRowBytes(uint32_t w, GLenum format, GLenum type) {
     return RowBytes(w, format, type, false);
 }
 
@@ -185,6 +187,118 @@ uint32_t PlaneRows(uint32_t h, bool pack) {
     GLint ih = pack ? s::GetState().pixels.pack_image_height
                     : s::GetState().pixels.unpack_image_height;
     return ih > 0 ? (uint32_t)ih : h;
+}
+
+struct UnpackSource {
+    const void* data = nullptr;
+    bool provided = false;
+};
+
+bool CheckedAddProduct(uint64_t* total, uint64_t left, uint64_t right) {
+    if (left && right > std::numeric_limits<uint64_t>::max() / left)
+        return false;
+    const uint64_t product = left * right;
+    if (*total > std::numeric_limits<uint64_t>::max() - product) return false;
+    *total += product;
+    return true;
+}
+
+// Resolve a GL client pointer or PIXEL_UNPACK_BUFFER byte offset into the
+// same immutable call-time byte snapshot consumed by StoreSlices. Pixel-store
+// skips are applied here; row/image strides remain visible to StoreSlices.
+bool ResolveUnpackSource(const void* pixels, uint32_t width, uint32_t height,
+                         uint32_t planes, bool three_dimensional,
+                         GLenum format, GLenum type, UnpackSource* output) {
+    if (!output) return false;
+    *output = {};
+    const bool uses_pbo = g_bound_pixel_unpack_buffer != 0;
+    if (!uses_pbo && !pixels) return true;
+
+    const uint32_t components = FormatComponents(format);
+    const uint32_t type_bytes = TypeBytes(type);
+    if (!components || !type_bytes) {
+        PUSH_ERROR(GL_INVALID_ENUM);
+        return false;
+    }
+    const uint64_t bytes_per_pixel =
+        static_cast<uint64_t>(components) * type_bytes;
+    const uint64_t row_bytes = UnpackRowBytes(width, format, type);
+    const uint64_t plane_rows = three_dimensional
+        ? PlaneRows(height, false) : height;
+    const s::PixelStore& store = s::GetState().pixels;
+
+    uint64_t plane_stride = 0;
+    if (!CheckedAddProduct(&plane_stride, plane_rows, row_bytes)) {
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return false;
+    }
+    uint64_t base = 0;
+    if ((three_dimensional &&
+         !CheckedAddProduct(&base,
+                            static_cast<uint64_t>(store.unpack_skip_images),
+                            plane_stride)) ||
+        !CheckedAddProduct(&base, static_cast<uint64_t>(store.unpack_skip_rows),
+                           row_bytes) ||
+        !CheckedAddProduct(&base, static_cast<uint64_t>(store.unpack_skip_pixels),
+                           bytes_per_pixel)) {
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return false;
+    }
+    uint64_t span = 0;
+    if (width && height && planes) {
+        if (!CheckedAddProduct(&span, planes - 1, plane_stride) ||
+            !CheckedAddProduct(&span, height - 1, row_bytes) ||
+            !CheckedAddProduct(&span, width, bytes_per_pixel)) {
+            PUSH_ERROR(GL_INVALID_OPERATION);
+            return false;
+        }
+    }
+
+    if (uses_pbo) {
+        const auto buffer = g_buffers.find(g_bound_pixel_unpack_buffer);
+        const uint64_t offset = reinterpret_cast<uintptr_t>(pixels);
+        if (buffer == g_buffers.end() || buffer->second.mapped ||
+            offset % type_bytes != 0 || offset > buffer->second.data.size() ||
+            base > buffer->second.data.size() - offset ||
+            span > buffer->second.data.size() - offset - base) {
+            PUSH_ERROR(GL_INVALID_OPERATION);
+            return false;
+        }
+        output->data = buffer->second.data.empty()
+            ? nullptr : buffer->second.data.data() + offset + base;
+    } else {
+        const uintptr_t address = reinterpret_cast<uintptr_t>(pixels);
+        if (address > std::numeric_limits<uintptr_t>::max() - base) {
+            PUSH_ERROR(GL_INVALID_OPERATION);
+            return false;
+        }
+        output->data = reinterpret_cast<const void*>(address + base);
+    }
+    output->provided = true;
+    return true;
+}
+
+bool ResolveUnpackBytes(const void* pointer, uint64_t byte_count,
+                        UnpackSource* output) {
+    if (!output) return false;
+    *output = {};
+    if (!g_bound_pixel_unpack_buffer) {
+        output->data = pointer;
+        output->provided = pointer != nullptr;
+        return true;
+    }
+    const auto buffer = g_buffers.find(g_bound_pixel_unpack_buffer);
+    const uint64_t offset = reinterpret_cast<uintptr_t>(pointer);
+    if (buffer == g_buffers.end() || buffer->second.mapped ||
+        offset > buffer->second.data.size() ||
+        byte_count > buffer->second.data.size() - offset) {
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return false;
+    }
+    output->data = buffer->second.data.empty()
+        ? nullptr : buffer->second.data.data() + offset;
+    output->provided = true;
+    return true;
 }
 
 // Byte offset of slice `slice` inside `st.mip[level]`.
@@ -226,7 +340,7 @@ void StoreSlices(TexState& st, uint32_t level, uint32_t slice0, uint32_t count,
                  GLenum format, GLenum type, const void* data) {
     if (!FormatComponents(format) || !TypeBytes(type)) return;
     uint32_t lvl_w = std::max<uint32_t>(1, st.width >> level);
-    uint32_t row_src = UnpackRowBytes(w, format, type);
+    size_t row_src = UnpackRowBytes(w, format, type);
     uint32_t plane_rows = PlaneRows(h, false);
     for (uint32_t s = 0; s < count; ++s) {
         const uint8_t* plane = (const uint8_t*)data + (size_t)s * plane_rows * row_src;
@@ -234,6 +348,24 @@ void StoreSlices(TexState& st, uint32_t level, uint32_t slice0, uint32_t count,
         for (uint32_t r = 0; r < h; ++r)
             DecodeRowRGBA8(plane + (size_t)r * row_src, dst + (size_t)r * lvl_w * 4,
                            (GLsizei)w, format, type);
+    }
+}
+
+// A 1D-array image is specified by the 2D texture upload commands: source
+// rows are array layers, so GL_UNPACK_IMAGE_HEIGHT must not become a layer
+// stride. Keep that API-dimensional semantic out of backend storage layout.
+void Store1DArraySlices(TexState& st, uint32_t level, uint32_t slice0,
+                        uint32_t count, uint32_t x, uint32_t width,
+                        GLenum format, GLenum type, const void* data) {
+    if (!FormatComponents(format) || !TypeBytes(type)) return;
+    const size_t source_row_bytes = UnpackRowBytes(width, format, type);
+    for (uint32_t layer = 0; layer < count; ++layer) {
+        const auto* source = static_cast<const uint8_t*>(data) +
+                             static_cast<size_t>(layer) * source_row_bytes;
+        uint8_t* destination = SlicePtr(st, level, slice0 + layer) +
+                               static_cast<size_t>(x) * 4;
+        DecodeRowRGBA8(source, destination, static_cast<GLsizei>(width),
+                       format, type);
     }
 }
 
@@ -1047,6 +1179,7 @@ void APIENTRY glTexImage2D(GLenum target, GLint level, GLint internalformat,
         if (target != GL_TEXTURE_2D || level != 0 ||
             internalformat != GL_DEPTH_COMPONENT32F ||
             format != GL_DEPTH_COMPONENT || type != GL_FLOAT || pixels ||
+            g_bound_pixel_unpack_buffer ||
             !v::SupportsDepthTextures()) {
             PUSH_ERROR(GL_INVALID_OPERATION);
             return;
@@ -1078,6 +1211,13 @@ void APIENTRY glTexImage2D(GLenum target, GLint level, GLint internalformat,
         return;
     }
 
+    UnpackSource source;
+    if (!ResolveUnpackSource(pixels, static_cast<uint32_t>(width),
+                             static_cast<uint32_t>(height), 1,
+                             /*three_dimensional=*/false, format, type,
+                             &source))
+        return;
+
     if (level == 0) {
         if (st.has_image && !face && st.SliceCount() > 1) {
             PUSH_ERROR(GL_INVALID_OPERATION);   // array extent redefinition
@@ -1103,18 +1243,20 @@ void APIENTRY glTexImage2D(GLenum target, GLint level, GLint internalformat,
     AllocLevel(st, (uint32_t)level);
     uint32_t lvl_w = std::max<uint32_t>(1, st.width >> level);
     uint32_t lvl_h = std::max<uint32_t>(1, st.height >> level);
-    if (pixels && (uint32_t)width == lvl_w && (uint32_t)height == lvl_h &&
+    if (source.provided && (uint32_t)width == lvl_w &&
+        (uint32_t)height == lvl_h &&
         face && st.IsCube())
         StoreSlices(st, (uint32_t)level, slice, 1, 0, 0, (uint32_t)width,
-                    (uint32_t)height, format, type, pixels);
-    else if (pixels && (uint32_t)width == lvl_w && !face &&
+                    (uint32_t)height, format, type, source.data);
+    else if (source.provided && (uint32_t)width == lvl_w && !face &&
              target != GL_TEXTURE_1D_ARRAY)
         StoreSlices(st, (uint32_t)level, 0, 1, 0, 0, (uint32_t)width,
-                    (uint32_t)height, format, type, pixels);
-    else if (pixels && target == GL_TEXTURE_1D_ARRAY &&
+                    (uint32_t)height, format, type, source.data);
+    else if (source.provided && target == GL_TEXTURE_1D_ARRAY &&
              (uint32_t)width == lvl_w && (uint32_t)st.depth == (uint32_t)height)
-        StoreSlices(st, (uint32_t)level, 0, st.depth, 0, 0, (uint32_t)width, 1,
-                    format, type, pixels);
+        Store1DArraySlices(st, static_cast<uint32_t>(level), 0, st.depth, 0,
+                           static_cast<uint32_t>(width), format, type,
+                           source.data);
 
     MarkTextureDirty(st, id);
 }
@@ -1177,6 +1319,11 @@ void APIENTRY glTexImage1D(GLenum target, GLint level, GLint internalformat,
     }
     GLuint id = ActiveBound(target);
     if (!id) return;
+    UnpackSource source;
+    if (!ResolveUnpackSource(pixels, static_cast<uint32_t>(width), 1, 1,
+                             /*three_dimensional=*/false, format, type,
+                             &source))
+        return;
     TexState& st = g_textures[id];
     if (level == 0) {
         st.width = static_cast<uint32_t>(width);
@@ -1187,9 +1334,9 @@ void APIENTRY glTexImage1D(GLenum target, GLint level, GLint internalformat,
     if (!st.has_image) return;
     AllocLevel(st, static_cast<uint32_t>(level));
     const uint32_t level_width = std::max<uint32_t>(1, st.width >> level);
-    if (pixels && static_cast<uint32_t>(width) == level_width)
+    if (source.provided && static_cast<uint32_t>(width) == level_width)
         StoreSlices(st, static_cast<uint32_t>(level), 0, 1, 0, 0,
-                    static_cast<uint32_t>(width), 1, format, type, pixels);
+                    static_cast<uint32_t>(width), 1, format, type, source.data);
     MarkTextureDirty(st, id);
 }
 
@@ -1209,6 +1356,12 @@ void APIENTRY glTexImage3D(GLenum target, GLint level, GLint internalformat,
     }
     GLuint id = ActiveBound(target);
     if (id == 0) return;
+    UnpackSource source;
+    if (!ResolveUnpackSource(pixels, static_cast<uint32_t>(width),
+                             static_cast<uint32_t>(height),
+                             static_cast<uint32_t>(depth),
+                             /*three_dimensional=*/true, format, type, &source))
+        return;
     TexState& st = g_textures[id];
     // 2D array image height is the "width" of one layer; 3D keeps z as depth.
     if (level == 0) {
@@ -1221,10 +1374,11 @@ void APIENTRY glTexImage3D(GLenum target, GLint level, GLint internalformat,
     AllocLevel(st, (uint32_t)level);
     uint32_t lvl_w = std::max<uint32_t>(1, st.width >> level);
     uint32_t lvl_h = std::max<uint32_t>(1, st.height >> level);
-    if (pixels && (uint32_t)width == lvl_w && (uint32_t)height == lvl_h &&
+    if (source.provided && (uint32_t)width == lvl_w &&
+        (uint32_t)height == lvl_h &&
         (uint32_t)depth == st.depth)
         StoreSlices(st, (uint32_t)level, 0, st.depth, 0, 0, (uint32_t)width,
-                    (uint32_t)height, format, type, pixels);
+                    (uint32_t)height, format, type, source.data);
     MarkTextureDirty(st, id);
 }
 
@@ -1242,6 +1396,12 @@ void APIENTRY glTexSubImage2D(GLenum target, GLint level, GLint xoffset,
     }
     GLuint id = ActiveBound(target);
     if (!id) return;
+    UnpackSource source;
+    if (!ResolveUnpackSource(pixels, static_cast<uint32_t>(width),
+                             static_cast<uint32_t>(height), 1,
+                             /*three_dimensional=*/false, format, type,
+                             &source))
+        return;
     TexState& st = g_textures[id];
     if (st.image_backend_format == v::TexelFormat::Depth32Float) {
         PUSH_ERROR(GL_INVALID_OPERATION);
@@ -1255,15 +1415,33 @@ void APIENTRY glTexSubImage2D(GLenum target, GLint level, GLint xoffset,
     if (slice >= st.SliceCount()) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
     uint32_t lvl_w = std::max<uint32_t>(1, st.width >> level);
     uint32_t lvl_h = std::max<uint32_t>(1, st.height >> level);
+    if (target == GL_TEXTURE_1D_ARRAY) {
+        if (static_cast<uint32_t>(xoffset) + static_cast<uint32_t>(width) >
+                lvl_w ||
+            static_cast<uint32_t>(yoffset) + static_cast<uint32_t>(height) >
+                st.depth) {
+            PUSH_ERROR(GL_INVALID_VALUE);
+            return;
+        }
+        if (source.provided && width > 0 && height > 0)
+            Store1DArraySlices(st, static_cast<uint32_t>(level),
+                               static_cast<uint32_t>(yoffset),
+                               static_cast<uint32_t>(height),
+                               static_cast<uint32_t>(xoffset),
+                               static_cast<uint32_t>(width), format, type,
+                               source.data);
+        MarkTextureDirty(st, id);
+        return;
+    }
     if ((uint32_t)xoffset + (uint32_t)width > lvl_w ||
         (uint32_t)yoffset + (uint32_t)height > lvl_h) {
         PUSH_ERROR(GL_INVALID_VALUE);
         return;
     }
-    if (!st.mip[level].empty() && pixels)
+    if (!st.mip[level].empty() && source.provided)
         StoreSlices(st, (uint32_t)level, slice, 1, (uint32_t)xoffset,
                     (uint32_t)yoffset, (uint32_t)width, (uint32_t)height,
-                    format, type, pixels);
+                    format, type, source.data);
     MarkTextureDirty(st, id);
 }
 
@@ -1282,6 +1460,12 @@ void APIENTRY glTexSubImage3D(GLenum target, GLint level, GLint xoffset,
     }
     GLuint id = ActiveBound(target);
     if (!id) return;
+    UnpackSource source;
+    if (!ResolveUnpackSource(pixels, static_cast<uint32_t>(width),
+                             static_cast<uint32_t>(height),
+                             static_cast<uint32_t>(depth),
+                             /*three_dimensional=*/true, format, type, &source))
+        return;
     TexState& st = g_textures[id];
     if (st.image_backend_format == v::TexelFormat::Depth32Float) {
         PUSH_ERROR(GL_INVALID_OPERATION);
@@ -1299,10 +1483,10 @@ void APIENTRY glTexSubImage3D(GLenum target, GLint level, GLint xoffset,
         PUSH_ERROR(GL_INVALID_VALUE);
         return;
     }
-    if (pixels)
+    if (source.provided)
         StoreSlices(st, (uint32_t)level, (uint32_t)zoffset, (uint32_t)depth,
                     (uint32_t)xoffset, (uint32_t)yoffset, (uint32_t)width,
-                    (uint32_t)height, format, type, pixels);
+                    (uint32_t)height, format, type, source.data);
     MarkTextureDirty(st, id);
 }
 
@@ -1316,6 +1500,11 @@ void APIENTRY glTexSubImage1D(GLenum target, GLint level, GLint xoffset,
     }
     GLuint id = ActiveBound(target);
     if (!id) return;
+    UnpackSource source;
+    if (!ResolveUnpackSource(pixels, static_cast<uint32_t>(width), 1, 1,
+                             /*three_dimensional=*/false, format, type,
+                             &source))
+        return;
     TexState& st = g_textures[id];
     if (!st.has_image || st.mip.size() <= static_cast<size_t>(level)) {
         PUSH_ERROR(GL_INVALID_OPERATION);
@@ -1327,10 +1516,10 @@ void APIENTRY glTexSubImage1D(GLenum target, GLint level, GLint xoffset,
         PUSH_ERROR(GL_INVALID_VALUE);
         return;
     }
-    if (pixels)
+    if (source.provided)
         StoreSlices(st, static_cast<uint32_t>(level), 0, 1,
                     static_cast<uint32_t>(xoffset), 0,
-                    static_cast<uint32_t>(width), 1, format, type, pixels);
+                    static_cast<uint32_t>(width), 1, format, type, source.data);
     MarkTextureDirty(st, id);
 }
 
@@ -1415,7 +1604,7 @@ void APIENTRY glGetTexImage(GLenum target, GLint level, GLenum format,
     uint32_t lvl_w = std::max<uint32_t>(1, st.width >> level);
     uint32_t lvl_h = std::max<uint32_t>(1, st.height >> level);
     uint32_t row_src = lvl_w * 4;
-    uint32_t row_dst = RowBytes(lvl_w, format, type, /*pack=*/true);
+    size_t row_dst = RowBytes(lvl_w, format, type, /*pack=*/true);
     uint32_t plane_dst_rows = PlaneRows(lvl_h, /*pack=*/true);
     for (uint32_t s = 0; s < count; ++s) {
         const uint8_t* src = SlicePtrC(st, (uint32_t)level, slice0 + s);
@@ -1664,9 +1853,14 @@ void APIENTRY glCompressedTexImage2D(GLenum target, GLint level,
     }
     bool face = IsCubeFace(target);
     if (target != GL_TEXTURE_2D && !face) { PUSH_ERROR(GL_INVALID_ENUM); return; }
-    if (width < 0 || height < 0 || level < 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+    if (width < 0 || height < 0 || level < 0 || imageSize < 0) {
+        PUSH_ERROR(GL_INVALID_VALUE); return;
+    }
     GLuint id = ActiveBound(target);
     if (!id) return;
+    UnpackSource source;
+    if (!ResolveUnpackBytes(data, static_cast<uint64_t>(imageSize), &source))
+        return;
     TexState& st = g_textures[id];
 
     if (level == 0) {
@@ -1682,17 +1876,18 @@ void APIENTRY glCompressedTexImage2D(GLenum target, GLint level,
     if (!st.has_image) return;
     uint32_t slice = face ? CubeFaceIndex(target) : 0;
     AllocLevel(st, (uint32_t)level);
-    if (data != nullptr) {
+    if (source.provided) {
         // Keep the raw compressed bytes and decompress into the mirror.
         if (st.comp.size() <= (size_t)level) st.comp.resize(level + 1);
-        st.comp[level].assign((const uint8_t*)data,
-                              (const uint8_t*)data + (size_t)imageSize);
+        st.comp[level].assign((const uint8_t*)source.data,
+                              (const uint8_t*)source.data + (size_t)imageSize);
         st.has_comp = true;
         st.comp_format = internalformat;
         uint32_t lvl_w = std::max<uint32_t>(1, st.width >> level);
         uint32_t lvl_h = std::max<uint32_t>(1, st.height >> level);
-        DecodeCompressedPlane(SlicePtr(st, level, slice), (const uint8_t*)data,
-                              lvl_w, lvl_h, internalformat);
+        DecodeCompressedPlane(SlicePtr(st, level, slice),
+                              (const uint8_t*)source.data, lvl_w, lvl_h,
+                              internalformat);
     }
     MarkTextureDirty(st, id);
 }
@@ -1702,13 +1897,16 @@ void APIENTRY glCompressedTexImage1D(GLenum target, GLint level,
                                      GLint border, GLsizei imageSize,
                                      const void* data) {
     if (target != GL_TEXTURE_1D) { PUSH_ERROR(GL_INVALID_ENUM); return; }
-    if (border != 0 || width < 0 || level < 0) {
+    if (border != 0 || width < 0 || level < 0 || imageSize < 0) {
         PUSH_ERROR(GL_INVALID_VALUE);
         return;
     }
     if (!IsS3TC(internalformat)) { PUSH_ERROR(GL_INVALID_ENUM); return; }
     GLuint id = ActiveBound(target);
     if (!id) return;
+    UnpackSource source;
+    if (!ResolveUnpackBytes(data, static_cast<uint64_t>(imageSize), &source))
+        return;
     TexState& st = g_textures[id];
     if (level == 0) {
         st.width = static_cast<uint32_t>(width);
@@ -1718,15 +1916,15 @@ void APIENTRY glCompressedTexImage1D(GLenum target, GLint level,
     }
     if (!st.has_image) return;
     AllocLevel(st, static_cast<uint32_t>(level));
-    if (data) {
+    if (source.provided) {
         if (st.comp.size() <= static_cast<size_t>(level))
             st.comp.resize(static_cast<size_t>(level) + 1);
-        st.comp[level].assign(static_cast<const uint8_t*>(data),
-                              static_cast<const uint8_t*>(data) + imageSize);
+        st.comp[level].assign(static_cast<const uint8_t*>(source.data),
+                              static_cast<const uint8_t*>(source.data) + imageSize);
         st.has_comp = true;
         st.comp_format = internalformat;
         DecodeCompressedPlane(SlicePtr(st, static_cast<uint32_t>(level), 0),
-                              static_cast<const uint8_t*>(data),
+                              static_cast<const uint8_t*>(source.data),
                               std::max<uint32_t>(1, st.width >> level), 1,
                               internalformat);
     }
@@ -1744,12 +1942,15 @@ void APIENTRY glCompressedTexImage3D(GLenum target, GLint level,
         PUSH_ERROR(GL_INVALID_ENUM);
         return;
     }
-    if (width < 0 || height < 0 || depth < 0 || level < 0) {
+    if (width < 0 || height < 0 || depth < 0 || level < 0 || imageSize < 0) {
         PUSH_ERROR(GL_INVALID_VALUE);
         return;
     }
     GLuint id = ActiveBound(target);
     if (!id) return;
+    UnpackSource source;
+    if (!ResolveUnpackBytes(data, static_cast<uint64_t>(imageSize), &source))
+        return;
     TexState& st = g_textures[id];
     if (level == 0) {
         st.width = (uint32_t)width;
@@ -1759,10 +1960,10 @@ void APIENTRY glCompressedTexImage3D(GLenum target, GLint level,
     }
     if (!st.has_image) return;
     AllocLevel(st, (uint32_t)level);
-    if (data && st.comp.size() <= (size_t)level) {
+    if (source.provided && st.comp.size() <= (size_t)level) {
         st.comp.resize(level + 1);
-        st.comp[level].assign((const uint8_t*)data,
-                              (const uint8_t*)data + (size_t)imageSize);
+        st.comp[level].assign((const uint8_t*)source.data,
+                              (const uint8_t*)source.data + (size_t)imageSize);
         st.has_comp = true;
         st.comp_format = internalformat;
     }
@@ -1776,12 +1977,16 @@ void APIENTRY glCompressedTexSubImage2D(GLenum target, GLint level,
                                         const void* data) {
     bool face = IsCubeFace(target);
     if (target != GL_TEXTURE_2D && !face) { PUSH_ERROR(GL_INVALID_ENUM); return; }
-    if (xoffset < 0 || yoffset < 0 || width < 0 || height < 0 || level < 0) {
+    if (xoffset < 0 || yoffset < 0 || width < 0 || height < 0 || level < 0 ||
+        imageSize < 0) {
         PUSH_ERROR(GL_INVALID_VALUE);
         return;
     }
     GLuint id = ActiveBound(target);
     if (!id) return;
+    UnpackSource source;
+    if (!ResolveUnpackBytes(data, static_cast<uint64_t>(imageSize), &source))
+        return;
     TexState& st = g_textures[id];
     if (!st.has_image || st.mip.size() <= (size_t)level) {
         PUSH_ERROR(GL_INVALID_OPERATION);
@@ -1795,17 +2000,18 @@ void APIENTRY glCompressedTexSubImage2D(GLenum target, GLint level,
         PUSH_ERROR(GL_INVALID_VALUE);
         return;
     }
-    if (data) {
+    if (source.provided) {
         // Only fully-aligned sub-regions are decoded; anything else is
         // re-encoded on the fly is not worth it for MC.
         DecodeCompressedPlane(SlicePtr(st, level, slice) +
                               ((size_t)yoffset * lvl_w + xoffset) * 4,
-                              (const uint8_t*)data,
+                              (const uint8_t*)source.data,
                               (uint32_t)width, (uint32_t)height, format);
         if (st.comp.size() <= (size_t)level) {
             st.comp.resize(level + 1);
             st.comp[level].assign(
-                (const uint8_t*)data, (const uint8_t*)data + (size_t)imageSize);
+                (const uint8_t*)source.data,
+                (const uint8_t*)source.data + (size_t)imageSize);
             st.has_comp = true;
             st.comp_format = format;
         }
@@ -1824,22 +2030,25 @@ void APIENTRY glCompressedTexSubImage3D(GLenum target, GLint level,
         return;
     }
     if (xoffset < 0 || yoffset < 0 || zoffset < 0 || width < 0 || height < 0 ||
-        depth < 0 || level < 0) {
+        depth < 0 || level < 0 || imageSize < 0) {
         PUSH_ERROR(GL_INVALID_VALUE);
         return;
     }
     GLuint id = ActiveBound(target);
     if (!id) return;
+    UnpackSource source;
+    if (!ResolveUnpackBytes(data, static_cast<uint64_t>(imageSize), &source))
+        return;
     TexState& st = g_textures[id];
     if (!st.has_image || st.mip.size() <= (size_t)level) {
         PUSH_ERROR(GL_INVALID_OPERATION);
         return;
     }
-    if (data) {
+    if (source.provided) {
         if (st.comp.size() <= (size_t)level) {
             st.comp.resize(level + 1);
-            st.comp[level].assign((const uint8_t*)data,
-                                  (const uint8_t*)data + (size_t)imageSize);
+            st.comp[level].assign((const uint8_t*)source.data,
+                                  (const uint8_t*)source.data + (size_t)imageSize);
             st.has_comp = true;
             st.comp_format = format;
         }
@@ -1851,7 +2060,8 @@ void APIENTRY glCompressedTexSubImage3D(GLenum target, GLint level,
             DecodeCompressedPlane(
                 SlicePtr(st, level, (uint32_t)(zoffset + z)) +
                     ((size_t)yoffset * lvl_w + xoffset) * 4,
-                (const uint8_t*)data + (size_t)z * dsz, (uint32_t)width,
+                (const uint8_t*)source.data + (size_t)z * dsz,
+                (uint32_t)width,
                 (uint32_t)height, format);
         }
     }

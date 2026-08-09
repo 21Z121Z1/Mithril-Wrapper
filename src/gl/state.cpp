@@ -449,8 +449,22 @@ void APIENTRY glPixelStorei(GLenum pname, GLint param) {
             if (pname == GL_PACK_ALIGNMENT) st.pixels.pack_alignment = param;
             else st.pixels.unpack_alignment = param;
             break;
-        case GL_PACK_ROW_LENGTH:  st.pixels.pack_row_length = param; break;
-        case GL_UNPACK_ROW_LENGTH: st.pixels.unpack_row_length = param; break;
+        case GL_PACK_ROW_LENGTH:
+        case GL_UNPACK_ROW_LENGTH:
+        case GL_UNPACK_SKIP_PIXELS:
+        case GL_UNPACK_SKIP_ROWS:
+        case GL_UNPACK_IMAGE_HEIGHT:
+        case GL_UNPACK_SKIP_IMAGES:
+            if (param < 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+            switch (pname) {
+                case GL_PACK_ROW_LENGTH: st.pixels.pack_row_length = param; break;
+                case GL_UNPACK_ROW_LENGTH: st.pixels.unpack_row_length = param; break;
+                case GL_UNPACK_SKIP_PIXELS: st.pixels.unpack_skip_pixels = param; break;
+                case GL_UNPACK_SKIP_ROWS: st.pixels.unpack_skip_rows = param; break;
+                case GL_UNPACK_IMAGE_HEIGHT: st.pixels.unpack_image_height = param; break;
+                case GL_UNPACK_SKIP_IMAGES: st.pixels.unpack_skip_images = param; break;
+            }
+            break;
         default:
             PUSH_ERROR(GL_INVALID_ENUM);
     }
@@ -561,6 +575,16 @@ void APIENTRY glGetIntegerv(GLenum pname, GLint* data) {
             *data = static_cast<GLint>(kUniformBufferOffsetAlignment); break;
         case GL_UNIFORM_BUFFER_BINDING:
             *data = static_cast<GLint>(g_bound_uniform_buffer); break;
+        case GL_PIXEL_UNPACK_BUFFER_BINDING:
+            *data = static_cast<GLint>(g_bound_pixel_unpack_buffer); break;
+        case GL_PACK_ALIGNMENT: *data = st.pixels.pack_alignment; break;
+        case GL_UNPACK_ALIGNMENT: *data = st.pixels.unpack_alignment; break;
+        case GL_PACK_ROW_LENGTH: *data = st.pixels.pack_row_length; break;
+        case GL_UNPACK_ROW_LENGTH: *data = st.pixels.unpack_row_length; break;
+        case GL_UNPACK_SKIP_PIXELS: *data = st.pixels.unpack_skip_pixels; break;
+        case GL_UNPACK_SKIP_ROWS: *data = st.pixels.unpack_skip_rows; break;
+        case GL_UNPACK_IMAGE_HEIGHT: *data = st.pixels.unpack_image_height; break;
+        case GL_UNPACK_SKIP_IMAGES: *data = st.pixels.unpack_skip_images; break;
         case GL_MAX_VIEWPORT_DIMS:
             data[0] = 16384; data[1] = 16384; break;
         case GL_VIEWPORT:

@@ -89,6 +89,7 @@ struct PixelStore {
     GLint unpack_skip_pixels = 0, pack_skip_pixels = 0;
     GLint unpack_skip_rows = 0, pack_skip_rows = 0;
     GLint unpack_image_height = 0, pack_image_height = 0;
+    GLint unpack_skip_images = 0;
 };
 
 struct GLState {

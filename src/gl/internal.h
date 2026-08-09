@@ -63,6 +63,9 @@ struct BufferData {
     uint64_t lifetime_id = 0;
     uint64_t content_version = 0;
     bool defined = false;
+    bool mapped = false;
+    bool map_writable = false;
+    size_t map_offset = 0;
 };
 
 // Storage lives in vertex.cpp; the draw path reads these through the header.
@@ -72,6 +75,7 @@ extern GLuint g_bound_vao;           // default VAO is 0
 extern GLuint g_bound_array_buffer;
 extern GLuint g_bound_element_buffer;
 extern GLuint g_bound_uniform_buffer;
+extern GLuint g_bound_pixel_unpack_buffer;
 
 struct IndexedBufferBinding {
     GLuint buffer = 0;

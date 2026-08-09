@@ -13,6 +13,7 @@
  *   LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu ./tests/texture_smoke
  */
 #include <dlfcn.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -24,6 +25,7 @@
 #define GL_TRIANGLE_STRIP     0x0005
 #define GL_ARRAY_BUFFER       0x8892
 #define GL_ELEMENT_ARRAY_BUFFER 0x8893
+#define GL_PIXEL_UNPACK_BUFFER 0x88EC
 #define GL_TEXTURE0           0x84C0
 #define GL_TEXTURE_2D         0x0DE1
 #define GL_TEXTURE_3D         0x806F
@@ -53,6 +55,9 @@
 #define GL_TEXTURE_COMPRESSED 0x86A1
 #define GL_TEXTURE_COMPRESSED_IMAGE_SIZE 0x86A0
 #define GL_COMPRESSED_RGB_S3TC_DXT1_EXT 0x83F0
+#define GL_UNPACK_ROW_LENGTH  0x0CF2
+#define GL_UNPACK_SKIP_ROWS   0x0CF3
+#define GL_UNPACK_SKIP_PIXELS 0x0CF4
 
 typedef unsigned int GLuint;
 typedef unsigned int GLenum;
@@ -91,6 +96,8 @@ typedef GLboolean (*fn_glIsTexture)(GLuint);
 typedef void (*fn_glBindTexture)(GLenum, GLuint);
 typedef void (*fn_glActiveTexture)(GLenum);
 typedef void (*fn_glTexImage2D)(GLenum, GLint, GLint, GLsizei, GLsizei, GLint, GLenum, GLenum, const void*);
+typedef void (*fn_glTexSubImage2D)(GLenum, GLint, GLint, GLint, GLsizei,
+                                   GLsizei, GLenum, GLenum, const void*);
 typedef void (*fn_glTexImage3D)(GLenum, GLint, GLint, GLsizei, GLsizei, GLsizei, GLint, GLenum, GLenum, const void*);
 typedef void (*fn_glTexParameteri)(GLenum, GLenum, GLint);
 typedef void (*fn_glGetTexParameteriv)(GLenum, GLenum, GLint*);
@@ -101,6 +108,7 @@ typedef void (*fn_glCompressedTexImage2D)(GLenum, GLint, GLenum, GLsizei, GLsize
 typedef void (*fn_glGetCompressedTexImage)(GLenum, GLint, void*);
 typedef void (*fn_glCopyTexSubImage2D)(GLenum, GLint, GLint, GLint, GLint, GLint, GLsizei, GLsizei);
 typedef void (*fn_glTexBuffer)(GLenum, GLenum, GLuint);
+typedef void (*fn_glPixelStorei)(GLenum, GLint);
 
 static int failures = 0;
 
@@ -168,6 +176,8 @@ int main(void) {
     fn_glBindTexture       bindTexture  = (fn_glBindTexture)dlsym(h, "glBindTexture");
     fn_glActiveTexture     activeTexture= (fn_glActiveTexture)dlsym(h, "glActiveTexture");
     fn_glTexImage2D        texImage2D   = (fn_glTexImage2D)dlsym(h, "glTexImage2D");
+    fn_glTexSubImage2D     texSubImage2D=
+        (fn_glTexSubImage2D)dlsym(h, "glTexSubImage2D");
     fn_glTexImage3D        texImage3D   = (fn_glTexImage3D)dlsym(h, "glTexImage3D");
     fn_glTexParameteri     texParameteri= (fn_glTexParameteri)dlsym(h, "glTexParameteri");
     fn_glGetTexParameteriv getTexParam  = (fn_glGetTexParameteriv)dlsym(h, "glGetTexParameteriv");
@@ -178,6 +188,7 @@ int main(void) {
     fn_glGetCompressedTexImage getCompTexImage = (fn_glGetCompressedTexImage)dlsym(h, "glGetCompressedTexImage");
     fn_glCopyTexSubImage2D copyTexSub2D = (fn_glCopyTexSubImage2D)dlsym(h, "glCopyTexSubImage2D");
     fn_glTexBuffer         texBuffer    = (fn_glTexBuffer)dlsym(h, "glTexBuffer");
+    fn_glPixelStorei       pixelStorei  = (fn_glPixelStorei)dlsym(h, "glPixelStorei");
 
     CHECK(clearColor && clear && createShader && shaderSource && compileShader &&
           createProgram && attachShader && linkProgram && useProgram &&
@@ -185,7 +196,8 @@ int main(void) {
           genBuffers && bindBuffer && bufferData && enableAttrib &&
           vertexAttribPtr && drawArrays && finish && readPixels &&
           genTextures && deleteTextures && isTexture && bindTexture &&
-          activeTexture && texImage2D && texParameteri && getTexParam &&
+          activeTexture && texImage2D && texSubImage2D && texParameteri &&
+          pixelStorei && getTexParam &&
           generateMipmap && texImage3D && getTexImage && getLevelParam &&
           compTexImage2D && getCompTexImage && copyTexSub2D && texBuffer,
           "all required texture symbols resolved");
@@ -306,6 +318,49 @@ int main(void) {
         CHECK(px_match(back, 255, 30, 0, 255),
               "glGetTexImage returns the level-0 pixels (r=%d g=%d b=%d)",
               back[0], back[1], back[2]);
+    }
+
+    /* -- PBO offset + UNPACK row/skip state -> resident texture ----- */
+    {
+        GLuint pbo_tex = 0, pbo = 0;
+        genTextures(1, &pbo_tex);
+        bindTexture(GL_TEXTURE_2D, pbo_tex);
+        texImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 2, 2, 0, GL_RGBA,
+                   GL_UNSIGNED_BYTE, NULL);
+        texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+
+        unsigned char staged[16 + 4 * 4 * 4];
+        memset(staged, 0, sizeof(staged));
+        for (int y = 1; y <= 2; ++y) {
+            for (int x = 1; x <= 2; ++x) {
+                unsigned char* pixel = staged + 16 + (y * 4 + x) * 4;
+                pixel[0] = 0; pixel[1] = 255; pixel[2] = 0; pixel[3] = 255;
+            }
+        }
+        genBuffers(1, &pbo);
+        bindBuffer(GL_PIXEL_UNPACK_BUFFER, pbo);
+        bufferData(GL_PIXEL_UNPACK_BUFFER, (GLsizeiptr)sizeof(staged), staged,
+                   0x88E4);
+        pixelStorei(GL_UNPACK_ROW_LENGTH, 4);
+        pixelStorei(GL_UNPACK_SKIP_ROWS, 1);
+        pixelStorei(GL_UNPACK_SKIP_PIXELS, 1);
+        texSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 2, 2, GL_RGBA,
+                      GL_UNSIGNED_BYTE, (const void*)(uintptr_t)16);
+        pixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+        pixelStorei(GL_UNPACK_SKIP_ROWS, 0);
+        pixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
+        bindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+
+        clear(GL_COLOR_BUFFER_BIT);
+        drawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        finish();
+        readPixels(256, 256, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        CHECK(px_match(px, 0, 255, 0, 255),
+              "PBO byte offset and UNPACK row/skip state upload green "
+              "(r=%d g=%d b=%d)", px[0], px[1], px[2]);
+        deleteTextures(1, &pbo_tex);
+        bindTexture(GL_TEXTURE_2D, tex);
     }
 
     /* -- compressed S3TC (DXT1) 4x4 red block ------------------------ */
