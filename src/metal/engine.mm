@@ -105,6 +105,29 @@ struct BoundTexture {
     id<MTLSamplerState> sampler = nil;
 };
 
+struct Renderbuffer {
+    id<MTLTexture> texture = nil;
+    id<MTLTexture> resolve = nil;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    uint32_t samples = 1;
+    bool depth_stencil = false;
+};
+
+struct Framebuffer {
+    backend::FboSpec spec;
+    std::string signature;
+};
+
+struct ResolvedTarget {
+    std::vector<id<MTLTexture>> colors;
+    std::vector<id<MTLTexture>> resolve_colors;
+    id<MTLTexture> depth_stencil = nil;
+    NSUInteger width = 0;
+    NSUInteger height = 0;
+    NSUInteger samples = 1;
+};
+
 struct PendingDraw {
     backend::DrawParams params;
     // Strong references make GL deletion safe for already-recorded work.
@@ -136,6 +159,8 @@ struct Engine {
     std::unordered_map<std::string, PipelineBundle> pipelines;
     std::unordered_map<uint64_t, ResidentBuffer> resident_buffers;
     std::unordered_map<uint64_t, ResidentTexture> textures;
+    std::unordered_map<uint64_t, Renderbuffer> renderbuffers;
+    std::unordered_map<uint64_t, Framebuffer> framebuffers;
     uint64_t pipeline_clock = 0;
     std::vector<PendingDraw> draws;
     std::vector<uint8_t> readback_pixels;
@@ -284,6 +309,110 @@ id<MTLTexture> CreateTexture(const backend::TexUpload& image) {
         }
     }
     return texture;
+}
+
+bool ResolveAttachment(const backend::FboAttach& attachment,
+                       id<MTLTexture>* texture, bool* is_depth = nullptr) {
+    auto& engine = GetEngine();
+    if (attachment.is_texture) {
+        auto found = engine.textures.find(attachment.tex_id);
+        if (found == engine.textures.end() || attachment.level != 0 ||
+            attachment.layer != 0)
+            return false;
+        *texture = found->second.texture;
+        if (is_depth) *is_depth = false;
+        return *texture != nil;
+    }
+    if (attachment.rbo_id) {
+        auto found = engine.renderbuffers.find(attachment.rbo_id);
+        if (found == engine.renderbuffers.end()) return false;
+        *texture = found->second.texture;
+        if (is_depth) *is_depth = found->second.depth_stencil;
+        return *texture != nil;
+    }
+    return false;
+}
+
+bool ResolveTarget(uint64_t fbo_id, ResolvedTarget* target) {
+    if (!target) return false;
+    auto& engine = GetEngine();
+    *target = {};
+    if (!fbo_id) {
+        target->colors.push_back(engine.color);
+        target->resolve_colors.push_back(nil);
+        target->depth_stencil = engine.depth_stencil;
+        target->width = engine.width;
+        target->height = engine.height;
+        return engine.color != nil;
+    }
+    auto found = engine.framebuffers.find(fbo_id);
+    if (found == engine.framebuffers.end() || !found->second.spec.width ||
+        !found->second.spec.height)
+        return false;
+    target->width = found->second.spec.width;
+    target->height = found->second.spec.height;
+    for (const auto& color : found->second.spec.color) {
+        id<MTLTexture> texture = nil;
+        ResolveAttachment(color, &texture);
+        target->colors.push_back(texture);
+        id<MTLTexture> resolve = nil;
+        if (!color.is_texture && color.rbo_id) {
+            auto renderbuffer = engine.renderbuffers.find(color.rbo_id);
+            if (renderbuffer != engine.renderbuffers.end()) {
+                resolve = renderbuffer->second.resolve;
+                if (target->samples != 1 &&
+                    target->samples != renderbuffer->second.samples)
+                    return false;
+                target->samples = renderbuffer->second.samples;
+            }
+        }
+        target->resolve_colors.push_back(resolve);
+    }
+    if (found->second.spec.has_depth) {
+        bool depth = false;
+        id<MTLTexture> depth_texture = nil;
+        if (!ResolveAttachment(found->second.spec.depth,
+                               &depth_texture, &depth) || !depth)
+            return false;
+        target->depth_stencil = depth_texture;
+    }
+    return !target->colors.empty() && target->colors.front() != nil;
+}
+
+std::string FramebufferSignature(const backend::FboSpec& spec) {
+    std::ostringstream out;
+    out << spec.width << 'x' << spec.height << '|' << spec.has_depth << '|'
+        << spec.read_buf;
+    auto append = [&out](const backend::FboAttach& attachment) {
+        out << ':' << attachment.is_texture << ',' << attachment.tex_id << ','
+            << attachment.level << ',' << attachment.layer << ','
+            << attachment.rbo_id;
+    };
+    for (const auto& color : spec.color) append(color);
+    if (spec.has_depth) append(spec.depth);
+    out << "|d";
+    for (GLenum draw_buffer : spec.draw_bufs) out << ':' << draw_buffer;
+    return out.str();
+}
+
+bool CurrentTargetUsesTexture(uint64_t texture_id) {
+    auto& engine = GetEngine();
+    auto fbo = engine.framebuffers.find(engine.bound_draw_fbo);
+    if (fbo == engine.framebuffers.end()) return false;
+    for (const auto& color : fbo->second.spec.color)
+        if (color.is_texture && color.tex_id == texture_id) return true;
+    return fbo->second.spec.has_depth && fbo->second.spec.depth.is_texture &&
+           fbo->second.spec.depth.tex_id == texture_id;
+}
+
+bool CurrentTargetUsesRenderbuffer(uint64_t renderbuffer_id) {
+    auto& engine = GetEngine();
+    auto fbo = engine.framebuffers.find(engine.bound_draw_fbo);
+    if (fbo == engine.framebuffers.end()) return false;
+    for (const auto& color : fbo->second.spec.color)
+        if (!color.is_texture && color.rbo_id == renderbuffer_id) return true;
+    return fbo->second.spec.has_depth && !fbo->second.spec.depth.is_texture &&
+           fbo->second.spec.depth.rbo_id == renderbuffer_id;
 }
 
 void WarnUnsupported(const char* feature) {
@@ -553,7 +682,19 @@ void EvictOldPipelineIfNeeded() {
 
 PipelineBundle* GetOrCreatePipeline(const backend::DrawParams& params) {
     auto& engine = GetEngine();
-    const std::string key = PipelineKey(params);
+    ResolvedTarget target;
+    if (!ResolveTarget(engine.bound_draw_fbo, &target)) return nullptr;
+    std::ostringstream target_key;
+    target_key << PipelineKey(params) << "|rt:" << target.colors.size() << ':'
+               << (target.depth_stencil != nil)
+               << ':' << target.samples;
+    if (engine.bound_draw_fbo) {
+        auto fbo = engine.framebuffers.find(engine.bound_draw_fbo);
+        if (fbo != engine.framebuffers.end())
+            for (GLenum draw_buffer : fbo->second.spec.draw_bufs)
+                target_key << ':' << draw_buffer;
+    }
+    const std::string key = target_key.str();
     auto cached = engine.pipelines.find(key);
     if (cached != engine.pipelines.end()) {
         cached->second.last_use = ++engine.pipeline_clock;
@@ -590,18 +731,36 @@ PipelineBundle* GetOrCreatePipeline(const backend::DrawParams& params) {
     descriptor.vertexFunction = program_it->second.vertex.function;
     descriptor.fragmentFunction = program_it->second.fragment.function;
     descriptor.vertexDescriptor = vertex_descriptor;
-    descriptor.colorAttachments[0].pixelFormat = MTLPixelFormatRGBA8Unorm;
-    descriptor.depthAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
-    descriptor.stencilAttachmentPixelFormat = MTLPixelFormatDepth32Float_Stencil8;
-    auto* color = descriptor.colorAttachments[0];
-    color.writeMask = ColorWriteMask(params.pipeline);
-    color.blendingEnabled = params.pipeline.blend_enable;
-    color.sourceRGBBlendFactor = BlendFactor(params.pipeline.blend_src_rgb);
-    color.destinationRGBBlendFactor = BlendFactor(params.pipeline.blend_dst_rgb);
-    color.sourceAlphaBlendFactor = BlendFactor(params.pipeline.blend_src_alpha);
-    color.destinationAlphaBlendFactor = BlendFactor(params.pipeline.blend_dst_alpha);
-    color.rgbBlendOperation = BlendOperation(params.pipeline.blend_eq_rgb);
-    color.alphaBlendOperation = BlendOperation(params.pipeline.blend_eq_alpha);
+    descriptor.rasterSampleCount = target.samples;
+    descriptor.depthAttachmentPixelFormat = target.depth_stencil
+        ? MTLPixelFormatDepth32Float_Stencil8 : MTLPixelFormatInvalid;
+    descriptor.stencilAttachmentPixelFormat = target.depth_stencil
+        ? MTLPixelFormatDepth32Float_Stencil8 : MTLPixelFormatInvalid;
+    const backend::FboSpec* fbo_spec = nullptr;
+    if (engine.bound_draw_fbo) {
+        auto fbo = engine.framebuffers.find(engine.bound_draw_fbo);
+        if (fbo != engine.framebuffers.end()) fbo_spec = &fbo->second.spec;
+    }
+    for (NSUInteger i = 0; i < target.colors.size(); ++i) {
+        if (!target.colors[i]) continue;
+        auto* color = descriptor.colorAttachments[i];
+        color.pixelFormat = MTLPixelFormatRGBA8Unorm;
+        bool enabled = true;
+        if (fbo_spec && !fbo_spec->draw_bufs.empty()) {
+            enabled = false;
+            for (GLenum draw_buffer : fbo_spec->draw_bufs)
+                if (draw_buffer == GL_COLOR_ATTACHMENT0 + i) enabled = true;
+        }
+        color.writeMask = enabled ? ColorWriteMask(params.pipeline)
+                                  : MTLColorWriteMaskNone;
+        color.blendingEnabled = params.pipeline.blend_enable;
+        color.sourceRGBBlendFactor = BlendFactor(params.pipeline.blend_src_rgb);
+        color.destinationRGBBlendFactor = BlendFactor(params.pipeline.blend_dst_rgb);
+        color.sourceAlphaBlendFactor = BlendFactor(params.pipeline.blend_src_alpha);
+        color.destinationAlphaBlendFactor = BlendFactor(params.pipeline.blend_dst_alpha);
+        color.rgbBlendOperation = BlendOperation(params.pipeline.blend_eq_rgb);
+        color.alphaBlendOperation = BlendOperation(params.pipeline.blend_eq_alpha);
+    }
 
     NSError* error = nil;
     id<MTLRenderPipelineState> pipeline =
@@ -683,7 +842,8 @@ void WaitForAllFrames() {
     if (engine.last_submitted) [engine.last_submitted waitUntilCompleted];
 }
 
-FrameContext& AcquireFrame(NSUInteger upload_bytes, bool needs_readback) {
+FrameContext& AcquireFrame(NSUInteger upload_bytes, bool needs_readback,
+                           NSUInteger read_width, NSUInteger read_height) {
     auto& engine = GetEngine();
     FrameContext& frame = engine.frames[engine.next_frame];
     engine.next_frame = (engine.next_frame + 1) % kFrameCount;
@@ -698,8 +858,8 @@ FrameContext& AcquireFrame(NSUInteger upload_bytes, bool needs_readback) {
         frame.upload_capacity = frame.upload ? capacity : 0;
     }
     if (needs_readback) {
-        frame.readback_row_bytes = AlignUp(engine.width * 4, 256);
-        const NSUInteger bytes = frame.readback_row_bytes * engine.height;
+        frame.readback_row_bytes = AlignUp(read_width * 4, 256);
+        const NSUInteger bytes = frame.readback_row_bytes * read_height;
         if (bytes > frame.readback_capacity) {
             frame.readback = [engine.device newBufferWithLength:bytes
                                                         options:MTLResourceStorageModeShared];
@@ -813,26 +973,27 @@ MTLPrimitiveType PrimitiveType(backend::Topology topology) {
 }
 
 void ApplyDynamicState(id<MTLRenderCommandEncoder> encoder,
-                       const backend::PipelineState& state) {
+                       const backend::PipelineState& state,
+                       NSUInteger target_width, NSUInteger target_height) {
     auto& engine = GetEngine();
-    const double vx = std::clamp<double>(engine.viewport[0], 0, engine.width);
-    const double vy_bottom = std::clamp<double>(engine.viewport[1], 0, engine.height);
-    const double vw = std::clamp<double>(engine.viewport[2], 0, engine.width - vx);
-    const double vh = std::clamp<double>(engine.viewport[3], 0, engine.height - vy_bottom);
-    MTLViewport viewport{vx, engine.height - (vy_bottom + vh), vw, vh, 0.0, 1.0};
+    const double vx = std::clamp<double>(engine.viewport[0], 0, target_width);
+    const double vy_bottom = std::clamp<double>(engine.viewport[1], 0, target_height);
+    const double vw = std::clamp<double>(engine.viewport[2], 0, target_width - vx);
+    const double vh = std::clamp<double>(engine.viewport[3], 0, target_height - vy_bottom);
+    MTLViewport viewport{vx, target_height - (vy_bottom + vh), vw, vh, 0.0, 1.0};
     [encoder setViewport:viewport];
 
-    MTLScissorRect scissor{0, 0, engine.width, engine.height};
+    MTLScissorRect scissor{0, 0, target_width, target_height};
     if (state.scissor_test) {
         const NSUInteger sx = std::clamp<NSInteger>((NSInteger)engine.scissor[0], 0,
-                                                     (NSInteger)engine.width);
+                                                     (NSInteger)target_width);
         const NSUInteger sy_bottom = std::clamp<NSInteger>((NSInteger)engine.scissor[1], 0,
-                                                            (NSInteger)engine.height);
+                                                            (NSInteger)target_height);
         const NSUInteger sw = std::min<NSUInteger>((NSUInteger)std::max(0.f, engine.scissor[2]),
-                                                    engine.width - sx);
+                                                    target_width - sx);
         const NSUInteger sh = std::min<NSUInteger>((NSUInteger)std::max(0.f, engine.scissor[3]),
-                                                    engine.height - sy_bottom);
-        scissor = {sx, engine.height - (sy_bottom + sh), sw, sh};
+                                                    target_height - sy_bottom);
+        scissor = {sx, target_height - (sy_bottom + sh), sw, sh};
     }
     [encoder setScissorRect:scissor];
 
@@ -859,6 +1020,8 @@ void ApplyDynamicState(id<MTLRenderCommandEncoder> encoder,
 
 bool EncodeDraws(id<MTLRenderCommandEncoder> encoder, FrameContext& frame) {
     auto& engine = GetEngine();
+    ResolvedTarget target;
+    if (!ResolveTarget(engine.bound_draw_fbo, &target)) return false;
     NSUInteger cursor = 0;
     std::unordered_map<std::string, NSUInteger> uniform_memo;
     for (const auto& pending : engine.draws) {
@@ -909,7 +1072,7 @@ bool EncodeDraws(id<MTLRenderCommandEncoder> encoder, FrameContext& frame) {
 
         [encoder setRenderPipelineState:pipeline->pipeline];
         [encoder setDepthStencilState:pipeline->depth_stencil];
-        ApplyDynamicState(encoder, draw.pipeline);
+        ApplyDynamicState(encoder, draw.pipeline, target.width, target.height);
         [encoder setVertexBuffer:vertex_buffer offset:vertex_offset atIndex:0];
         if (instance_offset != NSNotFound)
             [encoder setVertexBuffer:instance_buffer offset:instance_offset atIndex:1];
@@ -971,7 +1134,35 @@ bool SubmitInternal(bool wait_for_completion, bool copy_for_readback,
         return true;
     }
 
-    FrameContext& frame = AcquireFrame(RequiredUploadBytes(), copy_for_readback);
+    ResolvedTarget draw_target;
+    ResolvedTarget read_target;
+    if (needs_render && !ResolveTarget(engine.bound_draw_fbo, &draw_target)) {
+        ML_LOG_ERROR("metal: draw framebuffer %llu is not renderable",
+                     (unsigned long long)engine.bound_draw_fbo);
+        return false;
+    }
+    id<MTLTexture> read_color = nil;
+    if (copy_for_readback) {
+        if (!ResolveTarget(engine.bound_read_fbo, &read_target)) return false;
+        NSUInteger read_index = 0;
+        if (engine.bound_read_fbo) {
+            auto fbo = engine.framebuffers.find(engine.bound_read_fbo);
+            if (fbo != engine.framebuffers.end() &&
+                fbo->second.spec.read_buf >= GL_COLOR_ATTACHMENT0)
+                read_index = fbo->second.spec.read_buf - GL_COLOR_ATTACHMENT0;
+        }
+        if (read_index >= read_target.colors.size()) return false;
+        read_color = read_target.resolve_colors[read_index]
+            ? read_target.resolve_colors[read_index]
+            : read_target.colors[read_index];
+        if (!read_color)
+            return false;
+    }
+
+    FrameContext& frame = AcquireFrame(
+        RequiredUploadBytes(), copy_for_readback,
+        copy_for_readback ? read_target.width : 0,
+        copy_for_readback ? read_target.height : 0);
     if ((RequiredUploadBytes() && !frame.upload) ||
         (copy_for_readback && !frame.readback)) {
         ML_LOG_ERROR("metal: frame buffer allocation failed");
@@ -983,32 +1174,53 @@ bool SubmitInternal(bool wait_for_completion, bool copy_for_readback,
 
     if (needs_render) {
         MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
-        auto* color = pass.colorAttachments[0];
-        color.texture = engine.color;
-        color.storeAction = MTLStoreActionStore;
-        if (engine.clear_mask & GL_COLOR_BUFFER_BIT) {
-            color.loadAction = MTLLoadActionClear;
-            color.clearColor = MTLClearColorMake(engine.clear_color[0],
-                                                  engine.clear_color[1],
-                                                  engine.clear_color[2],
-                                                  engine.clear_color[3]);
-        } else {
-            color.loadAction = engine.color_initialized
-                ? MTLLoadActionLoad : MTLLoadActionDontCare;
+        const backend::FboSpec* draw_spec = nullptr;
+        if (engine.bound_draw_fbo) {
+            auto fbo = engine.framebuffers.find(engine.bound_draw_fbo);
+            if (fbo != engine.framebuffers.end()) draw_spec = &fbo->second.spec;
+        }
+        for (NSUInteger i = 0; i < draw_target.colors.size(); ++i) {
+            if (!draw_target.colors[i]) continue;
+            auto* color = pass.colorAttachments[i];
+            color.texture = draw_target.colors[i];
+            if (draw_target.resolve_colors[i]) {
+                color.resolveTexture = draw_target.resolve_colors[i];
+                color.storeAction = MTLStoreActionMultisampleResolve;
+            } else {
+                color.storeAction = MTLStoreActionStore;
+            }
+            bool draw_buffer_enabled = true;
+            if (draw_spec && !draw_spec->draw_bufs.empty()) {
+                draw_buffer_enabled = false;
+                for (GLenum draw_buffer : draw_spec->draw_bufs)
+                    if (draw_buffer == GL_COLOR_ATTACHMENT0 + i)
+                        draw_buffer_enabled = true;
+            }
+            if ((engine.clear_mask & GL_COLOR_BUFFER_BIT) && draw_buffer_enabled) {
+                color.loadAction = MTLLoadActionClear;
+                color.clearColor = MTLClearColorMake(engine.clear_color[0],
+                                                      engine.clear_color[1],
+                                                      engine.clear_color[2],
+                                                      engine.clear_color[3]);
+            } else {
+                color.loadAction = (!engine.bound_draw_fbo && !engine.color_initialized)
+                    ? MTLLoadActionDontCare : MTLLoadActionLoad;
+            }
         }
 
-        pass.depthAttachment.texture = engine.depth_stencil;
-        pass.depthAttachment.storeAction = MTLStoreActionStore;
-        pass.depthAttachment.loadAction = (engine.clear_mask & GL_DEPTH_BUFFER_BIT)
-            ? MTLLoadActionClear
-            : (engine.depth_initialized ? MTLLoadActionLoad : MTLLoadActionDontCare);
-        pass.depthAttachment.clearDepth = engine.clear_depth;
-        pass.stencilAttachment.texture = engine.depth_stencil;
-        pass.stencilAttachment.storeAction = MTLStoreActionStore;
-        pass.stencilAttachment.loadAction = (engine.clear_mask & GL_STENCIL_BUFFER_BIT)
-            ? MTLLoadActionClear
-            : (engine.depth_initialized ? MTLLoadActionLoad : MTLLoadActionDontCare);
-        pass.stencilAttachment.clearStencil = engine.clear_stencil;
+        if (draw_target.depth_stencil) {
+            pass.depthAttachment.texture = draw_target.depth_stencil;
+            pass.depthAttachment.storeAction = MTLStoreActionStore;
+            pass.depthAttachment.loadAction = (engine.clear_mask & GL_DEPTH_BUFFER_BIT)
+                ? MTLLoadActionClear : MTLLoadActionLoad;
+            pass.depthAttachment.clearDepth = engine.clear_depth;
+            pass.stencilAttachment.texture = draw_target.depth_stencil;
+            pass.stencilAttachment.storeAction = MTLStoreActionStore;
+            pass.stencilAttachment.loadAction =
+                (engine.clear_mask & GL_STENCIL_BUFFER_BIT)
+                    ? MTLLoadActionClear : MTLLoadActionLoad;
+            pass.stencilAttachment.clearStencil = engine.clear_stencil;
+        }
 
         id<MTLRenderCommandEncoder> encoder =
             [command renderCommandEncoderWithDescriptor:pass];
@@ -1019,21 +1231,23 @@ bool SubmitInternal(bool wait_for_completion, bool copy_for_readback,
             return false;
         }
         [encoder endEncoding];
-        engine.color_initialized = true;
-        engine.depth_initialized = true;
+        if (!engine.bound_draw_fbo) {
+            engine.color_initialized = true;
+            engine.depth_initialized = true;
+        }
     }
 
     if (copy_for_readback) {
         id<MTLBlitCommandEncoder> blit = [command blitCommandEncoder];
-        [blit copyFromTexture:engine.color
+        [blit copyFromTexture:read_color
                  sourceSlice:0
                  sourceLevel:0
                 sourceOrigin:MTLOriginMake(0, 0, 0)
-                  sourceSize:MTLSizeMake(engine.width, engine.height, 1)
+                  sourceSize:MTLSizeMake(read_target.width, read_target.height, 1)
                     toBuffer:frame.readback
            destinationOffset:0
       destinationBytesPerRow:frame.readback_row_bytes
-    destinationBytesPerImage:frame.readback_row_bytes * engine.height];
+    destinationBytesPerImage:frame.readback_row_bytes * read_target.height];
         [blit endEncoding];
     }
 
@@ -1187,10 +1401,8 @@ bool Draw(const backend::DrawParams& params) {
         return false;
     auto program = engine.programs.find(params.program);
     if (program == engine.programs.end()) return false;
-    if (engine.bound_draw_fbo != 0) {
-        WarnUnsupported("user framebuffer rendering");
-        return false;
-    }
+    ResolvedTarget draw_target;
+    if (!ResolveTarget(engine.bound_draw_fbo, &draw_target)) return false;
     const bool uses_sampled_images = program->second.vertex.uses_sampled_images ||
                                      program->second.fragment.uses_sampled_images;
     if (uses_sampled_images && params.sampler_binds.empty()) return false;
@@ -1246,36 +1458,36 @@ void SubmitFlush(bool wait_for_completion) {
 void ReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, void* output) {
     if (!output || width <= 0 || height <= 0 || !EnsureInit()) return;
     auto& engine = GetEngine();
-    if (engine.bound_read_fbo != 0) {
-        WarnUnsupported("user framebuffer readback");
-        std::memset(output, 0, (size_t)width * height * 4);
-        return;
-    }
     @autoreleasepool {
+        ResolvedTarget read_target;
+        if (!ResolveTarget(engine.bound_read_fbo, &read_target)) {
+            std::memset(output, 0, (size_t)width * height * 4);
+            return;
+        }
         FrameContext* frame = nullptr;
         if (!SubmitInternal(true, true, &frame) || !frame || !frame->readback) {
             std::memset(output, 0, (size_t)width * height * 4);
             return;
         }
-        engine.readback_pixels.resize(engine.width * engine.height * 4);
+        engine.readback_pixels.resize(read_target.width * read_target.height * 4);
         const uint8_t* source = static_cast<const uint8_t*>(frame->readback.contents);
-        for (NSUInteger row = 0; row < engine.height; ++row)
-            std::memcpy(engine.readback_pixels.data() + row * engine.width * 4,
+        for (NSUInteger row = 0; row < read_target.height; ++row)
+            std::memcpy(engine.readback_pixels.data() + row * read_target.width * 4,
                         source + row * frame->readback_row_bytes,
-                        engine.width * 4);
+                        read_target.width * 4);
 
         uint8_t* destination = static_cast<uint8_t*>(output);
         std::memset(destination, 0, (size_t)width * height * 4);
         for (GLsizei row = 0; row < height; ++row) {
             const GLint gl_y = y + row;
-            if (gl_y < 0 || gl_y >= (GLint)engine.height) continue;
-            const GLint src_y = (GLint)engine.height - 1 - gl_y;
+            if (gl_y < 0 || gl_y >= (GLint)read_target.height) continue;
+            const GLint src_y = (GLint)read_target.height - 1 - gl_y;
             const GLint left = std::max<GLint>(x, 0);
-            const GLint right = std::min<GLint>(x + width, (GLint)engine.width);
+            const GLint right = std::min<GLint>(x + width, (GLint)read_target.width);
             if (left >= right) continue;
             std::memcpy(destination + ((size_t)row * width + (left - x)) * 4,
                         engine.readback_pixels.data() +
-                            ((size_t)src_y * engine.width + left) * 4,
+                            ((size_t)src_y * read_target.width + left) * 4,
                         (size_t)(right - left) * 4);
         }
     }
@@ -1285,6 +1497,9 @@ void UploadTexture(uint64_t texture_id, const backend::TexUpload& image,
                    const backend::TexSamplerInfo& sampler_info) {
     auto& engine = GetEngine();
     if (!engine.initialized || image.mip.empty()) return;
+    if (engine.frame_dirty && CurrentTargetUsesTexture(texture_id) &&
+        !SubmitInternal(false, false, nullptr))
+        return;
     @autoreleasepool {
         auto existing = engine.textures.find(texture_id);
         const bool same_shape = existing != engine.textures.end() &&
@@ -1339,23 +1554,169 @@ void UpdateTextureSampler(uint64_t texture_id,
         texture->second.sampler_version = sampler_info.state_version;
     }
 }
-void DestroyResidentTexture(uint64_t id) { GetEngine().textures.erase(id); }
-void CreateRenderbuffer(uint64_t, GLenum, uint32_t, uint32_t, uint32_t) {
-    WarnUnsupported("renderbuffers");
+void DestroyResidentTexture(uint64_t id) {
+    auto& engine = GetEngine();
+    if (engine.frame_dirty && CurrentTargetUsesTexture(id))
+        (void)SubmitInternal(false, false, nullptr);
+    engine.textures.erase(id);
 }
-void DestroyRenderbuffer(uint64_t) {}
-void SetFramebuffer(uint64_t, const backend::FboSpec&) {
-    WarnUnsupported("framebuffer attachments");
+void CreateRenderbuffer(uint64_t renderbuffer_id, GLenum format,
+                        uint32_t width, uint32_t height, uint32_t samples) {
+    auto& engine = GetEngine();
+    if (!engine.initialized || !width || !height) return;
+    if (engine.frame_dirty && CurrentTargetUsesRenderbuffer(renderbuffer_id) &&
+        !SubmitInternal(false, false, nullptr))
+        return;
+    const uint32_t sample_count = std::max<uint32_t>(samples, 1);
+    if (![engine.device supportsTextureSampleCount:sample_count]) {
+        WarnUnsupported("requested renderbuffer sample count");
+        engine.renderbuffers.erase(renderbuffer_id);
+        return;
+    }
+    const bool depth = format == GL_DEPTH_COMPONENT ||
+                       format == GL_DEPTH_COMPONENT16 ||
+                       format == GL_DEPTH_COMPONENT24 ||
+                       format == GL_DEPTH_COMPONENT32F ||
+                       format == GL_DEPTH24_STENCIL8 ||
+                       format == GL_DEPTH32F_STENCIL8 ||
+                       format == GL_DEPTH_STENCIL;
+    MTLTextureDescriptor* descriptor = [MTLTextureDescriptor
+        texture2DDescriptorWithPixelFormat:depth
+            ? MTLPixelFormatDepth32Float_Stencil8 : MTLPixelFormatRGBA8Unorm
+                                     width:width height:height mipmapped:NO];
+    descriptor.storageMode = MTLStorageModePrivate;
+    descriptor.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+    if (sample_count > 1) {
+        descriptor.textureType = MTLTextureType2DMultisample;
+        descriptor.sampleCount = sample_count;
+        descriptor.mipmapLevelCount = 1;
+    }
+    id<MTLTexture> texture = [engine.device newTextureWithDescriptor:descriptor];
+    if (!texture) {
+        engine.renderbuffers.erase(renderbuffer_id);
+        return;
+    }
+    Renderbuffer renderbuffer;
+    renderbuffer.texture = texture;
+    if (sample_count > 1 && !depth) {
+        MTLTextureDescriptor* resolve = [MTLTextureDescriptor
+            texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                         width:width height:height mipmapped:NO];
+        resolve.storageMode = MTLStorageModePrivate;
+        resolve.usage = MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead;
+        renderbuffer.resolve = [engine.device newTextureWithDescriptor:resolve];
+        if (!renderbuffer.resolve) {
+            engine.renderbuffers.erase(renderbuffer_id);
+            return;
+        }
+    }
+    renderbuffer.width = width;
+    renderbuffer.height = height;
+    renderbuffer.samples = sample_count;
+    renderbuffer.depth_stencil = depth;
+    engine.renderbuffers[renderbuffer_id] = std::move(renderbuffer);
 }
-void DestroyFramebuffer(uint64_t) {}
-void BindDrawFramebuffer(uint64_t id) { GetEngine().bound_draw_fbo = id; }
+void DestroyRenderbuffer(uint64_t id) {
+    auto& engine = GetEngine();
+    if (engine.frame_dirty && CurrentTargetUsesRenderbuffer(id))
+        (void)SubmitInternal(false, false, nullptr);
+    engine.renderbuffers.erase(id);
+}
+void SetFramebuffer(uint64_t id, const backend::FboSpec& spec) {
+    auto& engine = GetEngine();
+    const std::string signature = FramebufferSignature(spec);
+    auto existing = engine.framebuffers.find(id);
+    if (existing != engine.framebuffers.end() &&
+        existing->second.signature == signature)
+        return;
+    if (engine.bound_draw_fbo == id && engine.frame_dirty)
+        (void)SubmitInternal(false, false, nullptr);
+    Framebuffer& framebuffer = engine.framebuffers[id];
+    framebuffer.spec = spec;
+    framebuffer.signature = signature;
+}
+void DestroyFramebuffer(uint64_t id) { GetEngine().framebuffers.erase(id); }
+void BindDrawFramebuffer(uint64_t id) {
+    auto& engine = GetEngine();
+    if (engine.bound_draw_fbo != id && engine.frame_dirty)
+        (void)SubmitInternal(false, false, nullptr);
+    engine.bound_draw_fbo = id;
+}
 void BindReadFramebuffer(uint64_t id) { GetEngine().bound_read_fbo = id; }
-uint32_t DrawTargetWidth() { return TargetWidth(); }
-uint32_t DrawTargetHeight() { return TargetHeight(); }
+uint32_t DrawTargetWidth() {
+    ResolvedTarget target;
+    return ResolveTarget(GetEngine().bound_draw_fbo, &target)
+        ? (uint32_t)target.width : 0;
+}
+uint32_t DrawTargetHeight() {
+    ResolvedTarget target;
+    return ResolveTarget(GetEngine().bound_draw_fbo, &target)
+        ? (uint32_t)target.height : 0;
+}
 void RefreshReadback() {}
-void BlitFramebuffer(uint64_t, uint64_t, GLint, GLint, GLint, GLint,
-                     GLint, GLint, GLint, GLint, GLbitfield, GLenum) {
-    WarnUnsupported("framebuffer blit");
+void BlitFramebuffer(uint64_t src_id, uint64_t dst_id,
+                     GLint sx0, GLint sy0, GLint sx1, GLint sy1,
+                     GLint dx0, GLint dy0, GLint dx1, GLint dy1,
+                     GLbitfield mask, GLenum filter) {
+    auto& engine = GetEngine();
+    if (mask != GL_COLOR_BUFFER_BIT) {
+        WarnUnsupported("depth/stencil or combined framebuffer blit");
+        return;
+    }
+    const GLint source_width = std::abs(sx1 - sx0);
+    const GLint source_height = std::abs(sy1 - sy0);
+    const GLint destination_width = std::abs(dx1 - dx0);
+    const GLint destination_height = std::abs(dy1 - dy0);
+    if (sx1 < sx0 || sy1 < sy0 || dx1 < dx0 || dy1 < dy0 ||
+        filter != GL_NEAREST || source_width != destination_width ||
+        source_height != destination_height || source_width <= 0 ||
+        source_height <= 0) {
+        WarnUnsupported("scaled or filtered framebuffer blit");
+        return;
+    }
+    if (engine.frame_dirty && !SubmitInternal(false, false, nullptr)) return;
+
+    ResolvedTarget source;
+    ResolvedTarget destination;
+    if (!ResolveTarget(src_id, &source) || !ResolveTarget(dst_id, &destination))
+        return;
+    if (source.samples != 1 || destination.samples != 1) {
+        WarnUnsupported("multisample framebuffer blit");
+        return;
+    }
+    NSUInteger source_index = 0;
+    auto src_fbo = engine.framebuffers.find(src_id);
+    if (src_id && src_fbo != engine.framebuffers.end() &&
+        src_fbo->second.spec.read_buf >= GL_COLOR_ATTACHMENT0)
+        source_index = src_fbo->second.spec.read_buf - GL_COLOR_ATTACHMENT0;
+    NSUInteger destination_index = 0;
+    auto dst_fbo = engine.framebuffers.find(dst_id);
+    if (dst_id && dst_fbo != engine.framebuffers.end() &&
+        !dst_fbo->second.spec.draw_bufs.empty() &&
+        dst_fbo->second.spec.draw_bufs.front() >= GL_COLOR_ATTACHMENT0)
+        destination_index = dst_fbo->second.spec.draw_bufs.front() -
+                            GL_COLOR_ATTACHMENT0;
+    if (source_index >= source.colors.size() ||
+        destination_index >= destination.colors.size() ||
+        !source.colors[source_index] || !destination.colors[destination_index])
+        return;
+
+    id<MTLCommandBuffer> command = [engine.queue commandBuffer];
+    id<MTLBlitCommandEncoder> blit = [command blitCommandEncoder];
+    const NSUInteger source_x = std::min(sx0, sx1);
+    const NSUInteger source_y = source.height - std::max(sy0, sy1);
+    const NSUInteger destination_x = std::min(dx0, dx1);
+    const NSUInteger destination_y = destination.height - std::max(dy0, dy1);
+    [blit copyFromTexture:source.colors[source_index]
+              sourceSlice:0 sourceLevel:0
+             sourceOrigin:MTLOriginMake(source_x, source_y, 0)
+               sourceSize:MTLSizeMake(source_width, source_height, 1)
+                toTexture:destination.colors[destination_index]
+         destinationSlice:0 destinationLevel:0
+        destinationOrigin:MTLOriginMake(destination_x, destination_y, 0)];
+    [blit endEncoding];
+    [command commit];
+    engine.last_submitted = command;
 }
 
 } // namespace mithril::metal
