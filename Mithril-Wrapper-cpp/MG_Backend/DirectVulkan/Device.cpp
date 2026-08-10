@@ -328,6 +328,19 @@ int backend_poll_completed_frames() {
 
     int drainedSlots = 0;
     for (int s = 0; s < kMaxFramesInFlight; ++s) {
+        // FIX (GPU page fault root cause — defense-in-depth): NEVER drain the
+        // CURRENT slot's disposal queue from a mid-frame poll. Every other
+        // mid-frame drain site (try_allocate_memory_with_gc, proactive GC,
+        // delete_program_resources, texture pre-create GC) excludes currentFrame;
+        // this function is the only one that did not. Its safety previously
+        // rested entirely on the invariant fencePending[currentFrame]==false
+        // while recording. That holds today, but if it is ever broken (a submit
+        // on the current slot that does not clear/advance — e.g. an out-of-band
+        // safe_device_wait_idle path), draining the current slot here would free
+        // views/descriptor-pools that the still-recording command buffer
+        // references → kIOGPUCommandBufferCallbackErrorPageFault. Excluding
+        // currentFrame removes the fragile invariant, matching every other site.
+        if (s == b->currentFrame) continue;
         if (!b->fencePending[s]) continue;  // 无 pending submit，跳过
         if (b->disposalQueue[s].empty()) {
             // 队列为空：但 fence 可能仍 pending。检查 fence 状态以清除
@@ -1286,6 +1299,22 @@ bool init_device() {
 
     b->initialized = true;
     MITHRIL_LOG_INFO("vk", "Vulkan 1.2 backend initialised (MoltenVK static link)");
+
+    // FIX (GPU page fault root cause): eagerly create the process-wide default
+    // 1x1 black texture NOW, while the device is fresh and VRAM is plentiful.
+    // It is lazily initialized on first descriptor bind otherwise; under the
+    // VRAM pressure spike at world-load (block/entity atlas creation) that lazy
+    // init could fail, leaving the descriptor completeness guard with NO valid
+    // fallback and an unwritten COMBINED_IMAGE_SAMPLER binding → GPU samples an
+    // uninitialized descriptor → kIOGPUCommandBufferCallbackErrorPageFault.
+    // A tiny 1x1 texture is guaranteed-available when created up front.
+    if (mithril::vk::ensure_default_texture_ready()) {
+        MITHRIL_LOG_INFO("vk", "Default fallback texture initialised eagerly");
+    } else {
+        MITHRIL_LOG_WARN("vk", "WARNING: failed to eagerly create default "
+                          "fallback texture — descriptor completeness fallback "
+                          "may be unavailable under VRAM pressure");
+    }
     return true;
 }
 

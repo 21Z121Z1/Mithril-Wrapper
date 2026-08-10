@@ -1474,7 +1474,35 @@ VkImage backend_get_or_create_texture(GLuint name, int width, int height, int de
     vci.subresourceRange.layerCount = ici.arrayLayers;
     vci.components = { VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
                        VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY };
-    vkCreateImageView(b->device, &vci, nullptr, &e.view);
+    // FIX (GPU page fault root cause): the view creation return value was not
+    // checked. On failure e.view stayed VK_NULL_HANDLE but the entry was still
+    // stored in texture_table; a later descriptor bind would then feed that NULL
+    // view into a descriptor, and MoltenVK would sample a garbage address on the
+    // GPU → kIOGPUCommandBufferCallbackErrorPageFault. Under the VRAM spike at
+    // world-load (atlas creation) view creation can genuinely fail. On failure we
+    // now free the image+memory and do NOT store a broken entry; the GL layer's
+    // next glTexImage2D retry (or the default-texture fallback) covers the bind.
+    if (vkCreateImageView(b->device, &vci, nullptr, &e.view) != VK_SUCCESS) {
+        static int viewFailCount = 0;
+        viewFailCount++;
+        if (viewFailCount <= 5 || viewFailCount % 100 == 0) {
+            MITHRIL_LOG_WARN("vk", "vkCreateImageView failed (tex %u, %dx%d "
+                              "fmt=%d) — freeing image/memory, entry not stored "
+                              "(fail #%d)",
+                              name, width, height, (int)fmt, viewFailCount);
+        }
+        vkDestroyImage(b->device, e.image, nullptr);
+        if (e.memory != VK_NULL_HANDLE) {
+            vkFreeMemory(b->device, e.memory, nullptr);
+            if (b->currentAllocationCount > 0) b->currentAllocationCount--;
+            if (e.memorySize > 0 && b->currentVramBytes >= e.memorySize) {
+                b->currentVramBytes -= e.memorySize;
+            } else if (e.memorySize > 0) {
+                b->currentVramBytes = 0;
+            }
+        }
+        return VK_NULL_HANDLE;
+    }
 
     tbl[name] = e;
     return e.image;

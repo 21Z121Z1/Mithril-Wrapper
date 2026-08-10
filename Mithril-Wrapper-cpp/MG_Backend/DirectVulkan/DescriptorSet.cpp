@@ -428,6 +428,11 @@ DefaultTexture& default_texture() {
     return dt;
 }
 
+bool ensure_default_texture_ready() {
+    DefaultTexture& dt = default_texture();
+    return dt.view != VK_NULL_HANDLE && dt.sampler != VK_NULL_HANDLE;
+}
+
 // ---------------------------------------------------------------------------
 // Per-draw fast path: hashing, link-time packing plans, bind deduplication
 // ---------------------------------------------------------------------------
@@ -1232,7 +1237,18 @@ void bind_program_descriptors(GLuint program, VkPipelineBindPoint bindPoint) {
         // 补齐：检查 pr.bindings 里每个 COMBINED_IMAGE_SAMPLER binding 是否
         // 都有 write，没有的用 default texture 补齐。UBO 不补齐（UBO 路径
         // 在 arena upload 失败时 return 跳过整个 bind，不会产生半写入的 set）。
+        //
+        // FIX (GPU page fault root cause — second layer): if a sampler binding
+        // still lacks a write AND the default texture is ALSO unavailable (its
+        // eager init failed, or it was never created), the set would be committed
+        // with an UNWRITTEN descriptor. MoltenVK samples that uninitialized slot
+        // as a garbage GPU address → kIOGPUCommandBufferCallbackErrorPageFault at
+        // the next vkQueueSubmit. We must NEVER bind an incomplete set: abort the
+        // whole bind (return before vkUpdateDescriptorSets / vkCmdBindDescriptorSets)
+        // so the set is not submitted. The set remains cached for a future retry;
+        // once the default texture exists, a later draw re-enters and writes it.
         {
+            bool incomplete = false;
             DefaultTexture& dt = default_texture();
             for (const auto& db : pr.bindings) {
                 if (db.type != VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) continue;
@@ -1264,8 +1280,23 @@ void bind_program_descriptors(GLuint program, VkPipelineBindPoint bindPoint) {
                     sig = fnv1a_u64(handle_bits(dt.sampler), sig);
                     sig = fnv1a_u64(handle_bits(dt.view), sig);
                     sig = fnv1a_u64((uint64_t)VkImageLayout(VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL), sig);
+                } else {
+                    // 既没有真实纹理 view，也没有 default fallback —— 无法为
+                    // 该 binding 提供有效 descriptor。绝不能提交不完整 set。
+                    incomplete = true;
+                    static int incompleteBindCount = 0;
+                    incompleteBindCount++;
+                    if (incompleteBindCount <= 5 || incompleteBindCount % 200 == 0) {
+                        MITHRIL_LOG_WARN("vk", "descriptor set incomplete: binding %u "
+                                          "(sampler) has no valid view AND default "
+                                          "texture unavailable (program %u) — aborting "
+                                          "bind, NOT submitting incomplete set (log %d)",
+                                          db.binding, program, incompleteBindCount);
+                    }
+                    break;
                 }
             }
+            if (incomplete) return;  // do NOT commit/bind a half-written set
         }
 
         if (!writes.empty()) {

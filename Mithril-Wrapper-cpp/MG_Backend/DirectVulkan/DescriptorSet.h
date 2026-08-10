@@ -90,6 +90,24 @@ void invalidate_descriptor_memo();
  */
 void reset_all_descriptor_pools();
 
+/*
+ * Ensure the process-wide default 1x1 black texture (view + sampler) is ready.
+ * Returns true iff a valid (view, sampler) pair is available for the descriptor
+ * completeness fallback.
+ *
+ * FIX (GPU page fault root cause): default_texture() was lazily initialized on
+ * first bind. Under VRAM pressure during world-load (block/entity atlas spikes),
+ * that first init could itself fail to allocate the image / transition it /
+ * create the sampler. The descriptor completeness guard then had NO valid
+ * fallback, so a COMBINED_IMAGE_SAMPLER binding was left UNWRITTEN in the set.
+ * MoltenVK samples that uninitialized descriptor as a garbage address on the
+ * GPU → kIOGPUCommandBufferCallbackErrorPageFault at the next vkQueueSubmit.
+ *
+ * Eagerly creating the tiny 1x1 texture at device init (when memory is
+ * plentiful) guarantees the fallback is always available later.
+ */
+bool ensure_default_texture_ready();
+
 } // namespace vk
 } // namespace mithril
 
