@@ -44,6 +44,10 @@ static bool SubmitClear(v::ClearParams clear) {
         PUSH_ERROR(GL_INVALID_OPERATION);
         return false;
     }
+    // A clear may be the first GPU operation in a context. Texture storage
+    // created before lazy backend initialization must be resident before an
+    // attached FBO can be resolved, just as DrawCommon already guarantees.
+    if (!g_dirty_textures.empty()) FlushDirtyTextureUploads();
     auto& st = s::GetState();
     clear.scissor_test = st.caps.Test(GL_SCISSOR_TEST);
     if (st.scissor.initialized) {
