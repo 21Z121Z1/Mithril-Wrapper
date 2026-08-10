@@ -1049,4 +1049,74 @@ bool shader_translate(GLenum gl_stage, const std::string& glsl_source,
     return true;
 }
 
+// ---- Fallback error shader (red-screen fix) ----
+// When a shader fails to compile, the program cannot link and every draw is
+// skipped — leaving only the application's glClearColor visible (Minecraft's
+// red loading screen). Instead of skipping draws, we substitute a minimal
+// fallback shader that renders geometry in solid gray. This proves the render
+// pipeline works and avoids the "stuck on clear color" failure mode.
+//
+// The fallback is compiled via the same glsl_to_spirv path so the SPIR-V is
+// always valid. Results are cached (thread-safe) so repeated failures of the
+// same stage don't re-invoke glslang.
+bool get_fallback_spirv(GLenum gl_stage, bool flip_y,
+                        std::vector<uint32_t>& out_spirv) {
+    // Cache key: stage + flip_y
+    static std::mutex fallback_mu;
+    static std::unordered_map<uint64_t, std::vector<uint32_t>> fallback_cache;
+    uint64_t key = (uint64_t)gl_stage | (flip_y ? (1ULL << 32) : 0);
+    {
+        std::lock_guard<std::mutex> lk(fallback_mu);
+        auto it = fallback_cache.find(key);
+        if (it != fallback_cache.end()) {
+            out_spirv = it->second;
+            return true;
+        }
+    }
+
+    std::string source;
+    if (gl_stage == GL_VERTEX_SHADER) {
+        // Minimal vertex shader: position at location 0, Z-remap + optional
+        // Y-flip (same transform as inject_position_fixup applies to real
+        // shaders). The Y-flip variant is used for default-FBO draws.
+        source = "#version 330\n"
+                 "layout(location = 0) in vec4 a_position;\n"
+                 "void main() {\n"
+                 "    vec4 pos = a_position;\n"
+                 "    pos.y = ";
+        source += flip_y ? "-pos.y;\n" : "pos.y;\n";
+        source += "    pos.z = (pos.z + pos.w) * 0.5;\n"
+                  "    gl_Position = pos;\n"
+                  "}\n";
+    } else if (gl_stage == GL_FRAGMENT_SHADER) {
+        // Solid gray output — visible against any clear color (including
+        // Minecraft's red loading screen).
+        source = "#version 330\n"
+                 "layout(location = 0) out vec4 fragColor;\n"
+                 "void main() {\n"
+                 "    fragColor = vec4(0.5, 0.5, 0.5, 1.0);\n"
+                 "}\n";
+    } else {
+        // No fallback for compute/geometry/tessellation stages.
+        return false;
+    }
+
+    std::vector<uint32_t> spirv;
+    std::string info;
+    if (!glsl_to_spirv(gl_stage, source, spirv, info, nullptr, flip_y)) {
+        MITHRIL_LOG_ERROR("shader", "FATAL: fallback shader compilation failed: %s",
+                          info.c_str());
+        return false;
+    }
+
+    MITHRIL_LOG_WARN("shader", "Generated fallback %s shader (flip_y=%d): %zu SPIR-V words",
+                     gl_stage == GL_VERTEX_SHADER ? "vertex" : "fragment",
+                     (int)flip_y, spirv.size());
+
+    out_spirv = spirv;
+    std::lock_guard<std::mutex> lk(fallback_mu);
+    fallback_cache[key] = spirv;
+    return true;
+}
+
 } // namespace mithril

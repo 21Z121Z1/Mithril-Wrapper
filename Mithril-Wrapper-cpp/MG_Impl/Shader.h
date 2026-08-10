@@ -47,6 +47,21 @@ bool shader_translate(GLenum gl_stage, const std::string& glsl_source,
                       const std::unordered_map<std::string, GLuint>* attrib_bindings = nullptr,
                       bool flip_y = false);
 
+// Generate a minimal fallback SPIR-V for a shader stage that failed to
+// compile. The fallback renders geometry with a solid gray color so that
+// draws are NOT skipped (which would leave only the application's clear
+// color visible — the "red screen" symptom on Minecraft's loading screen).
+//
+// Vertex fallback: reads position at location 0, applies Z-remap + optional
+// Y-flip (same transform as real shaders), outputs gl_Position.
+// Fragment fallback: outputs vec4(0.5, 0.5, 0.5, 1.0) (neutral gray).
+// Other stages: returns false (no fallback for compute/geometry/etc).
+//
+// Deep reference: MobileGL VulkanRenderer fallback shader substitution
+// (VulkanRenderer.cpp GetFallbackShader).
+bool get_fallback_spirv(GLenum gl_stage, bool flip_y,
+                        std::vector<uint32_t>& out_spirv);
+
 } // namespace mithril
 
 #endif // MITHRIL_SHADER_H

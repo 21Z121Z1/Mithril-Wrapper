@@ -1316,12 +1316,21 @@ void commit_frame() {
                 sc->currentColorLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
             }
             // Minimal render pass to trigger IOSurface binding.
+            // FIX (first-frame priming): use CLEAR with black instead of
+            // DONT_CARE. DONT_CARE leaves the image contents undefined, which
+            // can show garbage pixels on the first frame before any draws are
+            // recorded. CLEAR ensures a clean black frame. MobileGL primes the
+            // first swapchain image in Initialize() for the same reason.
             VkRenderingAttachmentInfoKHR dummyAttach{};
             dummyAttach.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR;
             dummyAttach.imageView = sc->views[sc->currentImage];
             dummyAttach.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-            dummyAttach.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+            dummyAttach.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
             dummyAttach.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+            dummyAttach.clearValue.color.float32[0] = 0.0f;
+            dummyAttach.clearValue.color.float32[1] = 0.0f;
+            dummyAttach.clearValue.color.float32[2] = 0.0f;
+            dummyAttach.clearValue.color.float32[3] = 1.0f;
             VkRenderingInfoKHR dummyRI{};
             dummyRI.sType = VK_STRUCTURE_TYPE_RENDERING_INFO_KHR;
             dummyRI.renderArea.offset.x = 0;

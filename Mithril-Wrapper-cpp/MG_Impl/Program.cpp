@@ -104,9 +104,29 @@ void glCompileShader(GLuint shader) {
                          s->type == GL_FRAGMENT_SHADER ? "fragment" : "other",
                          s->spirv.size());
     } else {
-        s->compiled = false;
-        MITHRIL_LOG_ERROR("shader", "Failed to compile shader %u: %s",
-                          shader, info.c_str());
+        // FIX (red-screen): shader compilation failed. Instead of marking the
+        // shader uncompiled (which prevents the program from linking and
+        // causes ALL draws to be skipped — leaving only the application's
+        // glClearColor visible), substitute a minimal fallback SPIR-V that
+        // renders geometry in solid gray. This ensures the render pipeline
+        // is exercised and geometry is visible, rather than a stuck clear
+        // color. Deep reference: MobileGL VulkanRenderer.cpp fallback shader
+        // substitution (GetFallbackShader).
+        std::vector<uint32_t> fallback;
+        if (mithril::get_fallback_spirv(s->type, /*flip_y=*/false, fallback)) {
+            s->compiled = true;
+            s->spirv = std::move(fallback);
+            MITHRIL_LOG_WARN("shader", "Shader %u (%s) compilation failed — "
+                              "using FALLBACK shader (gray output): %s",
+                              shader,
+                              s->type == GL_VERTEX_SHADER ? "vertex" :
+                              s->type == GL_FRAGMENT_SHADER ? "fragment" : "other",
+                              info.c_str());
+        } else {
+            s->compiled = false;
+            MITHRIL_LOG_ERROR("shader", "Failed to compile shader %u: %s",
+                              shader, info.c_str());
+        }
     }
 }
 
@@ -212,16 +232,26 @@ void glLinkProgram(GLuint program) {
                 if (mithril::shader_translate(s->type, s->source, spirv, info, bindings_ptr, /*flip_y=*/true)) {
                     p->vertexSpirvYFlipped = std::move(spirv);
                 } else {
-                    // Degraded fallback: use the non-flipped variant. The
-                    // default-FBO draw will have wrong Y orientation but won't
-                    // crash. This path is extremely rare (only if glslang
-                    // accepts the non-flipped source but rejects the flipped
-                    // one, which should never happen since the flip is a pure
-                    // append after the original main).
-                    MITHRIL_LOG_ERROR("program", "Y-flipped vertex translation "
-                                      "failed for program %u: %s (using non-flipped fallback)",
-                                      program, info.c_str());
-                    p->vertexSpirvYFlipped = p->vertexSpirv;
+                    // FIX (red-screen): Y-flipped translation failed. If the
+                    // non-flipped variant is also a fallback shader (i.e. the
+                    // original shader source failed to compile), generate a
+                    // Y-flipped fallback so default-FBO draws get correct Y
+                    // orientation. Only fall back to the non-flipped variant
+                    // if the Y-flipped fallback also fails.
+                    std::vector<uint32_t> yflip_fallback;
+                    if (mithril::get_fallback_spirv(GL_VERTEX_SHADER, /*flip_y=*/true, yflip_fallback)) {
+                        p->vertexSpirvYFlipped = std::move(yflip_fallback);
+                        MITHRIL_LOG_WARN("program", "Y-flipped vertex translation "
+                                         "failed for program %u — using Y-flipped "
+                                         "FALLBACK shader: %s", program, info.c_str());
+                    } else {
+                        // Last resort: non-flipped variant (wrong Y orientation
+                        // but won't crash).
+                        MITHRIL_LOG_ERROR("program", "Y-flipped vertex translation "
+                                          "failed for program %u: %s (using non-flipped fallback)",
+                                          program, info.c_str());
+                        p->vertexSpirvYFlipped = p->vertexSpirv;
+                    }
                 }
             }
         } else if (s->type == GL_FRAGMENT_SHADER) {
