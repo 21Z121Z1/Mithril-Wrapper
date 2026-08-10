@@ -35,7 +35,7 @@ jobs:
           echo "fbo after=$(git hash-object src/gl/fbo.cpp)"
           echo "metal after=$(git hash-object src/metal/engine.mm)"
           echo "test after=$(git hash-object tests/directmetal_fbo_smoke.c)"
-          test "$(git hash-object src/gl/fbo.cpp)" = 6c07b2fd8cec46a4bcd52556298b7816701bd41d
+          test "$(git hash-object src/gl/fbo.cpp)" = 30540102c6b4023d83fe388d739cb70811114f8e
           test "$(git hash-object src/metal/engine.mm)" = 101e3294a04a0847a8bed817d97a77a1d6180f38
           test "$(git hash-object tests/directmetal_fbo_smoke.c)" = 6c5c3d357c7f27fd17c336683427960e97d61fd5
           git diff --check
