@@ -461,11 +461,15 @@ void SubmitFlush() {
             if (pipe == VK_NULL_HANDLE) continue;
             g.fn.CmdBindPipeline(g.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
 
+            // GL window coordinates are bottom-left-origin while the Vulkan
+            // framebuffer is top-left-origin. Vulkan 1.1 permits a negative
+            // viewport height, so flip during rasterization and keep readback,
+            // scissor and framebuffer coordinates in their natural conventions.
             VkViewport vp{};
             vp.x = op.dynamic.viewport[0];
-            vp.y = op.dynamic.viewport[1];
+            vp.y = static_cast<float>(ph) - op.dynamic.viewport[1];
             vp.width = std::min<float>(op.dynamic.viewport[2], pw);
-            vp.height = std::min<float>(op.dynamic.viewport[3], ph);
+            vp.height = -std::min<float>(op.dynamic.viewport[3], ph);
             vp.minDepth = 0.f;
             vp.maxDepth = 1.f;
             g.fn.CmdSetViewport(g.cmd, 0, 1, &vp);
