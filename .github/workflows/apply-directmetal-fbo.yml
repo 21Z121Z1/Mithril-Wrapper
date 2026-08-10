@@ -73,7 +73,10 @@ jobs:
           fi
 
       - name: Build and verify iPhoneOS arm64 dylib
-        run: ./scripts/build_iphoneos.sh
+        run: |
+          chmod +x scripts/build_iphoneos.sh
+          test -x scripts/build_iphoneos.sh
+          ./scripts/build_iphoneos.sh
 
       - name: Commit validated implementation and remove staging helpers
         run: |
@@ -85,7 +88,7 @@ jobs:
           git status --short
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add src/gl/fbo.cpp src/metal/engine.mm \
+          git add src/gl/fbo.cpp src/metal/engine.mm scripts/build_iphoneos.sh \
                   scripts/_apply_directmetal_fbo_frontend.py \
                   scripts/_apply_directmetal_fbo_metal.py \
                   .github/workflows/apply-directmetal-fbo.yml
