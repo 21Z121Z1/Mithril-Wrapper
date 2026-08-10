@@ -668,4 +668,102 @@ void glResumeTransformFeedback(void) {
     if (tf && tf->paused) tf->paused = false;
 }
 
+/* ---- GL 4.3 ARB_invalidate_subdata: texture/buffer invalidation ----
+ *
+ * Vulkan has no direct equivalent of "hint that this texture/buffer data is
+ * no longer needed" — GPU memory is reclaimed when the object is deleted.
+ * On TBDR GPUs (Apple Silicon), the framebuffer invalidation path
+ * (glInvalidateFramebuffer -> storeOp=DONT_CARE) is the ONLY one that
+ * matters for memory pressure, and that path IS implemented (Framebuffer.cpp).
+ *
+ * These texture/buffer invalidation entry points are exported as no-ops so
+ * that hosts probing for GL 4.3+ completeness via dlsym resolve valid symbols.
+ * The GL spec allows the implementation to ignore these hints ("the contents
+ * of the specified object may be discarded").
+ */
+void glInvalidateTexSubImage(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth) {
+    MITHRIL_ENSURE_INIT();
+    (void)texture; (void)level; (void)xoffset; (void)yoffset; (void)zoffset;
+    (void)width; (void)height; (void)depth;
+    // No-op: Vulkan reclaims texture memory on vkDestroyImage (glDeleteTextures).
+}
+
+void glInvalidateTexImage(GLuint texture, GLint level) {
+    MITHRIL_ENSURE_INIT();
+    (void)texture; (void)level;
+    // No-op: same rationale as glInvalidateTexSubImage.
+}
+
+void glInvalidateBufferSubData(GLuint buffer, GLintptr offset, GLsizeiptr length) {
+    MITHRIL_ENSURE_INIT();
+    (void)buffer; (void)offset; (void)length;
+    // No-op: Vulkan reclaims buffer memory on vkDestroyBuffer (glDeleteBuffers).
+}
+
+void glInvalidateBufferData(GLuint buffer) {
+    MITHRIL_ENSURE_INIT();
+    (void)buffer;
+    // No-op: same rationale as glInvalidateBufferSubData.
+}
+
+/* ---- GL 4.5 ARB_direct_state_access: DSA framebuffer invalidation ----
+ *
+ * DSA variants of glInvalidateFramebuffer / glInvalidateSubFramebuffer that
+ * take an explicit framebuffer id instead of using the current binding.
+ * Implementation: bind the framebuffer temporarily, delegate to the non-DSA
+ * variant, then restore the original binding. This avoids duplicating the
+ * attachment-parsing logic.
+ */
+void glInvalidateNamedFramebufferData(GLuint framebuffer, GLsizei numAttachments, const GLenum* attachments) {
+    MITHRIL_ENSURE_INIT();
+    if (framebuffer == 0) {
+        // Default framebuffer: delegate with current binding.
+        glInvalidateFramebuffer(GL_FRAMEBUFFER, numAttachments, attachments);
+        return;
+    }
+    // Save current draw FBO, bind the named one, invalidate, restore.
+    GLuint saved = g_state->currentDrawFBO;
+    if (saved != framebuffer) {
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, framebuffer);
+    }
+    glInvalidateFramebuffer(GL_DRAW_FRAMEBUFFER, numAttachments, attachments);
+    if (saved != framebuffer) {
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, saved);
+    }
+}
+
+void glInvalidateNamedFramebufferSubData(GLuint framebuffer, GLsizei numAttachments, const GLenum* attachments, GLint x, GLint y, GLsizei width, GLsizei height) {
+    MITHRIL_ENSURE_INIT();
+    if (framebuffer == 0) {
+        glInvalidateSubFramebuffer(GL_FRAMEBUFFER, numAttachments, attachments, x, y, width, height);
+        return;
+    }
+    GLuint saved = g_state->currentDrawFBO;
+    if (saved != framebuffer) {
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, framebuffer);
+    }
+    glInvalidateSubFramebuffer(GL_DRAW_FRAMEBUFFER, numAttachments, attachments, x, y, width, height);
+    if (saved != framebuffer) {
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, saved);
+    }
+}
+
+/* ---- GL 4.6 ARB_gl_spirv: glSpecializeShader ----
+ *
+ * Part of ARB_gl_spirv, which allows loading pre-compiled SPIR-V shaders
+ * directly. Mithril compiles GLSL to SPIR-V internally via glslang, so this
+ * entry point is not used by the normal GLSL path. Exported as a no-op so
+ * that hosts probing for GL 4.6 completeness via dlsym resolve a valid symbol.
+ *
+ * If a host actually tries to use SPIR-V shaders via this path, the shader
+ * object will remain unspecialized and subsequent linking will fail —
+ * the host should fall back to the GLSL path (which is what Minecraft uses).
+ */
+void glSpecializeShader(GLuint shader, const GLchar* pEntryPoint, GLuint numSpecializationConstants, const GLuint* pConstantIndex, const GLuint* pConstantValue) {
+    MITHRIL_ENSURE_INIT();
+    (void)shader; (void)pEntryPoint; (void)numSpecializationConstants;
+    (void)pConstantIndex; (void)pConstantValue;
+    // No-op: Mithril uses the GLSL -> SPIR-V path via glslang, not ARB_gl_spirv.
+}
+
 } // extern "C"

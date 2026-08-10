@@ -171,6 +171,7 @@ set(MITHRIL_SOURCES
     Mithril-Wrapper-cpp/MG_Impl/Framebuffer.cpp
     Mithril-Wrapper-cpp/MG_Impl/Drawing.cpp
     Mithril-Wrapper-cpp/MG_Impl/Stubs.cpp
+    Mithril-Wrapper-cpp/MG_Impl/GL46_Compat.cpp
     Mithril-Wrapper-cpp/MG_Impl/Debug.cpp
     Mithril-Wrapper-cpp/MG_Impl/lookup.cpp
 

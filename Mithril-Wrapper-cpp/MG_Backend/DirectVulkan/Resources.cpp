@@ -49,9 +49,12 @@ VkResult try_allocate_memory_with_gc(VkDevice device, const VkMemoryAllocateInfo
     Backend* b = backend();
     VkDeviceSize reqSize = info ? info->allocationSize : 0;
 
-    // ---- PRE-CHECK: GC-only（不 reject，避免红屏）----
-    // 当前已用 + 请求大小 > 95% 预算时，先 GC 释放空间。
-    // 不 reject：让 vkAllocateMemory 自己决定，避免拒绝必要纹理。
+    // ---- PRE-CHECK: 轻量 GC（只 drain disposal queue，不清 pipeline）----
+    // 当前已用 + 请求大小 > 95% 预算时，先 drain disposal queue 释放空间。
+    // 只做 drain（释放延迟销毁的资源），不做 clear_all_pipeline_caches
+    //（那太激进 — 每次分配都清 pipeline 会导致每帧重建所有 pipeline，
+    // 严重影响性能，且 safe_device_wait_idle 在帧中间提交+等待会造成卡顿）。
+    // pipeline/descriptor purge 只在 OOM fallback 路径做（vkAllocateMemory 真的失败时）。
     if (b->totalVramBytes > 0 && reqSize > 0) {
         VkDeviceSize gcThreshold = (b->totalVramBytes * 95) / 100;
         if (b->currentVramBytes + reqSize > gcThreshold) {
@@ -59,18 +62,18 @@ VkResult try_allocate_memory_with_gc(VkDevice device, const VkMemoryAllocateInfo
             preGcCount++;
             if (preGcCount <= 5 || preGcCount % 50 == 0) {
                 MITHRIL_LOG_WARN("vk", "pre-alloc GC: %llu + %llu > %llu MB (95%%), "
-                                  "purging before vkAllocateMemory (attempt #%d)",
+                                  "draining disposal queue before vkAllocateMemory "
+                                  "(attempt #%d)",
                                   (unsigned long long)(b->currentVramBytes / (1024*1024)),
                                   (unsigned long long)(reqSize / (1024*1024)),
                                   (unsigned long long)(gcThreshold / (1024*1024)),
                                   preGcCount);
             }
-            // 激进 GC：drain + purge pipeline + purge descriptor
+            // 轻量 GC：只 drain disposal queue（safe_device_wait_idle 提交当前
+            // command buffer 后，所有延迟资源不再被 GPU 引用，可以安全释放）
             safe_device_wait_idle();
             drain_all_disposal_queues();
-            clear_all_pipeline_caches();
-            reset_all_descriptor_pools();
-            // 不 reject — 继续尝试分配
+            // 不清 pipeline/descriptor — 太激进，留到 OOM fallback
         }
     }
 
@@ -80,6 +83,7 @@ VkResult try_allocate_memory_with_gc(VkDevice device, const VkMemoryAllocateInfo
     if (r != VK_ERROR_OUT_OF_DEVICE_MEMORY) return r;
 
     // ---- FALLBACK: vkAllocateMemory 返回 OOM ----
+    // 只有真正 OOM 时才做激进 purge（pipeline + descriptor）
     static int gcTriggerCount = 0;
     gcTriggerCount++;
 
@@ -1194,13 +1198,13 @@ VkImage backend_get_or_create_texture(GLuint name, int width, int height, int de
 
         VkDeviceSize gcThreshold = (b->totalVramBytes * 95) / 100;
         if (b->currentVramBytes + estSize > gcThreshold) {
-            // 接近上限，先 GC（不 reject，避免拒绝必要纹理导致红屏）
+            // 接近上限，先轻量 GC（只 drain disposal，不清 pipeline）
             static int imgGcCount = 0;
             imgGcCount++;
             if (imgGcCount <= 5 || imgGcCount % 50 == 0) {
                 MITHRIL_LOG_WARN("vk", "pre-vkCreateImage GC: %dx%d fmt=%d "
                                   "est %llu MB + current %llu MB > 95%% threshold "
-                                  "%llu MB (attempt #%d)",
+                                  "%llu MB — draining disposal (attempt #%d)",
                                   width, height, (int)fmt,
                                   (unsigned long long)(estSize / (1024*1024)),
                                   (unsigned long long)(b->currentVramBytes / (1024*1024)),
@@ -1209,9 +1213,7 @@ VkImage backend_get_or_create_texture(GLuint name, int width, int height, int de
             }
             mithril::vk::safe_device_wait_idle();
             mithril::vk::drain_all_disposal_queues();
-            mithril::vk::clear_all_pipeline_caches();
-            mithril::vk::reset_all_descriptor_pools();
-            // 不 return — 继续尝试 vkCreateImage
+            // 不清 pipeline/descriptor — 留到 OOM fallback（try_allocate_memory_with_gc）
         }
     }
 

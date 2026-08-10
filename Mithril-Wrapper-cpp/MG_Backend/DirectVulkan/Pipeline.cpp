@@ -829,8 +829,8 @@ VkPipeline get_or_create_pipeline(GLuint program,
     if (r != VK_SUCCESS) {
         // FIX (红屏根因 - 瞬态失败不可永久缓存):
         // vkCreateGraphicsPipelines 可能在设备处于异常状态时因瞬态原因失败：
-        //   VK_ERROR_OUT_OF_DEVICE_MEMORY     (-4) 显存不足，设备恢复后可成功
-        //   VK_ERROR_OUT_OF_HOST_MEMORY       (-3) 主机内存不足
+        //   VK_ERROR_OUT_OF_DEVICE_MEMORY     (-2) 显存不足，设备恢复后可成功
+        //   VK_ERROR_OUT_OF_HOST_MEMORY       (-1) 主机内存不足
         //   VK_ERROR_DEVICE_LOST              (-4) 设备丢失，恢复后可成功
         //   VK_ERROR_INITIALIZATION_FAILED    (-3) MoltenVK 着色器库编译失败
         //         （deviceLost 后 MoltenVK 内部 MSL 编译器状态异常）
@@ -844,10 +844,25 @@ VkPipeline get_or_create_pipeline(GLuint program,
         //
         // MobileGL 不做负缓存（VulkanRenderer.cpp:4183 直接返回 null），
         // 但那样会导致每帧重试。我们保留负缓存但仅用于永久性失败。
+        //
+        // FIX (红屏根因 - VK_ERROR_DEVICE_LOST 时序窗口):
+        // 原代码只检查 b->deviceLost 标志，但 vkCreateGraphicsPipelines 可能在
+        // b->deviceLost 被 vkQueueSubmit/vkDeviceWaitIdle 设置之前就返回
+        // VK_ERROR_DEVICE_LOST。在这个时序窗口中 isTransient=false，签名被永久
+        // 缓存到 failedSignatures，后续所有 draw 被跳过 → 红屏。
+        // 修复：显式检查 r == VK_ERROR_DEVICE_LOST，并在此时主动设置
+        // b->deviceLost = true 触发 EGL 恢复路径（clear_all_pipeline_caches）。
         bool isTransient = (r == VK_ERROR_OUT_OF_DEVICE_MEMORY ||
                            r == VK_ERROR_OUT_OF_HOST_MEMORY ||
                            r == VK_ERROR_INITIALIZATION_FAILED ||
+                           r == VK_ERROR_DEVICE_LOST ||
                            b->deviceLost);
+        // 当 pipeline 创建返回 VK_ERROR_DEVICE_LOST 时，主动设置 deviceLost 标志，
+        // 让 EGL 恢复路径（backend_reset_device_lost → clear_all_pipeline_caches）
+        // 清除负缓存并重建 pipeline。否则设备已死但标志未设置，恢复永远不会触发。
+        if (r == VK_ERROR_DEVICE_LOST && !b->deviceLost) {
+            b->deviceLost = true;
+        }
         if (!isTransient) {
             // 永久性失败：加入负缓存避免每帧重试刷屏
             pr.failedSignatures.insert(sig);
@@ -928,6 +943,12 @@ VkPipeline get_or_create_compute_pipeline(GLuint program,
     VkResult r = vkCreateComputePipelines(b->device, VK_NULL_HANDLE, 1, &ci,
                                           nullptr, &pipeline);
     if (r != VK_SUCCESS || pipeline == VK_NULL_HANDLE) {
+        // FIX (VK_ERROR_DEVICE_LOST from compute pipeline creation):
+        // Mirror the graphics path — set deviceLost so EGL recovery triggers
+        // clear_all_pipeline_caches and rebuilds from a clean state.
+        if (r == VK_ERROR_DEVICE_LOST && !b->deviceLost) {
+            b->deviceLost = true;
+        }
         // Rate-limited, same rationale as the graphics failure path: a broken
         // compute shader dispatched every frame must not flood the log.
         static int computeFailCount = 0;

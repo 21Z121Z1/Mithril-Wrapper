@@ -695,6 +695,12 @@ struct GLState {
     bool    textureCubeMapSeamless = false;
     bool    clipDistance[kMaxClipDistances] = {};
 
+    // GL 4.5 ARB_clip_control: clip volume origin and depth mode.
+    // GL_LOWER_LEFT + GL_NEGATIVE_ONE_TO_ONE = traditional GL (default).
+    // GL_UPPER_LEFT + GL_ZERO_TO_ONE = Vulkan/Metal native convention.
+    GLenum  clipOrigin = 0x8CA1;      // GL_LOWER_LEFT
+    GLenum  clipDepthMode = 0x935E;   // GL_NEGATIVE_ONE_TO_ONE
+
     // ---- Viewport / scissor ----
     GLint   viewportX = 0, viewportY = 0;
     GLsizei viewportW = 0, viewportH = 0;

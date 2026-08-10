@@ -6,6 +6,7 @@
 #include "Swapchain.h"
 #include "Resources.h"  // texture_table() / TextureEntry (root cause Y: FBO layout barriers)
 #include "DescriptorSet.h"  // bind_program_descriptors (compute dispatch path)
+#include "Pipeline.h"       // clear_all_pipeline_caches (OOM recovery)
 #include "UniformArena.h"   // ubo_arena_rewind (per-frame transient UBO storage)
 #include "../Backend.h"
 #include "../../MG_Impl/Log.h"
@@ -135,6 +136,18 @@ struct EncoderState {
     // start of each begin_render_pass so a previous pass's depth format does
     // not leak into a pass that has no depth attachment.
     VkFormat depthFormat = VK_FORMAT_UNDEFINED;
+
+    // ---- GL 4.3 ARB_invalidate_subdata: per-attachment discard flags ----
+    // Set by glInvalidateFramebuffer/glInvalidateSubFramebuffer via
+    // backend_set_invalidate_attachments. Applied to storeOp in the NEXT
+    // begin_render_pass, then cleared (invalidation is one-shot per GL spec).
+    // On TBDR GPUs (Apple Silicon), storeOp=DONT_CARE means the tile memory
+    // does NOT need to be written back to system memory — critical for
+    // reducing memory bandwidth and VRAM pressure (MobileGL uses the same
+    // pattern via VkAttachmentDescription.storeOp).
+    uint32_t invalidateColorMask = 0;  // bit i = color attachment i discard
+    bool invalidateDepth = false;
+    bool invalidateStencil = false;
 };
 
 EncoderState& encoder() {
@@ -372,6 +385,15 @@ void set_clear_color(float r, float g, float b, float a) {
 void set_clear_depth(double d) { encoder().clearDepth = d; }
 void set_clear_stencil(int s)  { encoder().clearStencil = s; }
 void set_load_clear(bool clear){ encoder().loadClear = clear; }
+
+// GL 4.3 ARB_invalidate_subdata: mark attachments for discard (storeOp=DONT_CARE)
+// in the next begin_render_pass. One-shot: cleared after begin_render_pass applies.
+void backend_set_invalidate_attachments(uint32_t color_mask, bool depth, bool stencil) {
+    EncoderState& e = encoder();
+    e.invalidateColorMask = color_mask;
+    e.invalidateDepth = depth;
+    e.invalidateStencil = stencil;
+}
 
 void set_active_swapchain(Swapchain* sc) {
     encoder().activeSwapchain = sc;
@@ -813,7 +835,9 @@ void begin_render_pass(VkImageView* color_views, int color_count,
         } else {
             colorAttachs[i].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
         }
-        colorAttachs[i].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        colorAttachs[i].storeOp = (e.invalidateColorMask & (1u << i))
+                                  ? VK_ATTACHMENT_STORE_OP_DONT_CARE
+                                  : VK_ATTACHMENT_STORE_OP_STORE;
         colorAttachs[i].clearValue.color.float32[0] = e.clearColor[0];
         colorAttachs[i].clearValue.color.float32[1] = e.clearColor[1];
         colorAttachs[i].clearValue.color.float32[2] = e.clearColor[2];
@@ -847,7 +871,9 @@ void begin_render_pass(VkImageView* color_views, int color_count,
     } else {
         depthAttach.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
     }
-    depthAttach.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    depthAttach.storeOp = (e.invalidateDepth || e.invalidateStencil)
+                          ? VK_ATTACHMENT_STORE_OP_DONT_CARE
+                          : VK_ATTACHMENT_STORE_OP_STORE;
     depthAttach.clearValue.depthStencil.depth = (float)e.clearDepth;
     depthAttach.clearValue.depthStencil.stencil = (uint32_t)e.clearStencil;
 
@@ -890,6 +916,11 @@ void begin_render_pass(VkImageView* color_views, int color_count,
     e.passActive = true;
     e.hasCommands = true;  // begin_render_pass recorded real commands
     e.loadClear = false;  // subsequent passes within the frame use LOAD
+    // GL 4.3 ARB_invalidate_subdata: invalidation is one-shot — clear after
+    // applying so the next pass uses default STORE (unless re-invalidated).
+    e.invalidateColorMask = 0;
+    e.invalidateDepth = false;
+    e.invalidateStencil = false;
 }
 
 void end_render_pass() {
@@ -1468,21 +1499,29 @@ void commit_frame() {
                                   "attempt recovery", deviceLostLogCount);
             }
         } else {
-            // OOM 或其他错误：触发 OOM GC，不设置 deviceLost
+            // OOM 或其他错误：在 Metal 上 OOM 经常意味着 GPU 已 fault
+            //（MoltenVK 的 "Caused GPU Address Fault Error"）。
+            // 旧代码只做 GC 不设 deviceLost，但 vkDeviceWaitIdle 后设备可能
+            // 已半死状态 — 后续 vkBeginCommandBuffer 成功但所有 vkCmd* 报
+            // VK_NOT_READY。现在也设 deviceLost，让 EGL 走恢复路径
+            //（purge + rebuild swapchain），而不是在半死设备上继续渲染。
             b->consecutiveSubmitFailures++;
+            b->deviceLost = true;  // FIX: OOM on Metal = likely faulted
             static int submitFailCount = 0;
             submitFailCount++;
             if (submitFailCount <= 3 || submitFailCount % 100 == 0) {
                 MITHRIL_LOG_ERROR("vk", "vkQueueSubmit failed (rc=%d, occurrence "
-                                  "#%d) — triggering OOM GC, skipping frame",
+                                  "#%d) — setting deviceLost (OOM on Metal likely "
+                                  "means GPU fault), triggering recovery",
                                   (int)r, submitFailCount);
             }
             // OOM 主动 GC：等待 GPU 完成 + 释放所有延迟资源
-            // 参考 MobileGL TryDrainFrameTransients（每帧 present 前主动 drain）
             if (b->device) {
                 vkDeviceWaitIdle(b->device);
             }
             drain_all_disposal_queues();
+            clear_all_pipeline_caches();
+            reset_all_descriptor_pools();
         }
         // vkQueueSubmit failure (e.g. VK_ERROR_OUT_OF_DEVICE_MEMORY /
         // VK_ERROR_DEVICE_LOST) means the command buffer was NOT consumed.
@@ -1508,12 +1547,34 @@ void commit_frame() {
             sc->needsRebuild = true;
         }
         // Reset+begin so the next frame has a recording buffer.
-        vkResetCommandBuffer(b->commandBuffer, 0);
-        VkCommandBufferBeginInfo rbi{};
-        rbi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-        rbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        if (vkBeginCommandBuffer(b->commandBuffer, &rbi) == VK_SUCCESS) {
-            b->commandBufferRecording = true;
+        // FIX (VK_NOT_READY storm): When deviceLost is true (OOM / DEVICE_LOST
+        // paths above), skip vkResetCommandBuffer + vkBeginCommandBuffer — the
+        // device is in an error state and vkBeginCommandBuffer will likely fail
+        // or produce a buffer that can't accept commands. Instead, clear the
+        // encoder state (passActive, boundPipeline, etc.) and set
+        // commandBufferRecording=false so that:
+        //   1. end_render_pass won't call vkCmdEndRendering on a non-recording
+        //      buffer (passActive=false → early return)
+        //   2. draw_recording_allowed won't allow vkCmdDraw (commandBufferRecording
+        //      =false → returns false)
+        //   3. The recovery path (backend_reset_device_lost → reset_encoder_state)
+        //      will handle the fresh vkBeginCommandBuffer after the device is
+        //      actually recovered
+        if (!b->deviceLost) {
+            vkResetCommandBuffer(b->commandBuffer, 0);
+            VkCommandBufferBeginInfo rbi{};
+            rbi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+            rbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+            if (vkBeginCommandBuffer(b->commandBuffer, &rbi) == VK_SUCCESS) {
+                b->commandBufferRecording = true;
+            }
+        } else {
+            // Device is lost: clear encoder state to prevent stale passActive
+            // from causing VK_NOT_READY errors on subsequent vkCmd* calls.
+            e.passActive = false;
+            e.boundPipeline = VK_NULL_HANDLE;
+            e.hasCommands = false;
+            b->commandBufferRecording = false;
         }
         // This reset+begin bypasses ensure_command_buffer_recording(), so the
         // descriptor bind shadow has to be dropped here too: it names a set
@@ -2005,20 +2066,23 @@ void backend_set_blend_color(float r, float g, float b, float a) {
     // NOTE: parameter `b` is the blue blend constant (float); the backend ptr
     // is renamed to avoid shadowing it.
     mithril::vk::Backend* bk = mithril::vk::backend();
-    if (!bk->commandBuffer) return;
+    // FIX (VK_NOT_READY storm): guard against non-recording command buffer.
+    if (!bk->commandBuffer || !bk->commandBufferRecording) return;
     float bc[4] = { r, g, b, a };
     vkCmdSetBlendConstants(bk->commandBuffer, bc);
 }
 
 void backend_set_depth_bias(float slope, float clamp) {
     mithril::vk::Backend* b = mithril::vk::backend();
-    if (!b->commandBuffer) return;
+    // FIX (VK_NOT_READY storm): guard against non-recording command buffer.
+    if (!b->commandBuffer || !b->commandBufferRecording) return;
     vkCmdSetDepthBias(b->commandBuffer, slope, clamp, 0.0f);
 }
 
 void backend_set_cull_mode(int mode) {
     mithril::vk::Backend* b = mithril::vk::backend();
-    if (!b->commandBuffer) return;
+    // FIX (VK_NOT_READY storm): guard against non-recording command buffer.
+    if (!b->commandBuffer || !b->commandBufferRecording) return;
     VkCullModeFlags cull = VK_CULL_MODE_NONE;
     if (mode == 1) cull = VK_CULL_MODE_FRONT_BIT;
     else if (mode == 2) cull = VK_CULL_MODE_BACK_BIT;
@@ -2028,13 +2092,15 @@ void backend_set_cull_mode(int mode) {
 
 void backend_set_front_face(int ccw) {
     mithril::vk::Backend* b = mithril::vk::backend();
-    if (!b->commandBuffer) return;
+    // FIX (VK_NOT_READY storm): guard against non-recording command buffer.
+    if (!b->commandBuffer || !b->commandBufferRecording) return;
     vkCmdSetFrontFace(b->commandBuffer, ccw ? VK_FRONT_FACE_COUNTER_CLOCKWISE : VK_FRONT_FACE_CLOCKWISE);
 }
 
 void backend_set_depth_test(int enabled, int write_mask, int compare_func) {
     mithril::vk::Backend* b = mithril::vk::backend();
-    if (!b->commandBuffer) return;
+    // FIX (VK_NOT_READY storm): guard against non-recording command buffer.
+    if (!b->commandBuffer || !b->commandBufferRecording) return;
     vkCmdSetDepthTestEnable(b->commandBuffer, enabled ? VK_TRUE : VK_FALSE);
     vkCmdSetDepthWriteEnable(b->commandBuffer, write_mask ? VK_TRUE : VK_FALSE);
     VkCompareOp op = VK_COMPARE_OP_LESS;

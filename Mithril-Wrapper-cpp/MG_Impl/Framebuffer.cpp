@@ -165,6 +165,12 @@ void glBindFramebuffer(GLenum target, GLuint framebuffer) {
         g_state->currentReadFBO = framebuffer;
     }
     if (target == GL_DRAW_FRAMEBUFFER || target == GL_FRAMEBUFFER) {
+        // Clear stale invalidate flags when switching draw FBOs to prevent
+        // flags from a previous FBO's glInvalidateFramebuffer from applying
+        // to the new FBO's next render pass.
+        if (g_state->currentDrawFBO != framebuffer) {
+            backend_set_invalidate_attachments(0, false, false);
+        }
         g_state->currentDrawFBO = framebuffer;
     }
 }
@@ -832,6 +838,116 @@ void glGetFramebufferAttachmentParameteriv(GLenum target, GLenum attachment,
             mithril::state_set_error(GL_INVALID_ENUM);
             return;
     }
+}
+
+/* ---- GL 4.3 ARB_invalidate_subdata ----
+ *
+ * glInvalidateFramebuffer / glInvalidateSubFramebuffer tell the implementation
+ * that the contents of the specified attachments are no longer needed and may
+ * be discarded. On TBDR GPUs (Apple Silicon, all iOS devices), this is CRITICAL
+ * for performance and memory pressure: it maps to VK_ATTACHMENT_STORE_OP_DONT_CARE,
+ * which skips the tile-memory → system-memory writeback at render pass end.
+ *
+ * MobileGL uses the same mechanism via VkAttachmentDescription.storeOp.
+ *
+ * Implementation: sets per-attachment discard flags on the encoder. The NEXT
+ * begin_render_pass applies them as storeOp=DONT_CARE and clears the flags
+ * (one-shot per GL spec). The sub-region variant (glInvalidateSubFramebuffer)
+ * is treated the same — Vulkan storeOp is per-attachment, not per-region.
+ *
+ * Note: glInvalidateFramebuffer does NOT end the active render pass. The
+ * discard takes effect on the next pass (typically next frame). This is
+ * correct GL behavior — the spec says "may be discarded" at the
+ * implementation's discretion.
+ */
+static bool parse_invalidate_attachments(GLsizei numAttachments,
+                                         const GLenum* attachments,
+                                         bool isDefault,
+                                         uint32_t& outColorMask,
+                                         bool& outInvDepth,
+                                         bool& outInvStencil) {
+    for (GLsizei i = 0; i < numAttachments; ++i) {
+        GLenum a = attachments[i];
+        if (a == GL_NONE) continue;
+        if (a == GL_COLOR) {
+            if (isDefault) {
+                outColorMask |= 1u;  // default FBO: color attachment 0 only
+            } else {
+                for (int j = 0; j < mithril::kMaxColorAttachments; ++j)
+                    outColorMask |= (1u << j);
+            }
+        } else if (a == GL_DEPTH) {
+            outInvDepth = true;
+        } else if (a == GL_STENCIL) {
+            outInvStencil = true;
+        } else if (a == GL_DEPTH_STENCIL) {
+            outInvDepth = true;
+            outInvStencil = true;
+        } else if (a >= GL_COLOR_ATTACHMENT0 &&
+                   a < GL_COLOR_ATTACHMENT0 + mithril::kMaxColorAttachments) {
+            outColorMask |= (1u << (a - GL_COLOR_ATTACHMENT0));
+        } else {
+            mithril::state_set_error(GL_INVALID_ENUM);
+            return false;
+        }
+    }
+    return true;
+}
+
+void glInvalidateFramebuffer(GLenum target, GLsizei numAttachments,
+                             const GLenum* attachments) {
+    MITHRIL_ENSURE_INIT();
+    if (target != GL_FRAMEBUFFER && target != GL_DRAW_FRAMEBUFFER &&
+        target != GL_READ_FRAMEBUFFER) {
+        mithril::state_set_error(GL_INVALID_ENUM);
+        return;
+    }
+    if (numAttachments < 0) {
+        mithril::state_set_error(GL_INVALID_VALUE);
+        return;
+    }
+    if (numAttachments > 0 && !attachments) {
+        mithril::state_set_error(GL_INVALID_OPERATION);
+        return;
+    }
+    bool isDefault = (target == GL_READ_FRAMEBUFFER)
+                     ? (g_state->currentReadFBO == 0)
+                     : (g_state->currentDrawFBO == 0);
+    uint32_t colorMask = 0;
+    bool invDepth = false, invStencil = false;
+    if (!parse_invalidate_attachments(numAttachments, attachments, isDefault,
+                                      colorMask, invDepth, invStencil))
+        return;
+    backend_set_invalidate_attachments(colorMask, invDepth, invStencil);
+}
+
+void glInvalidateSubFramebuffer(GLenum target, GLsizei numAttachments,
+                                const GLenum* attachments,
+                                GLint x, GLint y, GLsizei width, GLsizei height) {
+    MITHRIL_ENSURE_INIT();
+    if (target != GL_FRAMEBUFFER && target != GL_DRAW_FRAMEBUFFER &&
+        target != GL_READ_FRAMEBUFFER) {
+        mithril::state_set_error(GL_INVALID_ENUM);
+        return;
+    }
+    if (numAttachments < 0) {
+        mithril::state_set_error(GL_INVALID_VALUE);
+        return;
+    }
+    if (numAttachments > 0 && !attachments) {
+        mithril::state_set_error(GL_INVALID_OPERATION);
+        return;
+    }
+    (void)x; (void)y; (void)width; (void)height;  // storeOp is per-attachment, not per-region
+    bool isDefault = (target == GL_READ_FRAMEBUFFER)
+                     ? (g_state->currentReadFBO == 0)
+                     : (g_state->currentDrawFBO == 0);
+    uint32_t colorMask = 0;
+    bool invDepth = false, invStencil = false;
+    if (!parse_invalidate_attachments(numAttachments, attachments, isDefault,
+                                      colorMask, invDepth, invStencil))
+        return;
+    backend_set_invalidate_attachments(colorMask, invDepth, invStencil);
 }
 
 } // extern "C"

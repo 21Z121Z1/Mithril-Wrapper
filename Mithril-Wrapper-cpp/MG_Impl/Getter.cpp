@@ -104,6 +104,7 @@ static const char* kExtensions[] = {
     "GL_ARB_sync",
     "GL_ARB_internalformat_query",
     "GL_ARB_internalformat_query2",
+    "GL_ARB_invalidate_subdata",
     "GL_ARB_robustness",
     "GL_ARB_map_buffer_range",
     "GL_ARB_vertex_type_2_10_10_10_rev",
@@ -427,6 +428,12 @@ void glGetIntegerv(GLenum pname, GLint* params) {
         case GL_STENCIL_PASS_DEPTH_FAIL:     *params = (GLint)g_state->stencilDpfail; break;
         case GL_STENCIL_PASS_DEPTH_PASS:     *params = (GLint)g_state->stencilDppass; break;
         case GL_SHADING_LANGUAGE_VERSION:     *params = 460; break;
+        /* GL 4.5 ARB_clip_control: queryable clip volume state.
+         * Required for completeness since we advertise GL_ARB_clip_control and
+         * implement glClipControl. MC/Sodium may query these to decide whether
+         * to apply its own Y-flip / depth remap. */
+        case 0x935C: /*GL_CLIP_ORIGIN*/       *params = (GLint)g_state->clipOrigin; break;
+        case 0x935D: /*GL_CLIP_DEPTH_MODE*/   *params = (GLint)g_state->clipDepthMode; break;
         default:                              *params = 0; break;
     }
 }

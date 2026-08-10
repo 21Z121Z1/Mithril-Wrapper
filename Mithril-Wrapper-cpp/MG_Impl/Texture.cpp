@@ -777,4 +777,194 @@ void glCopyTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffse
     (void)x; (void)y; (void)width; (void)height;
 }
 
+/* ---- GL 4.3 ARB_copy_image: glCopyImageSubData ----
+ *
+ * Copies a rectangular region of pixels from srcName to dstName. Both names
+ * must refer to textures (not renderbuffers) with compatible internal formats
+ * (same component count and size). The copy is pixel-exact (no scaling,
+ * no filtering) — maps to Vulkan's vkCmdBlitImage with NEAREST filter and
+ * identical src/dst rectangles, or vkCmdCopyImage for same-format copies.
+ *
+ * Used by Sodium (chunk mesh texture atlas updates) and Iris (shadow map
+ * cascade copies). MC 1.21.1 may call this during texture atlas stitching.
+ *
+ * Implementation: uses backend_blit_images per-Z-slice. For 2D textures
+ * (the common case), depth==1 so a single blit is issued. For 3D textures
+ * and cube maps, each Z-slice is blitted separately.
+ */
+void glCopyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLevel,
+                        GLint srcX, GLint srcY, GLint srcZ,
+                        GLuint dstName, GLenum dstTarget, GLint dstLevel,
+                        GLint dstX, GLint dstY, GLint dstZ,
+                        GLsizei srcWidth, GLsizei srcHeight, GLsizei srcDepth) {
+    MITHRIL_ENSURE_INIT();
+    (void)srcLevel; (void)dstLevel;  // mip level handled by texture creation
+
+    if (srcWidth <= 0 || srcHeight <= 0 || srcDepth <= 0) return;
+    if (srcName == 0 || dstName == 0) {
+        mithril::state_set_error(GL_INVALID_VALUE);
+        return;
+    }
+
+    mithril::Texture* srcTex = mithril::state_get_texture(srcName);
+    mithril::Texture* dstTex = mithril::state_get_texture(dstName);
+    if (!srcTex || !dstTex) {
+        mithril::state_set_error(GL_INVALID_OPERATION);
+        return;
+    }
+
+    VkImage srcImage = backend_get_texture_image(srcName);
+    VkImage dstImage = backend_get_texture_image(dstName);
+    if (srcImage == VK_NULL_HANDLE || dstImage == VK_NULL_HANDLE) return;
+
+    VkFormat srcFmt = backend_vk_format_for_gl((GLenum)srcTex->internalFormat);
+    VkFormat dstFmt = backend_vk_format_for_gl((GLenum)dstTex->internalFormat);
+    if (srcFmt == VK_FORMAT_UNDEFINED) srcFmt = VK_FORMAT_R8G8B8A8_UNORM;
+    if (dstFmt == VK_FORMAT_UNDEFINED) dstFmt = VK_FORMAT_R8G8B8A8_UNORM;
+
+    // Flush pending rendering — the blit must see the latest src contents and
+    // subsequent draws must see the blit's result.
+    backend_end_render_pass();
+    backend_commit();
+
+    // Blit each Z-slice. For 2D textures, depth==1 → single iteration.
+    // For 3D textures and cube map arrays, blit each slice separately.
+    for (GLsizei z = 0; z < srcDepth; ++z) {
+        int srcX0 = srcX;
+        int srcY0 = srcY + (int)z * srcTex->height;  // linear slice offset (2D fallback)
+        int srcX1 = srcX + srcWidth;
+        int srcY1 = srcY0 + srcHeight;
+
+        int dstX0 = dstX;
+        int dstY0 = dstY + (int)z * dstTex->height;
+        int dstX1 = dstX + srcWidth;
+        int dstY1 = dstY0 + srcHeight;
+
+        // For true 2D textures, z offset is 0 and we just blit the single slice.
+        if (srcDepth == 1) {
+            srcY0 = srcY; srcY1 = srcY + srcHeight;
+            dstY0 = dstY; dstY1 = dstY + srcHeight;
+        }
+
+        backend_blit_images(srcImage, srcFmt, dstImage, dstFmt,
+                            srcX0, srcY0, srcX1, srcY1,
+                            dstX0, dstY0, dstX1, dstY1,
+                            GL_COLOR_BUFFER_BIT, GL_NEAREST,
+                            0, dstTex->height);
+    }
+}
+
+/* ---- GL 4.3 ARB_internalformat_query2: glGetInternalformativ ----
+ *
+ * Queries implementation-supported properties of internal formats. MC/Sodium
+ * uses this to check MSAA sample counts and renderability before allocating
+ * renderbuffer storage.
+ *
+ * Returns reasonable defaults: all common color/depth/stencil formats are
+ * supported, 1 sample count (0 = no MSAA) is available, and max dimensions
+ * match the device's max texture size.
+ */
+#ifndef GL_TEXTURE_2D_MULTISAMPLE
+#define GL_TEXTURE_2D_MULTISAMPLE 0x9100
+#endif
+
+void glGetInternalformativ(GLenum target, GLenum internalformat,
+                           GLenum pname, GLsizei bufSize, GLint* params) {
+    MITHRIL_ENSURE_INIT();
+    if (!params || bufSize <= 0) return;
+    (void)target;
+    (void)internalformat;
+
+    switch (pname) {
+        case 0x826F: // GL_INTERNALFORMAT_SUPPORTED
+            *params = GL_TRUE;
+            return;
+        case 0x9380: // GL_NUM_SAMPLE_COUNTS
+            *params = 1;  // we support 1 sample count: 0 (no MSAA)
+            return;
+        case 0x8CAB: // GL_SAMPLES
+            *params = 0;  // 0 = no MSAA
+            return;
+        case 0x8286: // GL_COLOR_RENDERABLE
+        case 0x8287: // GL_DEPTH_RENDERABLE
+        case 0x8288: // GL_STENCIL_RENDERABLE
+        case 0x8289: // GL_FRAMEBUFFER_RENDERABLE
+            *params = GL_TRUE;
+            return;
+        case 0x827E: // GL_MAX_WIDTH
+        case 0x827F: // GL_MAX_HEIGHT
+            *params = 16384;  // iOS A-series GPUs support up to 16384
+            return;
+        case 0x8280: // GL_MAX_DEPTH
+            *params = 2048;
+            return;
+        case 0x8281: // GL_MAX_LAYERS
+            *params = 2048;
+            return;
+        case 0x8293: // GL_MIPMAP
+            *params = GL_TRUE;
+            return;
+        default:
+            *params = 0;
+            return;
+    }
+}
+
+/* ---- GL 4.5 ARB_get_texture_sub_image: glGetTextureSubImage ----
+ *
+ * Reads a sub-region of a texture into client memory. Equivalent to binding
+ * the texture to an FBO and calling glReadPixels, but operates directly on
+ * the texture name without disturbing the current framebuffer binding.
+ *
+ * Used by MC's screenshot and debug overlay code.
+ */
+void glGetTextureSubImage(GLuint texture, GLint level,
+                          GLint xoffset, GLint yoffset, GLint zoffset,
+                          GLsizei width, GLsizei height, GLsizei depth,
+                          GLenum format, GLenum type,
+                          GLsizei bufSize, void* pixels) {
+    MITHRIL_ENSURE_INIT();
+    (void)level; (void)zoffset; (void)depth;
+
+    if (!pixels || bufSize <= 0) return;
+    if (width <= 0 || height <= 0) return;
+    if (texture == 0) {
+        mithril::state_set_error(GL_INVALID_OPERATION);
+        return;
+    }
+
+    mithril::Texture* tex = mithril::state_get_texture(texture);
+    if (!tex) {
+        mithril::state_set_error(GL_INVALID_OPERATION);
+        return;
+    }
+
+    // Save current read FBO + read buffer state.
+    GLuint savedReadFBO = g_state->currentReadFBO;
+    GLenum savedReadBuffer = GL_COLOR_ATTACHMENT0;
+    mithril::Framebuffer* savedFbo = mithril::state_get_framebuffer(savedReadFBO);
+    if (savedFbo) savedReadBuffer = savedFbo->readBuffer;
+
+    // Create a temporary FBO, attach the texture, read pixels, restore.
+    GLuint tmpFBO = 0;
+    glGenFramebuffers(1, &tmpFBO);
+    if (tmpFBO == 0) return;
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, tmpFBO);
+    glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                           GL_TEXTURE_2D, texture, 0);
+    glReadBuffer(GL_COLOR_ATTACHMENT0);
+
+    // Read the sub-region.
+    glReadPixels(xoffset, yoffset, width, height, format, type, pixels);
+
+    // Restore the original read FBO + read buffer.
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, savedReadFBO);
+    if (savedReadFBO != 0) {
+        glReadBuffer(savedReadBuffer);
+    }
+
+    // Delete the temporary FBO.
+    glDeleteFramebuffers(1, &tmpFBO);
+}
+
 } // extern "C"

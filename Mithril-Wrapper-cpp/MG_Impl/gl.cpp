@@ -546,6 +546,24 @@ void glSampleMaski(GLuint maskNumber, GLbitfield mask) {
     }
 }
 
+// GL 4.5 ARB_clip_control — sets the clip volume origin and depth mode.
+// GL_LOWER_LEFT + GL_NEGATIVE_ONE_TO_ONE (default) = traditional GL convention.
+// GL_UPPER_LEFT + GL_ZERO_TO_ONE = Vulkan/Metal native convention.
+// State is stored and queryable via glGetIntegerv(GL_CLIP_ORIGIN / GL_CLIP_DEPTH_MODE).
+void glClipControl(GLenum origin, GLenum depth) {
+    MITHRIL_ENSURE_INIT();
+    if (origin != 0x8CA1 /*GL_LOWER_LEFT*/ && origin != 0x8CA2 /*GL_UPPER_LEFT*/) {
+        mithril::state_set_error(GL_INVALID_ENUM);
+        return;
+    }
+    if (depth != 0x935E /*GL_NEGATIVE_ONE_TO_ONE*/ && depth != 0x935F /*GL_ZERO_TO_ONE*/) {
+        mithril::state_set_error(GL_INVALID_ENUM);
+        return;
+    }
+    g_state->clipOrigin = origin;
+    g_state->clipDepthMode = depth;
+}
+
 void glLineWidth(GLfloat w) { MITHRIL_ENSURE_INIT(); g_state->lineWidth = w; }
 void glPointSize(GLfloat s) { MITHRIL_ENSURE_INIT(); g_state->pointSize = s; }
 void glHint(GLenum, GLenum) { MITHRIL_ENSURE_INIT(); /* hints are advisory */ }

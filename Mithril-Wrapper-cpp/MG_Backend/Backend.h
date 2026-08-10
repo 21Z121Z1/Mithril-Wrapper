@@ -131,6 +131,19 @@ void backend_begin_render_pass(VkImageView* color_views, int color_count,
 void backend_set_fbo_attachment_tex_ids(GLuint* color_tex_ids, int color_count,
                                         GLuint depth_tex_id);
 
+/*
+ * GL 4.3 ARB_invalidate_subdata: mark framebuffer attachments for discard.
+ * The NEXT backend_begin_render_pass will use VK_ATTACHMENT_STORE_OP_DONT_CARE
+ * for the specified attachments (instead of STORE), then auto-clear the flags
+ * (invalidation is one-shot). On TBDR GPUs (Apple Silicon), this skips the
+ * tile-memory → system-memory writeback, saving bandwidth and VRAM pressure.
+ *
+ *   color_mask : bit i set = discard color attachment i
+ *   depth      : true = discard depth
+ *   stencil    : true = discard stencil
+ */
+void backend_set_invalidate_attachments(uint32_t color_mask, bool depth, bool stencil);
+
 /* End + commit the active render pass / command buffer. */
 void backend_end_render_pass(void);
 void backend_commit(void);

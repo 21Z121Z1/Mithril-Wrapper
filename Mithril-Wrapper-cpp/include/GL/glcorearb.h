@@ -362,6 +362,110 @@ extern "C" {
 #define GL_BUFFER_IMMUTABLE_STORAGE     0x821F
 #define GL_BUFFER_STORAGE_FLAGS         0x8220
 
+/* GL 4.5 ARB_clip_control */
+#define GL_CLIP_CONTROL                 0x892F
+#define GL_CLIP_ORIGIN                  0x935C
+#define GL_CLIP_DEPTH_MODE              0x935D
+#define GL_NEGATIVE_ONE_TO_ONE          0x935E
+#define GL_ZERO_TO_ONE                  0x935F
+#define GL_LOWER_LEFT                   0x8CA1
+#define GL_UPPER_LEFT                   0x8CA2
+
+/* GL 4.3 ARB_internalformat_query2 */
+#define GL_NUM_SAMPLE_COUNTS            0x9380
+#define GL_INTERNALFORMAT_SUPPORTED     0x826F
+#define GL_INTERNALFORMAT_PREFERRED     0x8270
+#define GL_INTERNALFORMAT_RED_SIZE      0x8271
+#define GL_INTERNALFORMAT_GREEN_SIZE    0x8272
+#define GL_INTERNALFORMAT_BLUE_SIZE     0x8273
+#define GL_INTERNALFORMAT_ALPHA_SIZE    0x8274
+#define GL_INTERNALFORMAT_DEPTH_SIZE    0x8275
+#define GL_INTERNALFORMAT_STENCIL_SIZE  0x8276
+#define GL_INTERNALFORMAT_SHARED_SIZE   0x8277
+#define GL_INTERNALFORMAT_RED_TYPE      0x8278
+#define GL_INTERNALFORMAT_GREEN_TYPE    0x8279
+#define GL_INTERNALFORMAT_BLUE_TYPE     0x827A
+#define GL_INTERNALFORMAT_ALPHA_TYPE    0x827B
+#define GL_INTERNALFORMAT_DEPTH_TYPE    0x827C
+#define GL_INTERNALFORMAT_STENCIL_TYPE  0x827D
+#define GL_MAX_WIDTH                    0x827E
+#define GL_MAX_HEIGHT                   0x827F
+#define GL_MAX_DEPTH                    0x8280
+#define GL_MAX_LAYERS                    0x8281
+#define GL_MAX_COMBINED_DIMENSIONS      0x8282
+#define GL_COLOR_COMPONENTS             0x8283
+#define GL_DEPTH_COMPONENTS             0x8284
+#define GL_STENCIL_COMPONENTS           0x8285
+#define GL_COLOR_RENDERABLE             0x8286
+#define GL_DEPTH_RENDERABLE             0x8287
+#define GL_STENCIL_RENDERABLE           0x8288
+#define GL_FRAMEBUFFER_RENDERABLE       0x8289
+#define GL_FRAMEBUFFER_RENDERABLE_LAYERED 0x828A
+#define GL_FRAMEBUFFER_BLEND            0x828B
+#define GL_READ_PIXELS                  0x828C
+#define GL_READ_PIXELS_FORMAT           0x828D
+#define GL_READ_PIXELS_TYPE             0x828E
+#define GL_TEXTURE_IMAGE_FORMAT         0x828F
+#define GL_TEXTURE_IMAGE_TYPE           0x8290
+#define GL_GET_TEXTURE_IMAGE_FORMAT     0x8291
+#define GL_GET_TEXTURE_IMAGE_TYPE       0x8292
+#define GL_MIPMAP                       0x8293
+#define GL_MANUAL_GENERATE_MIPMAP       0x8294
+#define GL_AUTO_GENERATE_MIPMAP         0x8295
+#define GL_COLOR_ENCODING               0x8296
+#define GL_SRGB_READ                    0x8297
+#define GL_SRGB_WRITE                   0x8298
+#define GL_SRGB_DECODE_ARB              0x8299
+#define GL_FILTER                       0x829A
+#define GL_VERTEX_TEXTURE               0x829B
+#define GL_TESS_CONTROL_TEXTURE         0x829C
+#define GL_TESS_EVALUATION_TEXTURE      0x829D
+#define GL_GEOMETRY_TEXTURE             0x829E
+#define GL_FRAGMENT_TEXTURE             0x829F
+#define GL_COMPUTE_TEXTURE              0x82A0
+#define GL_TEXTURE_SHADOW               0x82A1
+#define GL_TEXTURE_GATHER               0x82A2
+#define GL_TEXTURE_GATHER_SHADOW        0x82A3
+#define GL_SHADER_IMAGE_LOAD            0x82A4
+#define GL_SHADER_IMAGE_STORE           0x82A5
+#define GL_SHADER_IMAGE_ATOMIC          0x82A6
+#define GL_SIMULTANEOUS_TEXTURE_AND_DEPTH_TEST 0x82AC
+#define GL_SIMULTANEOUS_TEXTURE_AND_STENCIL_TEST 0x82AD
+#define GL_SIMULTANEOUS_TEXTURE_AND_DEPTH_WRITE 0x82AE
+#define GL_SIMULTANEOUS_TEXTURE_AND_STENCIL_WRITE 0x82AF
+#define GL_TEXTURE_COMPRESSED           0x86A3
+#define GL_TEXTURE_COMPRESSED_BLOCK_WIDTH 0x82B1
+#define GL_TEXTURE_COMPRESSED_BLOCK_HEIGHT 0x82B2
+#define GL_TEXTURE_COMPRESSED_BLOCK_SIZE 0x82B3
+#define GL_CLEAR_BUFFER                 0x82B4
+#define GL_TEXTURE_VIEW                 0x82B5
+#define GL_VIEW_COMPATIBILITY_CLASS     0x82B6
+#define GL_FULL_SUPPORT                 0x82B7
+#define GL_CAVEAT_SUPPORT               0x82B8
+#define GL_IMAGE_CLASS_2_X_32           0x82B9
+#define GL_IMAGE_CLASS_2_X_16           0x82BA
+#define GL_IMAGE_CLASS_2_X_8            0x82BB
+#define GL_IMAGE_CLASS_1_X_32           0x82BC
+#define GL_IMAGE_CLASS_1_X_16           0x82BD
+#define GL_IMAGE_CLASS_1_X_8            0x82BE
+#define GL_IMAGE_CLASS_4_X_32           0x82BF
+#define GL_IMAGE_CLASS_4_X_16           0x82C0
+#define GL_IMAGE_CLASS_4_X_8            0x82C1
+#define GL_IMAGE_CLASS_11_X_11           0x82C2
+#define GL_IMAGE_CLASS_10_X_10_X_2       0x82C3
+#define GL_VIEW_CLASS_128_BITS           0x82C4
+#define GL_VIEW_CLASS_96_BITS            0x82C5
+#define GL_VIEW_CLASS_64_BITS            0x82C6
+#define GL_VIEW_CLASS_48_BITS            0x82C7
+#define GL_VIEW_CLASS_32_BITS            0x82C8
+#define GL_VIEW_CLASS_24_BITS            0x82C9
+#define GL_VIEW_CLASS_16_BITS            0x82CA
+#define GL_VIEW_CLASS_8_BITS             0x82CB
+#define GL_VIEW_CLASS_S3TC_DXT1_RGB      0x82CC
+#define GL_VIEW_CLASS_S3TC_DXT1_RGBA     0x82CD
+#define GL_VIEW_CLASS_S3TC_DXT3_RGBA     0x82CE
+#define GL_VIEW_CLASS_S3TC_DXT5_RGBA     0x82CF
+
 /* Framebuffer */
 #define GL_FRAMEBUFFER                  0x8D40
 #define GL_READ_FRAMEBUFFER             0x8CA8
@@ -820,6 +924,215 @@ GLAPI void GLAPIENTRY glGetObjectPtrLabel(const void* ptr, GLsizei bufSize, GLsi
 /* glX (symbol lookup) — implemented in MG_Impl/lookup.cpp */
 GLAPI void* GLAPIENTRY glXGetProcAddress(const char* name);
 GLAPI void* GLAPIENTRY glXGetProcAddressARB(const char* name);
+
+/* ---- GL 4.3 framebuffer invalidation (ARB_invalidate_subdata) ---- */
+GLAPI void GLAPIENTRY glInvalidateFramebuffer(GLenum target, GLsizei numAttachments, const GLenum* attachments);
+GLAPI void GLAPIENTRY glInvalidateSubFramebuffer(GLenum target, GLsizei numAttachments, const GLenum* attachments, GLint x, GLint y, GLsizei width, GLsizei height);
+
+/* ---- GL 4.3 texture/buffer invalidation (ARB_invalidate_subdata) ----
+ * On Vulkan/Metal there is no direct equivalent of "hint that this texture/buffer
+ * data is no longer needed". The implementations are intentionally no-ops:
+ * the GPU memory is reclaimed when the object is deleted via glDeleteTextures /
+ * glDeleteBuffers. On TBDR GPUs the framebuffer invalidation path above
+ * (glInvalidateFramebuffer -> storeOp=DONT_CARE) is the only one that matters
+ * for memory pressure, and that path IS implemented. */
+GLAPI void GLAPIENTRY glInvalidateTexSubImage(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth);
+GLAPI void GLAPIENTRY glInvalidateTexImage(GLuint texture, GLint level);
+GLAPI void GLAPIENTRY glInvalidateBufferSubData(GLuint buffer, GLintptr offset, GLsizeiptr length);
+GLAPI void GLAPIENTRY glInvalidateBufferData(GLuint buffer);
+
+/* ---- GL 4.3 image copy (ARB_copy_image) ---- */
+GLAPI void GLAPIENTRY glCopyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLevel, GLint srcX, GLint srcY, GLint srcZ, GLuint dstName, GLenum dstTarget, GLint dstLevel, GLint dstX, GLint dstY, GLint dstZ, GLsizei srcWidth, GLsizei srcHeight, GLsizei srcDepth);
+
+/* ---- GL 4.3 internalformat query (ARB_internalformat_query2) ---- */
+GLAPI void GLAPIENTRY glGetInternalformativ(GLenum target, GLenum internalformat, GLenum pname, GLsizei bufSize, GLint* params);
+
+/* ---- GL 4.5 texture sub-image readback (ARB_get_texture_sub_image) ---- */
+GLAPI void GLAPIENTRY glGetTextureSubImage(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLenum type, GLsizei bufSize, void* pixels);
+
+/* ---- GL 4.5 clip control (ARB_clip_control) ---- */
+GLAPI void GLAPIENTRY glClipControl(GLenum origin, GLenum depth);
+
+/* ---- GL 4.5 DSA framebuffer invalidation (ARB_direct_state_access) ----
+ * DSA variants of glInvalidateFramebuffer / glInvalidateSubFramebuffer that
+ * take an explicit framebuffer id instead of using the current binding. */
+GLAPI void GLAPIENTRY glInvalidateNamedFramebufferData(GLuint framebuffer, GLsizei numAttachments, const GLenum* attachments);
+GLAPI void GLAPIENTRY glInvalidateNamedFramebufferSubData(GLuint framebuffer, GLsizei numAttachments, const GLenum* attachments, GLint x, GLint y, GLsizei width, GLsizei height);
+
+/* ---- GL 4.5 texture barrier (ARB_texture_barrier) ---- */
+GLAPI void GLAPIENTRY glTextureBarrier(void);
+
+/* ---- GL 4.6 SPIR-V specialization (ARB_gl_spirv) ----
+ * glSpecializeShader is part of ARB_gl_spirv, which allows loading pre-
+ * compiled SPIR-V shaders directly. Mithril compiles GLSL to SPIR-V
+ * internally via glslang, so this entry point is not used by the normal
+ * GLSL path. It is exported as a no-op so that hosts probing for GL 4.6
+ * completeness via dlsym resolve a valid symbol. */
+GLAPI void GLAPIENTRY glSpecializeShader(GLuint shader, const GLchar* pEntryPoint, GLuint numSpecializationConstants, const GLuint* pConstantIndex, const GLuint* pConstantValue);
+
+/* ---- Declarations for entry points implemented in other TUs but not
+ * previously declared in this minimal header. Required so GL46_Compat.cpp
+ * can call them. ---- */
+GLAPI void GLAPIENTRY glBindSampler(GLuint unit, GLuint sampler);
+GLAPI void GLAPIENTRY glBindImageTexture(GLuint unit, GLuint texture, GLint level, GLboolean layered, GLint layer, GLenum access, GLenum format);
+GLAPI void GLAPIENTRY glGenSamplers(GLsizei n, GLuint* samplers);
+GLAPI void GLAPIENTRY glGetRenderbufferParameteriv(GLenum target, GLenum pname, GLint* params);
+GLAPI void GLAPIENTRY glGetFramebufferAttachmentParameteriv(GLenum target, GLenum attachment, GLenum pname, GLint* params);
+GLAPI void GLAPIENTRY glBindVertexBuffer(GLuint bindingindex, GLuint buffer, GLintptr offset, GLsizei stride);
+GLAPI void GLAPIENTRY glVertexAttribBinding(GLuint attribindex, GLuint bindingindex);
+GLAPI void GLAPIENTRY glVertexAttribFormat(GLuint attribindex, GLint size, GLenum type, GLboolean normalized, GLuint relativeoffset);
+GLAPI void GLAPIENTRY glVertexAttribIFormat(GLuint attribindex, GLint size, GLenum type, GLuint relativeoffset);
+GLAPI void GLAPIENTRY glVertexAttribLFormat(GLuint attribindex, GLint size, GLenum type, GLuint relativeoffset);
+GLAPI void GLAPIENTRY glVertexBindingDivisor(GLuint bindingindex, GLuint divisor);
+GLAPI void GLAPIENTRY glClearBufferfv(GLenum buffer, GLint drawbuffer, const GLfloat* value);
+GLAPI void GLAPIENTRY glClearBufferiv(GLenum buffer, GLint drawbuffer, const GLint* value);
+GLAPI void GLAPIENTRY glClearBufferuiv(GLenum buffer, GLint drawbuffer, const GLuint* value);
+GLAPI void GLAPIENTRY glClearBufferfi(GLenum buffer, GLint drawbuffer, GLfloat depth, GLint stencil);
+GLAPI void GLAPIENTRY glClearBufferData(GLenum target, GLenum internalformat, GLenum format, GLenum type, const void* data);
+GLAPI void GLAPIENTRY glClearBufferSubData(GLenum target, GLenum internalformat, GLintptr offset, GLsizeiptr size, GLenum format, GLenum type, const void* data);
+
+/* ---- GL 4.3-4.6 compatibility entry points (GL46_Compat.cpp) ----
+ * Implements missing GL 4.3-4.6 core profile functions so that mods (Sodium,
+ * Iris) and MC 1.21.1 pass capability checks. Resolved via dlsym, so they
+ * just need to be extern "C" with default visibility. */
+
+GLAPI GLenum GLAPIENTRY glGetGraphicsResetStatus(void);
+GLAPI void GLAPIENTRY glGetActiveUniformsiv(GLuint program, GLsizei uniformCount, const GLuint* uniformIndices, GLenum pname, GLint* params);
+GLAPI void GLAPIENTRY glGetUniformIndices(GLuint program, GLsizei uniformCount, const GLchar* const* uniformNames, GLuint* uniformIndices);
+GLAPI void GLAPIENTRY glGetActiveUniformName(GLuint program, GLuint uniformIndex, GLsizei bufSize, GLsizei* length, GLchar* uniformName);
+GLAPI void GLAPIENTRY glGetActiveUniformBlockName(GLuint program, GLuint uniformBlockIndex, GLsizei bufSize, GLsizei* length, GLchar* uniformName);
+GLAPI void GLAPIENTRY glClearTexImage(GLuint texture, GLint level, GLenum format, GLenum type, const void* data);
+GLAPI void GLAPIENTRY glClearTexSubImage(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLenum type, const void* data);
+GLAPI void GLAPIENTRY glReadnPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format, GLenum type, GLsizei bufSize, void* data);
+GLAPI void GLAPIENTRY glMemoryBarrierByRegion(GLbitfield barriers);
+GLAPI void GLAPIENTRY glGetTexLevelParameterfv(GLenum target, GLint level, GLenum pname, GLfloat* params);
+GLAPI void GLAPIENTRY glGetCompressedTexImage(GLenum target, GLint level, void* img);
+GLAPI void GLAPIENTRY glTexBufferRange(GLenum target, GLenum internalformat, GLuint buffer, GLintptr offset, GLsizeiptr size);
+GLAPI void GLAPIENTRY glTextureView(GLuint texture, GLenum target, GLuint origtexture, GLenum internalformat, GLuint minlevel, GLuint numlevels, GLuint minlayer, GLuint numlayers);
+GLAPI void GLAPIENTRY glFramebufferParameteri(GLenum target, GLenum pname, GLint param);
+GLAPI void GLAPIENTRY glGetFramebufferParameteriv(GLenum target, GLenum pname, GLint* params);
+GLAPI void GLAPIENTRY glPatchParameteri(GLenum pname, GLint value);
+GLAPI void GLAPIENTRY glPatchParameterfv(GLenum pname, const GLfloat* values);
+GLAPI void GLAPIENTRY glDrawElementsInstancedBaseVertexBaseInstance(GLenum mode, GLsizei count, GLenum type, const void* indices, GLsizei instancecount, GLint basevertex, GLuint baseinstance);
+GLAPI void GLAPIENTRY glTexStorage1D(GLenum target, GLsizei levels, GLenum internalformat, GLsizei width);
+
+/* GL 4.3 program interface queries */
+GLAPI void GLAPIENTRY glGetProgramInterfaceiv(GLuint program, GLenum programInterface, GLenum pname, GLint* params);
+GLAPI GLuint GLAPIENTRY glGetProgramResourceIndex(GLuint program, GLenum programInterface, const GLchar* name);
+GLAPI void GLAPIENTRY glGetProgramResourceiv(GLuint program, GLenum programInterface, GLuint index, GLsizei propCount, const GLenum* props, GLsizei bufSize, GLsizei* length, GLint* params);
+GLAPI void GLAPIENTRY glGetProgramResourceName(GLuint program, GLenum programInterface, GLuint index, GLsizei bufSize, GLsizei* length, GLchar* name);
+GLAPI GLint GLAPIENTRY glGetProgramResourceLocation(GLuint program, GLenum programInterface, const GLchar* name);
+GLAPI GLint GLAPIENTRY glGetProgramResourceLocationIndex(GLuint program, GLenum programInterface, const GLchar* name);
+GLAPI void GLAPIENTRY glGetProgramStageiv(GLuint program, GLenum shadertype, GLenum pname, GLint* values);
+
+/* GL 4.5 DSA functions */
+GLAPI void GLAPIENTRY glCreateTextures(GLenum target, GLsizei n, GLuint* textures);
+GLAPI void GLAPIENTRY glCreateBuffers(GLsizei n, GLuint* buffers);
+GLAPI void GLAPIENTRY glCreateFramebuffers(GLsizei n, GLuint* framebuffers);
+GLAPI void GLAPIENTRY glCreateVertexArrays(GLsizei n, GLuint* arrays);
+GLAPI void GLAPIENTRY glCreateSamplers(GLsizei n, GLuint* samplers);
+GLAPI void GLAPIENTRY glCreateProgramPipelines(GLsizei n, GLuint* pipelines);
+GLAPI void GLAPIENTRY glCreateQueries(GLenum target, GLsizei n, GLuint* ids);
+GLAPI void GLAPIENTRY glCreateRenderbuffers(GLsizei n, GLuint* renderbuffers);
+GLAPI void GLAPIENTRY glCreateTransformFeedbacks(GLsizei n, GLuint* ids);
+GLAPI void GLAPIENTRY glNamedBufferStorage(GLuint buffer, GLsizeiptr size, const void* data, GLbitfield flags);
+GLAPI void GLAPIENTRY glNamedBufferData(GLuint buffer, GLsizeiptr size, const void* data, GLenum usage);
+GLAPI void GLAPIENTRY glNamedBufferSubData(GLuint buffer, GLintptr offset, GLsizeiptr size, const void* data);
+GLAPI void GLAPIENTRY glTextureStorage2D(GLuint texture, GLsizei levels, GLenum internalformat, GLsizei width, GLsizei height);
+GLAPI void GLAPIENTRY glTextureStorage3D(GLuint texture, GLsizei levels, GLenum internalformat, GLsizei width, GLsizei height, GLsizei depth);
+GLAPI void GLAPIENTRY glTextureStorage1D(GLuint texture, GLsizei levels, GLenum internalformat, GLsizei width);
+GLAPI void GLAPIENTRY glTextureSubImage2D(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height, GLenum format, GLenum type, const void* pixels);
+GLAPI void GLAPIENTRY glTextureSubImage1D(GLuint texture, GLint level, GLint xoffset, GLsizei width, GLenum format, GLenum type, const void* pixels);
+GLAPI void GLAPIENTRY glTextureSubImage3D(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLenum type, const void* pixels);
+GLAPI void GLAPIENTRY glTextureParameterf(GLuint texture, GLenum pname, GLfloat param);
+GLAPI void GLAPIENTRY glTextureParameteri(GLuint texture, GLenum pname, GLint param);
+GLAPI void GLAPIENTRY glTextureParameterfv(GLuint texture, GLenum pname, const GLfloat* params);
+GLAPI void GLAPIENTRY glTextureParameteriv(GLuint texture, GLenum pname, const GLint* params);
+GLAPI void GLAPIENTRY glGenerateTextureMipmap(GLuint texture);
+GLAPI void GLAPIENTRY glBindTextureUnit(GLuint unit, GLuint texture);
+GLAPI void GLAPIENTRY glNamedFramebufferTexture(GLuint framebuffer, GLenum attachment, GLuint texture, GLint level);
+GLAPI void GLAPIENTRY glNamedFramebufferTextureLayer(GLuint framebuffer, GLenum attachment, GLuint texture, GLint level, GLint layer);
+GLAPI void GLAPIENTRY glNamedFramebufferDrawBuffer(GLuint framebuffer, GLenum buf);
+GLAPI void GLAPIENTRY glNamedFramebufferDrawBuffers(GLuint framebuffer, GLsizei n, const GLenum* bufs);
+GLAPI void GLAPIENTRY glNamedFramebufferReadBuffer(GLuint framebuffer, GLenum src);
+GLAPI void GLAPIENTRY glNamedFramebufferRenderbuffer(GLuint framebuffer, GLenum attachment, GLenum renderbuffertarget, GLuint renderbuffer);
+GLAPI GLenum GLAPIENTRY glCheckNamedFramebufferStatus(GLuint framebuffer, GLenum target);
+GLAPI void GLAPIENTRY glGetNamedFramebufferAttachmentParameteriv(GLuint framebuffer, GLenum attachment, GLenum pname, GLint* params);
+GLAPI void GLAPIENTRY glGetNamedFramebufferParameteriv(GLuint framebuffer, GLenum pname, GLint* params);
+GLAPI void GLAPIENTRY glClearNamedFramebufferiv(GLuint framebuffer, GLenum buffer, GLint drawbuffer, const GLint* value);
+GLAPI void GLAPIENTRY glClearNamedFramebufferuiv(GLuint framebuffer, GLenum buffer, GLint drawbuffer, const GLuint* value);
+GLAPI void GLAPIENTRY glClearNamedFramebufferfv(GLuint framebuffer, GLenum buffer, GLint drawbuffer, const GLfloat* value);
+GLAPI void GLAPIENTRY glClearNamedFramebufferfi(GLuint framebuffer, GLenum buffer, GLfloat depth, GLint stencil);
+GLAPI void GLAPIENTRY glBlitNamedFramebuffer(GLuint readFramebuffer, GLuint drawFramebuffer, GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1, GLint dstX0, GLint dstY0, GLint dstX1, GLint dstY1, GLbitfield mask, GLenum filter);
+GLAPI void GLAPIENTRY glCopyNamedBufferSubData(GLuint readBuffer, GLuint writeBuffer, GLintptr readOffset, GLintptr writeOffset, GLsizeiptr size);
+GLAPI void GLAPIENTRY glClearNamedBufferData(GLuint buffer, GLenum internalformat, GLenum format, GLenum type, const void* data);
+GLAPI void GLAPIENTRY glClearNamedBufferSubData(GLuint buffer, GLenum internalformat, GLintptr offset, GLsizeiptr size, GLenum format, GLenum type, const void* data);
+GLAPI void* GLAPIENTRY glMapNamedBuffer(GLuint buffer, GLenum access);
+GLAPI void* GLAPIENTRY glMapNamedBufferRange(GLuint buffer, GLintptr offset, GLsizeiptr length, GLbitfield access);
+GLAPI GLboolean GLAPIENTRY glUnmapNamedBuffer(GLuint buffer);
+GLAPI void GLAPIENTRY glFlushMappedNamedBufferRange(GLuint buffer, GLintptr offset, GLsizeiptr length);
+GLAPI void GLAPIENTRY glGetNamedBufferParameteriv(GLuint buffer, GLenum pname, GLint* params);
+GLAPI void GLAPIENTRY glGetNamedBufferParameteri64v(GLuint buffer, GLenum pname, GLint64* params);
+GLAPI void GLAPIENTRY glGetNamedBufferPointerv(GLuint buffer, GLenum pname, void** params);
+GLAPI void GLAPIENTRY glGetNamedBufferSubData(GLuint buffer, GLintptr offset, GLsizeiptr size, void* data);
+GLAPI void GLAPIENTRY glGetTextureImage(GLuint texture, GLint level, GLenum format, GLenum type, GLsizei bufSize, void* pixels);
+GLAPI void GLAPIENTRY glGetTextureLevelParameteriv(GLuint texture, GLint level, GLenum pname, GLint* params);
+GLAPI void GLAPIENTRY glGetTextureLevelParameterfv(GLuint texture, GLint level, GLenum pname, GLfloat* params);
+GLAPI void GLAPIENTRY glGetTextureParameteriv(GLuint texture, GLenum pname, GLint* params);
+GLAPI void GLAPIENTRY glGetTextureParameterfv(GLuint texture, GLenum pname, GLfloat* params);
+GLAPI void GLAPIENTRY glGetCompressedTextureImage(GLuint texture, GLint level, GLsizei bufSize, void* pixels);
+GLAPI void GLAPIENTRY glVertexArrayVertexBuffer(GLuint vaobj, GLuint bindingindex, GLuint buffer, GLintptr offset, GLsizei stride);
+GLAPI void GLAPIENTRY glVertexArrayVertexBuffers(GLuint vaobj, GLuint first, GLsizei count, const GLuint* buffers, const GLintptr* offsets, const GLsizei* strides);
+GLAPI void GLAPIENTRY glVertexArrayElementBuffer(GLuint vaobj, GLuint buffer);
+GLAPI void GLAPIENTRY glVertexArrayAttribBinding(GLuint vaobj, GLuint attribindex, GLuint bindingindex);
+GLAPI void GLAPIENTRY glVertexArrayAttribFormat(GLuint vaobj, GLuint attribindex, GLint size, GLenum type, GLboolean normalized, GLuint relativeoffset);
+GLAPI void GLAPIENTRY glVertexArrayAttribIFormat(GLuint vaobj, GLuint attribindex, GLint size, GLenum type, GLuint relativeoffset);
+GLAPI void GLAPIENTRY glVertexArrayAttribLFormat(GLuint vaobj, GLuint attribindex, GLint size, GLenum type, GLuint relativeoffset);
+GLAPI void GLAPIENTRY glVertexArrayBindingDivisor(GLuint vaobj, GLuint bindingindex, GLuint divisor);
+GLAPI void GLAPIENTRY glEnableVertexArrayAttrib(GLuint vaobj, GLuint index);
+GLAPI void GLAPIENTRY glDisableVertexArrayAttrib(GLuint vaobj, GLuint index);
+GLAPI void GLAPIENTRY glGetVertexArrayiv(GLuint vaobj, GLenum pname, GLint* param);
+GLAPI void GLAPIENTRY glGetVertexArrayIndexediv(GLuint vaobj, GLuint index, GLenum pname, GLint* param);
+GLAPI void GLAPIENTRY glGetVertexArrayIndexed64iv(GLuint vaobj, GLuint index, GLenum pname, GLint64* param);
+GLAPI void GLAPIENTRY glNamedRenderbufferStorage(GLuint renderbuffer, GLenum internalformat, GLsizei width, GLsizei height);
+GLAPI void GLAPIENTRY glNamedRenderbufferStorageMultisample(GLuint renderbuffer, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height);
+GLAPI void GLAPIENTRY glGetNamedRenderbufferParameteriv(GLuint renderbuffer, GLenum pname, GLint* params);
+GLAPI void GLAPIENTRY glTextureStorage2DMultisample(GLuint texture, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height, GLboolean fixedsamplelocations);
+GLAPI void GLAPIENTRY glTextureStorage3DMultisample(GLuint texture, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height, GLsizei depth, GLboolean fixedsamplelocations);
+
+/* GL 4.4 bind-multiple */
+GLAPI void GLAPIENTRY glBindBuffersBase(GLenum target, GLuint first, GLsizei count, const GLuint* buffers);
+GLAPI void GLAPIENTRY glBindBuffersRange(GLenum target, GLuint first, GLsizei count, const GLuint* buffers, const GLintptr* offsets, const GLsizeiptr* sizes);
+GLAPI void GLAPIENTRY glBindTextures(GLuint first, GLsizei count, const GLuint* textures);
+GLAPI void GLAPIENTRY glBindSamplers(GLuint first, GLsizei count, const GLuint* samplers);
+GLAPI void GLAPIENTRY glBindImageTextures(GLuint first, GLsizei count, const GLuint* textures);
+GLAPI void GLAPIENTRY glBindVertexBuffers(GLuint first, GLsizei count, const GLuint* buffers, const GLintptr* offsets, const GLsizei* strides);
+
+/* GL 4.5 transform feedback DSA */
+GLAPI void GLAPIENTRY glTransformFeedbackBufferBase(GLuint xfb, GLuint index, GLuint buffer);
+GLAPI void GLAPIENTRY glTransformFeedbackBufferRange(GLuint xfb, GLuint index, GLuint buffer, GLintptr offset, GLsizeiptr size);
+GLAPI void GLAPIENTRY glGetTransformFeedbackiv(GLuint xfb, GLenum pname, GLint* param);
+GLAPI void GLAPIENTRY glGetTransformFeedbacki_v(GLuint xfb, GLenum pname, GLuint index, GLint* param);
+GLAPI void GLAPIENTRY glGetTransformFeedbacki64_v(GLuint xfb, GLenum pname, GLuint index, GLint64* param);
+
+/* GL 4.5 query buffer */
+GLAPI void GLAPIENTRY glGetQueryBufferObjecti64v(GLuint id, GLuint buffer, GLenum pname, GLintptr offset);
+GLAPI void GLAPIENTRY glGetQueryBufferObjectiv(GLuint id, GLuint buffer, GLenum pname, GLintptr offset);
+GLAPI void GLAPIENTRY glGetQueryBufferObjectui64v(GLuint id, GLuint buffer, GLenum pname, GLintptr offset);
+GLAPI void GLAPIENTRY glGetQueryBufferObjectuiv(GLuint id, GLuint buffer, GLenum pname, GLintptr offset);
+
+/* GL 4.6 */
+GLAPI void GLAPIENTRY glMultiDrawArraysIndirectCount(GLenum mode, const void* indirect, GLintptr drawcount, GLint maxdrawcount, GLsizei stride);
+GLAPI void GLAPIENTRY glMultiDrawElementsIndirectCount(GLenum mode, GLenum type, const void* indirect, GLintptr drawcount, GLint maxdrawcount, GLsizei stride);
+
+/* GL 4.5 robustness */
+GLAPI void GLAPIENTRY glGetnCompressedTexImage(GLenum target, GLint level, GLsizei bufSize, void* img);
+GLAPI void GLAPIENTRY glGetnTexImage(GLenum target, GLint level, GLenum format, GLenum type, GLsizei bufSize, void* img);
+GLAPI void GLAPIENTRY glGetnUniformdv(GLuint program, GLint location, GLsizei bufSize, GLdouble* params);
+GLAPI void GLAPIENTRY glGetnUniformfv(GLuint program, GLint location, GLsizei bufSize, GLfloat* params);
+GLAPI void GLAPIENTRY glGetnUniformiv(GLuint program, GLint location, GLsizei bufSize, GLint* params);
+GLAPI void GLAPIENTRY glGetnUniformuiv(GLuint program, GLint location, GLsizei bufSize, GLuint* params);
+GLAPI void GLAPIENTRY glGetCompressedTextureSubImage(GLuint texture, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLsizei bufSize, void* pixels);
 
 #ifdef __cplusplus
 }
