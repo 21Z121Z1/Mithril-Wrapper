@@ -1076,21 +1076,22 @@ bool get_fallback_spirv(GLenum gl_stage, bool flip_y,
 
     std::string source;
     if (gl_stage == GL_VERTEX_SHADER) {
-        // Minimal vertex shader: position at location 0, Z-remap + optional
-        // Y-flip (same transform as inject_position_fixup applies to real
-        // shaders). The Y-flip variant is used for default-FBO draws.
+        // CRITICAL: fallback VS must NOT read any vertex attributes.
+        // Reading layout(location=0) in vec4 a_position when no vertex buffer
+        // is bound at binding 0 causes a GPU page fault
+        // (kIOGPUCommandBufferCallbackErrorPageFault) on Metal/MoltenVK →
+        // VK_ERROR_DEVICE_LOST → permanent device death.
+        // Instead, output a fixed degenerate position so all triangles
+        // collapse to a single point (nothing drawn, but no crash).
+        // The app's clear color remains visible — this is intentional:
+        // it proves the pipeline works and avoids the fatal page fault.
+        (void)flip_y;  // no position to flip
         source = "#version 330\n"
-                 "layout(location = 0) in vec4 a_position;\n"
                  "void main() {\n"
-                 "    vec4 pos = a_position;\n"
-                 "    pos.y = ";
-        source += flip_y ? "-pos.y;\n" : "pos.y;\n";
-        source += "    pos.z = (pos.z + pos.w) * 0.5;\n"
-                  "    gl_Position = pos;\n"
-                  "}\n";
+                 "    gl_Position = vec4(0.0, 0.0, 0.5, 1.0);\n"
+                 "}\n";
     } else if (gl_stage == GL_FRAGMENT_SHADER) {
-        // Solid gray output — visible against any clear color (including
-        // Minecraft's red loading screen).
+        // Solid gray output — visible against any clear color.
         source = "#version 330\n"
                  "layout(location = 0) out vec4 fragColor;\n"
                  "void main() {\n"

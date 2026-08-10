@@ -112,18 +112,27 @@ void safe_device_wait_idle() {
 
     // 3. 等待 GPU 完成。
     VkResult waitRc = vkDeviceWaitIdle(b->device);
-    (void)waitRc;
+    // FIX (recovery loop): if vkDeviceWaitIdle returns DEVICE_LOST, the Metal
+    // device is faulted — pending command buffers are discarded by Metal and
+    // further wait/submit calls will also fail. Set deviceLost immediately to
+    // prevent the recovery path from repeatedly calling vkDeviceWaitIdle (each
+    // call re-triggers the page fault error in MoltenVK, flooding the log and
+    // wasting CPU time). Deep reference: MobileGL handles device-lost by
+    // marking the device as faulted and skipping all subsequent GPU operations.
+    if (waitRc == VK_ERROR_DEVICE_LOST) {
+        b->deviceLost = true;
+    }
 
-    // 4. vkDeviceWaitIdle 后所有 fence 已 signaled。清除 fencePending，
-    //    让后续 ensure_command_buffer_recording 跳过无意义的 vkWaitForFences。
+    // 4. vkDeviceWaitIdle 后所有 fence 已 signaled（或设备已 lost，fence 状态
+    //    无意义）。清除 fencePending，让后续 ensure_command_buffer_recording
+    //    跳过无意义的 vkWaitForFences。
     for (int i = 0; i < kMaxFramesInFlight; ++i) {
         b->fencePending[i] = false;
     }
 
-    // 5. 如果之前在录制，重新 begin command buffer，让调用方可以透明地
-    //    继续录制。ensure_command_buffer_recording 看到
-    //    commandBufferRecording==false，跳过 fence wait（fencePending 已清除），
-    //    reset + begin 当前 slot 的 buffer。
+    // 5. 如果之前在录制且设备未 lost，重新 begin command buffer。
+    //    设备 lost 时不重新 begin（command buffer 录制会被 ensure_command_buffer_recording
+    //    的 deviceLost 检查拦截）。
     if (wasRecording && !b->deviceLost) {
         ensure_command_buffer_recording();
     }
