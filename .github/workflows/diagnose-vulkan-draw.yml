@@ -21,10 +21,45 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq libvulkan1 mesa-vulkan-drivers
-      - name: Build draw smoke
-        run: gcc -O0 -g -o /tmp/draw_smoke tests/draw_smoke.c -ldl
-      - name: Run draw smoke with complete output
+      - name: Build diagnostic variants
+        run: |
+          set -euo pipefail
+          cp tests/draw_smoke.c /tmp/restart.c
+          python3 - <<'PY'
+          from pathlib import Path
+          source = Path('tests/draw_smoke.c').read_text()
+          old_indices = 'const GLushort line_indices[5] = {0, 1, 42, 2, 3};'
+          old_draw = '''primitiveRestartIndex(42);
+                  enable(GL_PRIMITIVE_RESTART);
+                  drawElements(GL_LINE_STRIP, 5, GL_UNSIGNED_SHORT, (const GLvoid*)0);'''
+          if source.count(old_indices) != 1 or source.count(old_draw) != 1:
+              raise SystemExit('diagnostic source anchors changed')
+
+          ordinary = source.replace(
+              old_indices,
+              'const GLushort line_indices[4] = {0, 1, 2, 3};').replace(
+              old_draw,
+              '''primitiveRestartIndex(42);
+                  disable(GL_PRIMITIVE_RESTART);
+                  drawElements(GL_LINE_STRIP, 4, GL_UNSIGNED_SHORT, (const GLvoid*)0);''')
+          Path('/tmp/ordinary.c').write_text(ordinary)
+
+          lines = ordinary.replace(
+              'drawElements(GL_LINE_STRIP, 4, GL_UNSIGNED_SHORT, (const GLvoid*)0);',
+              'drawElements(GL_LINES, 4, GL_UNSIGNED_SHORT, (const GLvoid*)0);')
+          Path('/tmp/lines.c').write_text(lines)
+          PY
+          gcc -O0 -g -o /tmp/restart /tmp/restart.c -ldl
+          gcc -O0 -g -o /tmp/ordinary /tmp/ordinary.c -ldl
+          gcc -O0 -g -o /tmp/lines /tmp/lines.c -ldl
+      - name: Run all line topology variants
         shell: bash
         run: |
-          set -o pipefail
-          MITHRIL_LIBRARY="$PWD/output/libmithril.so" /tmp/draw_smoke 2>&1 | tee /tmp/draw-smoke.log
+          set +e
+          for variant in restart ordinary lines; do
+            echo "========== $variant =========="
+            MITHRIL_LIBRARY="$PWD/output/libmithril.so" /tmp/$variant 2>&1 | tee /tmp/$variant.log
+            status=${PIPESTATUS[0]}
+            echo "STATUS[$variant]=$status"
+          done
+          exit 0
