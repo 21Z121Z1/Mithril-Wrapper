@@ -388,7 +388,7 @@ void set_load_clear(bool clear){ encoder().loadClear = clear; }
 
 // GL 4.3 ARB_invalidate_subdata: mark attachments for discard (storeOp=DONT_CARE)
 // in the next begin_render_pass. One-shot: cleared after begin_render_pass applies.
-void backend_set_invalidate_attachments(uint32_t color_mask, bool depth, bool stencil) {
+void set_invalidate_attachments(uint32_t color_mask, bool depth, bool stencil) {
     EncoderState& e = encoder();
     e.invalidateColorMask = color_mask;
     e.invalidateDepth = depth;
@@ -1796,6 +1796,10 @@ void backend_set_clear_depth(double d) { mithril::vk::set_clear_depth(d); }
 void backend_set_clear_stencil(int s)  { mithril::vk::set_clear_stencil(s); }
 void backend_set_load_clear(void)      { mithril::vk::set_load_clear(true); }
 void backend_set_load_load(void)       { mithril::vk::set_load_clear(false); }
+
+void backend_set_invalidate_attachments(uint32_t color_mask, bool depth, bool stencil) {
+    mithril::vk::set_invalidate_attachments(color_mask, depth, stencil);
+}
 
 void backend_clear_attachments(GLbitfield mask, int x, int y, int w, int h) {
     mithril::vk::clear_attachments(mask, x, y, w, h);
