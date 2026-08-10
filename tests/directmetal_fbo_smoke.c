@@ -135,6 +135,12 @@ int main(void) {
     glFinish();
     CHECK(glGetError() == GL_NO_ERROR, "depth-only clear submits without GL error");
 
+    /* The following color-subresource cases intentionally test only the selected
+     * color image. Detach the 16x16 depth image so it cannot make the later
+     * 4x4 framebuffer incomplete for an unrelated dimension mismatch. */
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                           GL_TEXTURE_2D, 0, 0);
+
     GLuint miptex = 0;
     unsigned char zero8[8 * 8 * 4] = {0};
     unsigned char zero4[4 * 4 * 4] = {0};
