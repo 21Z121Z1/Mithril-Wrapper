@@ -54,6 +54,18 @@ jobs:
           otool -L output/libmithril.dylib
           nm -m output/libmithril.dylib | grep -E 'MTLCreateSystemDefaultDevice|OBJC_CLASS_\$_MTL' || true
 
+      - name: Compile existing DirectMetal draw/readback smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang -std=c11 -Wall -Wextra tests/draw_smoke.c -o "$RUNNER_TEMP/draw-smoke"
+
+      - name: Run existing DirectMetal draw/readback gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/draw-smoke"
+
       - name: Compile Mithril DirectMetal base FBO probe
         shell: bash
         run: |
@@ -66,19 +78,6 @@ jobs:
         run: |
           set -euo pipefail
           "$RUNNER_TEMP/directmetal-base-fbo-probe"
-
-      - name: Compile existing DirectMetal draw/readback smoke
-        shell: bash
-        run: |
-          set -euo pipefail
-          clang -std=c11 -Wall -Wextra tests/draw_smoke.c -o "$RUNNER_TEMP/draw-smoke"
-
-      - name: Run existing DirectMetal draw/readback regression (diagnostic)
-        continue-on-error: true
-        shell: bash
-        run: |
-          set -euo pipefail
-          "$RUNNER_TEMP/draw-smoke"
 
       - name: Compile DirectMetal FBO regression smoke
         shell: bash
