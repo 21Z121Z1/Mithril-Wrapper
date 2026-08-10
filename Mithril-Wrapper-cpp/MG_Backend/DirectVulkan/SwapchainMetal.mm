@@ -18,6 +18,10 @@
 #include "Swapchain.h"
 #include "Device.h"
 #include "../../MG_Impl/Log.h"
+// Full CAMetalLayer interface (QuartzCore). Required to set
+// maximumDrawableCount below — the Vulkan headers only forward-declare the
+// class, so the property would otherwise be "not found in forward class".
+#include <QuartzCore/CAMetalLayer.h>
 
 namespace mithril {
 namespace vk {
@@ -61,9 +65,11 @@ Swapchain* create_swapchain(void* native_window, int width, int height,
     sci.sType = VK_STRUCTURE_TYPE_METAL_SURFACE_CREATE_INFO_EXT;
     // __bridge: the CAMetalLayer is owned by the host view (EglSurface's
     // native_window, a weak ARC reference). We borrow the pointer for Vulkan
-    // surface creation without transferring ownership. A plain C cast is
-    // rejected under -fobjc-arc.
-    sci.pLayer = (__bridge const CAMetalLayer*)layer;
+    // surface creation without transferring ownership. `layer` is already a
+    // CAMetalLayer* (bridged from void* above); implicit conversion to the
+    // const-qualified member type is legal, and __bridge is implied by the
+    // assignability of ObjC object pointers in -fobjc-arc.
+    sci.pLayer = layer;
     if (!b->createMetalSurfaceEXT) {
         MITHRIL_LOG_ERROR("vk", "vkCreateMetalSurfaceEXT not resolved");
         return nullptr;
