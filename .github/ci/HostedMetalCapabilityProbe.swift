@@ -34,7 +34,11 @@ do {
     guard let device = MTLCreateSystemDefaultDevice() else {
         throw ProbeError.message("MTLCreateSystemDefaultDevice returned nil")
     }
+#if os(macOS)
     print("MTLDevice name=\(device.name) registryID=\(device.registryID) lowPower=\(device.isLowPower) removable=\(device.isRemovable)")
+#else
+    print("MTLDevice name=\(device.name) registryID=\(device.registryID)")
+#endif
 
     guard let queue = device.makeCommandQueue() else {
         throw ProbeError.message("MTLDevice.makeCommandQueue returned nil")
