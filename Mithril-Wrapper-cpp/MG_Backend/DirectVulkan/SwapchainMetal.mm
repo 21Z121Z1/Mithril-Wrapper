@@ -35,13 +35,35 @@ Swapchain* create_swapchain(void* native_window, int width, int height,
     // egl.cpp as void*; cast to CAMetalLayer* (the type vulkan_metal.h
     // expects). createMetalSurfaceEXT is stored as PFN_vkVoidFunction on the
     // Backend (see Device.h) - cast to the real type here.
+    CAMetalLayer* layer = (__bridge CAMetalLayer*)native_window;
+    if (!layer) {
+        MITHRIL_LOG_ERROR("vk", "create_swapchain: null CAMetalLayer");
+        return nullptr;
+    }
+
+    // FIX (GPU page fault 根因 - drawable/IOSurface 池不匹配, P0):
+    // swapchain 请求 imgCount=2（见 SwapchainCommon.cpp），而宿主创建的
+    // CAMetalLayer 默认 maximumDrawableCount=3（本设备实测 3）。MoltenVK 的
+    // nextDrawable 池大小由 maximumDrawableCount 决定，swapchain 的 VkImage
+    // 数组只有 2 个 —— 池循环到第 3 个 drawable 时，其 IOSurface 与
+    // swapchain VkImage 的绑定错位，Metal 驱动在该 IOSurface 上执行渲染/
+    // 呈现时访问失效内存 → kIOGPUCommandBufferCallbackErrorPageFault。
+    // 与线上症状完全吻合：首帧（前 2 个 drawable 与 2 个 VkImage 同步）
+    // 渲染成功，第 3 个 drawable 进入池后（第 2-3 帧）GPU page fault。
+    //
+    // 修复：创建 surface 前把 maximumDrawableCount 强制为 2，与 swapchain
+    // imageCount / kMaxFramesInFlight 完全一致。SwapchainCommon.cpp:58 的
+    // 注释声称"已在 SurfaceMetal.mm 设为 2"，但实际缺失 —— 这里补上。
+    // drawableSize 与 maximumDrawableCount 是独立属性，不影响后续尺寸变化。
+    layer.maximumDrawableCount = 2;
+
     VkMetalSurfaceCreateInfoEXT sci{};
     sci.sType = VK_STRUCTURE_TYPE_METAL_SURFACE_CREATE_INFO_EXT;
     // __bridge: the CAMetalLayer is owned by the host view (EglSurface's
     // native_window, a weak ARC reference). We borrow the pointer for Vulkan
     // surface creation without transferring ownership. A plain C cast is
     // rejected under -fobjc-arc.
-    sci.pLayer = (__bridge const CAMetalLayer*)native_window;
+    sci.pLayer = (__bridge const CAMetalLayer*)layer;
     if (!b->createMetalSurfaceEXT) {
         MITHRIL_LOG_ERROR("vk", "vkCreateMetalSurfaceEXT not resolved");
         return nullptr;

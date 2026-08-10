@@ -279,6 +279,10 @@ void drain_disposal_queue(int slot) {
             }
         }
         if (d.sampler) vkDestroySampler(b->device, d.sampler, nullptr);
+        // FIX (descriptor pool UAF - P0): 次级池扩容时退役的 VkDescriptorPool。
+        // 只能在此处（slot fence 已等待，所有引用其 set 的 command buffer 完成）
+        // 销毁 —— vkDestroyDescriptorPool 隐式释放池内所有 set。
+        if (d.pool) vkDestroyDescriptorPool(b->device, d.pool, nullptr);
     }
     q.clear();
 }
@@ -759,10 +763,14 @@ bool init_device() {
                          (unsigned long long)(gpuBudget / (1024*1024)));
     }
 
-    // 硬上限 256MB — iPhone X 的 A11 GPU + MoltenVK per-allocation 开销
-    // 意味着超过此值就有 GPU Address Fault 风险。
-    // 旧 512MB 太高：日志显示在此值下 GPU 仍 OOM fault。
-    constexpr VkDeviceSize kMaxVramBudget = 256ULL * 1024 * 1024;  // 256 MB
+    // 硬上限 512MB — iPhone X 的 A11 GPU + MoltenVK per-allocation 开销。
+    // 历史教训：旧 1.5GB/512MB 预算下 GPU 在阈值前就 fault，但那时的 fault
+    // 根因是资源生命周期错误（drawable 池不匹配 / descriptor UAF / buffer
+    // 覆写竞争），不是真实显存耗尽 —— 调低预算只是掩盖症状。P0 修复后，
+    // 512MB 对 3GB 统一内存的 iPhone X 是安全的（Jetsam 任务限制 2828MB，
+    // 系统 + JVM + Minecraft 占用后留给 GPU 的余量足够），同时避免 256MB
+    // 下每帧 mid-frame GC flush 的性能与一致性代价。
+    constexpr VkDeviceSize kMaxVramBudget = 512ULL * 1024 * 1024;  // 512 MB
     if (gpuBudget > kMaxVramBudget) {
         MITHRIL_LOG_INFO("vk", "GPU budget %llu MB exceeds hard cap, "
                           "clamping to %llu MB",

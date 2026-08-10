@@ -21,6 +21,145 @@ std::unordered_map<GLuint, BufferEntry>&  buffer_table()  { static std::unordere
 std::unordered_map<GLuint, TextureEntry>& texture_table() { static std::unordered_map<GLuint, TextureEntry> t; return t; }
 std::unordered_map<GLuint, SamplerEntry>& sampler_table() { static std::unordered_map<GLuint, SamplerEntry> t; return t; }
 
+// ===========================================================================
+// FIX (GPU page fault 根因 - buffer 覆写竞争, P0):
+// CPU 侧覆写一个 GPU 仍在读取的 buffer（顶点/索引缓冲）会让 GPU 读到撕裂
+// 的数据 —— 撕裂的索引值把顶点取址带到 buffer 之外 → GPU Address Fault
+// (kIOGPUCommandBufferCallbackErrorPageFault)。Minecraft 每帧都会更新 VBO，
+// 首帧安全（无在飞工作），第二帧起上一帧的 command buffer 还在执行时 CPU
+// 就开始覆写 → 确定性崩溃，与线上症状完全吻合。
+//
+// 修复（深度对照 MobileGL VkBufferManager::IsResourceBusy / OnRespecify /
+// OnSubData / StagedRangeCopy, VkBufferManager.cpp:200-427）:
+//   - glBufferData（整块重指定，GL 有 discard 语义）: buffer 可能在飞时
+//     orphan-rename（旧存储延迟销毁 + 全新分配），空闲时才原地更新。
+//   - glBufferSubData / map-flush（部分写入）: 在飞时走 staged GPU copy
+//     （数据先进 per-frame staging arena，再 vkCmdCopyBuffer 到目标），
+//     保持 GL 帧内顺序且绝不覆写 GPU 正在取的字节。
+//
+// 在飞判定复用现有 submitSerial/completedSerial 水位线（Device.cpp 的
+// refresh_completed_serials）：buffer 的最后一次写入将由第 N 次
+// vkQueueSubmit 携带（lastWriteSerial = submitSerial+1），当且仅当
+// completedSerial >= N（该次提交已在 GPU 完成）时才允许原地写入。
+// ===========================================================================
+
+// GL buffer 对象无类型 —— 同一个名字今天绑 GL_ARRAY_BUFFER，明天绑
+// GL_SHADER_STORAGE_BUFFER，GL 从不提前告知。Vulkan 要求在创建时声明一切
+// 可能的用途，因此这里把 GL 可能用到的 usage 全部加上（与
+// backend_get_or_create_buffer 创建路径保持一致）。
+static constexpr VkBufferUsageFlags kAllGlBufferUsage =
+    VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
+    VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+    VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+    VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+
+// 该 buffer 是否可能仍被 GPU 引用（其最近一次 CPU 写入尚未完成在飞）。
+// 非阻塞：backend_last_completed_serial() 内部只做 vkGetFenceStatus 轮询。
+static inline bool buffer_maybe_inflight(const BufferEntry& e) {
+    return e.lastWriteSerial > backend_last_completed_serial();
+}
+
+// 标记一次 CPU 写入：它将被"下一次 vkQueueSubmit"携带。
+static inline void stamp_buffer_write(BufferEntry& e) {
+    Backend* b = backend();
+    e.lastWriteSerial = b->submitSerial + 1;
+}
+
+// 在飞的部分写入：把 `data` 通过 per-frame staging arena（或临时 staging
+// buffer）staged 成 GPU copy，记录进当前 command buffer。返回 true 表示
+// 成功（调用方无需再做原地写入）。参照 MobileGL StagedRangeCopy。
+static bool stage_buffer_range_copy(BufferEntry& e, VkDeviceSize offset,
+                                    const void* data, VkDeviceSize size) {
+    Backend* b = backend();
+    if (!b->device || !data || size == 0) return false;
+    // vkCmdCopyBuffer 不能在 render pass 实例内录制（dynamic rendering 同样
+    // 禁止 transfer 命令在 pass 内）—— 先结束当前 pass，后续 draw 会重新开。
+    if (render_pass_active()) end_render_pass();
+    if (!ensure_command_buffer_recording()) return false;
+
+    // Staging 源：优先从 per-frame staging arena sub-allocate（与纹理上传
+    // 同一机制，arena 在 slot fence 后才 rewind，安全且零分配）。
+    VkBuffer     stagingBuffer = VK_NULL_HANDLE;
+    VkDeviceSize stagingOffset = 0;
+    void*        stagingMapped = nullptr;
+    bool         usedArena = false;
+    if (b->frameStagingReady) {
+        const VkDeviceSize aligned = (b->frameStagingOffset[b->currentFrame] + 255) & ~255;
+        if (aligned + size <= Backend::kFrameStagingSize) {
+            stagingBuffer = b->frameStagingBuffer[b->currentFrame];
+            stagingOffset = aligned;
+            stagingMapped = static_cast<uint8_t*>(b->frameStagingMapped[b->currentFrame]) + aligned;
+            b->frameStagingOffset[b->currentFrame] = aligned + size;
+            usedArena = true;
+        }
+    }
+    if (!usedArena) {
+        // Overflow / arena 未就绪：临时 staging buffer + 延迟销毁。
+        VkBufferCreateInfo bci{};
+        bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bci.size = size;
+        bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+        bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        if (vkCreateBuffer(b->device, &bci, nullptr, &stagingBuffer) != VK_SUCCESS) return false;
+        VkMemoryRequirements mr;
+        vkGetBufferMemoryRequirements(b->device, stagingBuffer, &mr);
+        const uint32_t memType = find_memory_type(mr.memoryTypeBits,
+                                                  VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
+        if (memType == 0xFFFFFFFFu) {
+            vkDestroyBuffer(b->device, stagingBuffer, nullptr);
+            return false;
+        }
+        VkMemoryAllocateInfo mai{};
+        mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        mai.allocationSize = mr.size;
+        mai.memoryTypeIndex = memType;
+        VkDeviceMemory tmpMem = VK_NULL_HANDLE;
+        if (try_allocate_memory_with_gc(b->device, &mai, nullptr, &tmpMem) != VK_SUCCESS) {
+            vkDestroyBuffer(b->device, stagingBuffer, nullptr);
+            return false;
+        }
+        vkBindBufferMemory(b->device, stagingBuffer, tmpMem, 0);
+        if (vkMapMemory(b->device, tmpMem, 0, size, 0, &stagingMapped) != VK_SUCCESS) {
+            vkFreeMemory(b->device, tmpMem, nullptr);
+            vkDestroyBuffer(b->device, stagingBuffer, nullptr);
+            return false;
+        }
+        b->currentAllocationCount++;
+        b->currentVramBytes += mr.size;
+        DeferredDestroy ds{};
+        ds.buffer = stagingBuffer;
+        ds.memory = tmpMem;
+        ds.memorySize = mr.size;
+        b->disposalQueue[b->currentFrame].push_back(ds);
+    }
+
+    std::memcpy(stagingMapped, data, (size_t)size);
+
+    // 把 copy 排在目标 buffer 的所有先前读写之后（帧内在飞 + 同 CB 已录制的
+    // 读取），以及所有后续使用之前。镜像 MobileGL StagedRangeCopy 的
+    // before/after barrier。
+    VkMemoryBarrier before{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    before.srcAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+    before.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    vkCmdPipelineBarrier(b->commandBuffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+                         1, &before, 0, nullptr, 0, nullptr);
+
+    VkBufferCopy region{};
+    region.srcOffset = stagingOffset;
+    region.dstOffset = offset;
+    region.size = size;
+    vkCmdCopyBuffer(b->commandBuffer, stagingBuffer, e.buffer, 1, &region);
+
+    VkMemoryBarrier after{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    after.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    after.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+    vkCmdPipelineBarrier(b->commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0,
+                         1, &after, 0, nullptr, 0, nullptr);
+    return true;
+}
+
 uint32_t find_memory_type(uint32_t type_bits, VkMemoryPropertyFlags props) {
     Backend* b = backend();
     VkPhysicalDeviceMemoryProperties memProps{};
@@ -251,6 +390,7 @@ void defer_destroy_buffer_entry(BufferEntry& e) {
     e.buffer = VK_NULL_HANDLE;
     e.memory = VK_NULL_HANDLE;
     e.size = 0;
+    e.lastWriteSerial = 0;
 }
 
 void defer_destroy_texture_entry(TextureEntry& e) {
@@ -891,13 +1031,30 @@ VkBuffer backend_get_or_create_buffer(GLuint name, const void* data, size_t size
     if (!b->initialized || name == 0 || size == 0) return VK_NULL_HANDLE;
     auto& tbl = mithril::vk::buffer_table();
     auto it = tbl.find(name);
-    // FIX (显存碎片化/持续增长): 当 buffer 已存在且大小足够时，即使有 data
-    // 也原地更新（vkMapMemory + memcpy），而不是 orphan 旧 buffer 重新分配。
+    // FIX (显存碎片化/持续增长): 当 buffer 已存在且大小足够时，优先原地更新
+    // （vkMapMemory + memcpy），而不是 orphan 旧 buffer 重新分配。
     // 原实现要求 !data 才复用，但 glBufferData 和 UBO 更新都传 data != nullptr，
     // 导致每次调用都走 orphan 路径（destroy + realloc），每帧产生上百次
     // vkCreateBuffer/vkAllocateMemory 和延迟销毁，在 iPhone SE 3 等显存紧张
     // 设备上导致 VK_ERROR_OUT_OF_DEVICE_MEMORY。
+    //
+    // FIX (GPU page fault 根因 - 覆写竞争): 原地更新必须加"在飞"检查。
+    // 若 GPU 仍在读取该 buffer（上一次写入的提交未完成），原地 memcpy 会让
+    // GPU 读到撕裂的顶点/索引数据 → GPU Address Fault。在飞时改为
+    // orphan-rename（MobileGL OnRespecify 的 busy 分支）：glBufferData 有
+    // discard 语义，无需拷贝旧内容，直接换新存储。空闲时才走快速原地路径。
     if (it != tbl.end() && it->second.size >= (VkDeviceSize)size) {
+        if (data && size > 0 && mithril::vk::buffer_maybe_inflight(it->second)) {
+            // 可能仍在飞：orphan-rename
+            mithril::vk::defer_destroy_buffer_entry(it->second);
+            mithril::vk::BufferEntry e;
+            if (!mithril::vk::create_buffer(e, size, mithril::vk::kAllGlBufferUsage, data, false)) {
+                return VK_NULL_HANDLE;
+            }
+            mithril::vk::stamp_buffer_write(e);
+            tbl[name] = e;
+            return e.buffer;
+        }
         // Buffer 已存在且容量足够：原地更新数据（如果有）
         if (data && size > 0) {
             void* dst = nullptr;
@@ -906,6 +1063,7 @@ VkBuffer backend_get_or_create_buffer(GLuint name, const void* data, size_t size
                 vkUnmapMemory(b->device, it->second.memory);
             }
         }
+        mithril::vk::stamp_buffer_write(it->second);
         return it->second.buffer;
     }
     // Buffer 不存在或容量不足：orphan 旧的，创建新的
@@ -922,14 +1080,10 @@ VkBuffer backend_get_or_create_buffer(GLuint name, const void* data, size_t size
      * used; without STORAGE_BUFFER an SSBO binding is illegal the same way.
      * Both are spec violations that a validation layer rejects outright and
      * MoltenVK may turn into a dropped draw. */
-    if (!mithril::vk::create_buffer(e, size,
-            VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
-            VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
-            VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT |
-            VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-            data, false)) {
+    if (!mithril::vk::create_buffer(e, size, mithril::vk::kAllGlBufferUsage, data, false)) {
         return VK_NULL_HANDLE;
     }
+    mithril::vk::stamp_buffer_write(e);
     tbl[name] = e;
     return e.buffer;
 }
@@ -959,6 +1113,7 @@ VkBuffer backend_create_buffer_storage(GLuint name, VkDeviceSize size,
         return VK_NULL_HANDLE;
     }
     (void)coherent;  // HOST_COHERENT is always requested by create_buffer
+    mithril::vk::stamp_buffer_write(e);
     tbl[name] = e;
     return e.buffer;
 }
@@ -969,9 +1124,25 @@ void backend_buffer_upload(GLuint name, GLintptr offset, const void* data, size_
     auto& tbl = mithril::vk::buffer_table();
     auto it = tbl.find(name);
     if (it == tbl.end()) return;
+    if (data && size > 0 && mithril::vk::buffer_maybe_inflight(it->second)) {
+        // FIX (GPU page fault 根因 - 覆写竞争): glBufferSubData /
+        // glMapBufferRange-flush 在 buffer 可能在飞时改为 staged GPU copy
+        // （MobileGL OnSubData / OnFlushMappedRange 的 busy 分支），保持
+        // GL 帧内顺序，绝不原地覆写 GPU 正在取的字节。staging 失败（罕见）
+        // 才回退原地写入。
+        if (mithril::vk::stage_buffer_range_copy(it->second,
+                                                 (VkDeviceSize)offset, data,
+                                                 (VkDeviceSize)size)) {
+            mithril::vk::stamp_buffer_write(it->second);
+            return;
+        }
+    }
     void* dst = nullptr;
-    vkMapMemory(b->device, it->second.memory, offset, size, 0, &dst);
-    if (dst) { std::memcpy(dst, data, size); vkUnmapMemory(b->device, it->second.memory); }
+    if (data && size > 0) {
+        vkMapMemory(b->device, it->second.memory, offset, size, 0, &dst);
+        if (dst) { std::memcpy(dst, data, size); vkUnmapMemory(b->device, it->second.memory); }
+    }
+    mithril::vk::stamp_buffer_write(it->second);
 }
 
 VkBuffer backend_get_buffer(GLuint name) {
@@ -1030,6 +1201,19 @@ void backend_update_generic_attribs(const float* values, int count) {
     VkBuffer existing = backend_get_buffer(kGenericAttribBufferName);
     if (existing == VK_NULL_HANDLE) {
         backend_get_or_create_buffer(kGenericAttribBufferName, values, bytes);
+        return;
+    }
+    // FIX (容量防御): 若新数据超过当前分配（首帧 attrib count 小于后续帧），
+    // 直接重建 buffer 而不是 map 越界写入。
+    auto& tbl = mithril::vk::buffer_table();
+    auto it = tbl.find(kGenericAttribBufferName);
+    if (it != tbl.end() && it->second.size < (VkDeviceSize)bytes) {
+        mithril::vk::defer_destroy_buffer_entry(it->second);
+        mithril::vk::BufferEntry e;
+        if (mithril::vk::create_buffer(e, bytes, mithril::vk::kAllGlBufferUsage, values, false)) {
+            mithril::vk::stamp_buffer_write(e);
+            tbl[kGenericAttribBufferName] = e;
+        }
         return;
     }
     backend_buffer_upload(kGenericAttribBufferName, 0, values, bytes);

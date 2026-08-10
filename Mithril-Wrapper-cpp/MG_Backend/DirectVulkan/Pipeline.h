@@ -86,6 +86,12 @@ struct UboBindingPlan {
     // is rewound, so the memo is only trusted within the same (slot, frame).
     int      lastSlot = -1;
     uint64_t lastFrameGen = 0;
+    // FIX (mid-frame flush 缓存失效 - P0): lastFlushGen must equal
+    // Backend::flushGeneration for the cached slice to be valid. A mid-frame
+    // flush (safe_device_wait_idle) rewinds the arena and re-begins the
+    // command buffer; the bytes this slice pointed at may be overwritten by
+    // later uploads in the same frame. On mismatch the next draw re-uploads.
+    uint64_t lastFlushGen = 0;
 };
 
 // One entry of the per-program descriptor-set reuse memo. When a draw resolves
@@ -164,6 +170,13 @@ struct ProgramResources {
     std::vector<VkDescriptorSet> allocatedSets[kMaxFramesInFlight];
     size_t    setCursor[kMaxFramesInFlight] = {};
     uint64_t  lastFrameGen[kMaxFramesInFlight] = {};
+    // FIX (mid-frame flush 缓存失效 - P0): per-slot flush-generation guard.
+    // When Backend::flushGeneration changes mid-frame (safe_device_wait_idle
+    // re-begins the command buffer and rewinds the arenas), the descMemo and
+    // cursor must be reset even though frameGeneration is unchanged — the
+    // cached sets hold pre-flush arena offsets that later uploads may
+    // overwrite. See bind_program_descriptors().
+    uint64_t  lastFlushGen[kMaxFramesInFlight] = {};
 
     /* ---- Dynamic-UBO mode (MoltenVK degradation gate) ----
      *

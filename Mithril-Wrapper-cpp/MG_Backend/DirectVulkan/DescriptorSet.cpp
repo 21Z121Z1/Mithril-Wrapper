@@ -63,6 +63,70 @@ static bool binding_is_dynamic_ubo(const ProgramResources& pr, uint32_t binding)
     return false;
 }
 
+// Per-pool set capacity. Minecraft 1.21.1 每帧可能绑定超过 256 个不同描述符集
+// （多种着色器 + 多个纹理单元），256 不够用导致 "descriptor pool exhausted"
+// 日志刷屏并跳过 draw。1024 足够覆盖最复杂的场景，内存开销可忽略。池耗尽时
+// bind_program_descriptors 会用 create_program_pool 扩容次级池。
+constexpr uint32_t kMaxSetsPerPool = 1024;
+
+/*
+ * Create a VkDescriptorPool sized for `pr.bindings` with room for `maxSets`
+ * sets. Pool sizing is per-SET, not per-type: a pool is consumed by both
+ * counts at once, so a program with two UBO bindings needs 2*maxSets
+ * uniform-buffer descriptors (see the sizing comment in ensure_program_layouts).
+ */
+static VkDescriptorPool create_program_pool(const ProgramResources& pr, uint32_t maxSets) {
+    Backend* b = backend();
+    if (!b->device) return VK_NULL_HANDLE;
+
+    uint32_t uboPerSet = 0, imgPerSet = 0, ssboPerSet = 0, stImgPerSet = 0;
+    for (const auto& db : pr.bindings) {
+        const uint32_t n = db.descriptorCount ? db.descriptorCount : 1u;
+        if (db.type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER)              uboPerSet += n;
+        else if (db.type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) imgPerSet += n;
+        else if (db.type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER)         ssboPerSet += n;
+        else if (db.type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)          stImgPerSet += n;
+    }
+    std::vector<VkDescriptorPoolSize> poolSizes;
+    if (uboPerSet) {
+        VkDescriptorPoolSize ps{};
+        ps.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        ps.descriptorCount = maxSets * uboPerSet;
+        poolSizes.push_back(ps);
+    }
+    if (imgPerSet) {
+        VkDescriptorPoolSize ps{};
+        ps.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        ps.descriptorCount = maxSets * imgPerSet;
+        poolSizes.push_back(ps);
+    }
+    if (ssboPerSet) {
+        VkDescriptorPoolSize ps{};
+        ps.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        ps.descriptorCount = maxSets * ssboPerSet;
+        poolSizes.push_back(ps);
+    }
+    if (stImgPerSet) {
+        VkDescriptorPoolSize ps{};
+        ps.type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        ps.descriptorCount = maxSets * stImgPerSet;
+        poolSizes.push_back(ps);
+    }
+
+    VkDescriptorPoolCreateInfo dpci{};
+    dpci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    dpci.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+    dpci.maxSets = maxSets;
+    dpci.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
+    dpci.pPoolSizes = poolSizes.data();
+
+    VkDescriptorPool pool = VK_NULL_HANDLE;
+    if (vkCreateDescriptorPool(b->device, &dpci, nullptr, &pool) != VK_SUCCESS) {
+        return VK_NULL_HANDLE;
+    }
+    return pool;
+}
+
 void ensure_program_layouts(GLuint program,
                             const uint32_t* vs, int vs_words,
                             const uint32_t* fs, int fs_words,
@@ -199,85 +263,25 @@ void ensure_program_layouts(GLuint program,
     }
 
     // ---- VkDescriptorPool (one per frame-in-flight slot) ----
-    // maxSets=256, 256 descriptors per type, PER SLOT. Created with
-    // FREE_DESCRIPTOR_SET_BIT so individual sets CAN be freed (useful if a
-    // layout is ever destroyed while cached sets survive); in practice we
-    // never free individual sets — the pool is destroyed wholesale on program
-    // deletion. Per-slot pools prevent the UAF where a shared pool reset
-    // invalidated descriptor sets still referenced by an in-flight command
-    // buffer on another slot.
+    // maxSets=1024, descriptors per type sized per-set (see create_program_pool),
+    // PER SLOT. Created with FREE_DESCRIPTOR_SET_BIT so individual sets CAN be
+    // freed (useful if a layout is ever destroyed while cached sets survive);
+    // in practice we never free individual sets — the pool is destroyed
+    // wholesale on program deletion. Per-slot pools prevent the UAF where a
+    // shared pool reset invalidated descriptor sets still referenced by an
+    // in-flight command buffer on another slot.
     //
-    // We do NOT call vkResetDescriptorPool. Instead, bind_program_descriptors
-    // rewinds a per-slot cursor at the start of each frame (after the slot's
-    // fence wait) and reuses previously allocated VkDescriptorSets. This
-    // avoids VUID-vkResetDescriptorPool-descriptorPool-00313 entirely and
-    // mirrors MobileGL's UniformManager (UniformManager.cpp:183,1026).
-    /* Pool sizing must be per-SET, not per-type.
-     *
-     * The old code asked for a flat 1024 descriptors of each type while also
-     * allowing maxSets = 1024. A descriptor pool is consumed by both counts at
-     * once: allocating N sets from a layout with K uniform buffers costs N*K
-     * uniform-buffer descriptors. So a program with two UBO bindings ran out
-     * after 512 sets, and one with four samplers after 256 — vkAllocate then
-     * failed mid-frame and the draw was dropped.
-     *
-     * That stayed hidden while every program had exactly one UBO (the
-     * synthetic global block). Application-declared blocks make two or more
-     * the normal case, so the arithmetic has to be right.
-     */
-    const uint32_t kMaxSets = 1024;
-    uint32_t uboPerSet = 0, imgPerSet = 0, ssboPerSet = 0, stImgPerSet = 0;
-    for (const auto& db : pr.bindings) {
-        const uint32_t n = db.descriptorCount ? db.descriptorCount : 1u;
-        if (db.type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER)              uboPerSet += n;
-        else if (db.type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) imgPerSet += n;
-        else if (db.type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER)         ssboPerSet += n;
-        else if (db.type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)          stImgPerSet += n;
-    }
-    std::vector<VkDescriptorPoolSize> poolSizes;
-    if (uboPerSet) {
-        VkDescriptorPoolSize ps{};
-        ps.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-        ps.descriptorCount = kMaxSets * uboPerSet;
-        poolSizes.push_back(ps);
-    }
-    if (imgPerSet) {
-        VkDescriptorPoolSize ps{};
-        ps.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        ps.descriptorCount = kMaxSets * imgPerSet;
-        poolSizes.push_back(ps);
-    }
-    if (ssboPerSet) {
-        VkDescriptorPoolSize ps{};
-        ps.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        ps.descriptorCount = kMaxSets * ssboPerSet;
-        poolSizes.push_back(ps);
-    }
-    if (stImgPerSet) {
-        VkDescriptorPoolSize ps{};
-        ps.type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-        ps.descriptorCount = kMaxSets * stImgPerSet;
-        poolSizes.push_back(ps);
-    }
-    VkDescriptorPoolCreateInfo dpci{};
-    dpci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    // FREE_DESCRIPTOR_SET_BIT lets a destroyed layout's cached sets be freed
-    // back to the pool (MobileGL UniformManager.cpp:952 does the same). Even
-    // though we currently rely on pool destruction to reclaim all sets, the
-    // flag is cheap and keeps the option open for future layout-eviction
-    // paths.
-    dpci.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
-    // FIX (descriptor pool exhausted): maxSets 从 256 增大到 1024。Minecraft 1.21.1
-    // 每帧可能绑定超过 256 个不同描述符集（多种着色器 + 多个纹理单元），
-    // 256 不够用导致 "descriptor pool exhausted" 日志刷屏并跳过 draw。
-    // 1024 足够覆盖最复杂的场景，且内存开销可忽略（每个 set 约 100 字节）。
-    dpci.maxSets = kMaxSets;
-    dpci.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
-    dpci.pPoolSizes = poolSizes.data();
+    // We do NOT call vkResetDescriptorPool in the normal path. Instead,
+    // bind_program_descriptors rewinds a per-slot cursor at the start of each
+    // frame (after the slot's fence wait) and reuses previously allocated
+    // VkDescriptorSets. This avoids VUID-vkResetDescriptorPool-descriptorPool
+    // -00313 entirely and mirrors MobileGL's UniformManager
+    // (UniformManager.cpp:183,1026).
+    const uint32_t kMaxSets = kMaxSetsPerPool;
     for (int i = 0; i < kMaxFramesInFlight; ++i) {
-        if (vkCreateDescriptorPool(b->device, &dpci, nullptr, &pr.descriptorPools[i]) != VK_SUCCESS) {
+        pr.descriptorPools[i] = create_program_pool(pr, kMaxSets);
+        if (pr.descriptorPools[i] == VK_NULL_HANDLE) {
             MITHRIL_LOG_WARN("vk", "vkCreateDescriptorPool failed (program %u, slot %d)", program, i);
-            pr.descriptorPools[i] = VK_NULL_HANDLE;
             // Layout is still valid; bind_program_descriptors skips slots with a null pool.
         }
     }
@@ -598,9 +602,17 @@ void bind_program_descriptors(GLuint program, VkPipelineBindPoint bindPoint) {
     // MobileGL's UniformManager (UniformManager.cpp:183,1026), which also
     // avoids vkResetDescriptorPool in favor of cursor rewind + set reuse,
     // eliminating any VUID-vkResetDescriptorPool-descriptorPool-00313 hazard.
-    if (pr.lastFrameGen[slot] != b->frameGeneration) {
+    //
+    // FIX (mid-frame flush 缓存失效 - P0): ensure_command_buffer_recording 在
+    // 帧中间被 safe_device_wait_idle 触发时会再次 rewind arena 并 bump
+    // flushGeneration。本帧前半段写入的 descMemo 条目持有 flush 前的 set
+    // 内容（arena 偏移已失效），必须一并作废，否则后续 draw 会复用指向
+    // 已被覆盖 arena 内存的 set。
+    if (pr.lastFrameGen[slot] != b->frameGeneration ||
+        pr.lastFlushGen[slot] != b->flushGeneration) {
         pr.setCursor[slot] = 0;
         pr.lastFrameGen[slot] = b->frameGeneration;
+        pr.lastFlushGen[slot] = b->flushGeneration;
         /* The cached sets this slot owns are about to be handed out again and
          * REWRITTEN by this frame's draws, so every memo entry naming one is
          * now a promise we can no longer keep. Dropping the memo here is what
@@ -749,15 +761,18 @@ void bind_program_descriptors(GLuint program, VkPipelineBindPoint bindPoint) {
                 /* Content hash decides whether this draw needs its own bytes.
                  *
                  * The previous slice is only reusable inside the same
-                 * (slot, frame): a slot's arena is rewound once its fence is
-                 * signalled, after which those bytes belong to whoever
-                 * bump-allocates them next.
+                 * (slot, frame, flush): a slot's arena is rewound once its
+                 * fence is signalled (after which those bytes belong to
+                 * whoever bump-allocates them next), and ALSO when a mid-frame
+                 * flush re-begins the command buffer (flushGeneration bump) —
+                 * a stale slice there would be overwritten by later uploads.
                  */
                 const uint64_t h = fnv1a(plan.scratch.data(), plan.scratch.size());
                 const bool sliceLive = plan.lastValid &&
                                        plan.lastBuffer != VK_NULL_HANDLE &&
                                        plan.lastSlot == slot &&
-                                       plan.lastFrameGen == b->frameGeneration;
+                                       plan.lastFrameGen == b->frameGeneration &&
+                                       plan.lastFlushGen == b->flushGeneration;
                 if (!sliceLive || plan.lastHash != h) {
                     UboSlice sl;
                     if (!ubo_arena_upload(slot, plan.scratch.data(),
@@ -786,6 +801,7 @@ void bind_program_descriptors(GLuint program, VkPipelineBindPoint bindPoint) {
                     plan.lastValid    = true;
                     plan.lastSlot     = slot;
                     plan.lastFrameGen = b->frameGeneration;
+                    plan.lastFlushGen = b->flushGeneration;
                 }
                 ubuf   = plan.lastBuffer;
                 uoff   = plan.lastOffset;
@@ -1152,32 +1168,52 @@ void bind_program_descriptors(GLuint program, VkPipelineBindPoint bindPoint) {
             dsai.pSetLayouts = &pr.descriptorSetLayout;
             if (vkAllocateDescriptorSets(b->device, &dsai, &set) != VK_SUCCESS) {
                 // Pool exhausted mid-frame (>1024 distinct sets this frame for
-                // this program). FIX: 重置描述符池并重试，而不是跳过 draw。
-                // 原实现跳过 draw 会导致渲染残缺，且每帧都会刷屏日志。
-                // 重置池会失效已分配的 set，但由于我们在帧开头已经 rewind 了
-                // cursor，当前帧的 set 都是在本次 rewind 后分配的，重置后重新
-                // 分配是安全的（前提：当前帧已绑定的 set 不再被后续 draw 使用，
-                // 因为 pipeline bind 会覆盖之前的 descriptor bind）。
+                // this program).
+                //
+                // FIX (descriptor pool UAF - GPU page fault 根因): 旧实现在这里
+                // 调 vkResetDescriptorPool —— 但当前 command buffer 仍在录制，
+                // 更早的 draw 已经通过 vkCmdBindDescriptorSets 引用了本池的 set。
+                // reset 释放这些 set 后，GPU 执行该 command buffer 时读取已释放的
+                // descriptor 内存 → GPU Address Fault (kIOGPUCommandBufferCallback
+                // ErrorPageFault)。VUID-vkResetDescriptorPool-descriptorPool-00313
+                // 明确禁止在 set 仍被录制中的 command buffer 引用时 reset。
+                //
+                // 修复（对照 MobileGL UniformManager 的增长策略）：不 reset 旧池，
+                // 而是创建一个新的次级池继续分配，旧池（连同其所有 set）延迟到
+                // slot fence 完成后才销毁。当前帧已绑定的 set 保持有效。
                 static int poolExhaustedLogCount = 0;
                 poolExhaustedLogCount++;
                 if (poolExhaustedLogCount <= 3 || poolExhaustedLogCount % 100 == 0) {
                     MITHRIL_LOG_WARN("vk", "vkAllocateDescriptorSets failed (program %u, slot %d, "
-                                      "gen %llu) — descriptor pool exhausted; resetting pool "
-                                      "(log %d)",
+                                      "gen %llu) — descriptor pool exhausted; growing a secondary "
+                                      "pool (log %d)",
                                       program, slot, (unsigned long long)b->frameGeneration,
                                       poolExhaustedLogCount);
                 }
-                vkResetDescriptorPool(b->device, pr.descriptorPools[slot], 0);
+                VkDescriptorPool oldPool = pr.descriptorPools[slot];
+                VkDescriptorPool newPool = create_program_pool(pr, kMaxSetsPerPool);
+                if (newPool == VK_NULL_HANDLE) {
+                    return;  // 次级池创建失败，放弃本次 bind（下次 draw 重试）
+                }
+                // 旧池可能仍被当前 command buffer 引用 —— 延迟到 fence 后销毁。
+                if (oldPool != VK_NULL_HANDLE) {
+                    DeferredDestroy dd;
+                    dd.pool = oldPool;
+                    b->disposalQueue[b->currentFrame].push_back(dd);
+                }
+                pr.descriptorPools[slot] = newPool;
+                // 新池没有任何已分配 set；旧池的缓存集合全部作废（它们属于旧池）。
                 pr.allocatedSets[slot].clear();
                 pr.setCursor[slot] = 0;
-                // The reset freed every set in this pool, so every memo entry
-                // (and the bind shadow, which may name one of them) is dangling.
+                // 旧池的 set 已随旧池延迟销毁，memo（和 bind shadow）里指向它们的
+                // 记录必须作废，否则后续 draw 会复用已失效的 set。
                 for (int i = 0; i < kDescriptorMemoSize; ++i) {
                     pr.descMemo[slot][i] = DescriptorMemoEntry{};
                 }
                 pr.descMemoNext[slot] = 0;
                 on_command_buffer_boundary();
-                // 重试分配
+                // 从新池重试分配
+                dsai.descriptorPool = newPool;
                 if (vkAllocateDescriptorSets(b->device, &dsai, &set) != VK_SUCCESS) {
                     return;  // 重试仍失败，放弃本次 bind
                 }
@@ -1288,6 +1324,7 @@ void reset_all_descriptor_pools() {
             pr.allocatedSets[i].clear();
             pr.setCursor[i] = 0;
             pr.lastFrameGen[i] = 0;
+            pr.lastFlushGen[i] = 0;
             for (int j = 0; j < kDescriptorMemoSize; ++j) {
                 pr.descMemo[i][j] = DescriptorMemoEntry{};
             }

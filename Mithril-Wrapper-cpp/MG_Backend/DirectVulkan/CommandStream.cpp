@@ -546,6 +546,16 @@ bool ensure_command_buffer_recording() {
      * recycle memory the GPU has not finished with. */
     ubo_arena_rewind(b->currentFrame);
 
+    /* FIX (mid-frame flush 缓存失效 - P0): 到达这里意味着当前 slot 的 arena
+     * 刚被 rewind（staging + UBO）。在"真帧边界"这无害 —— descMemo / UBO
+     * plan 本来就会在下一帧通过 frameGeneration 检查作废。但在帧中间发生
+     * flush（safe_device_wait_idle / drain_and_detach_swapchain 提交了当前
+     * command buffer 后重新 begin）时，本帧前半段分配 arena 切片写成的
+     * descriptor set 与 plan.lastOffset 仍指向这些刚被 rewind 的字节 ——
+     * 后续同帧 draw 复用它们会读到被覆盖的数据。bump flushGeneration 让
+     * bind_program_descriptors 作废这些缓存（见 DescriptorSet.cpp）。 */
+    b->flushGeneration++;
+
     /* A freshly begun command buffer has no descriptor sets bound, so the
      * bind-dedup shadow inside DescriptorSet.cpp must be dropped — otherwise
      * the first draw of the frame would "recognise" a binding that only

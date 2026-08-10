@@ -43,6 +43,15 @@ struct DeferredDestroy {
     VkImageView    view = VK_NULL_HANDLE;
     VkDeviceMemory memory = VK_NULL_HANDLE;
     VkSampler      sampler = VK_NULL_HANDLE;
+    // FIX (descriptor pool UAF - P0): a VkDescriptorPool whose sets may still
+    // be referenced by an in-flight command buffer. When a per-program pool is
+    // exhausted MID-RECORDING (see DescriptorSet.cpp), we now grow a secondary
+    // pool instead of vkResetDescriptorPool — resetting frees sets that draws
+    // already recorded in the current command buffer still reference, and when
+    // the GPU executes those draws it reads freed descriptor memory → GPU page
+    // fault (kIOGPUCommandBufferCallbackErrorPageFault). The retired pool is
+    // deferred here and destroyed only after the slot's fence signals.
+    VkDescriptorPool pool = VK_NULL_HANDLE;
     // FIX (MobileGL-style VRAM monitoring): byte size of the memory allocation
     // being freed, so drain_disposal_queue can decrement currentVramBytes.
     // Only set for entries that own a VkDeviceMemory (buffer/texture main alloc
@@ -124,6 +133,20 @@ struct Backend {
     // frame would never see a reset — the monotonic counter fixes that). The
     // value seen by every draw within a single frame is constant.
     uint64_t frameGeneration = 0;
+
+    // FIX (mid-frame flush 缓存失效 - P0): bumped by safe_device_wait_idle()
+    // every time it submits the current command buffer mid-frame and re-begins
+    // it. ensure_command_buffer_recording() then rewinds the UBO arena / staging
+    // arena, which invalidates:
+    //   * per-program UBO plan caches (plan.lastOffset points at arena bytes
+    //     that later uploads may overwrite after the rewind),
+    //   * per-(program,slot) descriptor-set memos (sets written before the
+    //     flush still name pre-flush arena offsets),
+    //   * the descriptor bind shadow.
+    // DescriptorSet.cpp compares each cache against this counter and drops it on
+    // mismatch, so a post-flush draw never binds a descriptor whose dynamic
+    // offset targets rewound (overwritten) arena memory.
+    uint64_t flushGeneration = 0;
 
     // FIX (GL sync correctness — glFenceSync / glClientWaitSync):
     // glFenceSync must not report "already signaled" immediately, otherwise
@@ -224,10 +247,16 @@ struct Backend {
     // 它用 OS 原生 API 获取真实内存上限，跟踪已分配字节数，在高位时主动 drain +
     // rewind transient arena + DestroyAll pipeline cache。
     //
-    // 预算来源：os_proc_available_memory() * 25%，硬上限 256MB，下限 96MB。
+    // 预算来源：os_proc_available_memory() * 25%，硬上限 512MB，下限 96MB。
     // GC 阈值 50% — 在驱动 GPU Address Fault 之前触发。
     // 临界阈值 65% — 额外驱逐 pipeline cache + descriptor pools。
-    VkDeviceSize     totalVramBytes = 0;       // GPU 显存预算（≤256MB）
+    // 注意：256MB 上限曾是"GPU Address Fault 之前安全"的保守估计，但那些
+    // fault 的真正根因是资源生命周期错误（drawable 池不匹配 / descriptor UAF /
+    // buffer 覆写竞争），已在 P0 修复中消除。iPhone X 有 ~2GB 统一内存可给
+    // GPU，512MB 上限在修复后是安全的，且避免 256MB 下每帧触发 mid-frame
+    // GC flush（safe_device_wait_idle 提交+重开 command buffer，本身有性能
+    // 与一致性的代价）。
+    VkDeviceSize     totalVramBytes = 0;       // GPU 显存预算（≤512MB）
     VkDeviceSize     currentVramBytes = 0;     // 运行时已分配字节数
     VkDeviceSize     vramPressureThreshold = 0; // GC 触发阈值（50% of totalVramBytes）
 
