@@ -76,9 +76,12 @@ if(APPLE)
     enable_language(OBJCXX)
     set(CMAKE_OBJCXX_STANDARD 17)
     set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
-    target_sources(mithril PRIVATE src/metal/engine.mm)
+    # engine_apple.mm includes the shared engine implementation and replaces
+    # only the CAMetalLayer presentation seam. Do not compile engine.mm as a
+    # second translation unit or SetNativeWindow/Present would be duplicated.
+    target_sources(mithril PRIVATE src/metal/engine_apple.mm)
     target_compile_definitions(mithril PRIVATE MITHRIL_HAS_DIRECT_METAL=1)
-    set_source_files_properties(src/metal/engine.mm PROPERTIES
+    set_source_files_properties(src/metal/engine_apple.mm PROPERTIES
         COMPILE_FLAGS "-fobjc-arc")
     target_link_libraries(mithril PRIVATE
         spirv-cross-msl
