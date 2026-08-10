@@ -148,6 +148,19 @@ struct Backend {
     // offset targets rewound (overwritten) arena memory.
     uint64_t flushGeneration = 0;
 
+    // FIX (GPU page fault root cause — re-entrant mid-frame purge):
+    // reset_all_descriptor_pools() / clear_all_pipeline_caches() are only safe
+    // when the current command buffer has NO live descriptor-set / pipeline
+    // binds (i.e. after a safe_device_wait_idle that flushed and re-begun an
+    // empty buffer). When an OOM/critical-pressure GC path requests a purge
+    // while a buffer is actively recording with binds, we must NOT run it
+    // re-entrantly (it would vkResetDescriptorPool the current slot's pool,
+    // invalidating the very sets the recording buffer already references ->
+    // kIOGPUCommandBufferCallbackErrorPageFault at the next submit). Instead we
+    // set this flag and defer the purge to the next safe point
+    // (process_pending_purge, called after the command buffer is flushed/re-begun).
+    bool pendingPurge = false;
+
     // FIX (GL sync correctness — glFenceSync / glClientWaitSync):
     // glFenceSync must not report "already signaled" immediately, otherwise
     // Sodium's persistent mapped-upload ring buffer overwrites a region the GPU

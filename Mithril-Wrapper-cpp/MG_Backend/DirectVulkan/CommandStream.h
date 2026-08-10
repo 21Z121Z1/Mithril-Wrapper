@@ -20,6 +20,17 @@ struct Swapchain;
 // begin_render_pass() and end_render_pass()).
 bool render_pass_active();
 
+// True when a valid VkDescriptorSet has been bound into the CURRENT command
+// buffer since the last command-buffer boundary (fresh begin / memo flush /
+// pool growth). bind_program_descriptors() sets it true right before issuing
+// vkCmdBindDescriptorSets; every command-buffer boundary resets it false.
+// backend_draw_* refuses to record a vkCmdDraw when it is false, because a
+// draw with an unbound / garbage descriptor set makes MoltenVK sample
+// undefined memory (pure-red geometry) and, on A11's Metal 2, can fault the
+// GPU (kIOGPUCommandBufferCallbackErrorPageFault) at the next vkQueueSubmit.
+void set_descriptors_bound(bool bound);
+bool descriptors_bound();
+
 // Pending clear values applied to the load op of the next render pass.
 void set_clear_color(float r, float g, float b, float a);
 void set_clear_depth(double d);

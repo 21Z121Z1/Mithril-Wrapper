@@ -496,8 +496,12 @@ bool backend_proactive_gc_if_needed() {
         // so purging pipelines/pools afterwards cannot invalidate a bound set. The
         // pipeline/pool caches are recreated on the next draw.
         safe_device_wait_idle();
-        clear_all_pipeline_caches();
-        reset_all_descriptor_pools();
+        // FIX (GPU page fault root cause — re-entrant purge): route through
+        // request_purge() so the purge can never run while the buffer holds
+        // live descriptor-set / pipeline binds. safe_device_wait_idle() above
+        // normally flushes+re-begins it empty (safe), but request_purge()
+        // guarantees the invariant and defers to the next safe boundary if not.
+        request_purge();
     }
     return true;
 }

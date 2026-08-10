@@ -259,8 +259,15 @@ VkResult try_allocate_memory_with_gc(VkDevice device, const VkMemoryAllocateInfo
                           gcTriggerCount,
                           (unsigned long long)(b->currentVramBytes / (1024*1024)));
     }
-    clear_all_pipeline_caches();
-    reset_all_descriptor_pools();
+    // FIX (GPU page fault root cause — re-entrant purge): NEVER purge while the
+    // command buffer is still recording with live descriptor-set / pipeline
+    // binds. Even though safe_device_wait_idle() above flushed+re-begun the
+    // buffer empty (making the purge safe in the common case), routing through
+    // request_purge() guarantees it: if the buffer happens to still hold live
+    // binds it defers to the next safe command-buffer boundary instead of
+    // vkResetDescriptorPool'ing the very sets the recording buffer references
+    // (-> kIOGPUCommandBufferCallbackErrorPageFault at the next submit).
+    request_purge();
     r = vkAllocateMemory(device, info, allocator, memory);
     if (r == VK_SUCCESS) {
         if (gcTriggerCount <= 5 || gcTriggerCount % 50 == 0) {

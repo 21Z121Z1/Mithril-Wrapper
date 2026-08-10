@@ -74,6 +74,12 @@ bool format_has_alpha(VkFormat fmt) {
 struct EncoderState {
     bool passActive = false;
     VkPipeline boundPipeline = VK_NULL_HANDLE;
+    // True once a valid VkDescriptorSet has been bound into the current
+    // command buffer (set by bind_program_descriptors just before
+    // vkCmdBindDescriptorSets). backend_draw_* requires it: a vkCmdDraw with
+    // an unbound descriptor set makes MoltenVK sample undefined memory -> pure
+    // red geometry, and on A11 can fault the GPU at the next submit.
+    bool descriptorsBound = false;
 
     // Pending clear values (applied to the load op of the next pass).
     float clearColor[4] = {0, 0, 0, 0};
@@ -307,6 +313,13 @@ void record_layout_barrier(VkCommandBuffer cb, VkImage image, VkFormat format,
 
 bool render_pass_active() { return encoder().passActive; }
 
+// Accessors for the "valid descriptor set bound in the current command buffer"
+// flag (see EncoderState::descriptorsBound). Defined here because encoder() is
+// an anonymous-namespace object in this TU; DescriptorSet.cpp sets it via
+// set_descriptors_bound() and backend_draw_* reads it via descriptors_bound().
+void set_descriptors_bound(bool bound) { encoder().descriptorsBound = bound; }
+bool descriptors_bound() { return encoder().descriptorsBound; }
+
 /*
  * ---- Root cause AI (CRITICAL, SIGSEGV inside MVKRenderSubpass) ----
  * Last line of defence before any vkCmdDraw* is recorded.
@@ -358,6 +371,31 @@ bool draw_recording_allowed(const char* who) {
                                    "dropped (undefined behaviour otherwise). "
                                    "Pipeline creation most likely failed; see "
                                    "prior warnings.", who);
+        }
+        return false;
+    }
+    // FIX (GPU page fault / pure-red from frame 1): a vkCmdDraw is only legal
+    // when a valid descriptor set is bound for the current command buffer.
+    // bind_program_descriptors() can bail early (uniform-arena upload failure,
+    // incomplete-set guard, descriptor-pool growth retry failure) AFTER the
+    // pipeline is bound but BEFORE issuing vkCmdBindDescriptorSets. Recording
+    // the draw anyway makes MoltenVK sample an unbound / garbage descriptor
+    // set -> geometry renders pure red and, on A11's Metal 2, can fault the
+    // GPU at the next vkQueueSubmit (kIOGPUCommandBufferCallbackErrorPageFault,
+    // the exact crash in the log: clean wrapper logs, then the first submit
+    // faults). Drop the draw instead: it is safer to miss one draw than to
+    // submit one referencing undefined memory. The flag is reset at every
+    // command-buffer boundary (on_command_buffer_boundary / fresh begin).
+    if (!e.descriptorsBound) {
+        static uint32_t warned = 0;
+        if (warned < 8) {
+            ++warned;
+            MITHRIL_LOG_WARN("vk", "%s: no valid descriptor set bound in this "
+                                   "command buffer — draw dropped (recording it "
+                                   "would sample undefined descriptors -> red / "
+                                   "GPU page fault). bind_program_descriptors "
+                                   "most likely bailed earlier; see prior "
+                                   "warnings.", who);
         }
         return false;
     }
@@ -567,6 +605,19 @@ bool ensure_command_buffer_recording() {
      * re-begun buffer has no pipeline bound, so the tracking handle must be
      * cleared here or backend_draw_* would wrongly believe one is live. */
     encoder().boundPipeline = VK_NULL_HANDLE;
+    // A freshly begun command buffer has no descriptor set bound either.
+    // Reset the flag so backend_draw_* refuses a draw until bind_program_
+    // descriptors() actually binds a set into this buffer.
+    encoder().descriptorsBound = false;
+
+    // FIX (GPU page fault root cause — re-entrant mid-frame purge): this is a
+    // genuine command-buffer boundary: the buffer was just flushed (fence
+    // waited above or via safe_device_wait_idle) and re-begun EMPTY — no render
+    // pass open, no descriptor set bound. Any purge deferred earlier by
+    // request_purge() (OOM / critical-pressure GC while a draw was mid-record)
+    // is now safe to run: it cannot invalidate a set/pipeline the buffer
+    // references. Run it before the first draw of the new buffer.
+    process_pending_purge();
 
     return true;
 }

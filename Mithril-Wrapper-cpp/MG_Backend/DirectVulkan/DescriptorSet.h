@@ -91,6 +91,27 @@ void invalidate_descriptor_memo();
 void reset_all_descriptor_pools();
 
 /*
+ * FIX (GPU page fault root cause — re-entrant mid-frame purge):
+ * Request a full pipeline + descriptor-pool purge. reset_all_descriptor_pools()
+ * + clear_all_pipeline_caches() are only safe when the current command buffer
+ * has NO live descriptor-set / pipeline binds. If one is actively recording
+ * (a render pass open, or a descriptor set already vkCmdBindDescriptorSets'd
+ * into it), purging re-entrantly would vkResetDescriptorPool the current slot's
+ * pool — invalidating the sets that buffer already references — and destroy
+ * its bound pipeline, so the next vkQueueSubmit faults the GPU
+ * (kIOGPUCommandBufferCallbackErrorPageFault). In that case this defers the
+ * purge to process_pending_purge(), run at the next safe command-buffer
+ * boundary (see ensure_command_buffer_recording). If it is already safe it
+ * runs immediately.
+ */
+void request_purge();
+
+// Run the deferred purge now if (a) one is pending and (b) it is safe (the
+// current buffer is not recording with live binds). Called at command-buffer
+// boundaries after the buffer has been flushed/re-begun empty.
+void process_pending_purge();
+
+/*
  * Ensure the process-wide default 1x1 black texture (view + sampler) is ready.
  * Returns true iff a valid (view, sampler) pair is available for the descriptor
  * completeness fallback.

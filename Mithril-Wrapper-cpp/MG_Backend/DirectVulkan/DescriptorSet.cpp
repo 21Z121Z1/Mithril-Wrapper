@@ -561,6 +561,11 @@ void on_command_buffer_boundary() {
         sh.set = VK_NULL_HANDLE;
         sh.dynOffsets.clear();  // keeps capacity; only the contents are stale
     }
+    // A command-buffer boundary means the buffer was flushed/re-begun or its
+    // cached descriptor sets were dropped; no valid set is bound until
+    // bind_program_descriptors() issues a fresh vkCmdBindDescriptorSets. Clear
+    // the flag so backend_draw_* refuses a draw with unbound descriptors.
+    mithril::vk::set_descriptors_bound(false);
 }
 
 void bind_program_descriptors(GLuint program, VkPipelineBindPoint bindPoint) {
@@ -577,9 +582,21 @@ void bind_program_descriptors(GLuint program, VkPipelineBindPoint bindPoint) {
     if (it == tbl.end()) return;
     ProgramResources& pr = it->second;
     int slot = b->currentFrame;
-    if (!pr.layoutsBuilt || pr.bindings.empty() ||
-        pr.pipelineLayout == VK_NULL_HANDLE ||
+    if (!pr.layoutsBuilt || pr.pipelineLayout == VK_NULL_HANDLE ||
         pr.descriptorPools[slot] == VK_NULL_HANDLE) {
+        // Program not ready (layouts not built / no layout / no pool). Bail: the
+        // descriptors_bound() guard in backend_draw_* will drop the draw, which is
+        // safer than recording it with an unbound descriptor set (red + possible
+        // GPU page fault).
+        return;
+    }
+    if (pr.bindings.empty()) {
+        // No descriptor bindings reflected for this program -> its pipeline uses
+        // the process-wide empty layout (zero descriptor sets). No
+        // vkCmdBindDescriptorSets is needed or possible; a draw is valid with
+        // nothing bound. Mark the descriptor requirement as satisfied so the
+        // descriptors_bound() guard does not wrongly drop these draws.
+        mithril::vk::set_descriptors_bound(true);
         return;
     }
 
@@ -1327,7 +1344,16 @@ void bind_program_descriptors(GLuint program, VkPipelineBindPoint bindPoint) {
      * identical vkCmdBindDescriptorSets, which MoltenVK turns into real Metal
      * argument-buffer rebinding work. The shadow is command-buffer scoped and
      * cleared by on_command_buffer_boundary().
+     *
+     * Reaching this point means we hold a COMPLETE, valid `set` (all early
+     * bails — layout missing, uniform-arena upload failure, pool-growth retry
+     * failure, incomplete-set guard — are above). Whether we then bind it here
+     * or a prior identical draw already bound it (sameAsBound below), the
+     * current command buffer now has a valid descriptor set bound. Publish that
+     * so backend_draw_* (via descriptors_bound()) refuses to record a vkCmdDraw
+     * with an unbound descriptor set (the pure-red + GPU page-fault hazard).
      */
+    mithril::vk::set_descriptors_bound(true);
     BindShadow& sh = g_bindShadow[bind_point_index(bindPoint)];
     const bool sameAsBound =
         sh.valid && sh.cb == b->commandBuffer &&
@@ -1420,6 +1446,45 @@ void reset_all_descriptor_pools() {
         MITHRIL_LOG_INFO("vk", "reset_all_descriptor_pools: reset %d pools across "
                           "%zu programs (device recovery)", resetCount, tbl.size());
     }
+}
+
+// FIX (GPU page fault root cause — re-entrant mid-frame purge): see the
+// declaration in DescriptorSet.h. reset_all_descriptor_pools() resets the
+// CURRENT slot's pool, which frees any descriptor set already bound into the
+// still-recording command buffer (VUID-vkResetDescriptorPool-descriptorPool
+// -00313), and clear_all_pipeline_caches() destroys the pipeline that buffer
+// references. Running either while a buffer is actively recording with live
+// binds makes the next vkQueueSubmit read freed descriptor/pipeline memory ->
+// kIOGPUCommandBufferCallbackErrorPageFault. So a purge requested from an OOM
+// / critical-pressure GC path is deferred to a safe boundary when binds are
+// live. The buffer's own contents are otherwise fence-gated, so at a genuine
+// boundary (no pass open AND no descriptor set bound) the purge is safe.
+void request_purge() {
+    Backend* b = backend();
+    if (!b->device) return;
+    const bool liveBinds =
+        b->commandBufferRecording && (render_pass_active() || descriptors_bound());
+    if (liveBinds) {
+        // Mid-draw: cannot purge now without faulting the GPU. Defer to the next
+        // safe command-buffer boundary (process_pending_purge, called from
+        // ensure_command_buffer_recording after the buffer is flushed/re-begun).
+        b->pendingPurge = true;
+        return;
+    }
+    clear_all_pipeline_caches();
+    reset_all_descriptor_pools();
+    b->pendingPurge = false;
+}
+
+void process_pending_purge() {
+    Backend* b = backend();
+    if (!b->device || !b->pendingPurge) return;
+    if (b->commandBufferRecording && (render_pass_active() || descriptors_bound())) {
+        return;  // still not safe; stay deferred
+    }
+    clear_all_pipeline_caches();
+    reset_all_descriptor_pools();
+    b->pendingPurge = false;
 }
 
 } // namespace vk
