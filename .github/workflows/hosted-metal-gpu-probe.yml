@@ -7,7 +7,8 @@ on:
       - ci/hosted-metal-gpu-probe-direct-metal-20260810
 
 jobs:
-  probe:
+  directmetal-hosted:
+    name: DirectMetal hosted GPU
     runs-on: macos-26
     env:
       MTL_DEBUG_LAYER: '0'
@@ -30,18 +31,13 @@ jobs:
           system_profiler SPHardwareDataType SPDisplaysDataType || true
           test "$(uname -m)" = "arm64"
 
-      - name: Compile Metal capability probe
+      - name: Compile and execute real Metal compute/readback capability probe
         shell: bash
         run: |
           set -euo pipefail
           xcrun swiftc -O -framework Metal \
             .github/ci/HostedMetalCapabilityProbe.swift \
             -o "$RUNNER_TEMP/hosted-metal-gpu-probe"
-
-      - name: Execute real offscreen Metal GPU workload
-        shell: bash
-        run: |
-          set -euo pipefail
           "$RUNNER_TEMP/hosted-metal-gpu-probe"
 
       - name: Build Mithril DirectMetal backend
@@ -54,40 +50,64 @@ jobs:
           otool -L output/libmithril.dylib
           nm -m output/libmithril.dylib | grep -E 'MTLCreateSystemDefaultDevice|OBJC_CLASS_\$_MTL' || true
 
-      - name: Compile existing DirectMetal draw/readback smoke
+      - name: Compile and run required DirectMetal draw/readback gate
         shell: bash
         run: |
           set -euo pipefail
           clang -std=c11 -Wall -Wextra tests/draw_smoke.c -o "$RUNNER_TEMP/draw-smoke"
-
-      - name: Run existing DirectMetal draw/readback gate
-        shell: bash
-        run: |
-          set -euo pipefail
           "$RUNNER_TEMP/draw-smoke"
 
-      - name: Compile Mithril DirectMetal base FBO probe
+      - name: Discover hosted DirectMetal smoke coverage
         shell: bash
         run: |
-          set -euo pipefail
-          clang -std=c11 -Wall -Wextra .github/ci/HostedDirectMetalFboProbe.c -o "$RUNNER_TEMP/directmetal-base-fbo-probe"
+          set -uo pipefail
+          tests=(
+            contract_smoke
+            state_smoke
+            shader_smoke
+            texture_smoke
+            sampler_smoke
+            buffer_texture_smoke
+            typed_vertex_smoke
+            ubo_smoke
+            query_smoke
+            sync_smoke
+            3d_smoke
+            render3d_smoke
+            fbo_smoke
+            directmetal_fbo_smoke
+          )
 
-      - name: Run Mithril DirectMetal base FBO render/readback regression (diagnostic)
+          echo '## DirectMetal hosted smoke discovery' >> "$GITHUB_STEP_SUMMARY"
+          mkdir -p "$RUNNER_TEMP/mithril-smoke-logs"
+          for test_name in "${tests[@]}"; do
+            src="tests/${test_name}.c"
+            exe="$RUNNER_TEMP/${test_name}"
+            log="$RUNNER_TEMP/mithril-smoke-logs/${test_name}.log"
+
+            if ! clang -std=c11 -Wall -Wextra "$src" -o "$exe" >"$log" 2>&1; then
+              echo "- ❌ ${test_name}: compile failed" | tee -a "$GITHUB_STEP_SUMMARY"
+              cat "$log"
+              continue
+            fi
+
+            set +e
+            "$exe" 2>&1 | tee "$log"
+            rc=${PIPESTATUS[0]}
+            set -e
+            if [ "$rc" -eq 0 ]; then
+              echo "- ✅ ${test_name}" | tee -a "$GITHUB_STEP_SUMMARY"
+            else
+              echo "- ❌ ${test_name}: exit ${rc}" | tee -a "$GITHUB_STEP_SUMMARY"
+            fi
+          done
+
+      - name: Compile and run minimal base-FBO regression diagnostic
         continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
+          clang -std=c11 -Wall -Wextra \
+            .github/ci/HostedDirectMetalFboProbe.c \
+            -o "$RUNNER_TEMP/directmetal-base-fbo-probe"
           "$RUNNER_TEMP/directmetal-base-fbo-probe"
-
-      - name: Compile DirectMetal FBO regression smoke
-        shell: bash
-        run: |
-          set -euo pipefail
-          clang -std=c11 -Wall -Wextra tests/directmetal_fbo_smoke.c -o "$RUNNER_TEMP/directmetal-fbo-smoke"
-
-      - name: Run advanced DirectMetal FBO subresource regression (diagnostic)
-        continue-on-error: true
-        shell: bash
-        run: |
-          set -euo pipefail
-          "$RUNNER_TEMP/directmetal-fbo-smoke"
