@@ -1347,12 +1347,32 @@ void invalidate_descriptor_memo() {
         for (int i = 0; i < kMaxFramesInFlight; ++i) {
             // Clear the memo entries so a cached set referencing a just-destroyed
             // resource is never returned by bind_program_descriptors' memo hit.
-            // Do NOT touch setCursor/lastFrameGen: the setCursor reuse path
-            // REWRITES the set with fresh descriptors, so it stays safe.
+            //
+            // FIX (GPU page fault / stale-set reuse): previously we deliberately
+            // did NOT touch setCursor/allocatedSets, relying on the setCursor
+            // reuse path (bind_program_descriptors line ~1166) to REWRITE a
+            // reused set with fresh descriptors. That is only sound if the
+            // rewrite is guaranteed to run. It is NOT: the rewrite can be
+            // skipped when a uniform-arena upload fails (early return) or when
+            // an incomplete-set guard bails out (DescriptorSet.cpp ~1299). In
+            // those cases a reused set retains a descriptor pointing at the
+            // just-deferred-destroyed VkImageView. The view is still alive now
+            // (it sits in disposalQueue until the slot fence signals), but the
+            // set is then submitted and, once the disposal drain frees the
+            // view, the next submit that reuses/re-records that descriptor reads
+            // freed memory -> kIOGPUCommandBufferCallbackErrorPageFault at a
+            // scene transition where textures are re-specified.
+            //
+            // Fix (mirrors reset_all_descriptor_pools): drop the whole per-slot
+            // set cache so the next bind allocates a BRAND-NEW set that is fully
+            // written from the current, still-valid resources. A set that may
+            // reference a destroyed view is never reused or re-bound.
             for (int j = 0; j < kDescriptorMemoSize; ++j) {
                 pr.descMemo[i][j] = DescriptorMemoEntry{};
             }
             pr.descMemoNext[i] = 0;
+            pr.allocatedSets[i].clear();
+            pr.setCursor[i] = 0;
         }
     }
     // The memo-cleared program may be bound again before the next draw; make
