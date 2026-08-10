@@ -14,6 +14,8 @@ jobs:
       MTL_SHADER_VALIDATION: '0'
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Describe hosted Apple Silicon runner
         shell: bash
@@ -38,3 +40,30 @@ jobs:
         run: |
           set -euo pipefail
           "$RUNNER_TEMP/hosted-metal-gpu-probe"
+
+      - name: Build Mithril DirectMetal backend
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-hosted-metal -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-hosted-metal -j"$(sysctl -n hw.ncpu)"
+          file output/libmithril.dylib
+          otool -L output/libmithril.dylib | grep -F '/System/Library/Frameworks/Metal.framework/Metal'
+
+      - name: Compile DirectMetal FBO regression smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang -std=c11 -Wall -Wextra -Werror \
+            tests/directmetal_fbo_smoke.c \
+            -o "$RUNNER_TEMP/directmetal-fbo-smoke"
+
+      - name: Run real Mithril DirectMetal offscreen FBO/readback smoke
+        shell: bash
+        env:
+          MITHRIL_BACKEND: metal
+          MITHRIL_EXPECT_RENDERER: Mithril DirectMetal
+          MITHRIL_LIBRARY: ./output/libmithril.dylib
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/directmetal-fbo-smoke"
