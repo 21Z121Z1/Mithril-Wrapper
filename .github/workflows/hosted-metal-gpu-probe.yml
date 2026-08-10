@@ -8,7 +8,7 @@ on:
 
 jobs:
   directmetal-hosted:
-    name: DirectMetal hosted GPU
+    name: DirectMetal hosted offscreen GPU
     runs-on: macos-26
     env:
       MTL_DEBUG_LAYER: '0'
@@ -53,18 +53,24 @@ jobs:
           # Keep that compatibility local to CI so they exercise the same dylib.
           ln -sf libmithril.dylib output/libmithril.so
 
-      - name: Run required DirectMetal draw/readback gates
+      - name: Run required DirectMetal offscreen gates
         shell: bash
         run: |
           set -euo pipefail
           tests=(
+            state_smoke
+            shader_smoke
             draw_smoke
+            texture_smoke
             sampler_smoke
             buffer_texture_smoke
             typed_vertex_smoke
             ubo_smoke
             query_smoke
             sync_smoke
+            3d_smoke
+            render3d_smoke
+            fbo_smoke
           )
           for test_name in "${tests[@]}"; do
             echo "==> ${test_name}"
@@ -72,46 +78,34 @@ jobs:
             "$RUNNER_TEMP/${test_name}"
           done
 
-      - name: Discover additional hosted DirectMetal smoke coverage
+      - name: Classify presentation-only EGL contract
         shell: bash
         run: |
           set -uo pipefail
-          tests=(
-            contract_smoke
-            state_smoke
-            shader_smoke
-            texture_smoke
-            3d_smoke
-            render3d_smoke
-            fbo_smoke
-            directmetal_fbo_smoke
-          )
+          clang -std=c11 -Wall -Wextra tests/contract_smoke.c -o "$RUNNER_TEMP/contract_smoke"
+          set +e
+          "$RUNNER_TEMP/contract_smoke" 2>&1 | tee "$RUNNER_TEMP/contract_smoke.log"
+          rc=${PIPESTATUS[0]}
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            echo 'HOSTED_EGL_WINDOW_SURFACE_SUPPORTED=true' >> "$GITHUB_STEP_SUMMARY"
+          elif grep -Fq 'eglCreateWindowSurface failed' "$RUNNER_TEMP/contract_smoke.log"; then
+            echo 'HOSTED_EGL_WINDOW_SURFACE_SUPPORTED=false' >> "$GITHUB_STEP_SUMMARY"
+            echo 'Window-surface/presentation coverage remains a physical display-session gate.' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Unexpected contract_smoke failure (exit ${rc})." >> "$GITHUB_STEP_SUMMARY"
+            exit "$rc"
+          fi
 
-          echo '## DirectMetal hosted smoke discovery' >> "$GITHUB_STEP_SUMMARY"
-          mkdir -p "$RUNNER_TEMP/mithril-smoke-logs"
-          for test_name in "${tests[@]}"; do
-            src="tests/${test_name}.c"
-            exe="$RUNNER_TEMP/${test_name}"
-            log="$RUNNER_TEMP/mithril-smoke-logs/${test_name}.log"
+      - name: Track DirectMetal FBO-subresource regression
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang -std=c11 -Wall -Wextra tests/directmetal_fbo_smoke.c -o "$RUNNER_TEMP/directmetal_fbo_smoke"
+          "$RUNNER_TEMP/directmetal_fbo_smoke"
 
-            if ! clang -std=c11 -Wall -Wextra "$src" -o "$exe" >"$log" 2>&1; then
-              echo "- ❌ ${test_name}: compile failed" | tee -a "$GITHUB_STEP_SUMMARY"
-              cat "$log"
-              continue
-            fi
-
-            set +e
-            "$exe" 2>&1 | tee "$log"
-            rc=${PIPESTATUS[0]}
-            set -e
-            if [ "$rc" -eq 0 ]; then
-              echo "- ✅ ${test_name}" | tee -a "$GITHUB_STEP_SUMMARY"
-            else
-              echo "- ❌ ${test_name}: exit ${rc}" | tee -a "$GITHUB_STEP_SUMMARY"
-            fi
-          done
-
-      - name: Compile and run minimal base-FBO regression diagnostic
+      - name: Track minimal base-FBO regression
         continue-on-error: true
         shell: bash
         run: |
