@@ -293,6 +293,19 @@ void drain_all_disposal_queues() {
     }
 }
 
+// FIX (mid-frame UAF): drain every slot's disposal queue EXCEPT `skip`.
+// Used by the proactive-GC path, which runs mid-frame while the current slot's
+// command buffer is still being recorded. The current slot's deferred-destroyed
+// resources may still be referenced by this frame's live descriptor sets, so
+// they must not be freed here — they are freed by the normal fence-wait drain
+// after the frame commits and the slot is recycled.
+void drain_disposal_queues_except(int skip) {
+    for (int i = 0; i < kMaxFramesInFlight; ++i) {
+        if (i == skip) continue;
+        drain_disposal_queue(i);
+    }
+}
+
 // FIX (显存耗尽根因 - 主动式 GC，深度参考 MobileGL):
 // 实现 backend_poll_completed_frames：非阻塞轮询所有帧槽位的 fence，
 // 对已完成的 slot 立即 drain 其 disposalQueue。
@@ -407,14 +420,31 @@ bool backend_proactive_gc_if_needed() {
         // safe_device_wait_idle 先结束+提交当前 command buffer，wait 后重新 begin，
         // 让 stage_and_copy_image 可以透明地继续录制。
         safe_device_wait_idle();
-        drain_all_disposal_queues();
+        // FIX (mid-frame UAF - GPU page fault root cause):
+        // safe_device_wait_idle() submits the CURRENT slot's command buffer to
+        // frameFences[currentFrame] WITHOUT advancing currentFrame, then waits
+        // (vkDeviceWaitIdle) and re-begins the SAME slot's buffer. The descriptor
+        // sets allocated for THIS frame still reference the current slot's
+        // deferred-destroyed views (they were never invalidated, and
+        // safe_device_wait_idle does NOT bump frameGeneration, so the descriptor
+        // memo and setCursor are NOT rewound). If we drain disposalQueue[currentFrame]
+        // here, we vkDestroy the very views that this frame's still-live
+        // descriptor sets reference; the next draw can re-bind a stale set and
+        // the next vkQueueSubmit hits kIOGPUCommandBufferCallbackErrorPageFault.
+        //
+        // Fix: drain ALL slots EXCEPT currentFrame. The current slot's queue is
+        // left for the normal fence-wait drain (ensure_command_buffer_recording /
+        // backend_poll_completed_frames) AFTER this frame commits and the slot is
+        // recycled — by then no live descriptor set references those resources.
+        drain_disposal_queues_except(b->currentFrame);
         // safe_device_wait_idle 已清除 fencePending，但重复清除无害（防御性）
         for (int i = 0; i < kMaxFramesInFlight; ++i) {
             b->fencePending[i] = false;
         }
         if (proactiveGcCount <= 3 || proactiveGcCount % 20 == 0) {
             MITHRIL_LOG_WARN("vk", "proactive GC: safe_device_wait_idle + "
-                              "drain_all completed, VRAM now %llu/%llu MB",
+                              "drain(except current) completed, VRAM now "
+                              "%llu/%llu MB",
                               (unsigned long long)(b->currentVramBytes / (1024*1024)),
                               (unsigned long long)(b->totalVramBytes / (1024*1024)));
         }
@@ -440,6 +470,19 @@ bool backend_proactive_gc_if_needed() {
                               (unsigned long long)(b->totalVramBytes / (1024*1024)),
                               pipelinePurgeCount);
         }
+        // FIX (GPU page fault root cause): clear_all_pipeline_caches() and
+        // reset_all_descriptor_pools() run MID-FRAME here. reset_all_descriptor_pools
+        // calls vkResetDescriptorPool on the current slot's pool, which invalidates
+        // every descriptor set already vkCmdBindDescriptorSets'd into the still-
+        // recording command buffer — including the current frame's live sets. On the
+        // next vkQueueSubmit, the GPU reads invalid descriptor memory and faults
+        // (kIOGPUCommandBufferCallbackErrorPageFault).
+        //
+        // Fix: flush the current command buffer + wait via safe_device_wait_idle()
+        // FIRST. It re-begins the slot's buffer fresh (no descriptor sets bound yet),
+        // so purging pipelines/pools afterwards cannot invalidate a bound set. The
+        // pipeline/pool caches are recreated on the next draw.
+        safe_device_wait_idle();
         clear_all_pipeline_caches();
         reset_all_descriptor_pools();
     }

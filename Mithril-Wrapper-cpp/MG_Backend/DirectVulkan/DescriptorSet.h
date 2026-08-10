@@ -57,6 +57,24 @@ void bind_program_descriptors(GLuint program, VkPipelineBindPoint bindPoint);
 void on_command_buffer_boundary();
 
 /*
+ * FIX (GPU page fault root cause - descriptor set references destroyed resource):
+ * Invalidate the per-program descriptor-set memo (descMemo) across ALL slots.
+ *
+ * bind_program_descriptors() caches a VkDescriptorSet per (program, slot) keyed
+ * by a content signature that includes the VkImageView/VkBuffer handles it
+ * references. When a texture/buffer/sampler is deferred-destroyed, the cached
+ * set may still point at the now-freed view. If the driver later reuses the
+ * same handle value and the memo returns the stale set WITHOUT rewriting it, the
+ * next vkQueueSubmit reads a freed resource -> kIOGPUCommandBufferCallbackErrorPageFault.
+ *
+ * This is called from defer_destroy_texture_entry / defer_destroy_buffer_entry /
+ * defer_destroy_sampler_entry so a destroyed resource can never be re-bound
+ * from the memo. The memo miss path (setCursor reuse / fresh allocate) always
+ * rewrites the set with fresh descriptors, so it is safe after teardown.
+ */
+void invalidate_descriptor_memo();
+
+/*
  * FIX (swapchain rebuild death loop): Reset ALL descriptor pools across ALL
  * programs and ALL frame-in-flight slots. Frees every allocated
  * VkDescriptorSet, releasing the Metal descriptor resources they hold.

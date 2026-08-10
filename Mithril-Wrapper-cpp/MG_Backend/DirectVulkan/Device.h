@@ -343,6 +343,13 @@ void drain_disposal_queue(int slot);
 // guarantees all GPU work is complete) and during shutdown_device().
 void drain_all_disposal_queues();
 
+// FIX (mid-frame UAF): drain every slot's disposal queue EXCEPT `skip`. Used
+// by the proactive-GC path, which runs mid-frame while the current slot's
+// command buffer is still being recorded. The current slot's deferred resources
+// may still be referenced by this frame's live descriptor sets, so they are
+// freed later by the normal fence-wait drain after the frame commits.
+void drain_disposal_queues_except(int skip);
+
 // FIX (SIGBUS 根因 - vkDeviceWaitIdle 触发 deferred encoding):
 // MoltenVK 的 vkDeviceWaitIdle 会等待所有 pending command buffer 被编码完成。
 // 如果当前有正在录制的 command buffer（commandBufferRecording=true），其中

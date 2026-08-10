@@ -211,7 +211,14 @@ VkResult try_allocate_memory_with_gc(VkDevice device, const VkMemoryAllocateInfo
             // 轻量 GC：只 drain disposal queue（safe_device_wait_idle 提交当前
             // command buffer 后，所有延迟资源不再被 GPU 引用，可以安全释放）
             safe_device_wait_idle();
-            drain_all_disposal_queues();
+            // FIX (GPU page fault root cause): safe_device_wait_idle() re-begins
+            // the CURRENT slot's buffer WITHOUT advancing currentFrame, and this
+            // frame's descriptor sets still reference the current slot's deferred
+            // views (memo not invalidated). Draining disposalQueue[currentFrame]
+            // here frees views the current frame's live sets reference -> UAF on
+            // the next vkQueueSubmit. Drain all slots EXCEPT the current one; the
+            // current slot's queue drains after the frame commits and recycles.
+            drain_disposal_queues_except(b->currentFrame);
             // 不清 pipeline/descriptor — 太激进，留到 OOM fallback
         }
     }
@@ -229,7 +236,11 @@ VkResult try_allocate_memory_with_gc(VkDevice device, const VkMemoryAllocateInfo
     safe_device_wait_idle();
 
     // Layer 1: drain disposal queues
-    drain_all_disposal_queues();
+    // FIX (GPU page fault root cause): drain all slots EXCEPT currentFrame. The
+    // current slot's deferred views are still referenced by this frame's live
+    // descriptor sets (safe_device_wait_idle re-begins the same slot without
+    // invalidating them); freeing them here UAFs the next vkQueueSubmit.
+    drain_disposal_queues_except(b->currentFrame);
     r = vkAllocateMemory(device, info, allocator, memory);
     if (r == VK_SUCCESS) {
         if (gcTriggerCount <= 5 || gcTriggerCount % 50 == 0) {
@@ -382,6 +393,10 @@ void defer_destroy_buffer_entry(BufferEntry& e) {
     if (!b->device) return;
     if (e.mapped) { vkUnmapMemory(b->device, e.memory); e.mapped = nullptr; }
     if (e.buffer == VK_NULL_HANDLE && e.memory == VK_NULL_HANDLE) return;
+    // FIX (GPU page fault root cause): a cached descriptor set (per-program memo)
+    // may still reference this buffer/view. Invalidate the memo so no stale set
+    // is re-bound after the resource is destroyed.
+    mithril::vk::invalidate_descriptor_memo();
     DeferredDestroy d;
     d.buffer = e.buffer;
     d.memory = e.memory;
@@ -399,6 +414,10 @@ void defer_destroy_texture_entry(TextureEntry& e) {
     if (e.view == VK_NULL_HANDLE && e.image == VK_NULL_HANDLE &&
         e.memory == VK_NULL_HANDLE && e.stagingBuffer == VK_NULL_HANDLE &&
         e.stagingMemory == VK_NULL_HANDLE) return;
+    // FIX (GPU page fault root cause): a cached descriptor set (per-program memo)
+    // may still reference this texture view. Invalidate the memo so no stale set
+    // is re-bound after the view is destroyed.
+    mithril::vk::invalidate_descriptor_memo();
     DeferredDestroy d;
     d.image = e.image;
     d.view  = e.view;
@@ -426,6 +445,10 @@ void defer_destroy_texture_entry(TextureEntry& e) {
 void defer_destroy_sampler_entry(SamplerEntry& e) {
     Backend* b = backend();
     if (!b->device || e.sampler == VK_NULL_HANDLE) return;
+    // FIX (GPU page fault root cause): a cached descriptor set (per-program memo)
+    // may still reference this sampler. Invalidate the memo so no stale set is
+    // re-bound after the sampler is destroyed.
+    mithril::vk::invalidate_descriptor_memo();
     DeferredDestroy d;
     d.sampler = e.sampler;
     b->disposalQueue[b->currentFrame].push_back(d);

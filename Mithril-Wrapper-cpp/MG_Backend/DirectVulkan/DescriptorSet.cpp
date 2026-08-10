@@ -1309,6 +1309,27 @@ void bind_program_descriptors(GLuint program, VkPipelineBindPoint bindPoint) {
     sh.dynOffsets.assign(dynOffsets.begin(), dynOffsets.end());
 }
 
+void invalidate_descriptor_memo() {
+    auto& tbl = program_table();
+    for (auto& kv : tbl) {
+        ProgramResources& pr = kv.second;
+        for (int i = 0; i < kMaxFramesInFlight; ++i) {
+            // Clear the memo entries so a cached set referencing a just-destroyed
+            // resource is never returned by bind_program_descriptors' memo hit.
+            // Do NOT touch setCursor/lastFrameGen: the setCursor reuse path
+            // REWRITES the set with fresh descriptors, so it stays safe.
+            for (int j = 0; j < kDescriptorMemoSize; ++j) {
+                pr.descMemo[i][j] = DescriptorMemoEntry{};
+            }
+            pr.descMemoNext[i] = 0;
+        }
+    }
+    // The memo-cleared program may be bound again before the next draw; make
+    // sure the bind-dedup shadow is dropped so the re-issued bind re-runs the
+    // full signature + memo lookup (which now misses and rewrites the set).
+    on_command_buffer_boundary();
+}
+
 void reset_all_descriptor_pools() {
     Backend* b = backend();
     if (!b->device) return;
