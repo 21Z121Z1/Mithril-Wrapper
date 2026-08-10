@@ -112,7 +112,7 @@ jobs:
           fi
 
   ios-directmetal-cross-build:
-    name: iOS DirectMetal cross-build candidate
+    name: iOS DirectMetal arm64 cross-build candidate
     runs-on: macos-26
     continue-on-error: true
     steps:
@@ -149,8 +149,97 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          file output/libmithril.dylib
-          otool -D output/libmithril.dylib
-          xcrun vtool -show-build output/libmithril.dylib | tee "$RUNNER_TEMP/vtool.txt"
+          artifact="$(find output -type f -name 'libmithril.dylib' -print -quit)"
+          test -n "$artifact"
+          echo "artifact=$artifact"
+          file "$artifact"
+          otool -D "$artifact"
+          xcrun vtool -show-build "$artifact" | tee "$RUNNER_TEMP/vtool.txt"
           grep -Eiq 'platform[[:space:]]+(IOS|2)' "$RUNNER_TEMP/vtool.txt"
-          lipo -info output/libmithril.dylib | grep -q arm64
+          lipo -info "$artifact" | grep -q arm64
+          otool -L "$artifact" | grep -q '/System/Library/Frameworks/Metal.framework/'
+
+  ios-simulator-directmetal-runtime:
+    name: iOS Simulator DirectMetal runtime candidate
+    runs-on: macos-26
+    continue-on-error: true
+    env:
+      MTL_DEBUG_LAYER: '0'
+      MTL_SHADER_VALIDATION: '0'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Select and boot an iOS Simulator
+        id: simulator
+        shell: bash
+        run: |
+          set -euo pipefail
+          udid="$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(x["udid"] for runtime, devices in d["devices"].items() if "iOS" in runtime for x in devices if x.get("isAvailable") and x.get("name", "").startswith("iPhone")))')"
+          test -n "$udid"
+          echo "udid=$udid" >> "$GITHUB_OUTPUT"
+          xcrun simctl boot "$udid" || true
+          xcrun simctl bootstatus "$udid" -b
+
+      - name: Cross-build DirectMetal for arm64 iOS Simulator
+        id: build
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdk="$(xcrun --sdk iphonesimulator --show-sdk-path)"
+          cmake -S . -B build-hosted-ios-sim \
+            -G Xcode \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OSX_SYSROOT="$sdk" \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=16.0 \
+            -DMITHRIL_IOS=ON \
+            -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO \
+            -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED=NO
+          cmake --build build-hosted-ios-sim --config Release --target mithril
+          artifact="$(find output -type f -name 'libmithril.dylib' -print -quit)"
+          test -n "$artifact"
+          echo "artifact=$artifact" >> "$GITHUB_OUTPUT"
+          file "$artifact"
+          xcrun vtool -show-build "$artifact" | tee "$RUNNER_TEMP/vtool-sim.txt"
+          grep -Eiq 'platform[[:space:]]+(IOSSIMULATOR|7)' "$RUNNER_TEMP/vtool-sim.txt"
+
+      - name: Compile simulator DirectMetal smoke executables
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdk="$(xcrun --sdk iphonesimulator --show-sdk-path)"
+          for test_name in draw_smoke directmetal_fbo_smoke; do
+            xcrun --sdk iphonesimulator clang \
+              -target arm64-apple-ios16.0-simulator \
+              -isysroot "$sdk" \
+              -std=c11 -Wall -Wextra \
+              "tests/${test_name}.c" \
+              -o "$RUNNER_TEMP/${test_name}-sim"
+          done
+
+      - name: Execute DirectMetal draw and FBO readback inside iOS Simulator
+        shell: bash
+        run: |
+          set -euo pipefail
+          udid="${{ steps.simulator.outputs.udid }}"
+          sim_tmp="$HOME/Library/Developer/CoreSimulator/Devices/$udid/data/tmp"
+          mkdir -p "$sim_tmp"
+          cp "${{ steps.build.outputs.artifact }}" "$sim_tmp/libmithril.dylib"
+          cp "$RUNNER_TEMP/draw_smoke-sim" "$sim_tmp/draw_smoke"
+          cp "$RUNNER_TEMP/directmetal_fbo_smoke-sim" "$sim_tmp/directmetal_fbo_smoke"
+          chmod +x "$sim_tmp/draw_smoke" "$sim_tmp/directmetal_fbo_smoke"
+          for test_name in draw_smoke directmetal_fbo_smoke; do
+            echo "==> simulator ${test_name}"
+            xcrun simctl spawn "$udid" /usr/bin/env \
+              MITHRIL_LIBRARY=/tmp/libmithril.dylib \
+              MITHRIL_BACKEND=metal \
+              MITHRIL_EXPECT_RENDERER='Mithril DirectMetal' \
+              "/tmp/${test_name}"
+          done
+
+      - name: Shutdown Simulator
+        if: always()
+        shell: bash
+        run: xcrun simctl shutdown "${{ steps.simulator.outputs.udid }}" || true
