@@ -618,6 +618,16 @@ void bind_program_descriptors(GLuint program, VkPipelineBindPoint bindPoint) {
         pr.setCursor[slot] = 0;
         pr.lastFrameGen[slot] = b->frameGeneration;
         pr.lastFlushGen[slot] = b->flushGeneration;
+        // FIX (mid-frame flush stale-set cache - mirror invalidate_descriptor_memo):
+        // a safe_device_wait_idle() flush submits the current buffer, re-begins the
+        // SAME slot, and (via drain_disposal_queues_except / the pre-vkCreateImage GC
+        // and delete_program_resources paths) can FREE resources that previously-
+        // allocated sets in this slot's cache still reference. Reusing such a set
+        // (setCursor already rewound to 0 above) relies on the rewrite to refresh
+        // it — which is skipped on a bail path (incomplete-set guard, DescriptorSet
+        // ~1299). Drop the whole per-slot set cache so the next bind allocates a
+        // BRAND-NEW set rewritten from current, still-valid resources.
+        pr.allocatedSets[slot].clear();
         /* The cached sets this slot owns are about to be handed out again and
          * REWRITTEN by this frame's draws, so every memo entry naming one is
          * now a promise we can no longer keep. Dropping the memo here is what

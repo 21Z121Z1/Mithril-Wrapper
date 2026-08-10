@@ -683,6 +683,15 @@ void begin_render_pass(VkImageView* color_views, int color_count,
     // spec-discouraged; DONT_CARE matches the discard semantics).
     bool swapchainColorWasUndefined = false;
     bool swapchainDepthWasUndefined = false;
+    // FIX (root cause — user-FBO depth first use): Minecraft renders the
+    // loading screen / main menu / world geometry into USER FBOs with their
+    // OWN depth texture (only the final composite goes to FBO 0). Those depth
+    // textures are created with initialLayout=UNDEFINED and are NEVER cleared
+    // to "far" on first use (see Resources.cpp:1407, Resources.h:58). The
+    // swapchain-only far-init (44772c4) did not cover them, so a first-use
+    // user-FBO depth was loaded as garbage (near/0) and every GL_LESS fragment
+    // failed -> pure red from frame 1. Mirror the swapchain one-shot below.
+    bool fboDepthWasUndefined = false;
     if (e.activeSwapchain) {
         Swapchain* sc = e.activeSwapchain;
         if (sc->currentImage >= 0 && sc->currentImage < (int)sc->views.size()) {
@@ -791,6 +800,11 @@ void begin_render_pass(VkImageView* color_views, int color_count,
                     TextureEntry& tex = it->second;
                     if (tex.image != VK_NULL_HANDLE &&
                         tex.currentLayout != VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL) {
+                        // Capture whether this is the depth's ONE-SHOT first use
+                        // (UNDEFINED) so the loadOp below can CLEAR it to far.
+                        // Must be read before the barrier overwrites the layout.
+                        fboDepthWasUndefined =
+                            (tex.currentLayout == VK_IMAGE_LAYOUT_UNDEFINED);
                         record_layout_barrier(b->commandBuffer,
                                               tex.image, tex.format,
                                               tex.currentLayout,
@@ -894,13 +908,18 @@ void begin_render_pass(VkImageView* color_views, int color_count,
     // depth-tested draw's fragments (depth < 1.0) pass the GL_LESS compare.
     depthAttach.clearValue.depthStencil.depth = (float)e.clearDepth;
     depthAttach.clearValue.depthStencil.stencil = (uint32_t)e.clearStencil;
-    if (swapchainDepthWasUndefined) {
+    // FIX (user-FBO depth first use): mirror the swapchain one-shot — if this
+    // pass is the very first use of a freshly-created (UNDEFINED) depth buffer
+    // — either the swapchain's persistent depth OR a user FBO's depth texture —
+    // clear it to far(1.0)/0 so the first GL_LESS draw's fragments pass.
+    const bool depthWasUndefined = swapchainDepthWasUndefined || fboDepthWasUndefined;
+    if (depthWasUndefined) {
         depthAttach.clearValue.depthStencil.depth = 1.0f;
         depthAttach.clearValue.depthStencil.stencil = 0u;
     }
     if (e.loadClear) {
         depthAttach.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    } else if (swapchainDepthWasUndefined) {
+    } else if (depthWasUndefined) {
         depthAttach.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
     } else {
         depthAttach.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
