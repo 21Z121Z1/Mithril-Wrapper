@@ -451,15 +451,21 @@ void defer_destroy_texture_entry(TextureEntry& e) {
 
 void defer_destroy_sampler_entry(SamplerEntry& e) {
     Backend* b = backend();
-    if (!b->device || e.sampler == VK_NULL_HANDLE) return;
+    if (!b->device) return;
     // FIX (GPU page fault root cause): a cached descriptor set (per-program memo)
     // may still reference this sampler. Invalidate the memo so no stale set is
     // re-bound after the sampler is destroyed.
     mithril::vk::invalidate_descriptor_memo();
-    DeferredDestroy d;
-    d.sampler = e.sampler;
-    b->disposalQueue[b->currentFrame].push_back(d);
-    e.sampler = VK_NULL_HANDLE;
+    // FIX (按参数缓存): 一个 SamplerEntry 可能持有多个按参数缓存的采样器，
+    // 全部延迟销毁，防止任一仍被在途 command buffer 引用。
+    for (auto& kv : e.byParams) {
+        VkSampler s = kv.second;
+        if (s == VK_NULL_HANDLE) continue;
+        DeferredDestroy d;
+        d.sampler = s;
+        b->disposalQueue[b->currentFrame].push_back(d);
+    }
+    e.byParams.clear();
 }
 
 // ---- GL internalFormat -> VkFormat / host texel bytes / aspect mask ----
@@ -888,7 +894,12 @@ static VkFilter to_vk_filter(GLenum f) {
     return VK_FILTER_LINEAR;
 }
 static VkSamplerMipmapMode to_vk_mipmap(GLenum f) {
-    if (f == GL_NEAREST_MIPMAP_NEAREST || f == GL_LINEAR_MIPMAP_NEAREST) return VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    // FIX (纯红 + GPU page fault): 非 mipmap 的 min filter（GL_NEAREST / GL_LINEAR）
+    // 必须映射为 NEAREST mip 模式，否则配合 maxLod=12 会请求跨不存在的 mip 层
+    // 采样 → A11/MoltenVK 采样越界。mip 模式只在 LOD 范围跨多层时才有意义；
+    // 非 mipmap filter 应在 backend_get_or_create_sampler 里把 minLod=maxLod=0。
+    if (f == GL_NEAREST_MIPMAP_NEAREST || f == GL_LINEAR_MIPMAP_NEAREST ||
+        f == GL_NEAREST || f == GL_LINEAR) return VK_SAMPLER_MIPMAP_MODE_NEAREST;
     return VK_SAMPLER_MIPMAP_MODE_LINEAR;
 }
 static VkSamplerAddressMode to_vk_wrap(GLenum w) {
@@ -1713,9 +1724,38 @@ VkSampler backend_get_or_create_sampler(GLuint name, GLint min_filter, GLint mag
                                         const float* border_color) {
     mithril::vk::Backend* b = mithril::vk::backend();
     if (!b->initialized) return VK_NULL_HANDLE;
+
+    // FIX (纯红 + GPU page fault): 采样器缓存必须按「纹理名 + 全部参数」，
+    // 而非只按纹理名。旧实现把首个请求的参数永久冻结：同一纹理名稍后用
+    // 不同的 filter/wrap 绑定时会拿到错误采样器 → mip/LOD 行为错误 →
+    // A11/MoltenVK 采样越界 → 纯红 / GPU page fault。这里把 min/mag/wrap/
+    // border 哈希进 key，同一纹理名下不同参数各持有一份采样器。
+    bool borderWhite = false;
+    if (border_color) {
+        borderWhite = border_color[0] >= 1.0f && border_color[1] >= 1.0f &&
+                      border_color[2] >= 1.0f && border_color[3] >= 1.0f;
+    }
+    // 参数哈希：仅纳入会影响 VkSamplerCreateInfo 的字段。
+    uint64_t pkey = 0xcbf29ce484222325ull;  // FNV-1a 64 起点
+    auto mix = [&pkey](uint64_t v) {
+        pkey ^= v;
+        pkey *= 0x100000001b3ull;
+    };
+    mix((uint64_t)(uint32_t)min_filter);
+    mix((uint64_t)(uint32_t)mag_filter);
+    mix((uint64_t)(uint32_t)wrap_s);
+    mix((uint64_t)(uint32_t)wrap_t);
+    mix((uint64_t)(uint32_t)wrap_r);
+    mix(borderWhite ? 1ull : 0ull);
+
     auto& tbl = mithril::vk::sampler_table();
-    auto it = tbl.find(name);
-    if (it != tbl.end() && it->second.sampler != VK_NULL_HANDLE) return it->second.sampler;
+    mithril::vk::SamplerEntry& entry = tbl[name];
+    entry.name = name;
+    // 先查本参数缓存的采样器；命中直接返回。按参数缓存保证同一纹理名的
+    // 不同 filter/wrap 各持有一份采样器，互不干扰（旧实现只按纹理名缓存
+    // 首个参数，正是纯红/GPU page fault 的根因）。
+    auto pit = entry.byParams.find(pkey);
+    if (pit != entry.byParams.end() && pit->second != VK_NULL_HANDLE) return pit->second;
 
     VkSamplerCreateInfo sci{};
     sci.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
@@ -1728,23 +1768,34 @@ VkSampler backend_get_or_create_sampler(GLuint name, GLint min_filter, GLint mag
     sci.borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
     if (border_color) {
         // Approximate border colour; only black/white matter for MoltenVK.
-        bool white = border_color[0] >= 1.0f && border_color[1] >= 1.0f &&
-                     border_color[2] >= 1.0f && border_color[3] >= 1.0f;
-        sci.borderColor = white ? VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE
-                                : VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
+        sci.borderColor = borderWhite ? VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE
+                                      : VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
     }
     sci.anisotropyEnable = VK_FALSE;
     sci.maxAnisotropy = 1.0f;
     sci.compareEnable = VK_FALSE;
     sci.compareOp = VK_COMPARE_OP_ALWAYS;
-    sci.minLod = 0.0f;
-    sci.maxLod = 12.0f;
+    // FIX (纯红 + GPU page fault): 非 mipmap 的 min filter（GL_NEAREST / GL_LINEAR）
+    // 只采样 base level。旧实现无条件 minLod=0 / maxLod=12 + mipmapMode=LINEAR，
+    // 会让只有 1 层 mip 的纹理被请求跨 0..12 层采样 → A11/MoltenVK 采样读越界
+    // → 纯红 / GPU page fault。非 mipmap filter 把 LOD 范围收束到 0，保证只采
+    // 第 0 层，与 GL 语义一致。mipmap filter 仍放开到 12。
+    const bool mipmapped =
+        min_filter == GL_NEAREST_MIPMAP_NEAREST || min_filter == GL_NEAREST_MIPMAP_LINEAR ||
+        min_filter == GL_LINEAR_MIPMAP_NEAREST || min_filter == GL_LINEAR_MIPMAP_LINEAR;
+    if (!mipmapped) {
+        sci.minLod = 0.0f;
+        sci.maxLod = 0.0f;
+    } else {
+        sci.minLod = 0.0f;
+        sci.maxLod = 12.0f;
+    }
     sci.unnormalizedCoordinates = VK_FALSE;
 
-    mithril::vk::SamplerEntry e;
-    if (vkCreateSampler(b->device, &sci, nullptr, &e.sampler) != VK_SUCCESS) return VK_NULL_HANDLE;
-    tbl[name] = e;
-    return e.sampler;
+    VkSampler s = VK_NULL_HANDLE;
+    if (vkCreateSampler(b->device, &sci, nullptr, &s) != VK_SUCCESS) return VK_NULL_HANDLE;
+    entry.byParams[pkey] = s;
+    return s;
 }
 
 VkFormat backend_vk_format_for_gl(GLenum internal_format) {

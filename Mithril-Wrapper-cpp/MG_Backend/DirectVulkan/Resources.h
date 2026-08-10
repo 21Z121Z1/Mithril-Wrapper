@@ -63,8 +63,19 @@ struct TextureEntry {
     VkDeviceSize   stagingSize = 0;
 };
 
+// FIX (纯红 + GPU page fault): 采样器必须按「纹理名 + 全部参数」缓存，而不能只按
+// 纹理名缓存。OpenGL 允许同一纹理名在不同的采样阶段使用不同的 filter/wrap 参数——
+// Minecraft 正是如此：加载界面用 mipmap 线性采样，方块/实体图集却用 GL_NEAREST /
+// GL_CLAMP_TO_EDGE。旧实现 sampler_table 只以纹理名为键，首个请求的参数被永久冻结，
+// 后续用不同参数绑定同一纹理名时拿到的是错误采样器 → mip/LOD 行为错误 → A11 /
+// MoltenVK 1.2.9 采样越界 → 纯红 / kIOGPUCommandBufferCallbackErrorPageFault。
+// 因此同一纹理名下按参数哈希缓存多个 VkSampler。
 struct SamplerEntry {
-    VkSampler sampler = VK_NULL_HANDLE;
+    // GL 纹理名。仍保留给 backend_invalidate_sampler_cache 按名批量作废。
+    GLuint name = 0;
+    // 参数哈希 -> VkSampler。同一纹理名的不同采样参数各持有一份采样器。
+    // 所有采样器都只存在这里，避免同一 handle 被重复引用/重复销毁。
+    std::unordered_map<uint64_t, VkSampler> byParams;
 };
 
 // Per-backend resource tables. Singleton accessors.
