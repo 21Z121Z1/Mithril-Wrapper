@@ -78,6 +78,15 @@ jobs:
             "$RUNNER_TEMP/${test_name}"
           done
 
+      - name: Require first-operation FBO clear/readback regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang -std=c11 -Wall -Wextra \
+            .github/ci/HostedDirectMetalFboProbe.c \
+            -o "$RUNNER_TEMP/directmetal-base-fbo-probe"
+          "$RUNNER_TEMP/directmetal-base-fbo-probe"
+
       - name: Classify presentation-only EGL contract
         shell: bash
         run: |
@@ -104,13 +113,3 @@ jobs:
           set -euo pipefail
           clang -std=c11 -Wall -Wextra tests/directmetal_fbo_smoke.c -o "$RUNNER_TEMP/directmetal_fbo_smoke"
           "$RUNNER_TEMP/directmetal_fbo_smoke"
-
-      - name: Track minimal base-FBO regression
-        continue-on-error: true
-        shell: bash
-        run: |
-          set -euo pipefail
-          clang -std=c11 -Wall -Wextra \
-            .github/ci/HostedDirectMetalFboProbe.c \
-            -o "$RUNNER_TEMP/directmetal-base-fbo-probe"
-          "$RUNNER_TEMP/directmetal-base-fbo-probe"
