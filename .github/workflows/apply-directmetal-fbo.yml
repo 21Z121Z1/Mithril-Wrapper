@@ -25,10 +25,16 @@ jobs:
       - name: Apply exact frontend and Metal patches
         run: |
           set -euo pipefail
+          echo "fbo before=$(git hash-object src/gl/fbo.cpp)"
+          echo "metal before=$(git hash-object src/metal/engine.mm)"
+          echo "test before=$(git hash-object tests/directmetal_fbo_smoke.c)"
           test "$(git hash-object src/gl/fbo.cpp)" = 8cb6049baf0f3fcc6faf1157a5d835b9e172c860
           test "$(git hash-object src/metal/engine.mm)" = 1c3ec8ccfece36b1c101665a685a04b85edc79b1
           python3 scripts/_apply_directmetal_fbo_frontend.py
           python3 scripts/_apply_directmetal_fbo_metal.py
+          echo "fbo after=$(git hash-object src/gl/fbo.cpp)"
+          echo "metal after=$(git hash-object src/metal/engine.mm)"
+          echo "test after=$(git hash-object tests/directmetal_fbo_smoke.c)"
           test "$(git hash-object src/gl/fbo.cpp)" = 6c07b2fd8cec46a4bcd52556298b7816701bd41d
           test "$(git hash-object src/metal/engine.mm)" = 101e3294a04a0847a8bed817d97a77a1d6180f38
           test "$(git hash-object tests/directmetal_fbo_smoke.c)" = 6c5c3d357c7f27fd17c336683427960e97d61fd5
