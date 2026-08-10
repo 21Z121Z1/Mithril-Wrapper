@@ -17,7 +17,7 @@ jobs:
       MITHRIL_EXPECT_RENDERER: Mithril DirectMetal
       MITHRIL_LIBRARY: ./output/libmithril.dylib
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           submodules: recursive
 
@@ -49,15 +49,30 @@ jobs:
           file output/libmithril.dylib
           otool -L output/libmithril.dylib
           nm -m output/libmithril.dylib | grep -E 'MTLCreateSystemDefaultDevice|OBJC_CLASS_\$_MTL' || true
+          # Several legacy smoke programs still hard-code the Linux basename.
+          # Keep that compatibility local to CI so they exercise the same dylib.
+          ln -sf libmithril.dylib output/libmithril.so
 
-      - name: Compile and run required DirectMetal draw/readback gate
+      - name: Run required DirectMetal draw/readback gates
         shell: bash
         run: |
           set -euo pipefail
-          clang -std=c11 -Wall -Wextra tests/draw_smoke.c -o "$RUNNER_TEMP/draw-smoke"
-          "$RUNNER_TEMP/draw-smoke"
+          tests=(
+            draw_smoke
+            sampler_smoke
+            buffer_texture_smoke
+            typed_vertex_smoke
+            ubo_smoke
+            query_smoke
+            sync_smoke
+          )
+          for test_name in "${tests[@]}"; do
+            echo "==> ${test_name}"
+            clang -std=c11 -Wall -Wextra "tests/${test_name}.c" -o "$RUNNER_TEMP/${test_name}"
+            "$RUNNER_TEMP/${test_name}"
+          done
 
-      - name: Discover hosted DirectMetal smoke coverage
+      - name: Discover additional hosted DirectMetal smoke coverage
         shell: bash
         run: |
           set -uo pipefail
@@ -66,12 +81,6 @@ jobs:
             state_smoke
             shader_smoke
             texture_smoke
-            sampler_smoke
-            buffer_texture_smoke
-            typed_vertex_smoke
-            ubo_smoke
-            query_smoke
-            sync_smoke
             3d_smoke
             render3d_smoke
             fbo_smoke
