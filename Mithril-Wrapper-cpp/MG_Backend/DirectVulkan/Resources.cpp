@@ -1419,7 +1419,17 @@ VkImage backend_get_or_create_texture(GLuint name, int width, int height, int de
                                   imgGcCount);
             }
             mithril::vk::safe_device_wait_idle();
-            mithril::vk::drain_all_disposal_queues();
+            // FIX (GPU page fault UAF): safe_device_wait_idle() submits the
+            // CURRENT slot's buffer WITHOUT advancing currentFrame and re-begins
+            // the SAME slot; this frame's descriptor sets still reference the
+            // current slot's deferred-destroyed views (memo not invalidated).
+            // drain_all_disposal_queues() here frees those views -> UAF on the
+            // next vkQueueSubmit (kIOGPUCommandBufferCallbackErrorPageFault).
+            // This fires in the texture re-spec / world-load path (pre-vkCreateImage
+            // GC), exactly when Minecraft creates the block/entity atlases. Drain
+            // all slots EXCEPT the current one; the current slot's queue is left
+            // for the normal fence-wait drain after the frame commits and recycles.
+            mithril::vk::drain_disposal_queues_except(b->currentFrame);
             // 不清 pipeline/descriptor — 留到 OOM fallback（try_allocate_memory_with_gc）
         }
     }

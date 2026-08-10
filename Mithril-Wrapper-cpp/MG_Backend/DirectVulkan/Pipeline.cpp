@@ -1018,7 +1018,17 @@ void delete_program_resources(GLuint program) {
     // safe_device_wait_idle 保证所有 GPU 工作已完成 — drain 任何之前帧延迟的
     // buffer/texture/sampler 销毁，确保没有过期的 Vulkan handle 比 program 的
     // shader module 存活更久。
-    drain_all_disposal_queues();
+    //
+    // FIX (GPU page fault UAF): safe_device_wait_idle() submits the CURRENT slot's
+    // buffer WITHOUT advancing currentFrame and re-begins the SAME slot, so OTHER
+    // programs' descriptor sets (memo'd this frame) still reference the current
+    // slot's deferred-destroyed views. drain_all_disposal_queues() here frees
+    // those views -> UAF when a stale memo set is re-bound on the next submit
+    // (kIOGPUCommandBufferCallbackErrorPageFault). glDeleteProgram fires during
+    // world-render when Sodium/Iris swap shader variants. Drain all slots EXCEPT
+    // the current one; the current slot's queue is left for the normal fence-wait
+    // drain after the frame commits and recycles.
+    drain_disposal_queues_except(b->currentFrame);
     for (auto& kv : pr.pipelines) {
         if (kv.second) vkDestroyPipeline(b->device, kv.second, nullptr);
     }
