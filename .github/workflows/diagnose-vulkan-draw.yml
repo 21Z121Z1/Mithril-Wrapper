@@ -21,45 +21,22 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq libvulkan1 mesa-vulkan-drivers
-      - name: Build diagnostic variants
+      - name: Build Y-swapped diagnostic
         run: |
           set -euo pipefail
-          cp tests/draw_smoke.c /tmp/restart.c
           python3 - <<'PY'
           from pathlib import Path
           source = Path('tests/draw_smoke.c').read_text()
-          old_indices = 'const GLushort line_indices[5] = {0, 1, 42, 2, 3};'
-          old_draw = '''primitiveRestartIndex(42);
-                  enable(GL_PRIMITIVE_RESTART);
-                  drawElements(GL_LINE_STRIP, 5, GL_UNSIGNED_SHORT, (const GLvoid*)0);'''
-          if source.count(old_indices) != 1 or source.count(old_draw) != 1:
-              raise SystemExit('diagnostic source anchors changed')
-
-          ordinary = source.replace(
-              old_indices,
-              'const GLushort line_indices[4] = {0, 1, 2, 3};').replace(
-              old_draw,
-              '''primitiveRestartIndex(42);
-                  disable(GL_PRIMITIVE_RESTART);
-                  drawElements(GL_LINE_STRIP, 4, GL_UNSIGNED_SHORT, (const GLvoid*)0);''')
-          Path('/tmp/ordinary.c').write_text(ordinary)
-
-          lines = ordinary.replace(
-              'drawElements(GL_LINE_STRIP, 4, GL_UNSIGNED_SHORT, (const GLvoid*)0);',
-              'drawElements(GL_LINES, 4, GL_UNSIGNED_SHORT, (const GLvoid*)0);')
-          Path('/tmp/lines.c').write_text(lines)
+          low = 'readPixels(127, 152, 3, 3, GL_RGBA, GL_UNSIGNED_BYTE, red_patch);'
+          high = 'readPixels(383, 357, 3, 3, GL_RGBA, GL_UNSIGNED_BYTE, green_patch);'
+          if source.count(low) != 1 or source.count(high) != 1:
+              raise SystemExit('line-strip sample anchors changed')
+          source = source.replace(low,
+              'readPixels(127, 357, 3, 3, GL_RGBA, GL_UNSIGNED_BYTE, red_patch);')
+          source = source.replace(high,
+              'readPixels(383, 152, 3, 3, GL_RGBA, GL_UNSIGNED_BYTE, green_patch);')
+          Path('/tmp/y_swapped.c').write_text(source)
           PY
-          gcc -O0 -g -o /tmp/restart /tmp/restart.c -ldl
-          gcc -O0 -g -o /tmp/ordinary /tmp/ordinary.c -ldl
-          gcc -O0 -g -o /tmp/lines /tmp/lines.c -ldl
-      - name: Run all line topology variants
-        shell: bash
-        run: |
-          set +e
-          for variant in restart ordinary lines; do
-            echo "========== $variant =========="
-            MITHRIL_LIBRARY="$PWD/output/libmithril.so" /tmp/$variant 2>&1 | tee /tmp/$variant.log
-            status=${PIPESTATUS[0]}
-            echo "STATUS[$variant]=$status"
-          done
-          exit 0
+          gcc -O0 -g -o /tmp/y_swapped /tmp/y_swapped.c -ldl
+      - name: Run Y-swapped smoke
+        run: MITHRIL_LIBRARY="$PWD/output/libmithril.so" /tmp/y_swapped
