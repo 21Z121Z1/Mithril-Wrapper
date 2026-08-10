@@ -12,7 +12,7 @@ concurrency:
 
 jobs:
   directmetal-hosted:
-    name: DirectMetal hosted offscreen GPU
+    name: DirectMetal hosted offscreen GPU required
     runs-on: macos-26
     env:
       MTL_DEBUG_LAYER: '0'
@@ -35,13 +35,11 @@ jobs:
           system_profiler SPHardwareDataType SPDisplaysDataType || true
           test "$(uname -m)" = "arm64"
 
-      - name: Compile and execute real Metal compute/readback capability probe
+      - name: Execute real Metal compute/readback capability probe
         shell: bash
         run: |
           set -euo pipefail
-          xcrun swiftc -O -framework Metal \
-            .github/ci/HostedMetalCapabilityProbe.swift \
-            -o "$RUNNER_TEMP/hosted-metal-gpu-probe"
+          xcrun swiftc -O -framework Metal .github/ci/HostedMetalCapabilityProbe.swift -o "$RUNNER_TEMP/hosted-metal-gpu-probe"
           "$RUNNER_TEMP/hosted-metal-gpu-probe"
 
       - name: Build Mithril DirectMetal backend
@@ -53,30 +51,13 @@ jobs:
           file output/libmithril.dylib
           otool -L output/libmithril.dylib
           nm -m output/libmithril.dylib | grep -E 'MTLCreateSystemDefaultDevice|OBJC_CLASS_\$_MTL' || true
-          # Several legacy smoke programs still hard-code the Linux basename.
-          # Keep that compatibility local to CI so they exercise the same dylib.
           ln -sf libmithril.dylib output/libmithril.so
 
       - name: Run required DirectMetal offscreen gates
         shell: bash
         run: |
           set -euo pipefail
-          tests=(
-            state_smoke
-            shader_smoke
-            draw_smoke
-            texture_smoke
-            sampler_smoke
-            buffer_texture_smoke
-            typed_vertex_smoke
-            ubo_smoke
-            query_smoke
-            sync_smoke
-            3d_smoke
-            render3d_smoke
-            fbo_smoke
-            directmetal_fbo_smoke
-          )
+          tests=(state_smoke shader_smoke draw_smoke texture_smoke sampler_smoke buffer_texture_smoke typed_vertex_smoke ubo_smoke query_smoke sync_smoke 3d_smoke render3d_smoke fbo_smoke directmetal_fbo_smoke)
           for test_name in "${tests[@]}"; do
             echo "==> ${test_name}"
             clang -std=c11 -Wall -Wextra "tests/${test_name}.c" -o "$RUNNER_TEMP/${test_name}"
@@ -87,9 +68,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          clang -std=c11 -Wall -Wextra \
-            .github/ci/HostedDirectMetalFboProbe.c \
-            -o "$RUNNER_TEMP/directmetal-base-fbo-probe"
+          clang -std=c11 -Wall -Wextra .github/ci/HostedDirectMetalFboProbe.c -o "$RUNNER_TEMP/directmetal-base-fbo-probe"
           "$RUNNER_TEMP/directmetal-base-fbo-probe"
 
       - name: Classify presentation-only EGL contract
@@ -107,37 +86,27 @@ jobs:
             echo 'HOSTED_EGL_WINDOW_SURFACE_SUPPORTED=false' >> "$GITHUB_STEP_SUMMARY"
             echo 'Window-surface/presentation coverage remains a physical display-session gate.' >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "Unexpected contract_smoke failure (exit ${rc})." >> "$GITHUB_STEP_SUMMARY"
             exit "$rc"
           fi
 
-  ios-directmetal-cross-build:
-    name: iOS DirectMetal arm64 cross-build candidate
+  ios-directmetal-cross-build-required:
+    name: iPhoneOS DirectMetal arm64 cross-build required
     runs-on: macos-26
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v6
         with:
           submodules: recursive
 
-      - name: Resolve iPhoneOS SDK
-        id: sdk
+      - name: Cross-compile Mithril DirectMetal for arm64 iPhoneOS
         shell: bash
         run: |
           set -euo pipefail
           sdk="$(xcrun --sdk iphoneos --show-sdk-path)"
-          test -d "$sdk"
-          echo "path=$sdk" >> "$GITHUB_OUTPUT"
           xcrun --sdk iphoneos --show-sdk-version
-
-      - name: Cross-compile Mithril DirectMetal for arm64 iOS
-        shell: bash
-        run: |
-          set -euo pipefail
           cmake -S . -B build-hosted-ios \
             -G Xcode \
             -DCMAKE_SYSTEM_NAME=iOS \
-            -DCMAKE_OSX_SYSROOT="${{ steps.sdk.outputs.path }}" \
+            -DCMAKE_OSX_SYSROOT="$sdk" \
             -DCMAKE_OSX_ARCHITECTURES=arm64 \
             -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 \
             -DMITHRIL_IOS=ON \
@@ -145,13 +114,12 @@ jobs:
             -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED=NO
           cmake --build build-hosted-ios --config Release --target mithril
 
-      - name: Verify iOS Mach-O platform contract
+      - name: Verify iPhoneOS Mach-O platform contract
         shell: bash
         run: |
           set -euo pipefail
           artifact="$(find output -type f -name 'libmithril.dylib' -print -quit)"
           test -n "$artifact"
-          echo "artifact=$artifact"
           file "$artifact"
           otool -D "$artifact"
           xcrun vtool -show-build "$artifact" | tee "$RUNNER_TEMP/vtool.txt"
@@ -160,7 +128,7 @@ jobs:
           otool -L "$artifact" | grep -q '/System/Library/Frameworks/Metal.framework/'
 
   ios-simulator-directmetal-runtime:
-    name: iOS Simulator DirectMetal runtime candidate
+    name: iOS Simulator DirectMetal host-GPU runtime candidate
     runs-on: macos-26
     continue-on-error: true
     env:
@@ -189,11 +157,8 @@ jobs:
           set -euo pipefail
           sdk="$(xcrun --sdk iphonesimulator --show-sdk-path)"
           cmake -S . -B build-hosted-ios-sim \
-            -G Xcode \
-            -DCMAKE_SYSTEM_NAME=iOS \
-            -DCMAKE_OSX_SYSROOT="$sdk" \
-            -DCMAKE_OSX_ARCHITECTURES=arm64 \
-            -DCMAKE_OSX_DEPLOYMENT_TARGET=16.0 \
+            -G Xcode -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_SYSROOT="$sdk" \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=16.0 \
             -DMITHRIL_IOS=ON \
             -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO \
             -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED=NO
@@ -212,32 +177,54 @@ jobs:
           sdk="$(xcrun --sdk iphonesimulator --show-sdk-path)"
           for test_name in draw_smoke directmetal_fbo_smoke; do
             xcrun --sdk iphonesimulator clang \
-              -target arm64-apple-ios16.0-simulator \
-              -isysroot "$sdk" \
-              -std=c11 -Wall -Wextra \
-              "tests/${test_name}.c" \
-              -o "$RUNNER_TEMP/${test_name}-sim"
+              -target arm64-apple-ios16.0-simulator -isysroot "$sdk" \
+              -std=c11 -Wall -Wextra "tests/${test_name}.c" \
+              -o "$RUNNER_TEMP/${test_name}"
           done
 
-      - name: Execute DirectMetal draw and FBO readback inside iOS Simulator
+      - name: Package, install and launch DirectMetal smokes as Simulator apps
         shell: bash
         run: |
           set -euo pipefail
           udid="${{ steps.simulator.outputs.udid }}"
-          sim_tmp="$HOME/Library/Developer/CoreSimulator/Devices/$udid/data/tmp"
-          mkdir -p "$sim_tmp"
-          cp "${{ steps.build.outputs.artifact }}" "$sim_tmp/libmithril.dylib"
-          cp "$RUNNER_TEMP/draw_smoke-sim" "$sim_tmp/draw_smoke"
-          cp "$RUNNER_TEMP/directmetal_fbo_smoke-sim" "$sim_tmp/directmetal_fbo_smoke"
-          chmod +x "$sim_tmp/draw_smoke" "$sim_tmp/directmetal_fbo_smoke"
-          for test_name in draw_smoke directmetal_fbo_smoke; do
-            echo "==> simulator ${test_name}"
-            xcrun simctl spawn "$udid" /usr/bin/env \
-              MITHRIL_LIBRARY=/tmp/libmithril.dylib \
-              MITHRIL_BACKEND=metal \
-              MITHRIL_EXPECT_RENDERER='Mithril DirectMetal' \
-              "/tmp/${test_name}"
-          done
+          dylib="${{ steps.build.outputs.artifact }}"
+          run_app() {
+            local test_name="$1" bundle="$2" expected="$3"
+            local app="$RUNNER_TEMP/${test_name}.app"
+            mkdir -p "$app"
+            cp "$RUNNER_TEMP/${test_name}" "$app/${test_name}"
+            cp "$dylib" "$app/libmithril.dylib"
+            cat > "$app/Info.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+          <key>CFBundleExecutable</key><string>${test_name}</string>
+          <key>CFBundleIdentifier</key><string>${bundle}</string>
+          <key>CFBundleName</key><string>${test_name}</string>
+          <key>CFBundlePackageType</key><string>APPL</string>
+          <key>CFBundleShortVersionString</key><string>1.0</string>
+          <key>CFBundleVersion</key><string>1</string>
+          <key>LSRequiresIPhoneOS</key><true/>
+          <key>MinimumOSVersion</key><string>16.0</string>
+          <key>UIDeviceFamily</key><array><integer>1</integer><integer>2</integer></array>
+          </dict></plist>
+          PLIST
+            codesign --force --sign - --timestamp=none "$app/libmithril.dylib"
+            codesign --force --sign - --timestamp=none "$app"
+            xcrun simctl install "$udid" "$app"
+            set +e
+            output="$(SIMCTL_CHILD_MITHRIL_LIBRARY='@executable_path/libmithril.dylib' \
+              SIMCTL_CHILD_MITHRIL_BACKEND=metal \
+              SIMCTL_CHILD_MITHRIL_EXPECT_RENDERER='Mithril DirectMetal' \
+              xcrun simctl launch --console "$udid" "$bundle" 2>&1)"
+            rc=$?
+            set -e
+            printf '%s\n' "$output"
+            test "$rc" -eq 0
+            grep -Fq "$expected" <<<"$output"
+          }
+          run_app draw_smoke com.mithril.ci.draw 'DRAW SMOKE ALL PASSED'
+          run_app directmetal_fbo_smoke com.mithril.ci.fbo 'directmetal_fbo_smoke: PASS'
 
       - name: Shutdown Simulator
         if: always()
