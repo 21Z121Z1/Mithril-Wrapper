@@ -34,28 +34,27 @@ bool EnsurePresentPipeline() {
     if (g_present_pipeline) return true;
 
     auto& engine = GetEngine();
-    static NSString* const source = @R"MSL(
-#include <metal_stdlib>
-using namespace metal;
-
-vertex float4 mithril_present_vertex(uint vertex_id [[vertex_id]]) {
-    const float2 positions[3] = {
-        float2(-1.0, -1.0),
-        float2( 3.0, -1.0),
-        float2(-1.0,  3.0)
-    };
-    return float4(positions[vertex_id], 0.0, 1.0);
-}
-
-fragment float4 mithril_present_fragment(
-    float4 position [[position]],
-    texture2d<float, access::read> source [[texture(0)]]) {
-    uint2 pixel = uint2(position.xy);
-    pixel.x = min(pixel.x, source.get_width() - 1);
-    pixel.y = min(pixel.y, source.get_height() - 1);
-    return source.read(pixel);
-}
-)MSL";
+    static NSString* const source =
+        @"#include <metal_stdlib>\n"
+        @"using namespace metal;\n"
+        @"\n"
+        @"vertex float4 mithril_present_vertex(uint vertex_id [[vertex_id]]) {\n"
+        @"    const float2 positions[3] = {\n"
+        @"        float2(-1.0, -1.0),\n"
+        @"        float2( 3.0, -1.0),\n"
+        @"        float2(-1.0,  3.0)\n"
+        @"    };\n"
+        @"    return float4(positions[vertex_id], 0.0, 1.0);\n"
+        @"}\n"
+        @"\n"
+        @"fragment float4 mithril_present_fragment(\n"
+        @"    float4 position [[position]],\n"
+        @"    texture2d<float, access::read> source [[texture(0)]]) {\n"
+        @"    uint2 pixel = uint2(position.xy);\n"
+        @"    pixel.x = min(pixel.x, source.get_width() - 1);\n"
+        @"    pixel.y = min(pixel.y, source.get_height() - 1);\n"
+        @"    return source.read(pixel);\n"
+        @"}\n";
 
     NSError* library_error = nil;
     g_present_library = [engine.device newLibraryWithSource:source
