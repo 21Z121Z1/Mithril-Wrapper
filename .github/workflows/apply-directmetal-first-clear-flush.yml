@@ -33,22 +33,24 @@ jobs:
           from pathlib import Path
           path = Path('src/gl/state.cpp')
           text = path.read_text()
-          old = '''    if (!v::EnsureInit()) {
-        PUSH_ERROR(GL_INVALID_OPERATION);
-        return false;
-    }
-    auto& st = s::GetState();
-'''
-          new = '''    if (!v::EnsureInit()) {
-        PUSH_ERROR(GL_INVALID_OPERATION);
-        return false;
-    }
-    // A clear may be the first GPU operation in a context. Texture storage
-    // created before lazy backend initialization must be resident before an
-    // attached FBO can be resolved, just as DrawCommon already guarantees.
-    if (!g_dirty_textures.empty()) FlushDirtyTextureUploads();
-    auto& st = s::GetState();
-'''
+          old = (
+              '    if (!v::EnsureInit()) {\n'
+              '        PUSH_ERROR(GL_INVALID_OPERATION);\n'
+              '        return false;\n'
+              '    }\n'
+              '    auto& st = s::GetState();\n'
+          )
+          new = (
+              '    if (!v::EnsureInit()) {\n'
+              '        PUSH_ERROR(GL_INVALID_OPERATION);\n'
+              '        return false;\n'
+              '    }\n'
+              '    // A clear may be the first GPU operation in a context. Texture storage\n'
+              '    // created before lazy backend initialization must be resident before an\n'
+              '    // attached FBO can be resolved, just as DrawCommon already guarantees.\n'
+              '    if (!g_dirty_textures.empty()) FlushDirtyTextureUploads();\n'
+              '    auto& st = s::GetState();\n'
+          )
           if text.count(old) != 1:
               raise SystemExit(f'expected one SubmitClear init block, got {text.count(old)}')
           path.write_text(text.replace(old, new, 1))
