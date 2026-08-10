@@ -153,10 +153,19 @@ struct Framebuffer {
     std::string signature;
 };
 
+struct AttachmentSelection {
+    NSUInteger level = 0;
+    NSUInteger slice = 0;
+    NSUInteger depth_plane = 0;
+    bool uses_depth_plane = false;
+};
+
 struct ResolvedTarget {
     std::vector<id<MTLTexture>> colors;
     std::vector<id<MTLTexture>> resolve_colors;
+    std::vector<AttachmentSelection> color_selections;
     id<MTLTexture> depth_stencil = nil;
+    AttachmentSelection depth_selection;
     bool has_stencil = false;
     NSUInteger width = 0;
     NSUInteger height = 0;
@@ -601,19 +610,45 @@ id<MTLTexture> CreateTexture(const backend::TexUpload& image,
 }
 
 bool ResolveAttachment(const backend::FboAttach& attachment,
-                       id<MTLTexture>* texture, bool* is_depth = nullptr,
+                       id<MTLTexture>* texture, AttachmentSelection* selection,
+                       bool* is_depth = nullptr,
                        bool* has_stencil = nullptr) {
+    if (!texture || !selection) return false;
+    *texture = nil;
+    *selection = {};
     auto& engine = GetEngine();
     if (attachment.is_texture) {
         auto found = engine.textures.find(attachment.tex_id);
-        if (found == engine.textures.end() || attachment.level != 0 ||
-            attachment.layer != 0)
+        if (found == engine.textures.end()) return false;
+        const ResidentTexture& resident = found->second;
+        if (!resident.texture || resident.is_buffer ||
+            attachment.level >= resident.levels)
             return false;
-        *texture = found->second.texture;
+
+        selection->level = attachment.level;
+        if (resident.is_multisample) {
+            if (attachment.level != 0 || attachment.layer != 0) return false;
+        } else if (resident.is_3d) {
+            const NSUInteger depth_at_level = std::max<NSUInteger>(
+                1, static_cast<NSUInteger>(resident.depth) >> attachment.level);
+            if (attachment.layer >= depth_at_level) return false;
+            selection->depth_plane = attachment.layer;
+            selection->uses_depth_plane = true;
+        } else if (resident.is_cube) {
+            if (attachment.layer >= 6) return false;
+            selection->slice = attachment.layer;
+        } else if (resident.depth > 1) {
+            if (attachment.layer >= resident.depth) return false;
+            selection->slice = attachment.layer;
+        } else if (attachment.layer != 0) {
+            return false;
+        }
+
+        *texture = resident.texture;
         if (is_depth)
-            *is_depth = found->second.format == backend::TexelFormat::Depth32Float;
+            *is_depth = resident.format == backend::TexelFormat::Depth32Float;
         if (has_stencil) *has_stencil = false;
-        return *texture != nil;
+        return true;
     }
     if (attachment.rbo_id) {
         auto found = engine.renderbuffers.find(attachment.rbo_id);
@@ -633,6 +668,7 @@ bool ResolveTarget(uint64_t fbo_id, ResolvedTarget* target) {
     if (!fbo_id) {
         target->colors.push_back(engine.color);
         target->resolve_colors.push_back(nil);
+        target->color_selections.push_back({});
         target->depth_stencil = engine.depth_stencil;
         target->has_stencil = true;
         target->width = engine.width;
@@ -654,20 +690,26 @@ bool ResolveTarget(uint64_t fbo_id, ResolvedTarget* target) {
         sample_count_set = true;
         return true;
     };
+    bool has_attachment = false;
     for (const auto& color : found->second.spec.color) {
         id<MTLTexture> texture = nil;
-        ResolveAttachment(color, &texture);
+        AttachmentSelection selection;
+        if (!color.is_texture && !color.rbo_id) {
+            target->colors.push_back(nil);
+            target->resolve_colors.push_back(nil);
+            target->color_selections.push_back({});
+            continue;
+        }
+        if (!ResolveAttachment(color, &texture, &selection)) return false;
         if (!merge_sample_count(texture)) return false;
+        has_attachment = true;
         target->colors.push_back(texture);
+        target->color_selections.push_back(selection);
         id<MTLTexture> resolve = nil;
-        if (color.is_texture) {
-            if (engine.textures.find(color.tex_id) == engine.textures.end())
-                return false;
-        } else if (color.rbo_id) {
+        if (color.rbo_id) {
             auto renderbuffer = engine.renderbuffers.find(color.rbo_id);
-            if (renderbuffer != engine.renderbuffers.end()) {
+            if (renderbuffer != engine.renderbuffers.end())
                 resolve = renderbuffer->second.resolve;
-            }
         }
         target->resolve_colors.push_back(resolve);
     }
@@ -675,14 +717,17 @@ bool ResolveTarget(uint64_t fbo_id, ResolvedTarget* target) {
         bool depth = false;
         bool has_stencil = false;
         id<MTLTexture> depth_texture = nil;
-        if (!ResolveAttachment(found->second.spec.depth,
-                               &depth_texture, &depth, &has_stencil) || !depth)
+        AttachmentSelection depth_selection;
+        if (!ResolveAttachment(found->second.spec.depth, &depth_texture,
+                               &depth_selection, &depth, &has_stencil) || !depth)
             return false;
         if (!merge_sample_count(depth_texture)) return false;
         target->depth_stencil = depth_texture;
+        target->depth_selection = depth_selection;
         target->has_stencil = has_stencil;
+        has_attachment = true;
     }
-    return !target->colors.empty() && target->colors.front() != nil;
+    return has_attachment;
 }
 
 std::string FramebufferSignature(const backend::FboSpec& spec) {
@@ -1803,6 +1848,7 @@ bool SubmitInternal(bool wait_for_completion, bool copy_for_readback,
         return false;
     }
     id<MTLTexture> read_color = nil;
+    AttachmentSelection read_selection;
     if (copy_for_readback) {
         if (!ResolveTarget(engine.bound_read_fbo, &read_target)) return false;
         NSUInteger read_index = 0;
@@ -1813,11 +1859,14 @@ bool SubmitInternal(bool wait_for_completion, bool copy_for_readback,
                 read_index = fbo->second.spec.read_buf - GL_COLOR_ATTACHMENT0;
         }
         if (read_index >= read_target.colors.size()) return false;
-        read_color = read_target.resolve_colors[read_index]
-            ? read_target.resolve_colors[read_index]
-            : read_target.colors[read_index];
-        if (!read_color)
-            return false;
+        if (read_target.resolve_colors[read_index]) {
+            read_color = read_target.resolve_colors[read_index];
+            read_selection = {};
+        } else {
+            read_color = read_target.colors[read_index];
+            read_selection = read_target.color_selections[read_index];
+        }
+        if (!read_color) return false;
     }
 
     FrameContext& frame = AcquireFrame(
@@ -1885,6 +1934,13 @@ bool SubmitInternal(bool wait_for_completion, bool copy_for_readback,
             if (!draw_target.colors[i]) continue;
             auto* color = pass.colorAttachments[i];
             color.texture = draw_target.colors[i];
+            const AttachmentSelection& selection =
+                draw_target.color_selections[i];
+            color.level = selection.level;
+            if (selection.uses_depth_plane)
+                color.depthPlane = selection.depth_plane;
+            else
+                color.slice = selection.slice;
             if (draw_target.resolve_colors[i]) {
                 color.resolveTexture = draw_target.resolve_colors[i];
                 color.storeAction = MTLStoreActionMultisampleResolve;
@@ -1907,12 +1963,22 @@ bool SubmitInternal(bool wait_for_completion, bool copy_for_readback,
 
         if (draw_target.depth_stencil) {
             pass.depthAttachment.texture = draw_target.depth_stencil;
+            pass.depthAttachment.level = draw_target.depth_selection.level;
+            if (draw_target.depth_selection.uses_depth_plane)
+                pass.depthAttachment.depthPlane = draw_target.depth_selection.depth_plane;
+            else
+                pass.depthAttachment.slice = draw_target.depth_selection.slice;
             pass.depthAttachment.storeAction = MTLStoreActionStore;
             pass.depthAttachment.loadAction = load_depth_clear
                 ? MTLLoadActionClear : MTLLoadActionLoad;
             pass.depthAttachment.clearDepth = engine.clear.depth;
             if (draw_target.has_stencil) {
                 pass.stencilAttachment.texture = draw_target.depth_stencil;
+                pass.stencilAttachment.level = draw_target.depth_selection.level;
+                if (draw_target.depth_selection.uses_depth_plane)
+                    pass.stencilAttachment.depthPlane = draw_target.depth_selection.depth_plane;
+                else
+                    pass.stencilAttachment.slice = draw_target.depth_selection.slice;
                 pass.stencilAttachment.storeAction = MTLStoreActionStore;
                 pass.stencilAttachment.loadAction =
                     load_stencil_clear
@@ -1945,9 +2011,10 @@ bool SubmitInternal(bool wait_for_completion, bool copy_for_readback,
     if (copy_for_readback) {
         id<MTLBlitCommandEncoder> blit = [command blitCommandEncoder];
         [blit copyFromTexture:read_color
-                 sourceSlice:0
-                 sourceLevel:0
-                sourceOrigin:MTLOriginMake(0, 0, 0)
+                 sourceSlice:read_selection.uses_depth_plane ? 0 : read_selection.slice
+                 sourceLevel:read_selection.level
+                sourceOrigin:MTLOriginMake(0, 0,
+                    read_selection.uses_depth_plane ? read_selection.depth_plane : 0)
                   sourceSize:MTLSizeMake(read_target.width, read_target.height, 1)
                     toBuffer:frame.readback
            destinationOffset:0
@@ -2682,13 +2749,23 @@ void BlitFramebuffer(uint64_t src_id, uint64_t dst_id,
     const NSUInteger source_y = source.height - std::max(sy0, sy1);
     const NSUInteger destination_x = std::min(dx0, dx1);
     const NSUInteger destination_y = destination.height - std::max(dy0, dy1);
+    const AttachmentSelection& source_selection =
+        source.color_selections[source_index];
+    const AttachmentSelection& destination_selection =
+        destination.color_selections[destination_index];
     [blit copyFromTexture:source.colors[source_index]
-              sourceSlice:0 sourceLevel:0
-             sourceOrigin:MTLOriginMake(source_x, source_y, 0)
+              sourceSlice:source_selection.uses_depth_plane ? 0 : source_selection.slice
+              sourceLevel:source_selection.level
+             sourceOrigin:MTLOriginMake(source_x, source_y,
+                 source_selection.uses_depth_plane ? source_selection.depth_plane : 0)
                sourceSize:MTLSizeMake(source_width, source_height, 1)
                 toTexture:destination.colors[destination_index]
-         destinationSlice:0 destinationLevel:0
-        destinationOrigin:MTLOriginMake(destination_x, destination_y, 0)];
+         destinationSlice:destination_selection.uses_depth_plane
+             ? 0 : destination_selection.slice
+         destinationLevel:destination_selection.level
+        destinationOrigin:MTLOriginMake(destination_x, destination_y,
+            destination_selection.uses_depth_plane
+                ? destination_selection.depth_plane : 0)];
     [blit endEncoding];
     (void)CommitCommandBuffer(command);
 }
