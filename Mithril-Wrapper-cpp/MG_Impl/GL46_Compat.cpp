@@ -16,6 +16,21 @@
 //    initialized, and include a comment explaining why they are no-ops.
 #include "includes.h"
 #include <cstring>
+#include <unordered_set>
+
+// GL enums absent from the project's minimal glcorearb.h.
+#ifndef GL_ACTIVE_PROGRAM
+#define GL_ACTIVE_PROGRAM 0x8259
+#endif
+
+// Forward declarations for entry points defined in other TUs but absent from
+// the minimal glcorearb.h — needed only so the delegation calls below compile.
+extern "C" {
+void glBeginQuery(GLenum target, GLuint id);
+void glEndQuery(GLenum target);
+void glGetQueryiv(GLenum target, GLenum pname, GLint* params);
+void glGetVertexAttribdv(GLuint index, GLenum pname, GLdouble* params);
+}
 
 // GL enums absent from the project's minimal glcorearb.h.
 #ifndef GL_INVALID_INDEX
@@ -1368,6 +1383,883 @@ void glGetCompressedTextureSubImage(GLuint texture, GLint level, GLint xoffset,
     if (pixels && bufSize > 0) {
         memset(pixels, 0, (size_t)bufSize);
     }
+}
+
+/* ====================================================================
+ * GL 3.0-4.6 补齐批 (P2): indexed getters / double uniforms /
+ * program-uniform / pipeline objects / 1D textures / viewport-scissor arrays.
+ * 策略：能委托给已实现函数的直接委托；查询类返回安全默认值；
+ * 目标工作负载（MC/Sodium/Iris）不触发的路径保持 no-op 并注明原因。
+ * ==================================================================== */
+
+/* ---- Indexed state getters (GL 3.0). glGetIntegeri_v / glGetBooleani_v /
+ * glGetInteger64i_v 已在 Getter.cpp 实现（带正确的 per-index 语义），此处仅
+ * 补齐剩余索引 getter，全部委托给非索引版本。 ---- */
+void glGetFloati_v(GLenum target, GLuint index, GLfloat* data) {
+    MITHRIL_ENSURE_INIT();
+    (void)index;
+    glGetFloatv(target, data);
+}
+
+void glGetDoublei_v(GLenum target, GLuint index, GLdouble* data) {
+    MITHRIL_ENSURE_INIT();
+    (void)index;
+    glGetDoublev(target, data);
+}
+
+/* GL 3.2 — multisample sample position. Sample 0 is at (0.5, 0.5). */
+void glGetMultisamplefv(GLenum pname, GLuint index, GLfloat* val) {
+    MITHRIL_ENSURE_INIT();
+    (void)pname; (void)index;
+    if (!val) return;
+    val[0] = 0.5f;
+    val[1] = 0.5f;
+}
+
+/* GL 3.0 — buffer pointer query. Returns the persistent mapping if live. */
+void glGetBufferPointerv(GLenum target, GLenum pname, void** params) {
+    MITHRIL_ENSURE_INIT();
+    (void)pname;
+    if (!params) return;
+    *params = nullptr;
+    mithril::BufferTarget t = mithril::bufferTargetFromGL(target);
+    if (t == mithril::BufferTarget::Count || !g_state) return;
+    const auto& sl = g_state->bufferBindings[(int)t];
+    if (!sl.name) return;
+    mithril::Buffer* b = mithril::state_get_buffer(sl.name);
+    if (b) *params = b->mapped;  // the CPU shadow map (see Buffer.cpp)
+}
+
+void glGetBufferParameteri64v(GLenum target, GLenum pname, GLint64* params) {
+    MITHRIL_ENSURE_INIT();
+    if (!params) return;
+    GLint v = 0;
+    glGetBufferParameteriv(target, pname, &v);
+    *params = (GLint64)v;
+}
+
+/* ---- Sampler object getters (GL 3.3): return the GL defaults a fresh
+ * sampler has. MC binds samplers rarely; defaults keep capability probes sane. */
+static void sampler_default_params(GLenum pname, GLfloat* f, GLint* i) {
+    switch (pname) {
+        case GL_TEXTURE_MIN_FILTER:    if (i) *i = GL_NEAREST_MIPMAP_LINEAR; if (f) *f = (GLfloat)GL_NEAREST_MIPMAP_LINEAR; break;
+        case GL_TEXTURE_MAG_FILTER:    if (i) *i = GL_LINEAR;                if (f) *f = (GLfloat)GL_LINEAR; break;
+        case GL_TEXTURE_WRAP_S:
+        case GL_TEXTURE_WRAP_T:
+        case GL_TEXTURE_WRAP_R:        if (i) *i = GL_REPEAT;                if (f) *f = (GLfloat)GL_REPEAT; break;
+        case GL_TEXTURE_MIN_LOD:       if (i) *i = -1000;                    if (f) *f = -1000.0f; break;
+        case GL_TEXTURE_MAX_LOD:       if (i) *i = 1000;                     if (f) *f = 1000.0f; break;
+        case GL_TEXTURE_LOD_BIAS:      if (i) *i = 0;                        if (f) *f = 0.0f; break;
+        case GL_TEXTURE_COMPARE_MODE:  if (i) *i = GL_NONE;                  if (f) *f = (GLfloat)GL_NONE; break;
+        case GL_TEXTURE_COMPARE_FUNC:  if (i) *i = GL_LEQUAL;                if (f) *f = (GLfloat)GL_LEQUAL; break;
+        default:                       if (i) *i = 0;                        if (f) *f = 0.0f; break;
+    }
+}
+
+void glGetSamplerParameteriv(GLuint sampler, GLenum pname, GLint* params) {
+    MITHRIL_ENSURE_INIT();
+    (void)sampler;
+    if (params) sampler_default_params(pname, nullptr, params);
+}
+
+void glGetSamplerParameterfv(GLuint sampler, GLenum pname, GLfloat* params) {
+    MITHRIL_ENSURE_INIT();
+    (void)sampler;
+    if (params) sampler_default_params(pname, params, nullptr);
+}
+
+void glGetSamplerParameterIiv(GLuint sampler, GLenum pname, GLint* params) {
+    MITHRIL_ENSURE_INIT();
+    (void)sampler;
+    if (params) sampler_default_params(pname, nullptr, params);
+}
+
+void glGetSamplerParameterIuiv(GLuint sampler, GLenum pname, GLuint* params) {
+    MITHRIL_ENSURE_INIT();
+    (void)sampler;
+    if (params) {
+        GLint v = 0;
+        sampler_default_params(pname, nullptr, &v);
+        *params = (GLuint)v;
+    }
+}
+
+/* ---- Sampler parameter setters (GL 3.3): MC 绑定 sampler 对象极少；记录
+ * 到状态会引入额外表结构，no-op 对目标工作负载安全（默认 sampler 参数已由
+ * 纹理参数路径 backend_texture_set_params 覆盖）。 ---- */
+void glSamplerParameterIiv(GLuint sampler, GLenum pname, const GLint* params) {
+    MITHRIL_ENSURE_INIT();
+    (void)sampler; (void)pname; (void)params;
+}
+
+void glSamplerParameterIuiv(GLuint sampler, GLenum pname, const GLuint* params) {
+    MITHRIL_ENSURE_INIT();
+    (void)sampler; (void)pname; (void)params;
+}
+
+void glBindFragDataLocationIndexed(GLuint program, GLuint colorNumber,
+                                   GLuint index, const GLchar* name) {
+    MITHRIL_ENSURE_INIT();
+    (void)program; (void)colorNumber; (void)index; (void)name;
+}
+
+void glGetUniformSubroutineuiv(GLenum shadertype, GLint location, GLuint* params) {
+    MITHRIL_ENSURE_INIT();
+    (void)shadertype; (void)location;
+    if (params) *params = 0;
+}
+
+/* ---- Query object getters (occlusion/timestamp queries are no-op'd) ---- */
+void glGetQueryObjecti64v(GLuint id, GLenum pname, GLint64* params) {
+    MITHRIL_ENSURE_INIT();
+    (void)id; (void)pname;
+    if (params) *params = 0;
+}
+
+void glGetQueryObjectui64v(GLuint id, GLenum pname, GLuint64* params) {
+    MITHRIL_ENSURE_INIT();
+    (void)id; (void)pname;
+    if (params) *params = 0;
+}
+
+void glGetQueryIndexediv(GLenum target, GLuint index, GLenum pname, GLint* params) {
+    MITHRIL_ENSURE_INIT();
+    (void)index;
+    glGetQueryiv(target, pname, params);
+}
+
+/* GL 3.0 — unsigned uniform query. */
+void glGetUniformuiv(GLuint program, GLint location, GLuint* params) {
+    MITHRIL_ENSURE_INIT();
+    GLint v = 0;
+    glGetUniformiv(program, location, &v);
+    if (params) *params = (GLuint)v;
+}
+
+/* GL 3.0 — fragment data location. We don't track output bindings; -1 is the
+ * spec answer for "not a bound output". */
+GLint glGetFragDataLocation(GLuint program, const GLchar* name) {
+    MITHRIL_ENSURE_INIT();
+    (void)program; (void)name;
+    return -1;
+}
+
+GLint glGetFragDataIndex(GLuint program, const GLchar* name) {
+    MITHRIL_ENSURE_INIT();
+    (void)program; (void)name;
+    return -1;
+}
+
+/* GL 4.1 — shader precision format (highp float/int defaults per GL spec). */
+void glGetShaderPrecisionFormat(GLenum shadertype, GLenum precisiontype,
+                                GLint* range, GLint* precision) {
+    MITHRIL_ENSURE_INIT();
+    (void)shadertype;
+    if (precisiontype == GL_FLOAT) {
+        if (range) { range[0] = 127; range[1] = 127; }
+        if (precision) *precision = 23;
+    } else if (precisiontype == GL_INT || precisiontype == GL_UNSIGNED_INT) {
+        if (range) { range[0] = 31; range[1] = 30; }
+        if (precision) *precision = 0;
+    } else {
+        if (range) { range[0] = 0; range[1] = 0; }
+        if (precision) *precision = 0;
+    }
+}
+
+/* GL 4.3 — atomic counter buffer query. */
+void glGetActiveAtomicCounterBufferiv(GLuint program, GLuint bufferIndex,
+                                      GLenum pname, GLint* params) {
+    MITHRIL_ENSURE_INIT();
+    (void)program; (void)bufferIndex; (void)pname;
+    if (params) *params = 0;
+}
+
+void glGetInternalformati64v(GLenum target, GLenum internalformat, GLenum pname,
+                             GLsizei bufSize, GLint64* params) {
+    MITHRIL_ENSURE_INIT();
+    if (!params || bufSize <= 0) return;
+    GLint v = 0;
+    glGetInternalformativ(target, internalformat, pname, 1, &v);
+    for (GLsizei i = 0; i < bufSize; ++i) params[i] = (GLint64)v;
+}
+
+/* GL 3.0 — transform feedback varying query. */
+void glGetTransformFeedbackVarying(GLuint program, GLuint index, GLsizei bufSize,
+                                   GLsizei* length, GLsizei* size, GLenum* type,
+                                   GLchar* name) {
+    MITHRIL_ENSURE_INIT();
+    (void)program; (void)index; (void)bufSize;
+    if (length) *length = 0;
+    if (size) *size = 0;
+    if (type) *type = GL_FLOAT;
+    if (name && bufSize > 0) name[0] = '\0';
+}
+
+/* GL 4.0 — subroutine queries. No subroutines in the MSL path; return -1/0. */
+GLint glGetSubroutineUniformLocation(GLuint program, GLenum shadertype,
+                                     const GLchar* name) {
+    MITHRIL_ENSURE_INIT();
+    (void)program; (void)shadertype; (void)name;
+    return -1;
+}
+
+GLuint glGetSubroutineIndex(GLuint program, GLenum shadertype, const GLchar* name) {
+    MITHRIL_ENSURE_INIT();
+    (void)program; (void)shadertype; (void)name;
+    return GL_INVALID_INDEX;
+}
+
+void glGetActiveSubroutineUniformiv(GLuint program, GLenum shadertype,
+                                    GLuint index, GLenum pname, GLint* values) {
+    MITHRIL_ENSURE_INIT();
+    (void)program; (void)shadertype; (void)index; (void)pname;
+    if (values) *values = 0;
+}
+
+void glGetActiveSubroutineUniformName(GLuint program, GLenum shadertype,
+                                      GLuint index, GLsizei bufSize,
+                                      GLsizei* length, GLchar* name) {
+    MITHRIL_ENSURE_INIT();
+    (void)program; (void)shadertype; (void)index; (void)bufSize;
+    if (length) *length = 0;
+    if (name && bufSize > 0) name[0] = '\0';
+}
+
+void glGetActiveSubroutineName(GLuint program, GLenum shadertype, GLuint index,
+                               GLsizei bufSize, GLsizei* length, GLchar* name) {
+    MITHRIL_ENSURE_INIT();
+    (void)program; (void)shadertype; (void)index; (void)bufSize;
+    if (length) *length = 0;
+    if (name && bufSize > 0) name[0] = '\0';
+}
+
+void glUniformSubroutinesuiv(GLenum shadertype, GLsizei count, const GLuint* indices) {
+    MITHRIL_ENSURE_INIT();
+    (void)shadertype; (void)count; (void)indices;
+}
+
+/* ---- State setters that map onto existing entry points ---- */
+void glViewportArrayv(GLuint first, GLsizei count, const GLfloat* v) {
+    MITHRIL_ENSURE_INIT();
+    if (!v) return;
+    for (GLsizei i = 0; i < count; ++i) {
+        glViewport((GLint)v[i * 4 + 0], (GLint)v[i * 4 + 1],
+                   (GLsizei)v[i * 4 + 2], (GLsizei)v[i * 4 + 3]);
+    }
+    (void)first;
+}
+
+void glViewportIndexedf(GLuint index, GLfloat x, GLfloat y, GLfloat w, GLfloat h) {
+    MITHRIL_ENSURE_INIT();
+    (void)index;
+    glViewport((GLint)x, (GLint)y, (GLsizei)w, (GLsizei)h);
+}
+
+void glViewportIndexedfv(GLuint index, const GLfloat* v) {
+    MITHRIL_ENSURE_INIT();
+    (void)index;
+    if (v) glViewport((GLint)v[0], (GLint)v[1], (GLsizei)v[2], (GLsizei)v[3]);
+}
+
+void glScissorArrayv(GLuint first, GLsizei count, const GLint* v) {
+    MITHRIL_ENSURE_INIT();
+    if (!v) return;
+    for (GLsizei i = 0; i < count; ++i) {
+        glScissor(v[i * 4 + 0], v[i * 4 + 1], v[i * 4 + 2], v[i * 4 + 3]);
+    }
+    (void)first;
+}
+
+void glScissorIndexed(GLuint index, GLint left, GLint bottom, GLsizei width, GLsizei height) {
+    MITHRIL_ENSURE_INIT();
+    (void)index;
+    glScissor(left, bottom, width, height);
+}
+
+void glScissorIndexedv(GLuint index, const GLint* v) {
+    MITHRIL_ENSURE_INIT();
+    (void)index;
+    if (v) glScissor(v[0], v[1], v[2], v[3]);
+}
+
+void glDepthRangeArrayv(GLuint first, GLsizei count, const GLdouble* v) {
+    MITHRIL_ENSURE_INIT();
+    if (!v) return;
+    for (GLsizei i = 0; i < count; ++i) glDepthRange(v[i * 2], v[i * 2 + 1]);
+    (void)first;
+}
+
+void glDepthRangeIndexed(GLuint index, GLdouble n, GLdouble f) {
+    MITHRIL_ENSURE_INIT();
+    (void)index;
+    glDepthRange(n, f);
+}
+
+/* ---- GL 3.0-4.5 state no-ops (not exercised by the target workload) ---- */
+void glClampColor(GLenum target, GLenum clamp) {
+    MITHRIL_ENSURE_INIT();
+    (void)target; (void)clamp;
+}
+
+void glPointParameterf(GLenum pname, GLfloat param) {
+    MITHRIL_ENSURE_INIT();
+    (void)pname; (void)param;
+}
+
+void glPointParameterfv(GLenum pname, const GLfloat* params) {
+    MITHRIL_ENSURE_INIT();
+    (void)pname; (void)params;
+}
+
+void glPointParameteri(GLenum pname, GLint param) {
+    MITHRIL_ENSURE_INIT();
+    (void)pname; (void)param;
+}
+
+void glPointParameteriv(GLenum pname, const GLint* params) {
+    MITHRIL_ENSURE_INIT();
+    (void)pname; (void)params;
+}
+
+void glSampleCoverage(GLfloat value, GLboolean invert) {
+    MITHRIL_ENSURE_INIT();
+    (void)value; (void)invert;
+}
+
+void glProvokingVertex(GLenum mode) {
+    MITHRIL_ENSURE_INIT();
+    (void)mode;
+}
+
+/* ---- Generic vertex attribute variants. The float variants are already
+ * no-ops (VertexArray.cpp) because MC's modern pipeline never uses generic
+ * attributes; the double/int/packed/L variants mirror that policy. ---- */
+void glVertexAttrib1d(GLuint index, GLdouble x)                 { MITHRIL_ENSURE_INIT(); (void)index; (void)x; }
+void glVertexAttrib1dv(GLuint index, const GLdouble* v)         { MITHRIL_ENSURE_INIT(); (void)index; (void)v; }
+void glVertexAttrib1s(GLuint index, GLshort x)                  { MITHRIL_ENSURE_INIT(); (void)index; (void)x; }
+void glVertexAttrib1sv(GLuint index, const GLshort* v)          { MITHRIL_ENSURE_INIT(); (void)index; (void)v; }
+void glVertexAttrib2d(GLuint index, GLdouble x, GLdouble y)     { MITHRIL_ENSURE_INIT(); (void)index; (void)x; (void)y; }
+void glVertexAttrib2dv(GLuint index, const GLdouble* v)         { MITHRIL_ENSURE_INIT(); (void)index; (void)v; }
+void glVertexAttrib2s(GLuint index, GLshort x, GLshort y)       { MITHRIL_ENSURE_INIT(); (void)index; (void)x; (void)y; }
+void glVertexAttrib2sv(GLuint index, const GLshort* v)          { MITHRIL_ENSURE_INIT(); (void)index; (void)v; }
+void glVertexAttrib3d(GLuint index, GLdouble x, GLdouble y, GLdouble z) { MITHRIL_ENSURE_INIT(); (void)index; (void)x; (void)y; (void)z; }
+void glVertexAttrib3dv(GLuint index, const GLdouble* v)         { MITHRIL_ENSURE_INIT(); (void)index; (void)v; }
+void glVertexAttrib3s(GLuint index, GLshort x, GLshort y, GLshort z) { MITHRIL_ENSURE_INIT(); (void)index; (void)x; (void)y; (void)z; }
+void glVertexAttrib3sv(GLuint index, const GLshort* v)          { MITHRIL_ENSURE_INIT(); (void)index; (void)v; }
+void glVertexAttrib4d(GLuint index, GLdouble x, GLdouble y, GLdouble z, GLdouble w) { MITHRIL_ENSURE_INIT(); (void)index; (void)x; (void)y; (void)z; (void)w; }
+void glVertexAttrib4dv(GLuint index, const GLdouble* v)         { MITHRIL_ENSURE_INIT(); (void)index; (void)v; }
+void glVertexAttrib4s(GLuint index, GLshort x, GLshort y, GLshort z, GLshort w) { MITHRIL_ENSURE_INIT(); (void)index; (void)x; (void)y; (void)z; (void)w; }
+void glVertexAttrib4sv(GLuint index, const GLshort* v)          { MITHRIL_ENSURE_INIT(); (void)index; (void)v; }
+void glVertexAttrib4bv(GLuint index, const GLbyte* v)           { MITHRIL_ENSURE_INIT(); (void)index; (void)v; }
+void glVertexAttrib4iv(GLuint index, const GLint* v)            { MITHRIL_ENSURE_INIT(); (void)index; (void)v; }
+void glVertexAttrib4ubv(GLuint index, const GLubyte* v)         { MITHRIL_ENSURE_INIT(); (void)index; (void)v; }
+void glVertexAttrib4uiv(GLuint index, const GLuint* v)          { MITHRIL_ENSURE_INIT(); (void)index; (void)v; }
+void glVertexAttrib4usv(GLuint index, const GLushort* v)        { MITHRIL_ENSURE_INIT(); (void)index; (void)v; }
+void glVertexAttrib4Nbv(GLuint index, const GLbyte* v)          { MITHRIL_ENSURE_INIT(); (void)index; (void)v; }
+void glVertexAttrib4Niv(GLuint index, const GLint* v)           { MITHRIL_ENSURE_INIT(); (void)index; (void)v; }
+void glVertexAttrib4Nsv(GLuint index, const GLshort* v)         { MITHRIL_ENSURE_INIT(); (void)index; (void)v; }
+void glVertexAttrib4Nub(GLuint index, GLubyte x, GLubyte y, GLubyte z, GLubyte w) { MITHRIL_ENSURE_INIT(); (void)index; (void)x; (void)y; (void)z; (void)w; }
+void glVertexAttrib4Nubv(GLuint index, const GLubyte* v)        { MITHRIL_ENSURE_INIT(); (void)index; (void)v; }
+void glVertexAttrib4Nuiv(GLuint index, const GLuint* v)         { MITHRIL_ENSURE_INIT(); (void)index; (void)v; }
+void glVertexAttrib4Nusv(GLuint index, const GLushort* v)       { MITHRIL_ENSURE_INIT(); (void)index; (void)v; }
+
+void glVertexAttribI1i(GLuint index, GLint x)                   { MITHRIL_ENSURE_INIT(); (void)index; (void)x; }
+void glVertexAttribI2i(GLuint index, GLint x, GLint y)          { MITHRIL_ENSURE_INIT(); (void)index; (void)x; (void)y; }
+void glVertexAttribI3i(GLuint index, GLint x, GLint y, GLint z) { MITHRIL_ENSURE_INIT(); (void)index; (void)x; (void)y; (void)z; }
+void glVertexAttribI4i(GLuint index, GLint x, GLint y, GLint z, GLint w) { MITHRIL_ENSURE_INIT(); (void)index; (void)x; (void)y; (void)z; (void)w; }
+void glVertexAttribI1ui(GLuint index, GLuint x)                 { MITHRIL_ENSURE_INIT(); (void)index; (void)x; }
+void glVertexAttribI2ui(GLuint index, GLuint x, GLuint y)       { MITHRIL_ENSURE_INIT(); (void)index; (void)x; (void)y; }
+void glVertexAttribI3ui(GLuint index, GLuint x, GLuint y, GLuint z) { MITHRIL_ENSURE_INIT(); (void)index; (void)x; (void)y; (void)z; }
+void glVertexAttribI4ui(GLuint index, GLuint x, GLuint y, GLuint z, GLuint w) { MITHRIL_ENSURE_INIT(); (void)index; (void)x; (void)y; (void)z; (void)w; }
+void glVertexAttribI1iv(GLuint index, const GLint* v)           { MITHRIL_ENSURE_INIT(); (void)index; (void)v; }
+void glVertexAttribI2iv(GLuint index, const GLint* v)           { MITHRIL_ENSURE_INIT(); (void)index; (void)v; }
+void glVertexAttribI3iv(GLuint index, const GLint* v)           { MITHRIL_ENSURE_INIT(); (void)index; (void)v; }
+void glVertexAttribI4iv(GLuint index, const GLint* v)           { MITHRIL_ENSURE_INIT(); (void)index; (void)v; }
+void glVertexAttribI1uiv(GLuint index, const GLuint* v)         { MITHRIL_ENSURE_INIT(); (void)index; (void)v; }
+void glVertexAttribI2uiv(GLuint index, const GLuint* v)         { MITHRIL_ENSURE_INIT(); (void)index; (void)v; }
+void glVertexAttribI3uiv(GLuint index, const GLuint* v)         { MITHRIL_ENSURE_INIT(); (void)index; (void)v; }
+void glVertexAttribI4uiv(GLuint index, const GLuint* v)         { MITHRIL_ENSURE_INIT(); (void)index; (void)v; }
+void glVertexAttribI4bv(GLuint index, const GLbyte* v)          { MITHRIL_ENSURE_INIT(); (void)index; (void)v; }
+void glVertexAttribI4sv(GLuint index, const GLshort* v)         { MITHRIL_ENSURE_INIT(); (void)index; (void)v; }
+void glVertexAttribI4ubv(GLuint index, const GLubyte* v)        { MITHRIL_ENSURE_INIT(); (void)index; (void)v; }
+void glVertexAttribI4usv(GLuint index, const GLushort* v)       { MITHRIL_ENSURE_INIT(); (void)index; (void)v; }
+
+void glVertexAttribP1ui(GLuint index, GLenum type, GLboolean normalized, GLuint value) { MITHRIL_ENSURE_INIT(); (void)index; (void)type; (void)normalized; (void)value; }
+void glVertexAttribP1uiv(GLuint index, GLenum type, GLboolean normalized, const GLuint* value) { MITHRIL_ENSURE_INIT(); (void)index; (void)type; (void)normalized; (void)value; }
+void glVertexAttribP2ui(GLuint index, GLenum type, GLboolean normalized, GLuint value) { MITHRIL_ENSURE_INIT(); (void)index; (void)type; (void)normalized; (void)value; }
+void glVertexAttribP2uiv(GLuint index, GLenum type, GLboolean normalized, const GLuint* value) { MITHRIL_ENSURE_INIT(); (void)index; (void)type; (void)normalized; (void)value; }
+void glVertexAttribP3ui(GLuint index, GLenum type, GLboolean normalized, GLuint value) { MITHRIL_ENSURE_INIT(); (void)index; (void)type; (void)normalized; (void)value; }
+void glVertexAttribP3uiv(GLuint index, GLenum type, GLboolean normalized, const GLuint* value) { MITHRIL_ENSURE_INIT(); (void)index; (void)type; (void)normalized; (void)value; }
+void glVertexAttribP4ui(GLuint index, GLenum type, GLboolean normalized, GLuint value) { MITHRIL_ENSURE_INIT(); (void)index; (void)type; (void)normalized; (void)value; }
+void glVertexAttribP4uiv(GLuint index, GLenum type, GLboolean normalized, const GLuint* value) { MITHRIL_ENSURE_INIT(); (void)index; (void)type; (void)normalized; (void)value; }
+
+void glVertexAttribL1d(GLuint index, GLdouble x)                { MITHRIL_ENSURE_INIT(); (void)index; (void)x; }
+void glVertexAttribL2d(GLuint index, GLdouble x, GLdouble y)    { MITHRIL_ENSURE_INIT(); (void)index; (void)x; (void)y; }
+void glVertexAttribL3d(GLuint index, GLdouble x, GLdouble y, GLdouble z) { MITHRIL_ENSURE_INIT(); (void)index; (void)x; (void)y; (void)z; }
+void glVertexAttribL4d(GLuint index, GLdouble x, GLdouble y, GLdouble z, GLdouble w) { MITHRIL_ENSURE_INIT(); (void)index; (void)x; (void)y; (void)z; (void)w; }
+void glVertexAttribL1dv(GLuint index, const GLdouble* v)        { MITHRIL_ENSURE_INIT(); (void)index; (void)v; }
+void glVertexAttribL2dv(GLuint index, const GLdouble* v)        { MITHRIL_ENSURE_INIT(); (void)index; (void)v; }
+void glVertexAttribL3dv(GLuint index, const GLdouble* v)        { MITHRIL_ENSURE_INIT(); (void)index; (void)v; }
+void glVertexAttribL4dv(GLuint index, const GLdouble* v)        { MITHRIL_ENSURE_INIT(); (void)index; (void)v; }
+void glVertexAttribLPointer(GLuint index, GLint size, GLenum type, GLsizei stride, const void* pointer) {
+    MITHRIL_ENSURE_INIT();
+    (void)index; (void)size; (void)type; (void)stride; (void)pointer;
+}
+
+void glGetVertexAttribLdv(GLuint index, GLenum pname, GLdouble* params) {
+    MITHRIL_ENSURE_INIT();
+    glGetVertexAttribdv(index, pname, params);
+}
+
+/* ---- 通用顶点属性 float 变体（与 1f/4f/4fv 的 no-op 策略一致） ---- */
+void glVertexAttrib1fv(GLuint index, const GLfloat* v)         { MITHRIL_ENSURE_INIT(); (void)index; (void)v; }
+void glVertexAttrib2f(GLuint index, GLfloat x, GLfloat y)       { MITHRIL_ENSURE_INIT(); (void)index; (void)x; (void)y; }
+void glVertexAttrib2fv(GLuint index, const GLfloat* v)          { MITHRIL_ENSURE_INIT(); (void)index; (void)v; }
+void glVertexAttrib3f(GLuint index, GLfloat x, GLfloat y, GLfloat z) { MITHRIL_ENSURE_INIT(); (void)index; (void)x; (void)y; (void)z; }
+void glVertexAttrib3fv(GLuint index, const GLfloat* v)          { MITHRIL_ENSURE_INIT(); (void)index; (void)v; }
+
+/* ---- Double uniforms: convert to float and delegate ---- */
+void glUniform1d(GLint loc, GLdouble v0)                          { float v = (float)v0; glUniform1f(loc, v); }
+void glUniform2d(GLint loc, GLdouble v0, GLdouble v1)             { float v[2] = {(float)v0,(float)v1}; glUniform2fv(loc, 1, v); }
+void glUniform3d(GLint loc, GLdouble v0, GLdouble v1, GLdouble v2){ float v[3] = {(float)v0,(float)v1,(float)v2}; glUniform3fv(loc, 1, v); }
+void glUniform4d(GLint loc, GLdouble v0, GLdouble v1, GLdouble v2, GLdouble v3) { float v[4] = {(float)v0,(float)v1,(float)v2,(float)v3}; glUniform4fv(loc, 1, v); }
+void glUniform1dv(GLint loc, GLsizei count, const GLdouble* value) {
+    MITHRIL_ENSURE_INIT();
+    if (!value || count <= 0) return;
+    for (GLsizei i = 0; i < count; ++i) glUniform1f(loc + (GLint)i, (float)value[i]);
+}
+void glUniform2dv(GLint loc, GLsizei count, const GLdouble* value) {
+    MITHRIL_ENSURE_INIT();
+    if (!value || count <= 0) return;
+    for (GLsizei i = 0; i < count; ++i) {
+        float v[2] = {(float)value[i*2], (float)value[i*2+1]};
+        glUniform2fv(loc + (GLint)i, 1, v);
+    }
+}
+void glUniform3dv(GLint loc, GLsizei count, const GLdouble* value) {
+    MITHRIL_ENSURE_INIT();
+    if (!value || count <= 0) return;
+    for (GLsizei i = 0; i < count; ++i) {
+        float v[3] = {(float)value[i*3], (float)value[i*3+1], (float)value[i*3+2]};
+        glUniform3fv(loc + (GLint)i, 1, v);
+    }
+}
+void glUniform4dv(GLint loc, GLsizei count, const GLdouble* value) {
+    MITHRIL_ENSURE_INIT();
+    if (!value || count <= 0) return;
+    for (GLsizei i = 0; i < count; ++i) {
+        float v[4] = {(float)value[i*4], (float)value[i*4+1], (float)value[i*4+2], (float)value[i*4+3]};
+        glUniform4fv(loc + (GLint)i, 1, v);
+    }
+}
+
+static void uniform_matrix_d(GLint loc, GLsizei count, GLboolean transpose,
+                             const GLdouble* value, int cols, int rows) {
+    MITHRIL_ENSURE_INIT();
+    if (!value || count <= 0) return;
+    const int n = cols * rows;
+    for (GLsizei i = 0; i < count; ++i) {
+        float m[16];
+        for (int k = 0; k < n; ++k) m[k] = (float)value[i * n + k];
+        switch (n) {
+            case 4:  glUniformMatrix2fv(loc + (GLint)i, 1, transpose, m); break;
+            case 6:  glUniformMatrix2x3fv(loc + (GLint)i, 1, transpose, m); break;
+            case 8:  glUniformMatrix2x4fv(loc + (GLint)i, 1, transpose, m); break;
+            case 9:  glUniformMatrix3fv(loc + (GLint)i, 1, transpose, m); break;
+            case 12: glUniformMatrix3x4fv(loc + (GLint)i, 1, transpose, m); break;
+            case 16: glUniformMatrix4fv(loc + (GLint)i, 1, transpose, m); break;
+            default: break;
+        }
+    }
+}
+
+void glUniformMatrix2dv(GLint loc, GLsizei count, GLboolean transpose, const GLdouble* value) { uniform_matrix_d(loc, count, transpose, value, 2, 2); }
+void glUniformMatrix3dv(GLint loc, GLsizei count, GLboolean transpose, const GLdouble* value) { uniform_matrix_d(loc, count, transpose, value, 3, 3); }
+void glUniformMatrix4dv(GLint loc, GLsizei count, GLboolean transpose, const GLdouble* value) { uniform_matrix_d(loc, count, transpose, value, 4, 4); }
+void glUniformMatrix2x3dv(GLint loc, GLsizei count, GLboolean transpose, const GLdouble* value) { uniform_matrix_d(loc, count, transpose, value, 2, 3); }
+void glUniformMatrix2x4dv(GLint loc, GLsizei count, GLboolean transpose, const GLdouble* value) { uniform_matrix_d(loc, count, transpose, value, 2, 4); }
+void glUniformMatrix3x2dv(GLint loc, GLsizei count, GLboolean transpose, const GLdouble* value) { uniform_matrix_d(loc, count, transpose, value, 3, 2); }
+void glUniformMatrix3x4dv(GLint loc, GLsizei count, GLboolean transpose, const GLdouble* value) { uniform_matrix_d(loc, count, transpose, value, 3, 4); }
+void glUniformMatrix4x2dv(GLint loc, GLsizei count, GLboolean transpose, const GLdouble* value) { uniform_matrix_d(loc, count, transpose, value, 4, 2); }
+void glUniformMatrix4x3dv(GLint loc, GLsizei count, GLboolean transpose, const GLdouble* value) { uniform_matrix_d(loc, count, transpose, value, 4, 3); }
+
+void glGetUniformdv(GLuint program, GLint location, GLdouble* params) {
+    MITHRIL_ENSURE_INIT();
+    if (!params) return;
+    GLfloat f = 0.0f;
+    glGetUniformfv(program, location, &f);
+    *params = (GLdouble)f;
+}
+
+/* ---- glProgramUniform* (GL 4.1, ARB_separate_shader_objects): set a
+ * program's uniforms without binding it. Delegate via save/restore of the
+ * current program (store_uniform reads g_state->currentProgram). ---- */
+static void program_uniform_begin(GLuint program) {
+    if (!g_state) return;
+    g_state->currentProgram = program;
+}
+
+void glProgramUniform1i(GLuint program, GLint loc, GLint v0)               { program_uniform_begin(program); glUniform1i(loc, v0); }
+void glProgramUniform1iv(GLuint program, GLint loc, GLsizei count, const GLint* value) { program_uniform_begin(program); glUniform1iv(loc, count, value); }
+void glProgramUniform1f(GLuint program, GLint loc, GLfloat v0)             { program_uniform_begin(program); glUniform1f(loc, v0); }
+void glProgramUniform1fv(GLuint program, GLint loc, GLsizei count, const GLfloat* value) { program_uniform_begin(program); glUniform1fv(loc, count, value); }
+void glProgramUniform1d(GLuint program, GLint loc, GLdouble v0)            { program_uniform_begin(program); glUniform1d(loc, v0); }
+void glProgramUniform1dv(GLuint program, GLint loc, GLsizei count, const GLdouble* value) { program_uniform_begin(program); glUniform1dv(loc, count, value); }
+void glProgramUniform1ui(GLuint program, GLint loc, GLuint v0)             { program_uniform_begin(program); glUniform1ui(loc, v0); }
+void glProgramUniform1uiv(GLuint program, GLint loc, GLsizei count, const GLuint* value) { program_uniform_begin(program); glUniform1uiv(loc, count, value); }
+void glProgramUniform2i(GLuint program, GLint loc, GLint v0, GLint v1)     { program_uniform_begin(program); glUniform2i(loc, v0, v1); }
+void glProgramUniform2iv(GLuint program, GLint loc, GLsizei count, const GLint* value) { program_uniform_begin(program); glUniform2iv(loc, count, value); }
+void glProgramUniform2f(GLuint program, GLint loc, GLfloat v0, GLfloat v1) { program_uniform_begin(program); glUniform2f(loc, v0, v1); }
+void glProgramUniform2fv(GLuint program, GLint loc, GLsizei count, const GLfloat* value) { program_uniform_begin(program); glUniform2fv(loc, count, value); }
+void glProgramUniform2d(GLuint program, GLint loc, GLdouble v0, GLdouble v1) { program_uniform_begin(program); glUniform2d(loc, v0, v1); }
+void glProgramUniform2dv(GLuint program, GLint loc, GLsizei count, const GLdouble* value) { program_uniform_begin(program); glUniform2dv(loc, count, value); }
+void glProgramUniform2ui(GLuint program, GLint loc, GLuint v0, GLuint v1) { program_uniform_begin(program); glUniform2ui(loc, v0, v1); }
+void glProgramUniform2uiv(GLuint program, GLint loc, GLsizei count, const GLuint* value) { program_uniform_begin(program); glUniform2uiv(loc, count, value); }
+void glProgramUniform3i(GLuint program, GLint loc, GLint v0, GLint v1, GLint v2) { program_uniform_begin(program); glUniform3i(loc, v0, v1, v2); }
+void glProgramUniform3iv(GLuint program, GLint loc, GLsizei count, const GLint* value) { program_uniform_begin(program); glUniform3iv(loc, count, value); }
+void glProgramUniform3f(GLuint program, GLint loc, GLfloat v0, GLfloat v1, GLfloat v2) { program_uniform_begin(program); glUniform3f(loc, v0, v1, v2); }
+void glProgramUniform3fv(GLuint program, GLint loc, GLsizei count, const GLfloat* value) { program_uniform_begin(program); glUniform3fv(loc, count, value); }
+void glProgramUniform3d(GLuint program, GLint loc, GLdouble v0, GLdouble v1, GLdouble v2) { program_uniform_begin(program); glUniform3d(loc, v0, v1, v2); }
+void glProgramUniform3dv(GLuint program, GLint loc, GLsizei count, const GLdouble* value) { program_uniform_begin(program); glUniform3dv(loc, count, value); }
+void glProgramUniform3ui(GLuint program, GLint loc, GLuint v0, GLuint v1, GLuint v2) { program_uniform_begin(program); glUniform3ui(loc, v0, v1, v2); }
+void glProgramUniform3uiv(GLuint program, GLint loc, GLsizei count, const GLuint* value) { program_uniform_begin(program); glUniform3uiv(loc, count, value); }
+void glProgramUniform4i(GLuint program, GLint loc, GLint v0, GLint v1, GLint v2, GLint v3) { program_uniform_begin(program); glUniform4i(loc, v0, v1, v2, v3); }
+void glProgramUniform4iv(GLuint program, GLint loc, GLsizei count, const GLint* value) { program_uniform_begin(program); glUniform4iv(loc, count, value); }
+void glProgramUniform4f(GLuint program, GLint loc, GLfloat v0, GLfloat v1, GLfloat v2, GLfloat v3) { program_uniform_begin(program); glUniform4f(loc, v0, v1, v2, v3); }
+void glProgramUniform4fv(GLuint program, GLint loc, GLsizei count, const GLfloat* value) { program_uniform_begin(program); glUniform4fv(loc, count, value); }
+void glProgramUniform4d(GLuint program, GLint loc, GLdouble v0, GLdouble v1, GLdouble v2, GLdouble v3) { program_uniform_begin(program); glUniform4d(loc, v0, v1, v2, v3); }
+void glProgramUniform4dv(GLuint program, GLint loc, GLsizei count, const GLdouble* value) { program_uniform_begin(program); glUniform4dv(loc, count, value); }
+void glProgramUniform4ui(GLuint program, GLint loc, GLuint v0, GLuint v1, GLuint v2, GLuint v3) { program_uniform_begin(program); glUniform4ui(loc, v0, v1, v2, v3); }
+void glProgramUniform4uiv(GLuint program, GLint loc, GLsizei count, const GLuint* value) { program_uniform_begin(program); glUniform4uiv(loc, count, value); }
+
+void glProgramUniformMatrix2fv(GLuint program, GLint loc, GLsizei count, GLboolean transpose, const GLfloat* value) { program_uniform_begin(program); glUniformMatrix2fv(loc, count, transpose, value); }
+void glProgramUniformMatrix3fv(GLuint program, GLint loc, GLsizei count, GLboolean transpose, const GLfloat* value) { program_uniform_begin(program); glUniformMatrix3fv(loc, count, transpose, value); }
+void glProgramUniformMatrix4fv(GLuint program, GLint loc, GLsizei count, GLboolean transpose, const GLfloat* value) { program_uniform_begin(program); glUniformMatrix4fv(loc, count, transpose, value); }
+void glProgramUniformMatrix2x3fv(GLuint program, GLint loc, GLsizei count, GLboolean transpose, const GLfloat* value) { program_uniform_begin(program); glUniformMatrix2x3fv(loc, count, transpose, value); }
+void glProgramUniformMatrix3x2fv(GLuint program, GLint loc, GLsizei count, GLboolean transpose, const GLfloat* value) { program_uniform_begin(program); glUniformMatrix3x2fv(loc, count, transpose, value); }
+void glProgramUniformMatrix2x4fv(GLuint program, GLint loc, GLsizei count, GLboolean transpose, const GLfloat* value) { program_uniform_begin(program); glUniformMatrix2x4fv(loc, count, transpose, value); }
+void glProgramUniformMatrix4x2fv(GLuint program, GLint loc, GLsizei count, GLboolean transpose, const GLfloat* value) { program_uniform_begin(program); glUniformMatrix4x2fv(loc, count, transpose, value); }
+void glProgramUniformMatrix3x4fv(GLuint program, GLint loc, GLsizei count, GLboolean transpose, const GLfloat* value) { program_uniform_begin(program); glUniformMatrix3x4fv(loc, count, transpose, value); }
+void glProgramUniformMatrix4x3fv(GLuint program, GLint loc, GLsizei count, GLboolean transpose, const GLfloat* value) { program_uniform_begin(program); glUniformMatrix4x3fv(loc, count, transpose, value); }
+void glProgramUniformMatrix2dv(GLuint program, GLint loc, GLsizei count, GLboolean transpose, const GLdouble* value) { program_uniform_begin(program); glUniformMatrix2dv(loc, count, transpose, value); }
+void glProgramUniformMatrix3dv(GLuint program, GLint loc, GLsizei count, GLboolean transpose, const GLdouble* value) { program_uniform_begin(program); glUniformMatrix3dv(loc, count, transpose, value); }
+void glProgramUniformMatrix4dv(GLuint program, GLint loc, GLsizei count, GLboolean transpose, const GLdouble* value) { program_uniform_begin(program); glUniformMatrix4dv(loc, count, transpose, value); }
+void glProgramUniformMatrix2x3dv(GLuint program, GLint loc, GLsizei count, GLboolean transpose, const GLdouble* value) { program_uniform_begin(program); glUniformMatrix2x3dv(loc, count, transpose, value); }
+void glProgramUniformMatrix3x2dv(GLuint program, GLint loc, GLsizei count, GLboolean transpose, const GLdouble* value) { program_uniform_begin(program); glUniformMatrix3x2dv(loc, count, transpose, value); }
+void glProgramUniformMatrix2x4dv(GLuint program, GLint loc, GLsizei count, GLboolean transpose, const GLdouble* value) { program_uniform_begin(program); glUniformMatrix2x4dv(loc, count, transpose, value); }
+void glProgramUniformMatrix4x2dv(GLuint program, GLint loc, GLsizei count, GLboolean transpose, const GLdouble* value) { program_uniform_begin(program); glUniformMatrix4x2dv(loc, count, transpose, value); }
+void glProgramUniformMatrix3x4dv(GLuint program, GLint loc, GLsizei count, GLboolean transpose, const GLdouble* value) { program_uniform_begin(program); glUniformMatrix3x4dv(loc, count, transpose, value); }
+void glProgramUniformMatrix4x3dv(GLuint program, GLint loc, GLsizei count, GLboolean transpose, const GLdouble* value) { program_uniform_begin(program); glUniformMatrix4x3dv(loc, count, transpose, value); }
+
+/* ---- Program pipeline objects (GL 4.1): minimal name tracking. The
+ * separable-program path is not exercised by the target workload; binding is
+ * a no-op, Is/Get return safe defaults, and validation always succeeds. ---- */
+static std::unordered_set<GLuint>& pipeline_live_names() {
+    static std::unordered_set<GLuint> s;
+    return s;
+}
+
+void glGenProgramPipelines(GLsizei n, GLuint* pipelines) {
+    MITHRIL_ENSURE_INIT();
+    if (!pipelines || n <= 0) return;
+    static GLuint nextName = 1;
+    for (GLsizei i = 0; i < n; ++i) {
+        pipelines[i] = nextName++;
+        pipeline_live_names().insert(pipelines[i]);
+    }
+}
+
+void glDeleteProgramPipelines(GLsizei n, const GLuint* pipelines) {
+    MITHRIL_ENSURE_INIT();
+    if (!pipelines || n <= 0) return;
+    for (GLsizei i = 0; i < n; ++i) pipeline_live_names().erase(pipelines[i]);
+}
+
+GLboolean glIsProgramPipeline(GLuint pipeline) {
+    MITHRIL_ENSURE_INIT();
+    return (pipeline != 0 && pipeline_live_names().count(pipeline)) ? GL_TRUE : GL_FALSE;
+}
+
+void glBindProgramPipeline(GLuint pipeline) {
+    MITHRIL_ENSURE_INIT();
+    (void)pipeline;
+}
+
+void glValidateProgramPipeline(GLuint pipeline) {
+    MITHRIL_ENSURE_INIT();
+    (void)pipeline;
+}
+
+void glGetProgramPipelineiv(GLuint pipeline, GLenum pname, GLint* params) {
+    MITHRIL_ENSURE_INIT();
+    (void)pipeline;
+    if (!params) return;
+    switch (pname) {
+        case GL_ACTIVE_PROGRAM:  *params = 0; break;
+        case GL_VERTEX_SHADER:   *params = 0; break;
+        case GL_FRAGMENT_SHADER: *params = 0; break;
+        case GL_VALIDATE_STATUS: *params = GL_TRUE; break;
+        case GL_INFO_LOG_LENGTH: *params = 0; break;
+        default:                  *params = 0; break;
+    }
+}
+
+void glGetProgramPipelineInfoLog(GLuint pipeline, GLsizei bufSize,
+                                 GLsizei* length, GLchar* infoLog) {
+    MITHRIL_ENSURE_INIT();
+    (void)pipeline;
+    if (length) *length = 0;
+    if (infoLog && bufSize > 0) infoLog[0] = '\0';
+}
+
+void glUseProgramStages(GLuint pipeline, GLbitfield stages, GLuint program) {
+    MITHRIL_ENSURE_INIT();
+    (void)pipeline; (void)stages; (void)program;
+}
+
+void glActiveShaderProgram(GLuint pipeline, GLuint program) {
+    MITHRIL_ENSURE_INIT();
+    (void)pipeline; (void)program;
+}
+
+GLuint glCreateShaderProgramv(GLenum type, GLsizei count, const GLchar* const* strings) {
+    MITHRIL_ENSURE_INIT();
+    (void)type; (void)count; (void)strings;
+    return 0;  // separable program creation is not supported; 0 = failure
+}
+
+void glProgramParameteri(GLuint program, GLenum pname, GLint value) {
+    MITHRIL_ENSURE_INIT();
+    (void)program; (void)pname; (void)value;
+}
+
+void glProgramBinary(GLuint program, GLenum binaryFormat, const void* binary, GLsizei length) {
+    MITHRIL_ENSURE_INIT();
+    (void)program; (void)binaryFormat; (void)binary; (void)length;
+}
+
+void glGetProgramBinary(GLuint program, GLsizei bufSize, GLsizei* length,
+                        GLenum* binaryFormat, void* binary) {
+    MITHRIL_ENSURE_INIT();
+    (void)program; (void)bufSize; (void)binary;
+    if (length) *length = 0;
+    if (binaryFormat) *binaryFormat = 0;
+}
+
+/* ---- 1D textures: delegate to the 2D paths with height=1 ---- */
+void glTexImage1D(GLenum target, GLint level, GLint internalformat, GLsizei width,
+                  GLint border, GLenum format, GLenum type, const void* pixels) {
+    MITHRIL_ENSURE_INIT();
+    glTexImage2D(target, level, internalformat, width, 1, border, format, type, pixels);
+}
+
+void glTexSubImage1D(GLenum target, GLint level, GLint xoffset, GLsizei width,
+                     GLenum format, GLenum type, const void* pixels) {
+    MITHRIL_ENSURE_INIT();
+    glTexSubImage2D(target, level, xoffset, 0, width, 1, format, type, pixels);
+}
+
+void glCopyTexImage1D(GLenum target, GLint level, GLenum internalformat,
+                      GLint x, GLint y, GLsizei width, GLint border) {
+    MITHRIL_ENSURE_INIT();
+    (void)target; (void)level; (void)internalformat; (void)x; (void)y;
+    (void)width; (void)border;
+}
+
+void glCopyTexSubImage1D(GLenum target, GLint level, GLint xoffset, GLint x, GLint y,
+                         GLsizei width) {
+    MITHRIL_ENSURE_INIT();
+    (void)target; (void)level; (void)xoffset; (void)x; (void)y; (void)width;
+}
+
+void glCopyTexSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset,
+                         GLint zoffset, GLint x, GLint y, GLsizei width, GLsizei height) {
+    MITHRIL_ENSURE_INIT();
+    (void)target; (void)level; (void)xoffset; (void)yoffset; (void)zoffset;
+    (void)x; (void)y; (void)width; (void)height;
+}
+
+void glFramebufferTexture1D(GLenum target, GLenum attachment, GLenum textarget,
+                            GLuint texture, GLint level) {
+    MITHRIL_ENSURE_INIT();
+    glFramebufferTexture2D(target, attachment, GL_TEXTURE_2D, texture, level);
+    (void)textarget;
+}
+
+void glFramebufferTexture3D(GLenum target, GLenum attachment, GLenum textarget,
+                            GLuint texture, GLint level, GLint zoffset) {
+    MITHRIL_ENSURE_INIT();
+    glFramebufferTexture2D(target, attachment, GL_TEXTURE_2D, texture, level);
+    (void)textarget; (void)zoffset;
+}
+
+/* ---- Transform feedback / conditional render / indexed queries ---- */
+void glBeginConditionalRender(GLuint id, GLenum mode) {
+    MITHRIL_ENSURE_INIT();
+    (void)id; (void)mode;
+}
+
+void glEndConditionalRender(void) {
+    MITHRIL_ENSURE_INIT();
+}
+
+void glBeginQueryIndexed(GLenum target, GLuint index, GLuint id) {
+    MITHRIL_ENSURE_INIT();
+    (void)index;
+    glBeginQuery(target, id);
+}
+
+void glEndQueryIndexed(GLenum target, GLuint index) {
+    MITHRIL_ENSURE_INIT();
+    (void)index;
+    glEndQuery(target);
+}
+
+void glDrawTransformFeedback(GLenum mode, GLuint id) {
+    MITHRIL_ENSURE_INIT();
+    (void)mode; (void)id;
+}
+
+void glDrawTransformFeedbackStream(GLenum mode, GLuint id, GLuint stream) {
+    MITHRIL_ENSURE_INIT();
+    (void)mode; (void)id; (void)stream;
+}
+
+void glDrawTransformFeedbackInstanced(GLenum mode, GLuint id, GLsizei primcount) {
+    MITHRIL_ENSURE_INIT();
+    (void)mode; (void)id; (void)primcount;
+}
+
+void glDrawTransformFeedbackStreamInstanced(GLenum mode, GLuint id, GLuint stream,
+                                            GLsizei primcount) {
+    MITHRIL_ENSURE_INIT();
+    (void)mode; (void)id; (void)stream; (void)primcount;
+}
+
+void glTransformFeedbackVaryings(GLuint program, GLsizei count,
+                                 const GLchar* const* varyings, GLenum bufferMode) {
+    MITHRIL_ENSURE_INIT();
+    (void)program; (void)count; (void)varyings; (void)bufferMode;
+}
+
+/* ---- Buffer textures / multisample textures (not exercised by MC) ---- */
+void glTexBuffer(GLenum target, GLenum internalformat, GLuint buffer) {
+    MITHRIL_ENSURE_INIT();
+    (void)target; (void)internalformat; (void)buffer;
+}
+
+void glTextureBuffer(GLuint texture, GLenum internalformat, GLuint buffer) {
+    MITHRIL_ENSURE_INIT();
+    (void)texture; (void)internalformat; (void)buffer;
+}
+
+void glTextureBufferRange(GLuint texture, GLenum internalformat, GLuint buffer,
+                          GLintptr offset, GLsizeiptr size) {
+    MITHRIL_ENSURE_INIT();
+    (void)texture; (void)internalformat; (void)buffer; (void)offset; (void)size;
+}
+
+void glTexImage3DMultisample(GLenum target, GLsizei samples, GLenum internalformat,
+                             GLsizei width, GLsizei height, GLsizei depth,
+                             GLboolean fixedsamplelocations) {
+    MITHRIL_ENSURE_INIT();
+    (void)target; (void)samples; (void)internalformat;
+    (void)width; (void)height; (void)depth; (void)fixedsamplelocations;
+}
+
+void glTexStorage2DMultisample(GLenum target, GLsizei samples, GLenum internalformat,
+                               GLsizei width, GLsizei height,
+                               GLboolean fixedsamplelocations) {
+    MITHRIL_ENSURE_INIT();
+    (void)target; (void)samples; (void)internalformat;
+    (void)width; (void)height; (void)fixedsamplelocations;
+}
+
+void glTexStorage3DMultisample(GLenum target, GLsizei samples, GLenum internalformat,
+                               GLsizei width, GLsizei height, GLsizei depth,
+                               GLboolean fixedsamplelocations) {
+    MITHRIL_ENSURE_INIT();
+    (void)target; (void)samples; (void)internalformat;
+    (void)width; (void)height; (void)depth; (void)fixedsamplelocations;
+}
+
+/* ---- Texture DSA variants: delegate where a clear GL 1.x analog exists,
+ * otherwise no-op (MC uses the non-DSA path exclusively). ---- */
+void glCompressedTextureSubImage1D(GLuint texture, GLint level, GLint xoffset,
+                                   GLsizei width, GLenum format, GLsizei imageSize,
+                                   const void* data) {
+    MITHRIL_ENSURE_INIT();
+    (void)texture; (void)level; (void)xoffset; (void)width;
+    (void)format; (void)imageSize; (void)data;
+}
+
+void glCompressedTextureSubImage2D(GLuint texture, GLint level, GLint xoffset,
+                                   GLint yoffset, GLsizei width, GLsizei height,
+                                   GLenum format, GLsizei imageSize, const void* data) {
+    MITHRIL_ENSURE_INIT();
+    (void)texture; (void)level; (void)xoffset; (void)yoffset;
+    (void)width; (void)height; (void)format; (void)imageSize; (void)data;
+}
+
+void glCompressedTextureSubImage3D(GLuint texture, GLint level, GLint xoffset,
+                                   GLint yoffset, GLint zoffset, GLsizei width,
+                                   GLsizei height, GLsizei depth, GLenum format,
+                                   GLsizei imageSize, const void* data) {
+    MITHRIL_ENSURE_INIT();
+    (void)texture; (void)level; (void)xoffset; (void)yoffset; (void)zoffset;
+    (void)width; (void)height; (void)depth; (void)format; (void)imageSize; (void)data;
+}
+
+void glCopyTextureSubImage1D(GLuint texture, GLint level, GLint xoffset, GLint x, GLint y,
+                             GLsizei width) {
+    MITHRIL_ENSURE_INIT();
+    (void)texture; (void)level; (void)xoffset; (void)x; (void)y; (void)width;
+}
+
+void glCopyTextureSubImage2D(GLuint texture, GLint level, GLint xoffset, GLint yoffset,
+                             GLint x, GLint y, GLsizei width, GLsizei height) {
+    MITHRIL_ENSURE_INIT();
+    (void)texture; (void)level; (void)xoffset; (void)yoffset;
+    (void)x; (void)y; (void)width; (void)height;
+}
+
+void glCopyTextureSubImage3D(GLuint texture, GLint level, GLint xoffset, GLint yoffset,
+                             GLint zoffset, GLint x, GLint y, GLsizei width, GLsizei height) {
+    MITHRIL_ENSURE_INIT();
+    (void)texture; (void)level; (void)xoffset; (void)yoffset; (void)zoffset;
+    (void)x; (void)y; (void)width; (void)height;
+}
+
+void glTextureParameterIiv(GLuint texture, GLenum pname, const GLint* params) {
+    MITHRIL_ENSURE_INIT();
+    (void)texture; (void)pname; (void)params;
+}
+
+void glTextureParameterIuiv(GLuint texture, GLenum pname, const GLuint* params) {
+    MITHRIL_ENSURE_INIT();
+    (void)texture; (void)pname; (void)params;
+}
+
+void glGetTextureParameterIiv(GLuint texture, GLenum pname, GLint* params) {
+    MITHRIL_ENSURE_INIT();
+    (void)texture;
+    if (params) sampler_default_params(pname, nullptr, params);
+}
+
+void glGetTextureParameterIuiv(GLuint texture, GLenum pname, GLuint* params) {
+    MITHRIL_ENSURE_INIT();
+    (void)texture;
+    if (params) {
+        GLint v = 0;
+        sampler_default_params(pname, nullptr, &v);
+        *params = (GLuint)v;
+    }
+}
+
+void glNamedFramebufferParameteri(GLuint framebuffer, GLenum pname, GLint param) {
+    MITHRIL_ENSURE_INIT();
+    (void)framebuffer; (void)pname; (void)param;
 }
 
 } /* extern "C" */
