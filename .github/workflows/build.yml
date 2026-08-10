@@ -24,6 +24,9 @@ jobs:
       - name: Build
         run: cmake --build build -j$(sysctl -n hw.ncpu)
 
+      - name: Compile DirectMetal FBO regression smoke
+        run: clang -std=c11 -Wall -Wextra -Werror -fsyntax-only tests/directmetal_fbo_smoke.c
+
       - name: Locate dylib
         id: locate
         run: |
@@ -201,9 +204,9 @@ jobs:
 
       - name: Run GL->Vulkan draw smoke (lavapipe)
         run: |
-          output=$(./tests/draw_smoke)
-          echo "$output"
-          echo "$output" | grep -q "DRAW SMOKE ALL PASSED"
+          set -o pipefail
+          ./tests/draw_smoke 2>&1 | tee /tmp/draw-smoke.log
+          grep -q "DRAW SMOKE ALL PASSED" /tmp/draw-smoke.log
 
       - name: Run GL->Vulkan texture smoke (lavapipe)
         run: |
