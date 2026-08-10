@@ -1,0 +1,40 @@
+name: hosted-metal-gpu-probe
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - ci/hosted-metal-gpu-probe-direct-metal-20260810
+
+jobs:
+  probe:
+    runs-on: macos-26
+    env:
+      MTL_DEBUG_LAYER: '0'
+      MTL_SHADER_VALIDATION: '0'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Describe hosted Apple Silicon runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "CI=${CI:-<unset>}"
+          uname -a
+          sw_vers
+          system_profiler SPHardwareDataType SPDisplaysDataType || true
+          test "$(uname -m)" = "arm64"
+
+      - name: Compile Metal capability probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcrun swiftc -O -framework Metal \
+            .github/ci/HostedMetalCapabilityProbe.swift \
+            -o "$RUNNER_TEMP/hosted-metal-gpu-probe"
+
+      - name: Execute real offscreen Metal GPU workload
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/hosted-metal-gpu-probe"
