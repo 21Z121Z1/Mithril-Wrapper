@@ -874,18 +874,40 @@ void begin_render_pass(VkImageView* color_views, int color_count,
     depthAttach.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR;
     depthAttach.imageView = e.depthView;
     depthAttach.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    // Clear value for the depth/stencil attachment. Honour the host's
+    // glClearDepth for an explicit pass-start clear, EXCEPT on the ONE-SHOT
+    // first use of the persistent swapchain depth buffer (UNDEFINED layout)
+    // where we force far(1.0)/0 to initialise the buffer.
+    //
+    // ROOT CAUSE (systemic pure-red from frame 1): the persistent swapchain
+    // depth buffer is created with initialLayout=UNDEFINED and was NEVER
+    // initialized to "far" on its first use. With the old LOAD_OP_DONT_CARE
+    // the depth buffer holds garbage (typically 0 / near) on the first
+    // depth-tested draw; with the default depth func GL_LESS every fragment
+    // (depth in (0,1]) compares against garbage==near and FAILS, so only the
+    // swapchain clear color (red) survives -> pure red screen from the very
+    // first frame (loading screen, main menu, in-game all red with sound).
+    //
+    // MobileGL initializes the swapchain depth to far on first use. Fix:
+    // on the one-shot UNDEFINED->DEPTH_STENCIL_ATTACHMENT_OPTIMAL first use,
+    // CLEAR the depth buffer to far (1.0) instead of DONT_CARE so the first
+    // depth-tested draw's fragments (depth < 1.0) pass the GL_LESS compare.
+    depthAttach.clearValue.depthStencil.depth = (float)e.clearDepth;
+    depthAttach.clearValue.depthStencil.stencil = (uint32_t)e.clearStencil;
+    if (swapchainDepthWasUndefined) {
+        depthAttach.clearValue.depthStencil.depth = 1.0f;
+        depthAttach.clearValue.depthStencil.stencil = 0u;
+    }
     if (e.loadClear) {
         depthAttach.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
     } else if (swapchainDepthWasUndefined) {
-        depthAttach.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        depthAttach.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
     } else {
         depthAttach.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
     }
     depthAttach.storeOp = (e.invalidateDepth || e.invalidateStencil)
                           ? VK_ATTACHMENT_STORE_OP_DONT_CARE
                           : VK_ATTACHMENT_STORE_OP_STORE;
-    depthAttach.clearValue.depthStencil.depth = (float)e.clearDepth;
-    depthAttach.clearValue.depthStencil.stencil = (uint32_t)e.clearStencil;
 
     VkRenderingInfoKHR ri{};
     ri.sType = VK_STRUCTURE_TYPE_RENDERING_INFO_KHR;
