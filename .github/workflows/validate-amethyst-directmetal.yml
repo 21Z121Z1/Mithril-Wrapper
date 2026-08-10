@@ -36,6 +36,9 @@ jobs:
         run: |
           set -euo pipefail
           SDKROOT="$(xcrun --sdk iphoneos --show-sdk-path)"
+          # Amethyst's normal packaging environment provides Mach declarations
+          # transitively. Hosted Xcode direct-CMake does not, so preinclude the
+          # public Mach umbrella header only for this cross-repo validation.
           cmake -S amethyst/Natives -B amethyst/Natives/build-directmetal-ci \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_CROSSCOMPILING=true \
@@ -44,7 +47,7 @@ jobs:
             -DCMAKE_OSX_SYSROOT="$SDKROOT" \
             -DCMAKE_OSX_ARCHITECTURES=arm64 \
             -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 \
-            -DCMAKE_C_FLAGS='-arch arm64' \
+            -DCMAKE_C_FLAGS='-arch arm64 -include mach/mach.h' \
             -DCONFIG_BRANCH='feature/directmetal-mithril' \
             -DCONFIG_COMMIT='b9f5a2c' \
             -DCONFIG_RELEASE=0 \
