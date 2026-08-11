@@ -216,10 +216,16 @@ int main(int argc, char** argv) {
     finish();  /* 提交 clear 的 command buffer，确保 GPU 执行完毕 */
     unsigned char ctrl[4] = {0,0,0,0};
     readPixels(R / 2, C / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, ctrl);
-    CHECK(ctrl[0] == 25 && ctrl[1] == 51 && ctrl[2] == 76 && ctrl[3] == 255,
+    /* float→uint8 转换会四舍五入：0.1*255=25.5→26, 0.3*255=76.5→77。故对
+     * (0.1,0.2,0.3,1.0) 期望区间为 r∈[24,27], g==51±1, b∈[75,78], a==255。 */
+    CHECK((ctrl[0] >= 24 && ctrl[0] <= 27) &&
+          (ctrl[1] >= 50 && ctrl[1] <= 52) &&
+          (ctrl[2] >= 75 && ctrl[2] <= 78) &&
+          ctrl[3] == 255,
           "CONTROL clear-to-(0.1,0.2,0.3,1.0) readback=(%d,%d,%d,%d) — clear+readback path %s",
           ctrl[0], ctrl[1], ctrl[2], ctrl[3],
-          (ctrl[0]==25&&ctrl[1]==51&&ctrl[2]==76&&ctrl[3]==255) ? "OK" : "BROKEN");
+          ((ctrl[0]>=24&&ctrl[0]<=27)&&(ctrl[1]>=50&&ctrl[1]<=52)&&
+           (ctrl[2]>=75&&ctrl[2]<=78)&&ctrl[3]==255) ? "OK" : "BROKEN");
     /* 恢复黑色背景再继续 draw 测试 */
     clearColor(0.0f, 0.0f, 0.0f, 0.0f);
     clear(GL_COLOR_BUFFER_BIT);
