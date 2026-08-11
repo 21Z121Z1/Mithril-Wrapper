@@ -533,6 +533,17 @@ VkPipeline get_or_create_pipeline(GLuint program,
     // b->dummyVertexBuffer at draw time.
     std::vector<uint32_t> shaderLocations =
         reflect_vertex_input_locations(vertex_spirv, vertex_word_count);
+    // FIX (MSL `main0_in stage_in` compile failure - reflection fallback):
+    // 若 SPIRV-Cross 反射失败（畸形 SPIR-V / 异常被吞，返回空），上面一个 dummy
+    // 属性都不会生成。此时任何「GL 未启用的 shader location」字段都会缺
+    // [[attribute(N)]] → Metal 报 `invalid type 'main0_in' ... stage_in` →
+    // vkCreateGraphicsPipelines 失败 → 该 program 所有 draw 静默消失 → 红屏。
+    // 兜底：反射为空时覆盖 0..15 全部可能 location。多余的空 binding（stride 0）
+    // 由 dummyVertexBuffer 兜底、无副作用；Metal 只要求每个 stage_in 字段都有
+    // attribute，多给无害。这从根上消除整类 MSL stage_in 编译失败。
+    if (shaderLocations.empty()) {
+        for (uint32_t loc = 0; loc < 16; ++loc) shaderLocations.push_back(loc);
+    }
     for (uint32_t loc : shaderLocations) {
         bool alreadyEnabled = false;
         for (int i = 0; i < attrib_count; ++i) {
