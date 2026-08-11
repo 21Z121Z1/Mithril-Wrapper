@@ -450,6 +450,9 @@ int main(int argc, char** argv) {
              * mipmap 无关；若 A 白，问题在 CASCADE blit 生成的 level1）。 */
             finish();
             useProgram(fprogA);
+            GLint uTexLocA = getUniformLocation(fprogA, "uTex");
+            CHECK(uTexLocA >= 0, "disc-F getUniformLocation(uTex)=%d", uTexLocA);
+            if (uTexLocA >= 0) uniform1i(uTexLocA, 0);   /* sampler2D 使用 texture unit 0 */
             drawArrays(GL_TRIANGLES, 0, 3);
             finish();
             unsigned char fa[4] = {0,0,0,0};
@@ -466,6 +469,9 @@ int main(int argc, char** argv) {
             generateMipmap(GL_TEXTURE_2D);
             CHECK(getError() == GL_NO_ERROR, "disc-F storage mipmap generation leaves no error");
             useProgram(fprogB);
+            GLint uTexLocB = getUniformLocation(fprogB, "uTex");
+            CHECK(uTexLocB >= 0, "disc-F(B) getUniformLocation(uTex)=%d", uTexLocB);
+            if (uTexLocB >= 0) uniform1i(uTexLocB, 0);   /* sampler2D 使用 texture unit 0 */
             drawArrays(GL_TRIANGLES, 0, 3);
             finish();
             unsigned char fb[4] = {0,0,0,0};
