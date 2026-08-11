@@ -472,6 +472,13 @@ void defer_destroy_sampler_entry(SamplerEntry& e) {
 // (Moved to FormatMap.{h,cpp} so they can be unit-tested without linking the
 // rest of the Vulkan backend. See FormatMap.h for the declarations.)
 
+// FIX (compile order): stage_and_copy_image 需要在这几个 static helper 定义之前
+// 调用它们，因此在此处前向声明。定义见下方 ~780 行。
+static VkAccessFlags       src_access_for_layout(VkImageLayout layout);
+static VkAccessFlags       dst_access_for_layout(VkImageLayout layout);
+static VkPipelineStageFlags src_stage_for_layout(VkImageLayout layout);
+static VkPipelineStageFlags dst_stage_for_layout(VkImageLayout layout);
+
 void stage_and_copy_image(TextureEntry& tex, int level, int x, int y, int z,
                           int w, int h, int d, const void* pixels,
                           int unpack_alignment, GLenum format, GLenum type,
@@ -705,11 +712,21 @@ void stage_and_copy_image(TextureEntry& tex, int level, int x, int y, int z,
     // 保留未更新区域的既有内容；完整上传（glTexImage*）用 UNDEFINED 丢弃旧内容。
     // 无条件用 UNDEFINED 会导致 glTexSubImage2D 后纹理其余区域变 undefined →
     // 纹理损坏 → 物体黑色斑块。
+    VkImageLayout oldLayout = is_full_upload ? VK_IMAGE_LAYOUT_UNDEFINED : tex.currentLayout;
     VkImageMemoryBarrier barrier{};
     barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    barrier.srcAccessMask = 0;
+    // FIX (GPU page fault root cause - 上传前 barrier 欠同步):
+    // 旧代码硬编码 srcAccessMask = 0 / srcStage = TOP_OF_PIPE_BIT。对部分上传
+    // （glTexSubImage*，oldLayout != UNDEFINED）而言，这意味着把 image 从
+    // SHADER_READ_ONLY_OPTIMAL 过渡到 TRANSFER_DST 时，不等待此前已录制 draw
+    // 对该 image 的着色器读取。MoltenVK 因此可能在 fragment/compute 仍在读取时
+    // 就开始布局转换并覆盖数据 → 撕裂采样 / kIOGPUCommandBufferCallbackErrorPageFault。
+    // 修复：用与 transition_image_layout 相同的 src_stage_for_layout /
+    // src_access_for_layout 推导正确的源阶段与访问位。完整上传（UNDEFINED）时
+    // 两者返回 0/TOP_OF_PIPE，行为与旧实现一致（无此前内容需等待）。
+    barrier.srcAccessMask = src_access_for_layout(oldLayout);
     barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    barrier.oldLayout = is_full_upload ? VK_IMAGE_LAYOUT_UNDEFINED : tex.currentLayout;
+    barrier.oldLayout = oldLayout;
     barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -720,7 +737,7 @@ void stage_and_copy_image(TextureEntry& tex, int level, int x, int y, int z,
     barrier.subresourceRange.baseArrayLayer = 0;
     barrier.subresourceRange.layerCount = 1;
     vkCmdPipelineBarrier(b->commandBuffer,
-                         VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                         src_stage_for_layout(oldLayout),
                          VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
                          0, nullptr, 0, nullptr, 1, &barrier);
 
@@ -737,15 +754,19 @@ void stage_and_copy_image(TextureEntry& tex, int level, int x, int y, int z,
     //   color         -> SHADER_READ_ONLY_OPTIMAL
     // 对照 MobileGL ResolveSampledReadOnlyLayout (VkTextureManager.cpp:177)。
     //
-    // 注意：dstAccessMask = SHADER_READ_BIT / dstStage = FRAGMENT_SHADER_BIT 保持
-    // 不变——纹理作为 sampler 资源被 shader 读取时，无论布局是 SHADER_READ_ONLY
-    // 还是 DEPTH_STENCIL_READ_ONLY，访问类型都是 SHADER_READ from FRAGMENT_SHADER。
+    // 注意：dstAccessMask = SHADER_READ_BIT 覆盖 fragment+compute 的 SHADER_READ，
+    // dstStage 现由 dst_stage_for_layout 推导（FRAGMENT|COMPUTE，见下方 FIX）。
     VkImageLayout sampledLayout = sampled_layout_for_format(tex.format);
     barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
     barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
     barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     barrier.newLayout = sampledLayout;
-    VkPipelineStageFlagBits dstStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    // FIX (GPU page fault root cause - compute): 旧代码硬编码 dstStage =
+    // FRAGMENT_SHADER_BIT，copy 的写入只对 fragment 后续读取可见。Sodium/Iris
+    // 的 compute 管线会在上传后于计算着色器里采样该 image，但 dstStage 不含
+    // COMPUTE_SHADER → copy 写入对 compute 采样不可见 → 采样到未初始化/旧数据。
+    // 改用 dst_stage_for_layout(sampledLayout)（现含 FRAGMENT|COMPUTE）。
+    VkPipelineStageFlags dstStage = dst_stage_for_layout(sampledLayout);
     vkCmdPipelineBarrier(b->commandBuffer,
                          VK_PIPELINE_STAGE_TRANSFER_BIT,
                          dstStage, 0,
@@ -828,7 +849,14 @@ static VkPipelineStageFlags src_stage_for_layout(VkImageLayout layout) {
         case VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL:
             return VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
         case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
-            return VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+            // FIX (GPU page fault root cause - compute): 纹理既被 fragment 也被
+            // compute 着色器采样（Sodium/Iris 的 compute 管线在计算着色器里采样
+            // 方块图集/光照贴图）。若此处只写 FRAGMENT_SHADER_BIT，那么 pre-copy
+            // barrier 不会等待此前 compute 着色器对该 image 的读取 → 布局转换/覆盖
+            // 上传可能在 compute 仍读取时发生 → 撕裂采样 / MoltenVK GPU page fault。
+            // 同时覆盖两个 shader 阶段（访问位已含 SHADER_READ_BIT，两者共享）。
+            return VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+                   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
         case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
         case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
             return VK_PIPELINE_STAGE_TRANSFER_BIT;
@@ -846,7 +874,11 @@ static VkPipelineStageFlags dst_stage_for_layout(VkImageLayout layout) {
         case VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL:
             return VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
         case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
-            return VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+            // FIX (GPU page fault root cause - compute): 与 src_stage_for_layout 对称，
+            // 上传后把 image 转回 SHADER_READ_ONLY 的 barrier 必须让 copy 的写入对
+            // compute 着色器的后续读取可见（Sodium/Iris compute 管线）。
+            return VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+                   VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
         case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
         case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
             return VK_PIPELINE_STAGE_TRANSFER_BIT;
@@ -1685,7 +1717,13 @@ void backend_texture_set_params(GLuint name, GLint min_filter, GLint mag_filter,
 VkImageView backend_get_texture_view(GLuint name) {
     auto& tbl = mithril::vk::texture_table();
     auto it = tbl.find(name);
-    return it == tbl.end() ? VK_NULL_HANDLE : it->second.view;
+    if (it == tbl.end()) return VK_NULL_HANDLE;
+    // FIX (GPU page fault): 若纹理 image 已被销毁/重建成 NULL，但 entry 里还
+    // 残留一个非 NULL 的 view（重建竞态：新 image 尚未创建或失败），绝不能把
+    // 这个 stale view 交给 descriptor —— GPU 采样它会 kIOGPUCommandBufferCallback
+    // ErrorPageFault。只有当 image 和 view 都有效时才认为该 view 可采样。
+    if (it->second.image == VK_NULL_HANDLE) return VK_NULL_HANDLE;
+    return it->second.view;
 }
 
 VkImage backend_get_texture_image(GLuint name) {
