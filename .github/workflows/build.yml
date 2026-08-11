@@ -316,6 +316,7 @@ jobs:
           # 真正执行绘制。全程绑定用户 FBO（glBindFramebuffer(0) 无 swapchain 无目标）。
           DYLIB=$(find build -name 'libmithril.dylib' -type f | head -1)
           export DYLD_LIBRARY_PATH="$(brew --prefix)/lib"
+          export MITHRIL_DEBUG=1
           echo "=== build render_smoke ==="
           clang -std=c11 -O0 -Wall -Wextra \
             -IMithril-Wrapper-cpp/include \

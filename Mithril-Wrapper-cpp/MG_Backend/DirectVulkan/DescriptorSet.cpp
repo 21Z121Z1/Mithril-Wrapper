@@ -974,6 +974,15 @@ void bind_program_descriptors(GLuint program, VkPipelineBindPoint bindPoint) {
                     samp = dt.sampler;
                 }
             }
+            // DEBUG (sampler black-screen triage): log how each sampler binding
+            // resolved so CI can tell a real-texture bind (tex_id != 0) from the
+            // default-black fallback, and whether the view/sampler are valid.
+            MITHRIL_LOG_DEBUG("vk", "sampler bind prog=%u binding=%u unit=%d tex=%u "
+                              "viewValid=%d sampValid=%d (default view=%d samp=%d)",
+                              program, db.binding, unit, tex_id,
+                              view != VK_NULL_HANDLE, samp != VK_NULL_HANDLE,
+                              default_texture().view != VK_NULL_HANDLE,
+                              default_texture().sampler != VK_NULL_HANDLE);
             if (view != VK_NULL_HANDLE && samp != VK_NULL_HANDLE) {
                 // FIX (Root Cause AH - depth-stencil descriptor layout):
                 // 旧代码硬编码 imageLayout = SHADER_READ_ONLY_OPTIMAL，对 depth-stencil
