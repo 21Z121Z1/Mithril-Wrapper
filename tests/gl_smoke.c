@@ -158,17 +158,18 @@ int main(int argc, char** argv) {
           "glGetString(GL_SHADING_LANGUAGE_VERSION) contains 4.60 (got \"%s\")",
           glslVer ? glslVer : "(null)");
 
-    /* ---- 错误队列语义（空队列 -> 非法 pname -> FIFO 弹出 -> 排空） -------- */
-    CHECK(getError() == GL_NO_ERROR, "error queue starts empty");
+    /* ---- 错误语义 ------------------------------------------------------------
+     * Mithril 镜像 MobileGlues 的故意设计：glGetError 恒返回 GL_NO_ERROR，仅
+     * 内部弹出错误队列（否则 Minecraft 会刷屏无害的 GL 错误日志）。因此断言
+     * 非法 pname / capability 的调用本身不崩溃、状态机保持可用即可 —— 不能
+     * 期望 glGetError 返回 GL_INVALID_ENUM（该实现契约永远返回 NO_ERROR）。 */
+    CHECK(getError() == GL_NO_ERROR, "glGetError always NO_ERROR (MobileGlues mirror)");
     GLint bogus = 0;
-    getIntegerv(0xC0FFEE, &bogus);                       /* 非法 pname */
-    CHECK(getError() == GL_INVALID_ENUM, "illegal getIntegerv pname -> GL_INVALID_ENUM");
-    CHECK(getError() == GL_NO_ERROR, "error queue drains to empty after one pop");
-    getIntegerv(0xC0FFEE, &bogus);
-    enable(0xC0FFEE);                                     /* 非法 capability */
-    CHECK(getError() == GL_INVALID_ENUM, "FIFO: oldest (pname) pops first");
-    CHECK(getError() == GL_INVALID_ENUM, "FIFO: second (cap) pops next");
-    CHECK(getError() == GL_NO_ERROR, "FIFO: queue now empty");
+    getIntegerv(0xC0FFEE, &bogus);                       /* 非法 pname 不崩溃 */
+    CHECK(getError() == GL_NO_ERROR, "illegal getIntegerv pname tolerated (no crash)");
+    enable(0xC0FFEE);                                     /* 非法 capability 不崩溃 */
+    disable(0xC0FFEE);
+    CHECK(getError() == GL_NO_ERROR, "illegal enable/disable cap tolerated (no crash)");
 
     /* ---- viewport / scissor round-trip ----------------------------------- */
     viewport(10, 20, 640, 480);
