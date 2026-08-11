@@ -118,6 +118,7 @@ jobs:
             -DCMAKE_OSX_ARCHITECTURES=arm64 \
             -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 \
             -DMITHRIL_IOS=ON \
+            -DMITHRIL_OUTPUT_DIRECTORY="$PWD/build-hosted-ios/output" \
             -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO \
             -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED=NO
           cmake --build build-hosted-ios --config Release --target mithril
@@ -126,7 +127,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          artifact="$(find output -type f -name 'libmithril.dylib' -print -quit)"
+          artifact="$(find build-hosted-ios/output -type f -name 'libmithril.dylib' -print -quit)"
           test -n "$artifact"
           file "$artifact"
           otool -D "$artifact"
@@ -167,10 +168,11 @@ jobs:
             -G Xcode -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_SYSROOT="$sdk" \
             -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=16.0 \
             -DMITHRIL_IOS=ON \
+            -DMITHRIL_OUTPUT_DIRECTORY="$PWD/build-hosted-ios-sim/output" \
             -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO \
             -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED=NO
           cmake --build build-hosted-ios-sim --config Release --target mithril
-          artifact="$(find output -type f -name 'libmithril.dylib' -print -quit)"
+          artifact="$(find build-hosted-ios-sim/output -type f -name 'libmithril.dylib' -print -quit)"
           test -n "$artifact"
           echo "artifact=$artifact" >> "$GITHUB_OUTPUT"
           file "$artifact"

@@ -3,8 +3,9 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BUILD_DIR="${MITHRIL_IOS_BUILD_DIR:-${ROOT_DIR}/build-ios}"
+OUTPUT_DIR="${MITHRIL_IOS_OUTPUT_DIR:-${BUILD_DIR}/output}"
 DEPLOYMENT_TARGET="${MITHRIL_IOS_DEPLOYMENT_TARGET:-14.0}"
-DYLIB="${ROOT_DIR}/output/libmithril.dylib"
+DYLIB="${OUTPUT_DIR}/libmithril.dylib"
 
 for tool in cmake xcrun file lipo vtool otool nm; do
     command -v "${tool}" >/dev/null 2>&1 || {
@@ -18,13 +19,15 @@ SDKROOT="$(xcrun --sdk iphoneos --show-sdk-path)"
 echo "== Configure Mithril for iPhoneOS =="
 echo "SDKROOT=${SDKROOT}"
 echo "DEPLOYMENT_TARGET=${DEPLOYMENT_TARGET}"
+echo "OUTPUT_DIR=${OUTPUT_DIR}"
 cmake -S "${ROOT_DIR}" -B "${BUILD_DIR}" \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_SYSTEM_NAME=iOS \
     -DCMAKE_OSX_SYSROOT="${SDKROOT}" \
     -DCMAKE_OSX_ARCHITECTURES=arm64 \
     -DCMAKE_OSX_DEPLOYMENT_TARGET="${DEPLOYMENT_TARGET}" \
-    -DMITHRIL_IOS=ON
+    -DMITHRIL_IOS=ON \
+    -DMITHRIL_OUTPUT_DIRECTORY="${OUTPUT_DIR}"
 
 cmake --build "${BUILD_DIR}" -j"$(sysctl -n hw.ncpu 2>/dev/null || echo 4)"
 

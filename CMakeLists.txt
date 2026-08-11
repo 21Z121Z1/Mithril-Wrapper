@@ -11,6 +11,8 @@ endif()
 
 option(MITHRIL_IOS "Build for iOS instead of macOS when APPLE is set" OFF)
 set(MITHRIL_VULKAN_LIBRARY "" CACHE FILEPATH "Vulkan loader/MoltenVK library to link (iOS)")
+set(MITHRIL_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/output" CACHE PATH
+    "Directory for the Mithril shared-library artifact")
 
 if(MITHRIL_IOS AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
     message(FATAL_ERROR
@@ -111,8 +113,8 @@ endif()
 
 set_target_properties(mithril PROPERTIES
     OUTPUT_NAME mithril
-    LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/output
-    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/output
+    LIBRARY_OUTPUT_DIRECTORY "${MITHRIL_OUTPUT_DIRECTORY}"
+    RUNTIME_OUTPUT_DIRECTORY "${MITHRIL_OUTPUT_DIRECTORY}"
 )
 
 if(UNIX AND NOT APPLE)

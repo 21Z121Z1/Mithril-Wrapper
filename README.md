@@ -60,6 +60,11 @@ cmake --build build-macos --target amethyst_egl_smoke
 ctest --test-dir build-macos -R '^amethyst_egl_smoke$' --output-on-failure
 ```
 
+iPhoneOS artifact contract 使用 `./scripts/build_iphoneos.sh`；默认产物位于
+`build-ios/output/libmithril.dylib`。可分别用 `MITHRIL_IOS_BUILD_DIR` 与
+`MITHRIL_IOS_OUTPUT_DIR` 覆盖 build/output 路径，因此 iPhoneOS 验证不会覆盖
+macOS 的 `output/libmithril.dylib`。
+
 ## 冒烟测试
 
 ```sh

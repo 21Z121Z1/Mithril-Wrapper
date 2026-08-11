@@ -88,7 +88,8 @@ jobs:
             -DCMAKE_OSX_SYSROOT=iphoneos \
             -DCMAKE_OSX_ARCHITECTURES=arm64 \
             -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 \
-            -DMITHRIL_IOS=ON
+            -DMITHRIL_IOS=ON \
+            -DMITHRIL_OUTPUT_DIRECTORY="$GITHUB_WORKSPACE/build-ios/output"
 
       - name: Build iPhoneOS dylib
         run: cmake --build build-ios -j$(sysctl -n hw.ncpu)
@@ -96,8 +97,8 @@ jobs:
       - name: Verify iPhoneOS Mach-O contract
         id: locate_ios
         run: |
-          DYLIB=output/libmithril.dylib
-          [ -f "$DYLIB" ] || (echo "iOS dylib not found in output/" && exit 1)
+          DYLIB=build-ios/output/libmithril.dylib
+          [ -f "$DYLIB" ] || (echo "iOS dylib not found: $DYLIB" && exit 1)
           echo "path=$DYLIB" >> "$GITHUB_OUTPUT"
           file "$DYLIB"
           lipo -info "$DYLIB"
