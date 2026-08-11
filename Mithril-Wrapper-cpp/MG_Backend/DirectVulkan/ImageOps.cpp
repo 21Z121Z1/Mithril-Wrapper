@@ -517,6 +517,15 @@ int read_pixels(int x, int y, int w, int h, GLenum format, GLenum type, void* ou
         mithril::Texture* t = mithril::state_get_texture(src_tex_id);
         if (t) src_fmt = gl_internal_to_vk((GLenum)t->internalFormat);
     }
+    // DIAG (readback root-cause hunt): print what read_pixels actually resolves
+    // as the source image before doing anything, so a black readback can be
+    // attributed to src_image vs layout vs staging vs the copy itself.
+    {
+        MITHRIL_LOG_WARN("vk", "read_pixels DIAG: currentDrawFBO=%u src_tex_id=%u "
+                          "src_image=%p src_fmt=%d w=%d h=%d",
+                          g_state->currentDrawFBO, src_tex_id,
+                          (void*)src_image, (int)src_fmt, w, h);
+    }
     if (src_image == VK_NULL_HANDLE) return 0;
 
     // Flush any pending rendering into the colour attachment so the readback
@@ -554,6 +563,26 @@ int read_pixels(int x, int y, int w, int h, GLenum format, GLenum type, void* ou
     // not leave it UNDEFINED here.)
     if (src_layout == VK_IMAGE_LAYOUT_UNDEFINED) {
         src_layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    }
+    // DIAG (readback root-cause hunt): print the resolved source layout and the
+    // texture's tracked layout so a mismatch (e.g. barrier oldLayout vs real
+    // layout) is visible in the CI log.
+    {
+        GLuint layoutTex = 0;
+        VkImageLayout trackedLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        if (g_state->currentDrawFBO != 0) {
+            mithril::Framebuffer* fbo2 = mithril::state_get_framebuffer(g_state->currentDrawFBO);
+            if (fbo2) {
+                layoutTex = fbo2->colors[0].texture;
+                auto& tbl2 = mithril::vk::texture_table();
+                auto tit2 = tbl2.find(layoutTex);
+                if (tit2 != tbl2.end()) trackedLayout = tit2->second.currentLayout;
+            }
+        }
+        MITHRIL_LOG_WARN("vk", "read_pixels DIAG: src_layout=%d trackedLayout=%d "
+                          "(layoutTex=%u) staging_fmt=%d",
+                          (int)src_layout, (int)trackedLayout, layoutTex,
+                          (int)((src_fmt != VK_FORMAT_UNDEFINED) ? src_fmt : VK_FORMAT_R8G8B8A8_UNORM));
     }
 
     // Pick a host-visible staging buffer format. We always copy as RGBA8 on
@@ -670,6 +699,20 @@ int read_pixels(int x, int y, int w, int h, GLenum format, GLenum type, void* ou
         // Best-effort: copy byte-for-byte up to the smaller of the two sizes.
         size_t n = std::min((size_t)staging_size, (size_t)w * h * dst_bpp);
         std::memcpy(out_pixels, mapped, n);
+    }
+    // DIAG (readback root-cause hunt): dump the first host-visible pixel bytes
+    // read back. If this is all-zero while the source image holds a clear
+    // colour, the failure is in the copy / layout / barrier path, not src_image.
+    {
+        const unsigned char* dbg = (const unsigned char*)out_pixels;
+        size_t dbgN = (size_t)w * h * dst_bpp;
+        MITHRIL_LOG_WARN("vk", "read_pixels DIAG: first pixel bytes [%u,%u,%u,%u] "
+                          "staging_size=%zu dst_bpp=%d src_bpp=%d",
+                          dbgN >= 1 ? dbg[0] : 0,
+                          dbgN >= 2 ? dbg[1] : 0,
+                          dbgN >= 3 ? dbg[2] : 0,
+                          dbgN >= 4 ? dbg[3] : 0,
+                          (size_t)staging_size, dst_bpp, src_bpp);
     }
 
     vkUnmapMemory(b->device, staging.memory);
