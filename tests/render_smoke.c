@@ -578,6 +578,72 @@ int main(int argc, char** argv) {
                   topx[0], topx[1], topx[2], topx[3]);
         }
 
+        /* ---- 4h) 判别 C：texVs（attrib 0+1）program 能否画纯色 ----------
+         * UBO-only 已用 attrib0Vs（attrib 0 only）验证红；本测试用 texVs
+         * （attrib 0+1）+ 纯色 FS（无 sampler、无 UBO）画蓝色。若蓝 → texVs
+         * 的 attrib-1 pipeline 正常，黑屏出在 sampler descriptor；若黑 →
+         * attrib-1 顶点 pipeline 是根因。 */
+        {
+            const char* blueFs = "#version 330 core\n"
+                                 "out vec4 fragColor;\n"
+                                 "void main(){ fragColor = vec4(0.0, 0.0, 1.0, 1.0); }\n";
+            GLuint bFs = createShader(GL_FRAGMENT_SHADER);
+            shaderSource(bFs, 1, &blueFs, NULL);
+            compileShader(bFs);
+            GLuint blueProg = createProgram();
+            attachShader(blueProg, texVs);   /* attrib 0+1 */
+            attachShader(blueProg, bFs);
+            linkProgram(blueProg);
+            deleteShader(bFs);
+            useProgram(blueProg);
+            bindVertexArray(texVao);
+            clearColor(0.0f, 0.0f, 0.0f, 0.0f);
+            clear(GL_COLOR_BUFFER_BIT);
+            drawArrays(GL_TRIANGLES, 0, 3);
+            finish();
+            unsigned char bp[4] = {0,0,0,0};
+            readPixels(R / 2, C / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, bp);
+            CHECK(bp[2] > 128 && bp[3] > 128 && bp[0] < 40,
+                  "disc-C texVs attrib-1 pipeline: blue readback=(%d,%d,%d,%d)",
+                  bp[0], bp[1], bp[2], bp[3]);
+        }
+
+        /* ---- 4i) 判别 D：attrib0Vs + sampler（常量 UV）采样 ------------
+         * 隔离 sampler descriptor 链路：attrib0Vs（已验证能画）+ 一个用常量
+         * UV 采样全白纹理的 FS。若白 → sampler descriptor + attrib0Vs 正常；
+         * 若黑 → sampler descriptor 链路（纹理 view / unit 映射 / 描述符写入）
+         * 是根因。同时打印 uTex location 诊断映射是否建立。 */
+        {
+            const char* sampFs = "#version 330 core\n"
+                                 "out vec4 fragColor;\n"
+                                 "uniform sampler2D uTex;\n"
+                                 "void main(){ fragColor = texture(uTex, vec2(0.5, 0.5)); }\n";
+            GLuint sFs = createShader(GL_FRAGMENT_SHADER);
+            shaderSource(sFs, 1, &sampFs, NULL);
+            compileShader(sFs);
+            GLuint sampProg = createProgram();
+            attachShader(sampProg, attrib0Vs);   /* attrib 0 only */
+            attachShader(sampProg, sFs);
+            linkProgram(sampProg);
+            deleteShader(sFs);
+            GLint sLoc = getUniformLocation(sampProg, "uTex");
+            printf("disc-D getUniformLocation(uTex)=%d\n", sLoc);
+            useProgram(sampProg);
+            activeTexture(GL_TEXTURE0);
+            bindTexture(GL_TEXTURE_2D, sampTex);
+            if (sLoc >= 0) uniform1i(sLoc, 0);
+            bindVertexArray(texVao);
+            clearColor(0.0f, 0.0f, 0.0f, 0.0f);
+            clear(GL_COLOR_BUFFER_BIT);
+            drawArrays(GL_TRIANGLES, 0, 3);
+            finish();
+            unsigned char sp[4] = {0,0,0,0};
+            readPixels(R / 2, C / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, sp);
+            CHECK(sp[0] > 200 && sp[1] > 200 && sp[2] > 200 && sp[3] > 128,
+                  "disc-D sampler+attrib0Vs: white readback=(%d,%d,%d,%d)",
+                  sp[0], sp[1], sp[2], sp[3]);
+        }
+
         /* ---- 4g) 多帧动态 UBO + 贴图 + glFinish 稳定性 ------------------- */
         /* 每帧：改写 UBO（orphan-rename + descriptor memo 失效）→ draw →
          * glFinish(vkQueueSubmit) → readback。连续 N 帧验证：
