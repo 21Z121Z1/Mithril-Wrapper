@@ -35,12 +35,12 @@
 
 1. `eglGetDisplay(EGL_DEFAULT_DISPLAY)` → 非 NULL display
 2. `eglInitialize(display, NULL, NULL)` → 成功
-3. `eglChooseConfig` 对以下属性**必须返回 ≥1 个配置**（gl_bridge.m:133-141，否则 `assert(bundle->config)` 崩溃）：
+3. `eglChooseConfig` 对以下属性**必须返回 ≥1 个配置**（当前 `Amethyst-iOS-MyRemastered` 的 Mithril integration，否则 `assert(bundle->config)` 崩溃）：
    - `EGL_RED_SIZE=8, GREEN=8, BLUE=8, ALPHA=8, DEPTH=24`
    - `EGL_SURFACE_TYPE = EGL_WINDOW_BIT | EGL_PBUFFER_BIT`
-   - `EGL_RENDERABLE_TYPE = EGL_OPENGL_BIT`（desktop GL 分支，Mithril 走此路径）
+   - `EGL_RENDERABLE_TYPE = EGL_OPENGL_ES3_BIT`（Amethyst 将 Mithril 归入非 ANGLE negotiation 分支）
 4. `eglGetConfigAttrib(EGL_NATIVE_VISUAL_ID)` → 成功
-5. `eglBindAPI(EGL_OPENGL_API)` → EGL_TRUE（Mithril 走 desktop GL 分支 gl_bridge.m:161-163）
+5. `eglBindAPI(EGL_OPENGL_ES_API)` → EGL_TRUE；这是 host negotiation alias，LWJGL 随后仍直接加载 Mithril 的 desktop GL 3.3 Core exports
 6. `eglCreateWindowSurface(display, config, (EGLNativeWindowType)CALayer*, NULL)` — **native window 类型 = CALayer***（gl_bridge.m:171）
 7. `eglCreateContext(display, config, share_ctx, {EGL_CONTEXT_CLIENT_VERSION, 3})`（gl_bridge.m:178-183）
 8. `eglMakeCurrent` 支持解绑：`eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT)`（gl_bridge.m:194-200）
@@ -169,7 +169,7 @@ Vulkan 后端（src/vk/，经 MoltenVK → Metal → CAMetalLayer）
 |---|---|
 | EGL 18 符号 dlsym | Amethyst `Natives/ctxbridges/gl_bridge.m:73-97` |
 | eglChooseConfig 契约属性 | 同上 `:133-141` |
-| desktop GL 分支（EGL_OPENGL_BIT/API） | 同上 `:126-167` |
+| Mithril ES3 host negotiation alias | `Amethyst-iOS-MyRemastered` commit `696e230e`, `Natives/ctxbridges/gl_bridge.m` |
 | CALayer 作为 native window | 同上 `:171` |
 | context 属性 {CLIENT_VERSION,3} | 同上 `:178-183` |
 | 终止顺序 | 同上 `:249-257` |

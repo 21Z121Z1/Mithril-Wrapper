@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - feature/direct-metal
+      - codex/autonomous-direct-metal-next
 
 concurrency:
   group: directmetal-hosted-${{ github.ref }}
@@ -63,6 +64,13 @@ jobs:
             clang -std=c11 -Wall -Wextra "tests/${test_name}.c" -o "$RUNNER_TEMP/${test_name}"
             "$RUNNER_TEMP/${test_name}"
           done
+
+      - name: Replay Amethyst EGL negotiation and presentation
+        shell: bash
+        run: |
+          set -euo pipefail
+          ctest --test-dir build-hosted-metal \
+            -R '^amethyst_egl_smoke$' --output-on-failure
 
       - name: Require first-operation FBO clear/readback regression
         shell: bash

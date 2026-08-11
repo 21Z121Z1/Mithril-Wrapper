@@ -90,6 +90,25 @@ if(APPLE)
         "-framework QuartzCore")
 endif()
 
+include(CTest)
+if(APPLE AND NOT MITHRIL_IOS AND BUILD_TESTING)
+    add_executable(amethyst_egl_smoke tests/amethyst_egl_smoke.mm)
+    set_source_files_properties(tests/amethyst_egl_smoke.mm PROPERTIES
+        COMPILE_FLAGS "-fobjc-arc")
+    target_link_libraries(amethyst_egl_smoke PRIVATE
+        "-framework Foundation"
+        "-framework QuartzCore")
+    target_compile_options(amethyst_egl_smoke PRIVATE
+        -Wall -Wextra -Werror)
+    add_dependencies(amethyst_egl_smoke mithril)
+    add_test(NAME amethyst_egl_smoke COMMAND amethyst_egl_smoke)
+    set_tests_properties(amethyst_egl_smoke PROPERTIES
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        ENVIRONMENT
+            "MITHRIL_BACKEND=metal;MITHRIL_EXPECT_RENDERER=DirectMetal;MTL_DEBUG_LAYER=1;MTL_SHADER_VALIDATION=1"
+        PASS_REGULAR_EXPRESSION "AMETHYST EGL SMOKE ALL PASSED")
+endif()
+
 set_target_properties(mithril PROPERTIES
     OUTPUT_NAME mithril
     LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/output
