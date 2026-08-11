@@ -58,7 +58,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          tests=(state_smoke shader_smoke draw_smoke texture_smoke sampler_smoke buffer_texture_smoke typed_vertex_smoke ubo_smoke query_smoke sync_smoke 3d_smoke render3d_smoke fbo_smoke directmetal_fbo_smoke)
+          tests=(state_smoke shader_smoke draw_smoke texture_smoke sampler_smoke matrix_uniform_smoke buffer_texture_smoke typed_vertex_smoke ubo_smoke query_smoke sync_smoke 3d_smoke render3d_smoke fbo_smoke directmetal_fbo_smoke)
           for test_name in "${tests[@]}"; do
             echo "==> ${test_name}"
             clang -std=c11 -Wall -Wextra "tests/${test_name}.c" -o "$RUNNER_TEMP/${test_name}"

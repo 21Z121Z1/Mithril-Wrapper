@@ -48,6 +48,8 @@ clang -std=c11 -o /tmp/mithril-ubo-smoke tests/ubo_smoke.c
 MITHRIL_BACKEND=metal MTL_DEBUG_LAYER=1 /tmp/mithril-ubo-smoke
 clang -std=c11 -o /tmp/mithril-sampler-smoke tests/sampler_smoke.c
 MITHRIL_BACKEND=metal MTL_DEBUG_LAYER=1 /tmp/mithril-sampler-smoke
+clang -std=c11 -o /tmp/mithril-matrix-uniform-smoke tests/matrix_uniform_smoke.c
+MITHRIL_BACKEND=metal MTL_DEBUG_LAYER=1 /tmp/mithril-matrix-uniform-smoke
 clang -std=c11 -o /tmp/mithril-buffer-texture-smoke tests/buffer_texture_smoke.c
 MITHRIL_BACKEND=metal MTL_DEBUG_LAYER=1 /tmp/mithril-buffer-texture-smoke
 clang -std=c11 -o /tmp/mithril-sync-smoke tests/sync_smoke.c
@@ -112,5 +114,5 @@ src/backend backend-neutral draw/resource contract 与显式 backend 选择
 src/metal   DirectMetal（SPIR-V→MSL、program/pipeline cache、frame arena、command encoding/readback）
 src/vk      Vulkan reference/fallback（dlsym 加载器、离屏渲染、动态 UBO 池、读回）
 scripts/    gen_gl_stubs.py（stub 生成器）、exported_symbols.txt
-tests/      contract_smoke.c / state_smoke.c / shader_smoke.c / draw_smoke.c / ubo_smoke.c / sampler_smoke.c / buffer_texture_smoke.c / sync_smoke.c / typed_vertex_smoke.c / query_smoke.c / texture_smoke.c / fbo_smoke.c / 3d_smoke.c / render3d_smoke.c
+tests/      contract_smoke.c / state_smoke.c / shader_smoke.c / draw_smoke.c / ubo_smoke.c / sampler_smoke.c / matrix_uniform_smoke.c / buffer_texture_smoke.c / sync_smoke.c / typed_vertex_smoke.c / query_smoke.c / texture_smoke.c / fbo_smoke.c / 3d_smoke.c / render3d_smoke.c
 ```

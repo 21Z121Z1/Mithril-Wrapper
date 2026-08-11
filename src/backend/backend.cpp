@@ -4,6 +4,7 @@
 
 #include <util/log.h>
 
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 
@@ -51,6 +52,78 @@ const char* RendererName() {
         case Kind::DirectMetal: return "Mithril DirectMetal";
         default: return "Mithril backend unavailable";
     }
+}
+
+bool PackUniformValue(const UniformMemberLayout& layout,
+                      const std::vector<uint8_t>& value,
+                      uint8_t* block, size_t block_size) {
+    constexpr size_t kScalarBytes = sizeof(uint32_t);
+    if (!block || layout.offset > block_size ||
+        layout.size > block_size - layout.offset ||
+        value.size() % kScalarBytes != 0)
+        return false;
+
+    const size_t member_end = layout.offset + layout.size;
+    const uint32_t rows = std::max(layout.vector_components, 1u);
+    const uint32_t columns = std::max(layout.matrix_columns, 1u);
+    const uint32_t elements = std::max(layout.array_elements, 1u);
+    const size_t tight_element_bytes =
+        static_cast<size_t>(rows) * columns * kScalarBytes;
+    const size_t array_stride = layout.array_stride
+        ? layout.array_stride : tight_element_bytes;
+    const size_t matrix_stride = layout.matrix_stride
+        ? layout.matrix_stride : static_cast<size_t>(rows) * kScalarBytes;
+
+    auto copy_scalar = [&](size_t destination, size_t source) {
+        if (source + kScalarBytes > value.size() ||
+            destination + kScalarBytes > member_end)
+            return false;
+        std::memcpy(block + destination, value.data() + source, kScalarBytes);
+        return true;
+    };
+
+    for (uint32_t element = 0; element < elements; ++element) {
+        const size_t source_base =
+            static_cast<size_t>(element) * tight_element_bytes;
+        if (source_base >= value.size()) break;
+        const size_t destination_base =
+            layout.offset + static_cast<size_t>(element) * array_stride;
+        if (columns == 1) {
+            const size_t bytes = std::min<size_t>(
+                static_cast<size_t>(rows) * kScalarBytes,
+                value.size() - source_base);
+            if (destination_base + bytes > member_end) return false;
+            std::memcpy(block + destination_base,
+                        value.data() + source_base, bytes);
+            continue;
+        }
+        if (!layout.row_major) {
+            for (uint32_t column = 0; column < columns; ++column) {
+                for (uint32_t row = 0; row < rows; ++row) {
+                    const size_t scalar =
+                        static_cast<size_t>(column) * rows + row;
+                    if (!copy_scalar(
+                            destination_base + column * matrix_stride +
+                                row * kScalarBytes,
+                            source_base + scalar * kScalarBytes))
+                        return false;
+                }
+            }
+        } else {
+            for (uint32_t row = 0; row < rows; ++row) {
+                for (uint32_t column = 0; column < columns; ++column) {
+                    const size_t scalar =
+                        static_cast<size_t>(column) * rows + row;
+                    if (!copy_scalar(
+                            destination_base + row * matrix_stride +
+                                column * kScalarBytes,
+                            source_base + scalar * kScalarBytes))
+                        return false;
+                }
+            }
+        }
+    }
+    return true;
 }
 
 bool EnsureInit() {

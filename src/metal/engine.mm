@@ -62,11 +62,7 @@ uint64_t HashWords(const std::vector<uint32_t>& vs,
     return hash ? hash : 1;
 }
 
-struct UboMember {
-    std::string name;
-    uint32_t offset = 0;
-    uint32_t size = 0;
-};
+using UboMember = backend::UniformMemberLayout;
 
 struct ShaderStage {
     id<MTLLibrary> library = nil;
@@ -856,6 +852,23 @@ bool TranslateStage(const std::vector<uint32_t>& words,
                         block.base_type_id, i, spv::DecorationOffset);
                     member.size = static_cast<uint32_t>(
                         compiler.get_declared_struct_member_size(type, i));
+                    const auto& member_type =
+                        compiler.get_type(type.member_types[i]);
+                    member.vector_components =
+                        std::max(member_type.vecsize, 1u);
+                    member.matrix_columns =
+                        std::max(member_type.columns, 1u);
+                    member.array_elements = 1;
+                    for (uint32_t dimension : member_type.array)
+                        member.array_elements *= std::max(dimension, 1u);
+                    if (!member_type.array.empty())
+                        member.array_stride = static_cast<uint32_t>(
+                            compiler.type_struct_member_array_stride(type, i));
+                    if (member_type.columns > 1)
+                        member.matrix_stride = static_cast<uint32_t>(
+                            compiler.type_struct_member_matrix_stride(type, i));
+                    member.row_major = compiler.has_member_decoration(
+                        block.base_type_id, i, spv::DecorationRowMajor);
                     output->members.push_back(std::move(member));
                 }
             }
@@ -1379,10 +1392,12 @@ NSUInteger PackUniforms(FrameContext& frame, NSUInteger* cursor,
     for (const auto& member : stage.members) {
         auto value = draw.uniforms.find(member.name);
         if (value == draw.uniforms.end() || value->second.empty()) continue;
-        const size_t bytes = std::min<size_t>(
-            member.size, value->second.size());
-        if ((size_t)member.offset + bytes <= stage.ubo_size)
-            std::memcpy(packed.data() + member.offset, value->second.data(), bytes);
+        if (!backend::PackUniformValue(
+                member, value->second, packed.data(), stage.ubo_size)) {
+            ML_LOG_ERROR("metal: invalid reflected layout for uniform '%s'",
+                         member.name.c_str());
+            return NSNotFound;
+        }
     }
     // Exact byte identity is the only reuse criterion. The memo lives for one
     // frame arena, so offsets can never escape into a recycled frame context.

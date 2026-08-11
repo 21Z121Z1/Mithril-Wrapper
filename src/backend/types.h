@@ -150,6 +150,27 @@ struct UniformBufferBinding {
     uint64_t size = 0;
 };
 
+// Native shader reflection for one member of the synthetic loose-uniform
+// block. GL setters expose tightly packed scalar sequences, while std140/MSL
+// layouts may add a stride between array elements or matrix rows/columns.
+struct UniformMemberLayout {
+    std::string name;
+    uint32_t offset = 0;
+    uint32_t size = 0;
+    uint32_t vector_components = 1;
+    uint32_t matrix_columns = 1;
+    uint32_t array_elements = 1;
+    uint32_t array_stride = 0;
+    uint32_t matrix_stride = 0;
+    bool row_major = false;
+};
+
+// Copy one GL uniform snapshot into its reflected block layout. Values use
+// 32-bit GL scalar representations and matrices are normalized column-major.
+bool PackUniformValue(const UniformMemberLayout& layout,
+                      const std::vector<uint8_t>& value,
+                      uint8_t* block, size_t block_size);
+
 enum class TexFilter { Nearest = 0, Linear = 1 };
 enum class TexMipFilter { None = 0, Nearest = 1, Linear = 2 };
 

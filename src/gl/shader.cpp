@@ -655,6 +655,32 @@ void StoreUniformUInt(GLenum type, GLint location, const GLuint* v,
     u.raw_value.resize(bytes);
     std::memcpy(u.raw_value.data(), v, bytes);
 }
+
+void StoreUniformMatrix(GLenum type, GLint location, GLsizei count,
+                        GLboolean transpose, const GLfloat* value,
+                        int columns, int rows) {
+    if (!value || count <= 0) return;
+    const int components = columns * rows;
+    if (transpose == GL_FALSE) {
+        StoreUniform(type, location, value, count, components);
+        return;
+    }
+    // GL accepts row-major input when transpose is true but stores the same
+    // mathematical matrix as a normalized column-major scalar sequence.
+    std::vector<GLfloat> column_major(
+        static_cast<size_t>(count) * components);
+    for (GLsizei matrix = 0; matrix < count; ++matrix) {
+        const GLfloat* source = value +
+            static_cast<size_t>(matrix) * components;
+        GLfloat* destination = column_major.data() +
+            static_cast<size_t>(matrix) * components;
+        for (int column = 0; column < columns; ++column)
+            for (int row = 0; row < rows; ++row)
+                destination[column * rows + row] =
+                    source[row * columns + column];
+    }
+    StoreUniform(type, location, column_major.data(), count, components);
+}
 } // namespace
 
 void APIENTRY glUniform1f(GLint location, GLfloat v0) {
@@ -735,39 +761,45 @@ void APIENTRY glUniform4uiv(GLint location, GLsizei count, const GLuint* value) 
 
 void APIENTRY glUniformMatrix2fv(GLint location, GLsizei count, GLboolean transpose,
                                  const GLfloat* value) {
-    (void)transpose; StoreUniform(GL_FLOAT_MAT2, location, value, count, 4);
+    StoreUniformMatrix(GL_FLOAT_MAT2, location, count, transpose, value, 2, 2);
 }
 void APIENTRY glUniformMatrix3fv(GLint location, GLsizei count, GLboolean transpose,
                                  const GLfloat* value) {
-    (void)transpose; StoreUniform(GL_FLOAT_MAT3, location, value, count, 9);
+    StoreUniformMatrix(GL_FLOAT_MAT3, location, count, transpose, value, 3, 3);
 }
 void APIENTRY glUniformMatrix4fv(GLint location, GLsizei count, GLboolean transpose,
                                  const GLfloat* value) {
-    (void)transpose; StoreUniform(GL_FLOAT_MAT4, location, value, count, 16);
+    StoreUniformMatrix(GL_FLOAT_MAT4, location, count, transpose, value, 4, 4);
 }
 void APIENTRY glUniformMatrix2x3fv(GLint location, GLsizei count, GLboolean transpose,
                                    const GLfloat* value) {
-    (void)transpose; StoreUniform(GL_FLOAT_MAT2x3, location, value, count, 6);
+    StoreUniformMatrix(
+        GL_FLOAT_MAT2x3, location, count, transpose, value, 2, 3);
 }
 void APIENTRY glUniformMatrix3x2fv(GLint location, GLsizei count, GLboolean transpose,
                                    const GLfloat* value) {
-    (void)transpose; StoreUniform(GL_FLOAT_MAT3x2, location, value, count, 6);
+    StoreUniformMatrix(
+        GL_FLOAT_MAT3x2, location, count, transpose, value, 3, 2);
 }
 void APIENTRY glUniformMatrix2x4fv(GLint location, GLsizei count, GLboolean transpose,
                                    const GLfloat* value) {
-    (void)transpose; StoreUniform(GL_FLOAT_MAT2x4, location, value, count, 8);
+    StoreUniformMatrix(
+        GL_FLOAT_MAT2x4, location, count, transpose, value, 2, 4);
 }
 void APIENTRY glUniformMatrix4x2fv(GLint location, GLsizei count, GLboolean transpose,
                                    const GLfloat* value) {
-    (void)transpose; StoreUniform(GL_FLOAT_MAT4x2, location, value, count, 8);
+    StoreUniformMatrix(
+        GL_FLOAT_MAT4x2, location, count, transpose, value, 4, 2);
 }
 void APIENTRY glUniformMatrix3x4fv(GLint location, GLsizei count, GLboolean transpose,
                                    const GLfloat* value) {
-    (void)transpose; StoreUniform(GL_FLOAT_MAT3x4, location, value, count, 12);
+    StoreUniformMatrix(
+        GL_FLOAT_MAT3x4, location, count, transpose, value, 3, 4);
 }
 void APIENTRY glUniformMatrix4x3fv(GLint location, GLsizei count, GLboolean transpose,
                                    const GLfloat* value) {
-    (void)transpose; StoreUniform(GL_FLOAT_MAT4x3, location, value, count, 12);
+    StoreUniformMatrix(
+        GL_FLOAT_MAT4x3, location, count, transpose, value, 4, 3);
 }
 
 } // extern "C"

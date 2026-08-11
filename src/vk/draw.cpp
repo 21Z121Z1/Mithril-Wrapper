@@ -196,8 +196,12 @@ void Draw(const DrawParams& params) {
         for (const auto& m : prog.members) {
             auto it = params.uniforms.find(m.name);
             if (it == params.uniforms.end()) continue;
-            size_t n = std::min<size_t>(m.size, it->second.size());
-            std::memcpy(bytes.data() + m.offset, it->second.data(), n);
+            if (!backend::PackUniformValue(
+                    m, it->second, bytes.data(), bytes.size())) {
+                ML_LOG_ERROR("vk: invalid reflected layout for uniform '%s'",
+                             m.name.c_str());
+                return;
+            }
         }
         std::memcpy(g.ubo_map + op.ubo_offset, bytes.data(), bytes.size());
     } else {
