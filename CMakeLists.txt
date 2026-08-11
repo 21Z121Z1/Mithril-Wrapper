@@ -301,8 +301,16 @@ if(APPLE)
         "-framework QuartzCore"
         "-framework CoreGraphics"
         "-framework IOSurface"
-        "-framework UIKit"
     )
+    # UIKit is an iOS-only framework (absent on macOS). libMoltenVK.a references
+    # UIScreen / UIView for iOS surface/scale handling, so it is required on iOS
+    # but must NOT be linked on a native macOS build (test-macos-smoke) or the
+    # linker fails with "framework 'UIKit' not found". The iOS toolchain
+    # (ios.toolchain.cmake) defines the CMake IOS variable; a native macOS build
+    # does not.
+    if(IOS)
+        target_link_libraries(${PROJECT_NAME} PRIVATE "-framework UIKit")
+    endif()
     # The bundled libMoltenVK.dylib has install name
     # "@rpath/MoltenVK.framework/MoltenVK", but it's a raw dylib, not a
     # framework bundle. Patch the load reference so libmithril.dylib looks
