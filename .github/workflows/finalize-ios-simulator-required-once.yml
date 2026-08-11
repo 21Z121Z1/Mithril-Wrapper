@@ -1,0 +1,46 @@
+name: finalize-ios-simulator-required-once
+
+on:
+  push:
+    branches:
+      - ci/hosted-metal-gpu-probe-direct-metal-20260810
+
+permissions:
+  contents: write
+
+jobs:
+  finalize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ci/hosted-metal-gpu-probe-direct-metal-20260810
+          fetch-depth: 0
+      - name: Promote proven Simulator runtime lane
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('.github/workflows/hosted-metal-gpu-probe.yml')
+          text = path.read_text()
+          old = '''  ios-simulator-directmetal-runtime:
+            name: iOS Simulator DirectMetal host-GPU runtime candidate
+            runs-on: macos-26
+            continue-on-error: true
+          '''
+          new = '''  ios-simulator-directmetal-runtime-required:
+            name: iOS Simulator DirectMetal host-GPU runtime required
+            runs-on: macos-26
+          '''
+          if old not in text:
+              raise SystemExit('Simulator candidate block did not match')
+          path.write_text(text.replace(old, new, 1))
+          PY
+          git rm -f .github/workflows/finalize-ios-simulator-required-once.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add .github/workflows/hosted-metal-gpu-probe.yml
+          git diff --check
+          git commit -m 'ci: require iOS Simulator DirectMetal runtime'
+          git push origin HEAD:ci/hosted-metal-gpu-probe-direct-metal-20260810
