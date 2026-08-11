@@ -34,10 +34,27 @@ void proc_init(void);
 // state — GL calls in that situation should produce GL_INVALID_OPERATION per
 // the spec.  Only create the implicit global state when EGL is not in use
 // (e.g. headless unit tests that call GL directly without EGL).
+//
+// FIX (root cause - headless backend never brought up):
+// The load-time initialiser (static_block_t in init.cpp) calls state_init(),
+// which allocates g_state. That makes the `!g_state` branch below false on the
+// very first GL entry point, so proc_init() — the headless backend bring-up
+// that owns backend_init() → init_device() → b->initialized=true — was never
+// reached. The MoltenVK backend stayed uninitialized, so every backend_* call
+// (glClear/glDrawArrays/glReadPixels) bailed on its `!b->initialized` guard and
+// became a silent no-op → offscreen render read back all-black.
+//
+// Fix: on the headless path (EGL not in use) also run proc_init() when g_state
+// already exists but the backend is not yet available. proc_init() is
+// idempotent (static `done` + backend_init() idempotence), so this is safe.
+// On the EGL/iOS path g_eglInitialized is true, this branch is skipped, and
+// eglInitialize() owns backend bring-up exactly as before.
 #define MITHRIL_ENSURE_INIT() \
     do { \
         if (!::mithril::g_state) { \
             if (!::mithril::g_eglInitialized) ::proc_init(); \
+        } else if (!::mithril::g_eglInitialized && !backend_available()) { \
+            ::proc_init(); \
         } \
     } while (0)
 
