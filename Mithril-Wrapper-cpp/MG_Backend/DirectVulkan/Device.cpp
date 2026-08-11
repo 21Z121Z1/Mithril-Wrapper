@@ -1116,12 +1116,6 @@ bool init_device() {
     enabled.shaderStorageImageWriteWithoutFormat = supported.shaderStorageImageWriteWithoutFormat;
     enabled.drawIndirectFirstInstance     = supported.drawIndirectFirstInstance;
     enabled.multiDrawIndirect             = supported.multiDrawIndirect;
-    // GL 4.6 ARB_indirect_parameters — vkCmdDrawIndirectCount /
-    // vkCmdDrawIndexedIndirectCount (Vulkan 1.2 core). Sodium's chunk render
-    // issues glMultiDrawElementsIndirectCount; without this feature the
-    // *_count backend records a call the device rejects, so the fallback is
-    // required when unsupported. MoltenVK 1.2.x reports drawIndirectCount.
-    enabled.drawIndirectCount             = supported.drawIndirectCount;
     enabled.samplerAnisotropy             = supported.samplerAnisotropy;
     enabled.depthBounds                   = supported.depthBounds;
     enabled.occlusionQueryPrecise         = supported.occlusionQueryPrecise;
@@ -1136,7 +1130,26 @@ bool init_device() {
     // Remember whether one vkCmdDrawIndirect may issue drawCount > 1; the
     // indirect draw path falls back to a loop when it may not.
     b->multiDrawIndirectSupported = supported.multiDrawIndirect == VK_TRUE;
-    b->drawIndirectCountSupported = supported.drawIndirectCount == VK_TRUE;
+
+    // GL 4.6 ARB_indirect_parameters — glMultiDraw*IndirectCount 需要
+    // vkCmdDrawIndirectCount / vkCmdDrawIndexedIndirectCount。这是 Vulkan 1.2
+    // core 特性，位于 VkPhysicalDeviceVulkan12Features（不在 1.0 的
+    // VkPhysicalDeviceFeatures 里）。必须链入 vkGetPhysicalDeviceFeatures2
+    // 查询支持值，再链入 VkDeviceCreateInfo 启用。MoltenVK 1.2.x 报告它。
+    VkPhysicalDeviceVulkan12Features vulkan12Feat{};
+    vulkan12Feat.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+    vulkan12Feat.pNext = nullptr;
+    {
+        VkPhysicalDeviceFeatures2 feat2{};
+        feat2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+        feat2.pNext = &vulkan12Feat;
+        vkGetPhysicalDeviceFeatures2(b->physicalDevice, &feat2);
+        b->drawIndirectCountSupported = vulkan12Feat.drawIndirectCount == VK_TRUE;
+    }
+    // 仅当设备支持时链入启用；不支持则保持默认（spec-safe，启用不支持的特性
+    // 会让 vkCreateDevice 返回 VK_ERROR_FEATURE_NOT_PRESENT）。
+    if (b->drawIndirectCountSupported) append_feature(&vulkan12Feat);
+
     b->sampleRateShadingSupported = supported.sampleRateShading == VK_TRUE;
 
     VkDeviceCreateInfo devCI{};
