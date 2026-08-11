@@ -196,7 +196,7 @@ void Draw(const DrawParams& params) {
         for (const auto& m : prog.members) {
             auto it = params.uniforms.find(m.name);
             if (it == params.uniforms.end()) continue;
-            size_t n = std::min<size_t>(m.size, it->second.size() * sizeof(float));
+            size_t n = std::min<size_t>(m.size, it->second.size());
             std::memcpy(bytes.data() + m.offset, it->second.data(), n);
         }
         std::memcpy(g.ubo_map + op.ubo_offset, bytes.data(), bytes.size());

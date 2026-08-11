@@ -620,8 +620,11 @@ void StoreUniform(GLenum type, GLint location, const GLfloat* v, GLsizei count, 
     auto it = p->uniform_by_location.find(location);
     if (it == p->uniform_by_location.end()) return;
     sh::Uniform& u = p->uniforms[it->second];
-    u.type = type;
+    (void)type;
     u.value.assign(v, v + (size_t)count * (size_t)comps);
+    const size_t bytes = (size_t)count * (size_t)comps * sizeof(*v);
+    u.raw_value.resize(bytes);
+    std::memcpy(u.raw_value.data(), v, bytes);
 }
 
 void StoreUniformInt(GLenum type, GLint location, const GLint* v, GLsizei count, int comps) {
@@ -630,9 +633,27 @@ void StoreUniformInt(GLenum type, GLint location, const GLint* v, GLsizei count,
     auto it = p->uniform_by_location.find(location);
     if (it == p->uniform_by_location.end()) return;
     sh::Uniform& u = p->uniforms[it->second];
-    u.type = type;
+    (void)type;
     u.value.clear();
     for (GLsizei i = 0; i < count * comps; ++i) u.value.push_back((float)v[i]);
+    const size_t bytes = (size_t)count * (size_t)comps * sizeof(*v);
+    u.raw_value.resize(bytes);
+    std::memcpy(u.raw_value.data(), v, bytes);
+}
+
+void StoreUniformUInt(GLenum type, GLint location, const GLuint* v,
+                      GLsizei count, int comps) {
+    sh::Program* p = CurrentProgramForUniform();
+    if (!p || location < 0 || !v || count <= 0) return;
+    auto it = p->uniform_by_location.find(location);
+    if (it == p->uniform_by_location.end()) return;
+    sh::Uniform& u = p->uniforms[it->second];
+    (void)type;
+    u.value.clear();
+    for (GLsizei i = 0; i < count * comps; ++i) u.value.push_back((float)v[i]);
+    const size_t bytes = (size_t)count * (size_t)comps * sizeof(*v);
+    u.raw_value.resize(bytes);
+    std::memcpy(u.raw_value.data(), v, bytes);
 }
 } // namespace
 
@@ -661,18 +682,18 @@ void APIENTRY glUniform4i(GLint location, GLint v0, GLint v1, GLint v2, GLint v3
     GLint v[4] = {v0, v1, v2, v3}; StoreUniformInt(GL_INT_VEC4, location, v, 1, 4);
 }
 void APIENTRY glUniform1ui(GLint location, GLuint v0) {
-    GLint v[1] = {(GLint)v0}; StoreUniformInt(GL_UNSIGNED_INT, location, v, 1, 1);
+    GLuint v[1] = {v0}; StoreUniformUInt(GL_UNSIGNED_INT, location, v, 1, 1);
 }
 void APIENTRY glUniform2ui(GLint location, GLuint v0, GLuint v1) {
-    GLint v[2] = {(GLint)v0, (GLint)v1}; StoreUniformInt(GL_UNSIGNED_INT_VEC2, location, v, 1, 2);
+    GLuint v[2] = {v0, v1}; StoreUniformUInt(GL_UNSIGNED_INT_VEC2, location, v, 1, 2);
 }
 void APIENTRY glUniform3ui(GLint location, GLuint v0, GLuint v1, GLuint v2) {
-    GLint v[3] = {(GLint)v0, (GLint)v1, (GLint)v2};
-    StoreUniformInt(GL_UNSIGNED_INT_VEC3, location, v, 1, 3);
+    GLuint v[3] = {v0, v1, v2};
+    StoreUniformUInt(GL_UNSIGNED_INT_VEC3, location, v, 1, 3);
 }
 void APIENTRY glUniform4ui(GLint location, GLuint v0, GLuint v1, GLuint v2, GLuint v3) {
-    GLint v[4] = {(GLint)v0, (GLint)v1, (GLint)v2, (GLint)v3};
-    StoreUniformInt(GL_UNSIGNED_INT_VEC4, location, v, 1, 4);
+    GLuint v[4] = {v0, v1, v2, v3};
+    StoreUniformUInt(GL_UNSIGNED_INT_VEC4, location, v, 1, 4);
 }
 
 void APIENTRY glUniform1fv(GLint location, GLsizei count, const GLfloat* value) {
@@ -700,20 +721,16 @@ void APIENTRY glUniform4iv(GLint location, GLsizei count, const GLint* value) {
     StoreUniformInt(GL_INT_VEC4, location, value, count, 4);
 }
 void APIENTRY glUniform1uiv(GLint location, GLsizei count, const GLuint* value) {
-    std::vector<GLint> tmp(value, value + count);
-    StoreUniformInt(GL_UNSIGNED_INT, location, tmp.data(), count, 1);
+    StoreUniformUInt(GL_UNSIGNED_INT, location, value, count, 1);
 }
 void APIENTRY glUniform2uiv(GLint location, GLsizei count, const GLuint* value) {
-    std::vector<GLint> tmp(value, value + count * 2);
-    StoreUniformInt(GL_UNSIGNED_INT_VEC2, location, tmp.data(), count, 2);
+    StoreUniformUInt(GL_UNSIGNED_INT_VEC2, location, value, count, 2);
 }
 void APIENTRY glUniform3uiv(GLint location, GLsizei count, const GLuint* value) {
-    std::vector<GLint> tmp(value, value + count * 3);
-    StoreUniformInt(GL_UNSIGNED_INT_VEC3, location, tmp.data(), count, 3);
+    StoreUniformUInt(GL_UNSIGNED_INT_VEC3, location, value, count, 3);
 }
 void APIENTRY glUniform4uiv(GLint location, GLsizei count, const GLuint* value) {
-    std::vector<GLint> tmp(value, value + count * 4);
-    StoreUniformInt(GL_UNSIGNED_INT_VEC4, location, tmp.data(), count, 4);
+    StoreUniformUInt(GL_UNSIGNED_INT_VEC4, location, value, count, 4);
 }
 
 void APIENTRY glUniformMatrix2fv(GLint location, GLsizei count, GLboolean transpose,

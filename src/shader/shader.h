@@ -27,8 +27,10 @@ struct Shader {
     std::vector<uint32_t> spirv;   // SPIR-V words (empty until compiled)
 };
 
-// A reflected program uniform. `value` caches the last glUniform* write so
-// glGetUniform* can answer; the selected backend later uploads it into a UBO.
+// A reflected program uniform. `value` keeps a numeric cache for glGetUniform*
+// while `raw_value` preserves the exact scalar representation that native
+// backends upload. Storing GLint/GLuint values as float bytes would corrupt
+// integer uniforms even though the observable getter still looked plausible.
 struct Uniform {
     std::string name;
     GLenum type = GL_FLOAT;
@@ -40,6 +42,7 @@ struct Uniform {
     GLint matrix_stride = 0;
     GLboolean row_major = GL_FALSE;
     GLint size = 1;
+    std::vector<uint8_t> raw_value;
 };
 
 // A sampled-image uniform: the shared SPIR-V descriptor binding (assigned by

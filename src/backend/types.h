@@ -219,7 +219,10 @@ struct DrawParams {
     uint64_t occlusion_query = 0;
     uint32_t instance_count = 1;
     Topology topology = Topology::Triangles;
-    std::unordered_map<std::string, std::vector<float>> uniforms;
+    // Exact bytes captured when the GL draw is issued. Integer uniforms must
+    // remain integer bit patterns; converting their values through float
+    // changes what SPIR-V/MSL reads from the synthetic uniform block.
+    std::unordered_map<std::string, std::vector<uint8_t>> uniforms;
     std::vector<UniformBufferBinding> uniform_buffers;
     std::vector<SampledTextureBinding> sampled_textures;
     PipelineState pipeline;

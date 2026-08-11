@@ -1368,7 +1368,7 @@ NSUInteger PackUniforms(FrameContext& frame, NSUInteger* cursor,
         auto value = draw.uniforms.find(member.name);
         if (value == draw.uniforms.end() || value->second.empty()) continue;
         const size_t bytes = std::min<size_t>(
-            member.size, value->second.size() * sizeof(float));
+            member.size, value->second.size());
         if ((size_t)member.offset + bytes <= stage.ubo_size)
             std::memcpy(packed.data() + member.offset, value->second.data(), bytes);
     }

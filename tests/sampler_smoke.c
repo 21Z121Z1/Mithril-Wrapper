@@ -1,8 +1,9 @@
 /* DirectMetal independent sampler-object vertical smoke.
  *
- * Draws the same 2x1 texture twice in one deferred Metal batch: nearest on
- * the left, linear on the right. Sampler objects are deleted before glFinish
- * so the readback also guards the frontend snapshot/native lifetime boundary.
+ * Draws two 2x1 textures through sampler uniforms mapped to non-matching GL
+ * texture units in one deferred Metal batch. Sampler and texture objects are
+ * deleted before glFinish so readback also guards the frontend snapshot/native
+ * lifetime boundary that real multi-texture Minecraft draws depend on.
  *
  * Build:
  *   clang -std=c11 -o /tmp/mithril-sampler-smoke tests/sampler_smoke.c
@@ -65,6 +66,8 @@ typedef void (*fnEnableVertexAttribArray)(GLuint);
 typedef void (*fnVertexAttribPointer)(GLuint, GLint, GLenum, GLboolean,
                                       GLsizei, const void*);
 typedef void (*fnGenTextures)(GLsizei, GLuint*);
+typedef void (*fnDeleteTextures)(GLsizei, const GLuint*);
+typedef GLboolean (*fnIsTexture)(GLuint);
 typedef void (*fnBindTexture)(GLenum, GLuint);
 typedef void (*fnActiveTexture)(GLenum);
 typedef void (*fnTexImage2D)(GLenum, GLint, GLint, GLsizei, GLsizei, GLint,
@@ -102,9 +105,16 @@ static const char* vertex_source =
 
 static const char* fragment_source =
     "#version 150\n"
-    "uniform sampler2D image;\n"
+    "uniform sampler2D firstImage;\n"
+    "uniform sampler2D secondImage;\n"
+    "uniform int selection;\n"
     "layout(location=0) out vec4 color;\n"
-    "void main() { color = texture(image, vec2(0.4, 0.5)); }\n";
+    "void main() {\n"
+    "  vec4 first = texture(firstImage, vec2(0.4, 0.5));\n"
+    "  vec4 second = texture(secondImage, vec2(0.4, 0.5));\n"
+    "  color = selection == 0 ? first :\n"
+    "      (selection == 1 ? second : mix(first, second, 0.5));\n"
+    "}\n";
 
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -136,6 +146,8 @@ int main(void) {
          "glEnableVertexAttribArray");
     LOAD(fnVertexAttribPointer, vertexAttribPointer, "glVertexAttribPointer");
     LOAD(fnGenTextures, genTextures, "glGenTextures");
+    LOAD(fnDeleteTextures, deleteTextures, "glDeleteTextures");
+    LOAD(fnIsTexture, isTexture, "glIsTexture");
     LOAD(fnBindTexture, bindTexture, "glBindTexture");
     LOAD(fnActiveTexture, activeTexture, "glActiveTexture");
     LOAD(fnTexImage2D, texImage2D, "glTexImage2D");
@@ -159,7 +171,8 @@ int main(void) {
               useProgram && getUniformLocation && uniform1i &&
               genVertexArrays && bindVertexArray && genBuffers && bindBuffer &&
               bufferData && enableVertexAttribArray && vertexAttribPointer &&
-              genTextures && bindTexture && activeTexture && texImage2D &&
+              genTextures && deleteTextures && isTexture && bindTexture &&
+              activeTexture && texImage2D &&
               texParameteri && genSamplers && deleteSamplers && isSampler &&
               bindSampler && samplerParameteri && getSamplerParameteriv &&
               viewport && clearColor && clear && drawArrays && finish &&
@@ -182,9 +195,14 @@ int main(void) {
     attachShader(program, fragment);
     linkProgram(program);
     useProgram(program);
-    GLint image_location = getUniformLocation(program, "image");
-    uniform1i(image_location, 0);
-    CHECK(image_location >= 0, "sampler uniform resolves");
+    GLint first_location = getUniformLocation(program, "firstImage");
+    GLint second_location = getUniformLocation(program, "secondImage");
+    GLint selection_location = getUniformLocation(program, "selection");
+    uniform1i(first_location, 5);
+    uniform1i(second_location, 2);
+    CHECK(first_location >= 0 && second_location >= 0 &&
+              selection_location >= 0,
+          "two sampler uniforms and loose integer uniform resolve");
 
     const float quad[] = {-1.f, -1.f, 1.f, -1.f, -1.f, 1.f, 1.f, 1.f};
     GLuint vao = 0, vbo = 0;
@@ -196,13 +214,22 @@ int main(void) {
     enableVertexAttribArray(0);
     vertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), NULL);
 
-    const unsigned char texels[] = {255, 0, 0, 255, 0, 0, 255, 255};
-    GLuint texture = 0;
-    genTextures(1, &texture);
-    activeTexture(GL_TEXTURE0);
-    bindTexture(GL_TEXTURE_2D, texture);
+    const unsigned char first_texels[] = {
+        255, 0, 0, 255, 0, 0, 255, 255};
+    const unsigned char second_texels[] = {
+        0, 255, 0, 255, 255, 255, 255, 255};
+    GLuint textures[2] = {0, 0};
+    genTextures(2, textures);
+    activeTexture(GL_TEXTURE0 + 5);
+    bindTexture(GL_TEXTURE_2D, textures[0]);
     texImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 2, 1, 0, GL_RGBA,
-               GL_UNSIGNED_BYTE, texels);
+               GL_UNSIGNED_BYTE, first_texels);
+    texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    activeTexture(GL_TEXTURE0 + 2);
+    bindTexture(GL_TEXTURE_2D, textures[1]);
+    texImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 2, 1, 0, GL_RGBA,
+               GL_UNSIGNED_BYTE, second_texels);
     texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 
@@ -224,31 +251,46 @@ int main(void) {
 
     clearColor(0.f, 1.f, 0.f, 1.f);
     clear(GL_COLOR_BUFFER_BIT);
-    bindSampler(0, samplers[0]);
+    bindSampler(5, samplers[0]);
+    bindSampler(2, samplers[1]);
+    uniform1i(selection_location, 0);
     viewport(0, 0, 32, 32);
     drawArrays(GL_TRIANGLE_STRIP, 0, 4);
-    bindSampler(0, samplers[1]);
+    uniform1i(selection_location, 1);
     viewport(32, 0, 32, 32);
+    drawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    uniform1i(selection_location, 2);
+    viewport(64, 0, 32, 32);
     drawArrays(GL_TRIANGLE_STRIP, 0, 4);
 
     /* Deletion unbinds the frontend names. Pending draws retain their fully
      * resolved state and native Metal objects until command submission. */
     deleteSamplers(2, samplers);
+    deleteTextures(2, textures);
     CHECK(!isSampler(samplers[0]) && !isSampler(samplers[1]),
           "deleted sampler names leave the frontend object table");
+    CHECK(!isTexture(textures[0]) && !isTexture(textures[1]),
+          "deleted texture names leave the frontend object table");
     finish();
 
-    unsigned char left[4] = {0}, right[4] = {0};
+    unsigned char left[4] = {0}, middle[4] = {0}, right[4] = {0};
     readPixels(16, 16, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, left);
-    readPixels(48, 16, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, right);
+    readPixels(48, 16, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, middle);
+    readPixels(80, 16, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, right);
     CHECK(abs((int)left[0] - 255) <= 3 && left[1] <= 3 && left[2] <= 3 &&
               abs((int)left[3] - 255) <= 3,
           "nearest sampler reads the red texel (%u,%u,%u,%u)",
           left[0], left[1], left[2], left[3]);
-    CHECK(right[0] >= 140 && right[0] <= 210 && right[1] <= 3 &&
-              right[2] >= 45 && right[2] <= 115 &&
+    CHECK(middle[0] >= 45 && middle[0] <= 115 && middle[1] >= 252 &&
+              middle[2] >= 45 && middle[2] <= 115 &&
+              abs((int)middle[3] - 255) <= 3,
+          "second sampler maps to non-matching unit 2 and blends green/white (%u,%u,%u,%u)",
+          middle[0], middle[1], middle[2], middle[3]);
+    CHECK(right[0] >= 135 && right[0] <= 195 &&
+              right[1] >= 105 && right[1] <= 150 &&
+              right[2] >= 20 && right[2] <= 65 &&
               abs((int)right[3] - 255) <= 3,
-          "linear sampler blends red and blue (%u,%u,%u,%u)",
+          "two independently mapped samplers combine in one draw (%u,%u,%u,%u)",
           right[0], right[1], right[2], right[3]);
     CHECK(getError() == GL_NO_ERROR,
           "sampler draw/readback finishes without GL errors");

@@ -188,11 +188,12 @@ uint64_t CreateBackendProgram(sh::Program* prog) {
     return handle;
 }
 
-std::unordered_map<std::string, std::vector<float>> ComposeUniforms(
+std::unordered_map<std::string, std::vector<uint8_t>> ComposeUniforms(
     sh::Program* prog) {
-    std::unordered_map<std::string, std::vector<float>> uniforms;
+    std::unordered_map<std::string, std::vector<uint8_t>> uniforms;
     for (const auto& u : prog->uniforms)
-        if (u.location >= 0) uniforms[u.name] = u.value;
+        if (u.location >= 0 && !u.raw_value.empty())
+            uniforms[u.name] = u.raw_value;
     return uniforms;
 }
 
