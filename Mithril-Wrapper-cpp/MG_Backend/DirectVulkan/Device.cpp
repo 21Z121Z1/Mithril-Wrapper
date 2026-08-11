@@ -33,7 +33,15 @@
 // FIX (device lost 根因 - 真实内存上限): os_proc_available_memory() 返回进程
 // 在被 Jetsam kill 之前还能分配的字节数。这是 iOS 上唯一可靠的内存上限指标
 // （MoltenVK 报告的 heap size = 整个设备 RAM，完全不可信）。iOS 13+ / macOS 10.15+。
+//
+// 注意：os_proc_available_memory() 带 API_UNAVAILABLE(macos) 标注，macOS 原生
+// 构建（CI test-macos-smoke 用来 dlopen 跑状态机冒烟）会因显式调用而编译失败。
+// 因此必须用 TARGET_OS_IPHONE 而非 __APPLE__ 守卫，macOS 上降级走固定预算
+// fallback（行为与 Android/其他平台一致）。
 #if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
+#if defined(__APPLE__) && TARGET_OS_IPHONE
 #include <os/proc.h>
 #endif
 
@@ -798,7 +806,7 @@ bool init_device() {
 
     // 查询进程真实可用内存（iOS Jetsam 上限 - 已用）
     VkDeviceSize availableBytes = 0;
-#if defined(__APPLE__)
+#if defined(__APPLE__) && TARGET_OS_IPHONE
     availableBytes = os_proc_available_memory();
 #endif
 
