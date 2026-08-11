@@ -1881,31 +1881,38 @@ VkSampler backend_get_or_create_sampler(GLuint name, GLint min_filter, GLint mag
     const bool mipmapped =
         min_filter == GL_NEAREST_MIPMAP_NEAREST || min_filter == GL_NEAREST_MIPMAP_LINEAR ||
         min_filter == GL_LINEAR_MIPMAP_NEAREST || min_filter == GL_LINEAR_MIPMAP_LINEAR;
+    // 读取该纹理当前实际拥有的 mip 层数（glTexImage2D 只传 level0 时=1，
+    // glGenerateMipmap 重建后才到完整层数）。
+    int actualLevels = 1;
+    {
+        auto& tex_tbl = mithril::vk::texture_table();
+        auto tit = tex_tbl.find(name);
+        if (tit != tex_tbl.end()) actualLevels = tit->second.levels;
+    }
     if (!mipmapped) {
         sci.minLod = 0.0f;
         sci.maxLod = 0.0f;
     } else {
         sci.minLod = 0.0f;
-        // FIX (Root Cause - 单层 image 被多层采样越界 → page fault):
-        // 旧实现无条件 maxLod=12。Minecraft 先 glTexImage2D(level=0) 上传 atlas
-        // 的 base level（此时 VkImage 只有 1 层 mip），再 glGenerateMipmap()。
-        // 若 mip 链尚未生成，image 只有 1 层而采样器 maxLod=12 请求 level 1..11，
-        // MoltenVK/Metal 读未分配/未初始化的 mip 层地址 → kIOGPUCommandBuffer
-        // CallbackErrorPageFault（GPU 执行期崩溃，完全静默，与线上「atlas 创建后
-        // 第一帧渲染纯红 + page fault」吻合）。
-        // 修复：把 maxLod clamp 到该纹理当前实际拥有的 mip 层数 - 1。即使 image
-        // 暂时只有 1 层（glGenerateMipmap 尚未执行），采样器也只采 level 0，
-        // 绝不越界；一旦 mip 链生成（tex.levels 更新），下次按参数重新取采样器时
-        // 会拿到正确的 maxLod。这从采样侧彻底消除越界 page fault，是直接止血。
-        // （配套：generate_mipmaps 会在 glGenerateMipmap 时把 image 重建为完整
-        // mip 链，见 ImageOps.cpp，保证视觉上有正确 mipmap。）
-        int actualLevels = 1;
-        {
-            auto& tex_tbl = mithril::vk::texture_table();
-            auto tit = tex_tbl.find(name);
-            if (tit != tex_tbl.end()) actualLevels = tit->second.levels;
+        // FIX (加载界面即纯红 + GPU page fault 根因 - 单层 view + LINEAR mipmap):
+        // 深度对照 MobileGL VkSamplerManager (ResolveSingleLevelMaxLod + BuildSamplerKey
+        // 注释 :177-185)：当纹理当前只有 1 层 mip 时，若采样器仍用
+        // VK_SAMPLER_MIPMAP_MODE_LINEAR，纹理单元在 A11/MoltenVK 上可能对单层 view
+        // 发起 level+1 的取数，读进未初始化的越界页 → 静默 kIOGPUCommandBuffer
+        // CallbackErrorPageFault。这正是「加载界面/Mojang logo 采 gui.png-atlas 时
+        // 首帧即纯红 + page fault」的触发点：图集 base level 刚上传（tex.levels=1）
+        // 就被加载界面用 GL_LINEAR_MIPMAP_LINEAR 采样。
+        // 修复（与 MobileGL 完全一致）：actualLevels==1 时强制
+        //   - mipmapMode = NEAREST（放弃对不存在的第 1 层的线性插值）
+        //   - maxLod = 0.0f（只允许采第 0 层）
+        // 保证单层 view 绝不请求 level+1。mip 链生成后 tex.levels 更新，keyLevels
+        // 变化 → 重新取采样器得到正确的 LINEAR + 完整 maxLod。
+        if (actualLevels <= 1) {
+            sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+            sci.maxLod = 0.0f;
+        } else {
+            sci.maxLod = (float)std::max(0, actualLevels - 1);
         }
-        sci.maxLod = (float)std::max(0, actualLevels - 1);
     }
     sci.unnormalizedCoordinates = VK_FALSE;
 
