@@ -485,18 +485,36 @@ int read_pixels(int x, int y, int w, int h, GLenum format, GLenum type, void* ou
     // FBOs (their GL_COLOR_ATTACHMENT0 texture).
     VkImage src_image = VK_NULL_HANDLE;
     VkFormat src_fmt = VK_FORMAT_UNDEFINED;
+    // The source image's CURRENT tracked layout. The barrier below MUST use
+    // this as oldLayout, not a hardcoded guess. After any prior render pass on
+    // the FBO, end_render_pass() transitioned the color attachment back to a
+    // read-only layout (SHADER_READ_ONLY_OPTIMAL for color) and recorded it in
+    // TextureEntry::currentLayout. Issuing a barrier whose oldLayout claims
+    // COLOR_ATTACHMENT_OPTIMAL while the image is actually in a read-only
+    // layout is a Vulkan spec violation: MoltenVK treats the transition as a
+    // no-op, so the subsequent vkCmdCopyImageToBuffer reads the image in the
+    // wrong layout and returns garbage (observed as all-zero/black pixels on
+    // the offscreen render smoke).
+    VkImageLayout src_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    // User-FBO colour tex_id (0 for the swapchain default framebuffer). Used
+    // to update TextureEntry::currentLayout after the reverse barrier below.
+    GLuint src_tex_id = 0;
 
     if (g_state->currentDrawFBO == 0) {
         // EGL default framebuffer: read directly from the swapchain image.
         // The EGL layer installs both the VkImageView and the underlying
-        // VkImage + format on g_state when a surface is made current.
+        // VkImage + format on g_state when a surface is made current. The
+        // swapchain image is in COLOR_ATTACHMENT_OPTIMAL after a render pass
+        // (transitioned to PRESENT_SRC_KHR only at present).
         src_image = g_state->eglDefaultColorImage;
         src_fmt   = g_state->eglDefaultColorFormat;
+        src_layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     } else {
         mithril::Framebuffer* fbo = mithril::state_get_framebuffer(g_state->currentDrawFBO);
         if (!fbo || !fbo->colors[0].texture) return 0;
-        src_image = backend_get_texture_image(fbo->colors[0].texture);
-        mithril::Texture* t = mithril::state_get_texture(fbo->colors[0].texture);
+        src_tex_id = fbo->colors[0].texture;
+        src_image = backend_get_texture_image(src_tex_id);
+        mithril::Texture* t = mithril::state_get_texture(src_tex_id);
         if (t) src_fmt = gl_internal_to_vk((GLenum)t->internalFormat);
     }
     if (src_image == VK_NULL_HANDLE) return 0;
@@ -505,6 +523,38 @@ int read_pixels(int x, int y, int w, int h, GLenum format, GLenum type, void* ou
     // sees the latest pixels.
     backend_end_render_pass();
     backend_commit();
+
+    // Resolve the source image's layout AFTER the flush above. If a render pass
+    // was active when read_pixels() was entered, backend_end_render_pass() just
+    // transitioned the user-FBO color attachment back to a read-only layout
+    // (SHADER_READ_ONLY_OPTIMAL for color) and recorded it in
+    // TextureEntry::currentLayout. Reading it here guarantees the barrier below
+    // uses oldLayout == the image's REAL current layout.
+    //
+    // Hardcoding COLOR_ATTACHMENT_OPTIMAL would be a Vulkan spec violation when
+    // the image is in a read-only layout: MoltenVK treats the transition as a
+    // no-op, so the subsequent vkCmdCopyImageToBuffer reads the image in the
+    // wrong layout and returns garbage (observed as all-zero/black pixels on
+    // the offscreen render smoke).
+    if (g_state->currentDrawFBO == 0) {
+        // Swapchain image stays in COLOR_ATTACHMENT_OPTIMAL after a render pass
+        // (transitioned to PRESENT_SRC_KHR only at present).
+        src_layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    } else {
+        mithril::Framebuffer* fbo = mithril::state_get_framebuffer(g_state->currentDrawFBO);
+        if (fbo) {
+            auto& tbl = mithril::vk::texture_table();
+            auto tit = tbl.find(fbo->colors[0].texture);
+            if (tit != tbl.end()) src_layout = tit->second.currentLayout;
+        }
+    }
+    // Defensive fallback: if the tracked layout is still unknown/undefined,
+    // treat it as a colour-attachable image that a render pass just wrote to.
+    // (oldLayout=UNDEFINED would discard contents on the transition, so we must
+    // not leave it UNDEFINED here.)
+    if (src_layout == VK_IMAGE_LAYOUT_UNDEFINED) {
+        src_layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    }
 
     // Pick a host-visible staging buffer format. We always copy as RGBA8 on
     // the host side and convert to the requested (format,type) afterwards if
@@ -543,7 +593,11 @@ int read_pixels(int x, int y, int w, int h, GLenum format, GLenum type, void* ou
     bar.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
     bar.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
     bar.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-    bar.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    // oldLayout MUST be the image's actual tracked layout (see src_layout
+    // above). Hardcoding COLOR_ATTACHMENT_OPTIMAL here makes the transition a
+    // no-op on MoltenVK when the image is in a read-only layout after a render
+    // pass, returning garbage/black on readback.
+    bar.oldLayout = src_layout;
     bar.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
     bar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -585,6 +639,17 @@ int read_pixels(int x, int y, int w, int h, GLenum format, GLenum type, void* ou
     vkCmdPipelineBarrier(c.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
                          VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0,
                          0, nullptr, 0, nullptr, 1, &bar);
+    // Update the tracked layout so the next begin_render_pass / draw uses a
+    // non-stale oldLayout (otherwise its barrier would claim SHADER_READ_ONLY_OPTIMAL
+    // while the image is actually in COLOR_ATTACHMENT_OPTIMAL -> same no-op
+    // transition -> dropped draw / black screen). Only the user-FBO colour
+    // attachment lives in texture_table(); the swapchain image is handled by
+    // the activeSwapchain path in begin_render_pass/commit_frame.
+    if (src_tex_id != 0) {
+        auto& tbl = mithril::vk::texture_table();
+        auto tit = tbl.find(src_tex_id);
+        if (tit != tbl.end()) tit->second.currentLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    }
 
     end_one_shot(c);
 
