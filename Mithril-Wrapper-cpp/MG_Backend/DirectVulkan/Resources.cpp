@@ -1127,6 +1127,16 @@ VkBuffer backend_get_or_create_buffer(GLuint name, const void* data, size_t size
             }
             mithril::vk::stamp_buffer_write(e);
             tbl[name] = e;
+            // FIX (GPU page fault 根因 - orphan-rename 后描述符 UAF):
+            // 原地更新分支的 descriptor memo 里，可能已缓存了引用旧 VkBuffer
+            // 句柄的 descriptor set（bind_program_descriptors 在写 set 时对
+            // UBO/SSBO 用 backend_get_buffer 快照了当时的 VkBuffer handle）。
+            // 此处 orphan-rename 生成了新 VkBuffer，旧 handle 进 disposalQueue，
+            // 若不作废 memo，下一帧复用缓存 set 会提交指向【已释放】buffer 的
+            // 描述符 → 静默 GPU page fault（kIOGPUCommandBufferCallbackErrorPageFault）。
+            // 主菜单几乎不触发（无 SSBO 流式改写），世界/Sodium 每帧改写 SSBO+
+            // 动态 UBO 必触发 —— 与崩溃时机完全吻合。
+            mithril::vk::invalidate_descriptor_memo();
             return e.buffer;
         }
         // Buffer 已存在且容量足够：原地更新数据（如果有）
@@ -1159,6 +1169,10 @@ VkBuffer backend_get_or_create_buffer(GLuint name, const void* data, size_t size
     }
     mithril::vk::stamp_buffer_write(e);
     tbl[name] = e;
+    // FIX (GPU page fault 根因 - 容量增长 orphan 同样换新 VkBuffer):
+    // 与上方在飞 orphan 分支同理，旧 handle 进 disposalQueue 后，缓存 set
+    // 若仍引用旧 handle 会形成 UAF。必须作废 descriptor memo。
+    mithril::vk::invalidate_descriptor_memo();
     return e.buffer;
 }
 
@@ -1189,6 +1203,10 @@ VkBuffer backend_create_buffer_storage(GLuint name, VkDeviceSize size,
     (void)coherent;  // HOST_COHERENT is always requested by create_buffer
     mithril::vk::stamp_buffer_write(e);
     tbl[name] = e;
+    // FIX (GPU page fault 根因 - buffer storage orphan):
+    // glBufferStorage 重新指定同样 orphan 旧 buffer 换新 VkBuffer，需作废
+    // descriptor memo，避免缓存 set 引用已释放的旧 handle。
+    mithril::vk::invalidate_descriptor_memo();
     return e.buffer;
 }
 
