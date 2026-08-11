@@ -442,7 +442,51 @@ int main(int argc, char** argv) {
         enableAttrib(1);
         CHECK(getError() == GL_NO_ERROR, "sampled VAO/VBO (pos+uv) setup leaves no error");
 
-        /* ---- 4e) 隔离诊断 A：仅 UBO（无贴图）----------------------------
+        /* ---- 4e) 判别测试 C：空 program（无 descriptor，常量绿）+ texVao
+         * 关键判别：红色三角形（prog）用 vao（只有 attrib 0）能画；所有带
+         * descriptor 的新 program 都用 texVao（attrib 0+1）。此测试用【空
+         * program + 常量绿 + texVao】，隔离两个变量：
+         *   - 若绿 → texVao/texVbo 多 attrib VAO 与【新 program】pipeline 都
+         *           正常，黑屏问题 100% 出在 descriptor 绑定（UBO/贴图）。
+         *   - 若黑 → 问题在 texVao 多 attrib VAO 或【新 program】的 pipeline
+         *           创建/反射本身，与 UBO/贴图 descriptor 无关。
+         * 绿色以便与红色控制组区分。 */
+        {
+            const char* discVs = "#version 330 core\n"
+                                 "layout(location=0) in vec2 aPos;\n"
+                                 "void main(){ gl_Position = vec4(aPos, 0.0, 1.0); }\n";
+            const char* discFs = "#version 330 core\n"
+                                 "out vec4 fragColor;\n"
+                                 "void main(){ fragColor = vec4(0.0, 1.0, 0.0, 1.0); }\n";
+            GLuint dVs = createShader(GL_VERTEX_SHADER);
+            GLuint dFs = createShader(GL_FRAGMENT_SHADER);
+            shaderSource(dVs, 1, &discVs, NULL);
+            shaderSource(dFs, 1, &discFs, NULL);
+            compileShader(dVs);
+            compileShader(dFs);
+            GLuint discProg = createProgram();
+            attachShader(discProg, dVs);
+            attachShader(discProg, dFs);
+            linkProgram(discProg);
+            GLint discLink = 0;
+            getProgramiv(discProg, GL_LINK_STATUS, &discLink);
+            CHECK(discLink == GL_TRUE, "discriminant empty program linked (GL_LINK_STATUS=%d)", discLink);
+            deleteShader(dVs);
+            deleteShader(dFs);
+            useProgram(discProg);
+            bindVertexArray(texVao);              /* 复用 4d 的 pos+uv VAO */
+            clearColor(0.0f, 0.0f, 0.0f, 0.0f);
+            clear(GL_COLOR_BUFFER_BIT);
+            drawArrays(GL_TRIANGLES, 0, 3);
+            finish();
+            unsigned char dpx[4] = {0,0,0,0};
+            readPixels(R / 2, C / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, dpx);
+            CHECK(dpx[1] > 128 && dpx[3] > 128 && dpx[0] < 40,
+                  "DISCRIMINANT empty-program + texVao = green (g=%d r=%d b=%d a=%d)",
+                  dpx[1], dpx[0], dpx[2], dpx[3]);
+        }
+
+        /* ---- 4f) 隔离诊断 A：仅 UBO（无贴图）----------------------------
          * fragColor = tint，纯色三角形验证动态 UBO 的 bufferData→descriptor
          * 链路。若此读回随 tint 变红，则 UBO 路径正确，黑屏出在贴图采样。 */
         {
