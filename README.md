@@ -66,11 +66,13 @@ GLSL 源码  ──glslang──▶  SPIR-V  ──vkCreateShaderModule──▶
   - `ImageOps` —— 纹理的 blit、mipmap 生成、readPixels 等图像操作。
   - `Reflect` —— SPIR-V 反射辅助工具，封装 SPIRV-Cross 的常用反射查询。
 - 着色器转译（`MG_Impl/Shader.cpp`）：线程安全地调用 glslang 把 GLSL 3.30
-  编译成 Vulkan SPIR-V（`EShClientVulkan` + `EShTargetVulkan_1_2` +
-  `EShTargetSpv_1_5`），并在预处理阶段注入 `MG_MITHRIL` /
-  `MG_MITHRIL_VERSION` 宏以及 `glBindAttribLocation` 映射的
-  `layout(location=N)`。自动将 GLSL 版本升级到 330+。MoltenVK 在
-  `vkCreateShaderModule` 内部把 SPIR-V 交叉翻译成 MSL。
+  编译成 Vulkan SPIR-V（`EShClientOpenGL` + `EShTargetOpenGL_450` +
+  `EShTargetSpv_1_5`，统一启用 `EShMsgVulkanRules`），并在预处理阶段注入
+  `MG_MITHRIL` / `MG_MITHRIL_VERSION` 宏以及 `glBindAttribLocation` 映射的
+  `layout(location=N)`。编译前在源码层归一化 Vulkan 不兼容构造：
+  `layout(packed/shared)` UBO→`std140`、SSBO→`std430`，
+  `gl_FragColor`→合成命名输出（替代此前被移除的兜底回退路径）。自动将 GLSL 版本升级
+  到 330+。MoltenVK 在 `vkCreateShaderModule` 内部把 SPIR-V 交叉翻译成 MSL。
 
 ## 最低硬件 / 系统要求
 
@@ -159,13 +161,19 @@ framebuffer、VAO），以及 EGL 默认帧缓冲的 `VkImageView`。每个 `EGL
 
 ### 着色器翻译
 
-`Shader.cpp` 实现 GLSL → SPIR-V 编译管线：
+`Shader.cpp` 实现 GLSL → SPIR-V 编译管线，所有编译尝试统一使用
+`EShClientOpenGL` 输入方言并启用 `EShMsgVulkanRules`：
 1. 预处理阶段注入 `MG_MITHRIL` / `MG_MITHRIL_VERSION` 宏
 2. 自动升级 GLSL 版本到 330+（Vulkan GLSL 最低要求）
 3. 应用 `glBindAttribLocation` 映射，注入 `layout(location=N)`
-4. 调用 glslang 编译（`EShClientVulkan` + `EShTargetVulkan_1_2` +
-   `EShTargetSpv_1_5`）
-5. 线程安全（`std::mutex` 保护），带缓存
+4. 归一化 Vulkan 不兼容 layout（`normalize_vulkan_incompatible_layouts`）：
+   `layout(packed/shared)` UBO→`std140`、SSBO→`std430`
+5. 归一化 GL 遗留构造（`normalize_gl_legacy_constructs`）：
+   `gl_FragColor`→合成命名输出 `_mithril_FragColor`
+6. 位置 fixup、loose uniform 包装、opaque binding 注入
+7. 调用 glslang 编译（`EShClientOpenGL` + `EShTargetOpenGL_450` +
+   `EShTargetSpv_1_5`），两级 strict 回退：wrapped 源码 → unwrapped 源码
+8. 线程安全（`std::mutex` 保护），带缓存
 
 MoltenVK 在 `vkCreateShaderModule` 时自动将 SPIR-V 交叉翻译为 MSL。
 

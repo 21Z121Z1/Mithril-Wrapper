@@ -1,7 +1,7 @@
 // Mithril-Wrapper - MG_Impl/Shader.cpp
 // GLSL (desktop Core Profile) -> Vulkan SPIR-V translation via glslang.
 //
-// Pipeline:
+// Pipeline (single EShClientOpenGL input dialect; no Vulkan-client dialect):
 //   1. Preprocess: inject MG_MITHRIL / MG_MITHRIL_VERSION macros so host
 //      shaders can branch on the Mithril backend (mirrors MobileGlues'
 //      MG_MOBILEGLUES injection). Upgrade GLSL versions below 330 (the Vulkan
@@ -10,7 +10,19 @@
 //   2. Inject layout(location=N) into vertex `in` declarations from
 //      glBindAttribLocation mappings so the SPIR-V stage_input locations match
 //      the application's vertex descriptor.
-//   3. Preprocess: fold loose non-opaque uniforms into a synthetic
+//   3. Normalize Vulkan-incompatible layout qualifiers: rewrite UBO
+//      `layout(packed)` / `layout(shared)` to `layout(std140)` and SSBO
+//      equivalents to `layout(std430)` so strict EShClientOpenGL +
+//      EShMsgVulkanRules compiles them directly (previously saved by the
+//      removed relaxed fallback).
+//   4. Normalize GL legacy constructs: in fragment shaders using
+//      `gl_FragColor`, inject a synthetic `layout(location = 0) out vec4
+//      _mithril_FragColor;` declaration and rewrite all references (other GL
+//      legacy constructs are added on demand; Minecraft core shaders use only
+//      gl_FragColor).
+//   5. Inject GL->Vulkan position fixups (Z remap always; Y flip when flip_y)
+//      by wrapping main() (vertex shaders only).
+//   6. Preprocess: fold loose non-opaque uniforms into a synthetic
 //      `mithril_GlobalBlock` UBO (mirroring ANGLE's ANGLE_DefaultUniformBlock).
 //      Handles precision qualifiers, multi-dimensional arrays, multiple
 //      declarators, named and anonymous struct uniforms, and skips
@@ -18,17 +30,23 @@
 //      reference members by their original names without a block prefix.
 //      This avoids the "non-opaque uniforms outside a block" error that some
 //      glslang versions emit even with EShClientOpenGL + EShMsgVulkanRules.
-//   4. glslang compiles the GLSL to Vulkan SPIR-V via the GL_KHR_vulkan_glsl
-//      path: EShClientOpenGL + EShMsgVulkanRules. Because step 3 already
-//      wrapped loose uniforms, glslang never needs the auto-wrap path — it
-//      sees only block uniforms and opaque samplers. The emitted SPIR-V stays
-//      Vulkan-conformant (MoltenVK accepts it). The synthetic block name
-//      "mithril_GlobalBlock" does not match any GL uniform name, so
-//      DescriptorSet.cpp falls through to member-by-member packing (same
-//      $Global convention), which works identically.
+//   7. Per-stage explicit binding injection for opaque uniforms and UBO
+//      blocks (root cause AK fix: prevents VS/FS binding collisions).
+//   8. glslang compiles the GLSL to Vulkan SPIR-V via the GL_KHR_vulkan_glsl
+//      path: EShClientOpenGL + EShMsgVulkanRules. Two-level strict fallback:
+//      wrapped source (after step 6) -> unwrapped source (pre-step-6 backup,
+//      still normalized by steps 3-5). Both attempts use EShClientOpenGL. The
+//      previous third-level relaxed fallback is removed — its coverage
+//      (layout(packed/shared) UBOs, gl_FragColor) is replaced by steps 3+4.
+//      Because step 6 already wrapped loose uniforms, glslang never needs the
+//      auto-wrap path — it sees only block uniforms and opaque samplers. The
+//      emitted SPIR-V stays Vulkan-conformant (MoltenVK accepts it). The
+//      synthetic block name "mithril_GlobalBlock" does not match any GL
+//      uniform name, so DescriptorSet.cpp falls through to member-by-member
+//      packing (same $Global convention), which works identically.
 //      setAutoMapLocations(true) + setAutoMapBindings(true) auto-assign any
 //      remaining locations/bindings.
-//   5. The SPIR-V words are returned directly — MoltenVK cross-translates
+//   9. The SPIR-V words are returned directly — MoltenVK cross-translates
 //      Vulkan SPIR-V to MSL internally at vkCreateShaderModule time, so no
 //      SPIRV-Cross stage is needed here.
 #include "Shader.h"
@@ -673,6 +691,183 @@ void inject_position_fixup(std::string& src, GLenum gl_stage, bool flip_y) {
     src += "    gl_Position.z = (gl_Position.z + gl_Position.w) * 0.5;\n}\n";
 }
 
+// ---------------------------------------------------------------------------
+// Vulkan-incompatible layout qualifier normalization.
+//
+// glslang's strict EShClientOpenGL + EShMsgVulkanRules path rejects the
+// legacy `layout(packed)` / `layout(shared)` UBO/SSBO packing qualifiers
+// (Vulkan only allows std140 for UBOs and std430 for SSBOs). Previously
+// these were saved by the third-level relaxed fallback; now that the
+// relaxed fallback is removed, this preprocessor pass rewrites them at the
+// source level so the strict path accepts them directly.
+//
+// Rewrites:
+//   layout(packed)  uniform { ... }   -> layout(std140) uniform { ... }
+//   layout(shared) uniform { ... }   -> layout(std140) uniform { ... }
+//   layout(packed)  buffer  { ... }   -> layout(std430) buffer  { ... }
+//   layout(shared) buffer  { ... }   -> layout(std430) buffer  { ... }
+//
+// Idempotent: layout(std140), layout(std430), layout(row_major),
+// layout(column_major) and other qualifiers are left untouched. Multi-arg
+// forms like `layout(std140, packed)` are handled by replacing packed/shared
+// in-place with the appropriate std version. Occurrences inside // or /* */
+// comments are skipped (uses the existing is_in_comment helper).
+//
+// Common Minecraft/mod shaders use the simple single-arg `layout(packed)`
+// form. The pass is a no-op if the source contains no `packed`/`shared`
+// tokens at all (fast-path guard).
+// ---------------------------------------------------------------------------
+void normalize_vulkan_incompatible_layouts(std::string& source) {
+    // Fast path: skip if source has no packed/shared qualifiers at all.
+    if (source.find("packed") == std::string::npos &&
+        source.find("shared") == std::string::npos) {
+        return;
+    }
+
+    // Match `layout(<args>) <storage>` where <storage> is uniform (UBO) or
+    // buffer (SSBO). Capture the args and storage so we can rewrite
+    // packed/shared to std140 (UBO) or std430 (SSBO) based on storage class.
+    // [^)]* is safe: GLSL layout() never contains nested parens.
+    static const std::regex re(
+        R"(layout\s*\(([^)]*)\)\s*(uniform|buffer)\b)",
+        std::regex::optimize | std::regex::multiline);
+
+    // Helper: trim whitespace from a single arg, and if it equals "packed" or
+    // "shared", return the appropriate std replacement; otherwise return the
+    // trimmed arg unchanged. Sets *changed=true if a replacement happened.
+    auto process_arg = [](const std::string& arg, const std::string& replacement,
+                          bool* changed) -> std::string {
+        size_t b = arg.find_first_not_of(" \t");
+        size_t e = arg.find_last_not_of(" \t");
+        if (b == std::string::npos) return std::string();  // whitespace-only
+        std::string trimmed = arg.substr(b, e - b + 1);
+        if (trimmed == "packed" || trimmed == "shared") {
+            *changed = true;
+            return replacement;
+        }
+        return trimmed;
+    };
+
+    std::string out;
+    out.reserve(source.size());
+    std::string::const_iterator it = source.cbegin();
+    std::smatch m;
+    while (std::regex_search(it, source.cend(), m, re)) {
+        size_t match_pos = m.position(0) + (it - source.cbegin());
+        // Skip occurrences inside // or /* */ comments.
+        if (is_in_comment(source, match_pos)) {
+            out.append(it, m[0].second);
+            it = m[0].second;
+            continue;
+        }
+
+        std::string args = m[1].str();
+        std::string storage = m[2].str();
+        std::string replacement = (storage == "uniform") ? "std140" : "std430";
+
+        // Split args by comma; replace packed/shared with the appropriate std
+        // version. Track whether any replacement happened so we can leave
+        // non-matching layout() qualifiers untouched (idempotent).
+        std::string new_args;
+        bool changed = false;
+        std::string cur;
+        auto flush = [&]() {
+            std::string processed = process_arg(cur, replacement, &changed);
+            if (!processed.empty()) {
+                if (!new_args.empty()) new_args += ", ";
+                new_args += processed;
+            }
+            cur.clear();
+        };
+        for (char c : args) {
+            if (c == ',') flush();
+            else cur += c;
+        }
+        flush();
+
+        if (!changed) {
+            // No packed/shared in this layout() — leave it untouched.
+            out.append(it, m[0].second);
+        } else {
+            // Reconstruct: `layout(<new_args>) <storage>`.
+            out.append(it, m[0].first);
+            out += "layout(";
+            out += new_args;
+            out += ") ";
+            out += storage;
+        }
+        it = m[0].second;
+    }
+    out.append(it, source.cend());
+    source.swap(out);
+}
+
+// ---------------------------------------------------------------------------
+// GL legacy construct normalization.
+//
+// glslang's strict EShClientOpenGL + EShMsgVulkanRules path rejects GL
+// legacy constructs that the previous third-level relaxed fallback used to
+// accept. With the relaxed fallback removed, this pass rewrites the
+// constructs at the source level so the strict path accepts them directly.
+//
+// Currently handled (fragment shaders only):
+//   gl_FragColor: inject a synthetic `layout(location = 0) out vec4
+//   _mithril_FragColor;` declaration right after the #version line, and
+//   rewrite all word-boundary gl_FragColor references (outside comments) to
+//   _mithril_FragColor. Idempotent: if gl_FragColor is not used, the pass is
+//   a no-op and a shader that already declares a location=0 output is
+//   untouched.
+//
+// Out of scope (left as follow-up if a shader pack actually needs them):
+//   gl_FragData[0] — Minecraft core shaders don't use it.
+// ---------------------------------------------------------------------------
+void normalize_gl_legacy_constructs(std::string& source, GLenum gl_stage) {
+    // Only fragment shaders use gl_FragColor; vertex shaders are unaffected.
+    if (gl_stage != GL_FRAGMENT_SHADER) return;
+
+    // Fast path: if gl_FragColor doesn't appear at all, no work to do.
+    if (source.find("gl_FragColor") == std::string::npos) return;
+
+    static const std::regex re(R"(\bgl_FragColor\b)", std::regex::optimize);
+
+    // First pass: rewrite all word-boundary gl_FragColor references outside
+    // comments to _mithril_FragColor. Track whether any rewrite happened so
+    // we can skip the declaration injection if gl_FragColor only appears in
+    // comments (idempotent no-op).
+    std::string out;
+    out.reserve(source.size());
+    std::string::const_iterator it = source.cbegin();
+    std::smatch m;
+    bool rewritten = false;
+    while (std::regex_search(it, source.cend(), m, re)) {
+        size_t match_pos = m.position(0) + (it - source.cbegin());
+        out.append(it, m[0].first);
+        if (is_in_comment(source, match_pos)) {
+            out.append(m[0].str());
+        } else {
+            out.append("_mithril_FragColor");
+            rewritten = true;
+        }
+        it = m[0].second;
+    }
+    out.append(it, source.cend());
+    if (!rewritten) return;
+    source.swap(out);
+
+    // Inject synthetic declaration right after the #version line so the
+    // rewritten references resolve to a Vulkan-legal named output. Uses the
+    // same find-#version-insertion-point pattern as wrap_loose_uniforms.
+    // (gl_FragData[0] is out of scope — Minecraft core shaders don't use it;
+    // left as a follow-up if a shader pack actually needs it.)
+    size_t vp = source.find("#version");
+    size_t insert_at = 0;
+    if (vp != std::string::npos) {
+        size_t nl = source.find('\n', vp);
+        insert_at = (nl != std::string::npos) ? nl + 1 : source.size();
+    }
+    source.insert(insert_at, "layout(location = 0) out vec4 _mithril_FragColor;\n");
+}
+
 // FNV-1a 64-bit hash for cache keying.
 uint64_t fnv1a(const std::string& s) {
     uint64_t h = 1469598103934665603ULL;
@@ -743,8 +938,8 @@ unsigned binding_base_for_stage(EShLanguage stage) {
     }
 }
 
-// Must run on every TShader before parse(), the two fallback shaders included:
-// a shader that only survives the second or third attempt would otherwise slip
+// Must run on every TShader before parse(), the unwrapped fallback included:
+// a shader that only survives the second attempt would otherwise slip
 // back to colliding bindings — and would do it silently, since nothing fails
 // until MoltenVK rejects the generated MSL several frames later.
 //
@@ -781,12 +976,25 @@ bool glsl_to_spirv(GLenum gl_stage, const std::string& src,
     rewrite_desktop_builtins(source, gl_stage);
     apply_attrib_bindings(source, gl_stage, attrib_bindings);
 
+    // Normalize Vulkan-incompatible layout qualifiers (layout(packed) ->
+    // layout(std140) for UBOs, layout(std430) for SSBOs) and GL legacy
+    // constructs (gl_FragColor -> synthetic named output). Both passes are
+    // source-level and run BEFORE wrap_loose_uniforms / inject_opaque_bindings
+    // so the UBO blocks they generate see already-normalized layout
+    // qualifiers. Placed here (after apply_attrib_bindings, before
+    // inject_position_fixup) so the source_unwrapped backup below captures
+    // the normalized source and both compile attempts (wrapped + unwrapped)
+    // inherit the normalization. The passes are idempotent and comment-aware.
+    normalize_vulkan_incompatible_layouts(source);
+    normalize_gl_legacy_constructs(source, gl_stage);
+
     // Inject GL->Vulkan position fixups (Z remap always; Y flip when flip_y).
-    // Done AFTER ensure_glsl_version/rewrite_builtins/apply_attrib_bindings but
-    // BEFORE the source_unwrapped backup below, so all three compile fallback
-    // paths (wrapped / unwrapped / relaxed) inherit the injection. The wrapper
-    // main() appended here is a function definition — wrap_loose_uniforms only
-    // touches `uniform` declarations, so it never interferes with the injection.
+    // Done AFTER ensure_glsl_version/rewrite_builtins/apply_attrib_bindings/
+    // normalize_* but BEFORE the source_unwrapped backup below, so both
+    // compile fallback paths (wrapped / unwrapped) inherit the injection.
+    // The wrapper main() appended here is a function definition —
+    // wrap_loose_uniforms only touches `uniform` declarations, so it never
+    // interferes with the injection.
     // Deep reference: MobileGL GetShaderTransformFlags + InsertPositionFixup.
     inject_position_fixup(source, gl_stage, flip_y);
 
@@ -823,16 +1031,20 @@ bool glsl_to_spirv(GLenum gl_stage, const std::string& src,
     shader.setStrings(&s, 1);
 
     // GL_KHR_vulkan_glsl path: parse as OpenGL GLSL but emit Vulkan SPIR-V.
-    // EShClientOpenGL (NOT EShClientVulkan) is required — the Vulkan client
-    // forbids non-block uniforms outright. However, the loose uniforms have
-    // already been wrapped into a synthetic block by wrap_loose_uniforms()
-    // above (step 3 of the pipeline comment), so glslang never encounters
-    // them unadorned. The EShMsgVulkanRules flag + EShClientOpenGL pair is
-    // kept as a belt-and-suspenders safety net: if any loose non-opaque
-    // uniform slips through (e.g. a type the regex did not recognise), the
-    // auto-wrap code path will still protect it. The OpenGL client also keeps
-    // desktop GLSL builtin semantics (e.g. gl_VertexID 1-based, gl_InstanceID
-    // 1-based).
+    // EShClientOpenGL is required because the Vulkan client dialect forbids
+    // non-block uniforms outright. However, the loose uniforms have already
+    // been wrapped into a synthetic block by wrap_loose_uniforms() above
+    // (step 6 of the pipeline comment), so glslang never encounters them
+    // unadorned. The EShMsgVulkanRules flag + EShClientOpenGL pair is kept as
+    // a belt-and-suspenders safety net: if any loose non-opaque uniform slips
+    // through (e.g. a type the regex did not recognise), the auto-wrap code
+    // path will still protect it. The OpenGL client also keeps desktop GLSL
+    // builtin semantics (e.g. gl_VertexID 1-based, gl_InstanceID 1-based).
+    // Two-level strict fallback below: if this parse fails AND wrap_loose_uniforms
+    // was applied, retry with the unwrapped (but still normalized) source using
+    // the same EShClientOpenGL dialect. There is no third relaxed fallback —
+    // its coverage is replaced by normalize_vulkan_incompatible_layouts() and
+    // normalize_gl_legacy_constructs() in the preprocessor.
     // Target OpenGL 4.50 feature level (a superset of Minecraft's GLSL 150-330)
     // and emit SPIR-V 1.5 (paired with Vulkan 1.2).
     shader.setEnvInput(glslang::EShSourceGlsl, stage, glslang::EShClientOpenGL, glsl_version);
@@ -899,90 +1111,14 @@ bool glsl_to_spirv(GLenum gl_stage, const std::string& src,
                 "#define MG_MITHRIL_VERSION 1000000\n"
             );
             if (!shader2.parse(GetDefaultResources(), glsl_version, true, messages)) {
-                // ---- Third fallback: relaxed Vulkan-rules mode ----
-                // MobileGL uses setEnvInputVulkanRulesRelaxed() on its Vulkan
-                // path (ShaderCompiler.cpp:188) to accept GL legacy builtins
-                // and constructs that strict VulkanRules rejects — e.g.
-                // gl_FragColor, gl_TexCoord, implicit int->uint conversions,
-                // and other desktop-GL-isms that Minecraft shader packs and
-                // mod shaders frequently use. Without relaxed mode, any shader
-                // referencing these constructs fails translation -> linked=false
-                // -> prepare_draw skips the draw -> black screen with audio.
-                //
-                // We only reach here after BOTH strict attempts (wrapped +
-                // unwrapped) failed, so this is a pure addition: shaders that
-                // already compile are unaffected. The relaxed retry uses the
-                // unwrapped source (source_unwrapped) so the regex wrapper's
-                // edge-case mangling is not a factor.
-                //
-                // Semantic note: relaxed mode keeps gl_VertexID/gl_InstanceID
-                // 1-based GL semantics (vs strict Vulkan's 0-based). The
-                // rewrite_desktop_builtins() call above already renamed these
-                // to gl_VertexIndex/gl_InstanceIndex, so the relaxed mode's
-                // 1-based semantics do NOT apply — the renamed builtins use
-                // Vulkan semantics. This is correct and matches the existing
-                // behavior for shaders that compile in strict mode.
-                MITHRIL_LOG_WARN("shader", "glslang parse failed in strict mode; "
-                                  "retrying with setEnvInputVulkanRulesRelaxed()");
-                std::string source_relaxed = source_unwrapped;
-                glslang::TShader shader3(stage);
-                const char* s3 = source_relaxed.c_str();
-                shader3.setStrings(&s3, 1);
-                // ROOT-CAUSE FIX (minimal blast radius): the input dialect MUST be
-                // EShClientVulkan for setEnvInputVulkanRulesRelaxed() to have any
-                // effect. glslang::TranslateEnvironment (ShaderLang.cpp) only copies
-                // environment->input.vulkanRulesRelaxed into spvVersion.vulkanRelaxed
-                // when the input dialect is EShClientVulkan:
-                //
-                //   case EShClientVulkan: spvVersion.vulkanRelaxed = env->input.vulkanRulesRelaxed; break;
-                //   case EShClientOpenGL: spvVersion.openGl = ...; // vulkanRelaxed NOT set -> stays false
-                //
-                // With EShClientOpenGL (the value previously passed here) the flag is
-                // silently dropped, so every `spvVersion.vulkan > 0 &&
-                // spvVersion.vulkanRelaxed` branch in glslang was dead code and this
-                // "relaxed" fallback was a no-op. Shaders that genuinely need relaxed
-                // Vulkan rules (e.g. layout(packed)/layout(shared) UBOs, direct
-                // gl_VertexID/gl_InstanceID use, GL-legacy builtins) then failed all
-                // three fallback paths -> linked=false -> prepare_draw skipped the draw
-                // -> black screen with audio, i.e. the reported "大量着色器编译报错".
-                //
-                // The output client stays EShClientOpenGL (as MobileGL's CompileForOpenGL
-                // path does, ShaderCompiler.cpp:193-195) and gl_VertexID/gl_InstanceID
-                // have already been renamed to gl_VertexIndex/gl_InstanceIndex by
-                // rewrite_desktop_builtins(), so the relaxed mode's 1-based GL semantics
-                // do not apply and Vulkan (0-based) semantics are kept. This is the same
-                // contract Shader.cpp documents for the strict path.
-                shader3.setEnvInput(glslang::EShSourceGlsl, stage, glslang::EShClientVulkan, glsl_version);
-                shader3.setEnvClient(glslang::EShClientOpenGL, glslang::EShTargetOpenGL_450);
-                shader3.setEnvTarget(glslang::EShTargetSpv, glslang::EShTargetSpv_1_5);
-                shader3.setEnvInputVulkanRulesRelaxed();  // key: accept GL legacy constructs
-                shader3.setAutoMapLocations(true);
-                shader3.setAutoMapBindings(true);
-                apply_stage_binding_shift(shader3, stage);
-                shader3.setPreamble(
-                    "#define MG_MITHRIL 1\n"
-                    "#define MG_MITHRIL_VERSION 1000000\n"
-                );
-                if (!shader3.parse(GetDefaultResources(), glsl_version, true, messages)) {
-                    // All three attempts failed; return the original (wrapped)
-                    // error log so the caller sees the most informative message.
-                    return false;
-                }
-                glslang::TProgram program3;
-                program3.addShader(&shader3);
-                if (!program3.link(messages)) {
-                    info = program3.getInfoLog();
-                    info += program3.getInfoDebugLog();
-                    return false;
-                }
-                glslang::TIntermediate* inter3 = program3.getIntermediate(stage);
-                if (!inter3) { info = "no intermediate after link (relaxed retry)"; return false; }
-                glslang::SpvOptions spv_opts3;
-                spv_opts3.disableOptimizer = false;
-                glslang::GlslangToSpv(*inter3, spirv, &spv_opts3);
-                if (spirv.empty()) { info = "SPIR-V generation produced no words (relaxed retry)"; return false; }
-                MITHRIL_LOG_INFO("shader", "shader compiled successfully in relaxed mode");
-                return true;
+                // Two-level strict fallback exhausted: both wrapped and
+                // unwrapped EShClientOpenGL attempts failed. The previous
+                // third-level relaxed fallback is removed — its coverage
+                // (layout(packed/shared) UBOs, gl_FragColor) is now handled
+                // by normalize_vulkan_incompatible_layouts() and
+                // normalize_gl_legacy_constructs() in the preprocessor
+                // above, so there is no need for a relaxed dialect retry.
+                return false;
             }
             glslang::TProgram program2;
             program2.addShader(&shader2);
