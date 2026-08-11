@@ -187,6 +187,8 @@ struct SampledTextureBinding {
     uint32_t binding = 0;
     uint64_t texture = 0;
     TexSamplerInfo sampler;
+    bool vertex_stage = false;
+    bool fragment_stage = false;
 };
 
 struct ClearParams {

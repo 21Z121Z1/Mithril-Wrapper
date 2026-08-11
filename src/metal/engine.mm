@@ -8,6 +8,8 @@
 
 #include "engine.h"
 
+#include <mithril/directmetal_diagnostics.h>
+
 #include <util/log.h>
 #include <shader/shader.h>
 
@@ -128,6 +130,8 @@ struct BoundTexture {
     id<MTLTexture> texture = nil;
     id<MTLSamplerState> sampler = nil;
     id<MTLBuffer> backing_buffer = nil;
+    bool vertex_stage = false;
+    bool fragment_stage = false;
 };
 
 struct BoundUniformBuffer {
@@ -213,6 +217,13 @@ struct OcclusionQueryState {
     std::vector<OcclusionSegment> segments;
 };
 
+MithrilDirectMetalBindingStatsV1 EmptyBindingStats() {
+    MithrilDirectMetalBindingStatsV1 stats{};
+    stats.version = MITHRIL_DIRECT_METAL_BINDING_STATS_VERSION;
+    stats.struct_size = static_cast<uint32_t>(sizeof(stats));
+    return stats;
+}
+
 struct Engine {
     id<MTLDevice> device = nil;
     id<MTLCommandQueue> queue = nil;
@@ -240,6 +251,7 @@ struct Engine {
     uint64_t next_occlusion_query = 1;
     uint64_t pipeline_clock = 0;
     uint64_t sampler_clock = 0;
+    MithrilDirectMetalBindingStatsV1 binding_stats = EmptyBindingStats();
     std::vector<PendingDraw> draws;
     std::vector<uint8_t> readback_pixels;
     bool initialized = false;
@@ -1683,6 +1695,18 @@ bool EncodeDraws(
     if (!ResolveTarget(engine.bound_draw_fbo, &target)) return false;
     NSUInteger cursor = 0;
     std::unordered_map<std::string, NSUInteger> uniform_memo;
+    // Metal encoder state persists across draw calls in one render pass. Keep
+    // a compact shadow per shader stage and only materialize changes. These
+    // references are valid for the whole loop because PendingDraw owns the
+    // native texture/sampler objects until submission has been encoded.
+    std::array<id<MTLTexture>, backend::kMaxTextureUnits>
+        vertex_textures{};
+    std::array<id<MTLTexture>, backend::kMaxTextureUnits>
+        fragment_textures{};
+    std::array<id<MTLSamplerState>, backend::kMaxTextureUnits>
+        vertex_samplers{};
+    std::array<id<MTLSamplerState>, backend::kMaxTextureUnits>
+        fragment_samplers{};
     OcclusionQueryState* active_occlusion = nullptr;
     for (const auto& pending : engine.draws) {
         const auto& draw = pending.params;
@@ -1752,10 +1776,50 @@ bool EncodeDraws(
                                    atIndex:binding.index];
         }
         for (const auto& binding : pending.textures) {
-            [encoder setVertexTexture:binding.texture atIndex:binding.slot];
-            [encoder setVertexSamplerState:binding.sampler atIndex:binding.slot];
-            [encoder setFragmentTexture:binding.texture atIndex:binding.slot];
-            [encoder setFragmentSamplerState:binding.sampler atIndex:binding.slot];
+            if (!binding.vertex_stage) {
+                ++engine.binding_stats.inactive_stage_texture_bind_calls_avoided;
+                ++engine.binding_stats.inactive_stage_sampler_bind_calls_avoided;
+            }
+            if (!binding.fragment_stage) {
+                ++engine.binding_stats.inactive_stage_texture_bind_calls_avoided;
+                ++engine.binding_stats.inactive_stage_sampler_bind_calls_avoided;
+            }
+            if (binding.vertex_stage) {
+                if (vertex_textures[binding.slot] != binding.texture) {
+                    [encoder setVertexTexture:binding.texture
+                                      atIndex:binding.slot];
+                    vertex_textures[binding.slot] = binding.texture;
+                    ++engine.binding_stats.vertex_texture_bind_calls;
+                } else {
+                    ++engine.binding_stats.texture_bind_calls_elided;
+                }
+                if (vertex_samplers[binding.slot] != binding.sampler) {
+                    [encoder setVertexSamplerState:binding.sampler
+                                           atIndex:binding.slot];
+                    vertex_samplers[binding.slot] = binding.sampler;
+                    ++engine.binding_stats.vertex_sampler_bind_calls;
+                } else {
+                    ++engine.binding_stats.sampler_bind_calls_elided;
+                }
+            }
+            if (binding.fragment_stage) {
+                if (fragment_textures[binding.slot] != binding.texture) {
+                    [encoder setFragmentTexture:binding.texture
+                                        atIndex:binding.slot];
+                    fragment_textures[binding.slot] = binding.texture;
+                    ++engine.binding_stats.fragment_texture_bind_calls;
+                } else {
+                    ++engine.binding_stats.texture_bind_calls_elided;
+                }
+                if (fragment_samplers[binding.slot] != binding.sampler) {
+                    [encoder setFragmentSamplerState:binding.sampler
+                                             atIndex:binding.slot];
+                    fragment_samplers[binding.slot] = binding.sampler;
+                    ++engine.binding_stats.fragment_sampler_bind_calls;
+                } else {
+                    ++engine.binding_stats.sampler_bind_calls_elided;
+                }
+            }
         }
 
         const NSUInteger vertex_count = draw.vertex_stream.record_count
@@ -1790,8 +1854,9 @@ bool EncodeDraws(
             [encoder drawPrimitives:primitive
                         vertexStart:0
                         vertexCount:vertex_count
-                      instanceCount:instance_count];
+                          instanceCount:instance_count];
         }
+        ++engine.binding_stats.draws_encoded;
     }
     return true;
 }
@@ -2321,6 +2386,10 @@ bool Draw(const backend::DrawParams& params) {
         pending.params.uniform_buffers[i].source_size = 0;
     }
     for (const auto& bind : params.sampled_textures) {
+        if (!bind.vertex_stage && !bind.fragment_stage) {
+            ML_LOG_ERROR("metal: sampled-image binding has no shader stage");
+            return false;
+        }
         const NSUInteger slot = bind.binding ? bind.binding - 1 : 0;
         if (slot >= backend::kMaxTextureUnits) {
             WarnUnsupported("sampled-image binding beyond the frontend limit");
@@ -2344,8 +2413,10 @@ bool Draw(const backend::DrawParams& params) {
                          bind.binding);
             return false;
         }
-        pending.textures.push_back({slot, texture->second.texture, sampler,
-                                    texture->second.backing_buffer});
+        pending.textures.push_back({
+            slot, texture->second.texture, sampler,
+            texture->second.backing_buffer,
+            bind.vertex_stage, bind.fragment_stage});
     }
     if (pending.occlusion) ++pending.occlusion->pending_draws;
     engine.draws.push_back(std::move(pending));
@@ -2768,6 +2839,17 @@ void BlitFramebuffer(uint64_t src_id, uint64_t dst_id,
                 ? destination_selection.depth_plane : 0)];
     [blit endEncoding];
     (void)CommitCommandBuffer(command);
+}
+
+extern "C" void mithrilResetDirectMetalBindingStats(void) {
+    GetEngine().binding_stats = EmptyBindingStats();
+}
+
+extern "C" int mithrilGetDirectMetalBindingStatsV1(
+    MithrilDirectMetalBindingStatsV1* output, size_t output_size) {
+    if (!output || output_size < sizeof(*output)) return 0;
+    *output = GetEngine().binding_stats;
+    return 1;
 }
 
 } // namespace mithril::metal

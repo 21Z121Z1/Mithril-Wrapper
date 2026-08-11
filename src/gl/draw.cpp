@@ -662,8 +662,22 @@ void DrawCommon(GLenum mode, const std::vector<uint32_t>& idx, GLint first,
             PUSH_ERROR(GL_INVALID_OPERATION);
             return;
         }
-        dp.sampled_textures.push_back({
-            smp.binding, tex, sampler});
+        // A sampler is one GL program uniform even when both shader stages
+        // reference it. Internal SPIR-V bindings, however, are assigned while
+        // each stage is compiled and may differ with declaration order. Keep
+        // the stage destinations explicit instead of aliasing them by name.
+        if (smp.vertex_binding != UINT32_MAX &&
+            smp.vertex_binding == smp.fragment_binding) {
+            dp.sampled_textures.push_back({
+                smp.vertex_binding, tex, sampler, true, true});
+        } else {
+            if (smp.vertex_binding != UINT32_MAX)
+                dp.sampled_textures.push_back({
+                    smp.vertex_binding, tex, sampler, true, false});
+            if (smp.fragment_binding != UINT32_MAX)
+                dp.sampled_textures.push_back({
+                    smp.fragment_binding, tex, sampler, false, true});
+        }
     }
     if (dp.vertex_stream.HasStorage() && !v::Draw(dp))
         PUSH_ERROR(GL_INVALID_OPERATION);

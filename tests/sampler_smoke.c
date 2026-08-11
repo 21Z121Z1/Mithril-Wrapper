@@ -16,6 +16,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "../include/mithril/directmetal_diagnostics.h"
+
 #define GL_VERTEX_SHADER 0x8B31
 #define GL_FRAGMENT_SHADER 0x8B30
 #define GL_ARRAY_BUFFER 0x8892
@@ -86,6 +88,8 @@ typedef void (*fnDrawArrays)(GLenum, GLint, GLsizei);
 typedef void (*fnFinish)(void);
 typedef void (*fnReadPixels)(GLint, GLint, GLsizei, GLsizei, GLenum, GLenum,
                              void*);
+typedef void (*fnResetBindingStats)(void);
+typedef int (*fnGetBindingStats)(MithrilDirectMetalBindingStatsV1*, size_t);
 
 static int failures;
 
@@ -165,6 +169,10 @@ int main(void) {
     LOAD(fnDrawArrays, drawArrays, "glDrawArrays");
     LOAD(fnFinish, finish, "glFinish");
     LOAD(fnReadPixels, readPixels, "glReadPixels");
+    LOAD(fnResetBindingStats, resetBindingStats,
+         "mithrilResetDirectMetalBindingStats");
+    LOAD(fnGetBindingStats, getBindingStats,
+         "mithrilGetDirectMetalBindingStatsV1");
 
     CHECK(getString && getError && createShader && shaderSource &&
               compileShader && createProgram && attachShader && linkProgram &&
@@ -176,7 +184,7 @@ int main(void) {
               texParameteri && genSamplers && deleteSamplers && isSampler &&
               bindSampler && samplerParameteri && getSamplerParameteriv &&
               viewport && clearColor && clear && drawArrays && finish &&
-              readPixels,
+              readPixels && resetBindingStats && getBindingStats,
           "required independent-sampler symbols resolve");
     if (failures) return 1;
 
@@ -249,6 +257,7 @@ int main(void) {
     CHECK(nearest == GL_NEAREST && linear == GL_LINEAR,
           "sampler parameter state round-trips independently");
 
+    resetBindingStats();
     clearColor(0.f, 1.f, 0.f, 1.f);
     clear(GL_COLOR_BUFFER_BIT);
     bindSampler(5, samplers[0]);
@@ -272,6 +281,44 @@ int main(void) {
     CHECK(!isTexture(textures[0]) && !isTexture(textures[1]),
           "deleted texture names leave the frontend object table");
     finish();
+
+    MithrilDirectMetalBindingStatsV1 stats = {0};
+    CHECK(!getBindingStats(&stats, sizeof(stats) - 1),
+          "binding counter ABI rejects an undersized output struct");
+    CHECK(getBindingStats(&stats, sizeof(stats)) &&
+              stats.version == MITHRIL_DIRECT_METAL_BINDING_STATS_VERSION &&
+              stats.struct_size == sizeof(stats),
+          "versioned DirectMetal binding counters are readable");
+    CHECK(stats.draws_encoded == 3 &&
+              stats.vertex_texture_bind_calls == 0 &&
+              stats.vertex_sampler_bind_calls == 0 &&
+              stats.fragment_texture_bind_calls == 2 &&
+              stats.fragment_sampler_bind_calls == 2 &&
+              stats.texture_bind_calls_elided == 4 &&
+              stats.sampler_bind_calls_elided == 4 &&
+              stats.inactive_stage_texture_bind_calls_avoided == 6 &&
+              stats.inactive_stage_sampler_bind_calls_avoided == 6,
+          "three fragment-only draws materialize 2+2 binds and avoid 10+10 redundant calls");
+    printf("DIRECTMETAL_BINDING_STATS "
+           "{\"version\":%u,\"draws_encoded\":%llu,"
+           "\"vertex_texture_bind_calls\":%llu,"
+           "\"fragment_texture_bind_calls\":%llu,"
+           "\"vertex_sampler_bind_calls\":%llu,"
+           "\"fragment_sampler_bind_calls\":%llu,"
+           "\"texture_bind_calls_elided\":%llu,"
+           "\"sampler_bind_calls_elided\":%llu,"
+           "\"inactive_stage_texture_bind_calls_avoided\":%llu,"
+           "\"inactive_stage_sampler_bind_calls_avoided\":%llu}\n",
+           stats.version,
+           (unsigned long long)stats.draws_encoded,
+           (unsigned long long)stats.vertex_texture_bind_calls,
+           (unsigned long long)stats.fragment_texture_bind_calls,
+           (unsigned long long)stats.vertex_sampler_bind_calls,
+           (unsigned long long)stats.fragment_sampler_bind_calls,
+           (unsigned long long)stats.texture_bind_calls_elided,
+           (unsigned long long)stats.sampler_bind_calls_elided,
+           (unsigned long long)stats.inactive_stage_texture_bind_calls_avoided,
+           (unsigned long long)stats.inactive_stage_sampler_bind_calls_avoided);
 
     unsigned char left[4] = {0}, middle[4] = {0}, right[4] = {0};
     readPixels(16, 16, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, left);

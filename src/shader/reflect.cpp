@@ -489,14 +489,24 @@ bool ReflectProgram(Program& prog, std::string& error) {
                 const GLenum sampler_type = SamplerTypeFor(compiler, resource);
                 const uint32_t binding = compiler.get_decoration(
                     resource.id, spv::DecorationBinding);
-                const bool duplicate = std::any_of(
+                auto existing = std::find_if(
                     prog.samplers.begin(), prog.samplers.end(),
                     [&](const SamplerRef& sampler) {
                         return sampler.name == name;
                     });
-                if (!duplicate)
-                    prog.samplers.push_back(
-                        {name, sampler_type, binding, -1});
+                if (existing == prog.samplers.end()) {
+                    SamplerRef sampler;
+                    sampler.name = name;
+                    sampler.type = sampler_type;
+                    if (vertex_stage) sampler.vertex_binding = binding;
+                    else sampler.fragment_binding = binding;
+                    prog.samplers.push_back(std::move(sampler));
+                } else {
+                    if (existing->type != sampler_type)
+                        fail("cross-stage type mismatch for sampler " + name);
+                    if (vertex_stage) existing->vertex_binding = binding;
+                    else existing->fragment_binding = binding;
+                }
                 Uniform uniform;
                 uniform.name = name;
                 uniform.type = sampler_type;

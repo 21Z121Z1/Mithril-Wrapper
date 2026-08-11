@@ -65,6 +65,9 @@ target_include_directories(mithril PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party
 )
+target_include_directories(mithril PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
 
 target_link_libraries(mithril PRIVATE
     glslang::glslang

@@ -65,6 +65,13 @@ iPhoneOS artifact contract 使用 `./scripts/build_iphoneos.sh`；默认产物�
 `MITHRIL_IOS_OUTPUT_DIR` 覆盖 build/output 路径，因此 iPhoneOS 验证不会覆盖
 macOS 的 `output/libmithril.dylib`。
 
+DirectMetal 提供版本化、只读的 binding 诊断 ABI：
+`include/mithril/directmetal_diagnostics.h`。调用方在 workload 前 reset、
+`glFinish` 后读取，可获得实际 vertex/fragment texture/sampler Metal 调用数、
+重复状态省略数和 inactive-stage 省略数。`sampler_smoke` 会输出一行
+`DIRECTMETAL_BINDING_STATS` JSON，并同时用像素断言验证多 sampler、非同号
+texture unit、typed integer uniform 快照及删除后的 deferred lifetime。
+
 ## 冒烟测试
 
 ```sh
