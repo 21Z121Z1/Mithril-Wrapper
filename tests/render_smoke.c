@@ -32,6 +32,11 @@
 
 #include <GL/glcorearb.h>
 
+/* 项目自带 glcorearb.h 未定义 GL_INVALID_INDEX（Khronos 头在 GL 3.0 块才定义） */
+#ifndef GL_INVALID_INDEX
+#define GL_INVALID_INDEX 0xFFFFFFFFu
+#endif
+
 /* ---- 依赖的 GL 函数指针 typedef（与 glcorearb.h 签名一致） -------------- */
 typedef void      (*genTextures_fn)(GLsizei, GLuint*);
 typedef void      (*bindTexture_fn)(GLenum, GLuint);
@@ -70,6 +75,16 @@ typedef void      (*readPixels_fn)(GLint, GLint, GLsizei, GLsizei,
 typedef GLenum    (*getError_fn)(void);
 typedef void      (*getIntegerv_fn)(GLenum, GLint*);
 typedef const GLubyte* (*getString_fn)(GLenum);
+/* ---- 扩展测试（采样 + mipmap + 动态 UBO + 多帧 glFinish）所需 ---- */
+typedef void      (*texParameteri_fn)(GLenum, GLenum, GLint);
+typedef void      (*generateMipmap_fn)(GLenum);
+typedef void      (*activeTexture_fn)(GLenum);
+typedef void      (*bindBufferBase_fn)(GLenum, GLuint, GLuint);
+typedef GLint     (*getUniformLocation_fn)(GLuint, const GLchar*);
+typedef GLuint    (*getUniformBlockIndex_fn)(GLuint, const GLchar*);
+typedef void      (*uniformBlockBinding_fn)(GLuint, GLuint, GLuint);
+typedef void      (*uniform1i_fn)(GLint, GLint);
+typedef void      (*uniform4f_fn)(GLint, GLfloat, GLfloat, GLfloat, GLfloat);
 
 /* ---- 断言基础设施（Uniaball 风格） -------------------------------------- */
 static int failures = 0;
@@ -143,6 +158,15 @@ int main(int argc, char** argv) {
     getError_fn           getError           = NULL;
     getIntegerv_fn        getIntegerv        = NULL;
     getString_fn          getString          = NULL;
+    texParameteri_fn      texParameteri      = NULL;
+    generateMipmap_fn     generateMipmap     = NULL;
+    activeTexture_fn      activeTexture      = NULL;
+    bindBufferBase_fn     bindBufferBase     = NULL;
+    getUniformLocation_fn getUniformLocation = NULL;
+    getUniformBlockIndex_fn getUniformBlockIndex = NULL;
+    uniformBlockBinding_fn uniformBlockBinding = NULL;
+    uniform1i_fn          uniform1i          = NULL;
+    uniform4f_fn          uniform4f          = NULL;
 
     RESOLVE(genTextures, "glGenTextures");
     RESOLVE(bindTexture, "glBindTexture");
@@ -177,6 +201,15 @@ int main(int argc, char** argv) {
     RESOLVE(getError, "glGetError");
     RESOLVE(getIntegerv, "glGetIntegerv");
     RESOLVE(getString, "glGetString");
+    RESOLVE(texParameteri, "glTexParameteri");
+    RESOLVE(generateMipmap, "glGenerateMipmap");
+    RESOLVE(activeTexture, "glActiveTexture");
+    RESOLVE(bindBufferBase, "glBindBufferBase");
+    RESOLVE(getUniformLocation, "glGetUniformLocation");
+    RESOLVE(getUniformBlockIndex, "glGetUniformBlockIndex");
+    RESOLVE(uniformBlockBinding, "glUniformBlockBinding");
+    RESOLVE(uniform1i, "glUniform1i");
+    RESOLVE(uniform4f, "glUniform4f");
     if (failures) { printf("RENDER SMOKE FAILED (missing symbols)\n"); dlclose(h); return 1; }
 
     /* ---- 版本（走 backend 起来后的 glGetIntegerv，验证偏移修复） ---------- */
@@ -295,6 +328,157 @@ int main(int argc, char** argv) {
           "corner pixel is red (r=%d g=%d b=%d a=%d) — full-screen triangle rasterized",
           px[0], px[1], px[2], px[3]);
     CHECK(getError() == GL_NO_ERROR, "glReadPixels leaves no error");
+
+    /* =====================================================================
+     * 扩展测试：贴图采样 + mipmap + 动态 UBO + 多帧 glFinish 稳定性
+     * =====================================================================
+     * 目的（对齐 MC 真实动态 3D 场景的渲染路径，而非仅画一个纯色三角形）：
+     *   1) 贴图采样：绑定一张 2D 纹理并在 fragment shader 里 texture() 采样，
+     *      验证 glActiveTexture/glBindTexture/glTexImage2D/采样器链路。
+     *   2) mipmap 危险路径：min filter 用 GL_LINEAR_MIPMAP_LINEAR 并对单级
+     *      视图调用 glGenerateMipmap —— 这正是 MC 加载屏 GUI 图集采样触发
+     *      GPU page fault（kIOGPUCommandBufferCallbackErrorPageFault）的路径。
+     *      后端须对该单级视图强制 VK_SAMPLER_MIPMAP_MODE_NEAREST + maxLod=0
+     *      （对齐 MobileGL），否则 texture unit 会越界取 level+1。
+     *   3) 动态 UBO：用 glBindBufferBase 绑定一个 uniform block，每帧改写
+     *      glBufferData（GL_DYNAMIC_DRAW）触发后端 orphan-rename + descriptor
+     *      memo 失效，验证动态 uniform 每帧生效、无 page fault。
+     *   4) 多帧 glFinish：连续 N 帧各执行 draw + glFinish（vkQueueSubmit）
+     *      + readback，验证跨帧描述符复用/缓冲生命周期稳定。
+     * ===================================================================== */
+    {
+        /* ---- 4a) 生成全白采样纹理（2x2）------------------------------- */
+        GLuint sampTex = 0;
+        genTextures(1, &sampTex);
+        CHECK(sampTex != 0, "genTextures allocated sample texture (%u)", sampTex);
+        activeTexture(GL_TEXTURE0);
+        bindTexture(GL_TEXTURE_2D, sampTex);
+        const GLubyte white[16] = { 255,255,255,255, 255,255,255,255,
+                                    255,255,255,255, 255,255,255,255 };
+        texImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, white);
+        /* 关键：min filter 走 mipmap 线性，mip 链用 glGenerateMipmap 生成。
+         * 这命中单级视图 + LINEAR mipmap 的页错误路径。 */
+        texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+        texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        texParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+        texParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+        generateMipmap(GL_TEXTURE_2D);
+        CHECK(getError() == GL_NO_ERROR, "texture upload + mipmap generation leaves no error");
+
+        /* ---- 4b) 动态 UBO（每帧改写，触发 orphan-rename）--------------- */
+        GLuint ubo = 0;
+        genBuffers(1, &ubo);
+        bindBuffer(GL_UNIFORM_BUFFER, ubo);
+        GLfloat initColor[4] = { 0.0f, 0.0f, 1.0f, 1.0f };  /* 初始蓝色 */
+        bufferData(GL_UNIFORM_BUFFER, sizeof(initColor), initColor, GL_DYNAMIC_DRAW);
+        CHECK(getError() == GL_NO_ERROR, "dynamic UBO initial bufferData leaves no error");
+
+        /* ---- 4c) 采样 + UBO 的 fragment shader -------------------------- */
+        const char* texVsSrc = "#version 330 core\n"
+                               "layout(location=0) in vec2 aPos;\n"
+                               "layout(location=1) in vec2 aUV;\n"
+                               "out vec2 vUV;\n"
+                               "void main(){ vUV = aUV; gl_Position = vec4(aPos, 0.0, 1.0); }\n";
+        const char* texFsSrc = "#version 330 core\n"
+                               "in vec2 vUV;\n"
+                               "out vec4 fragColor;\n"
+                               "layout(std140) uniform DynColor { vec4 tint; };\n"
+                               "uniform sampler2D uTex;\n"
+                               "void main(){ fragColor = texture(uTex, vUV) * tint; }\n";
+        GLuint texVs = createShader(GL_VERTEX_SHADER);
+        GLuint texFs = createShader(GL_FRAGMENT_SHADER);
+        shaderSource(texVs, 1, &texVsSrc, NULL);
+        shaderSource(texFs, 1, &texFsSrc, NULL);
+        compileShader(texVs);
+        compileShader(texFs);
+        GLint tvsOk = 0, tfsOk = 0;
+        getShaderiv(texVs, GL_COMPILE_STATUS, &tvsOk);
+        getShaderiv(texFs, GL_COMPILE_STATUS, &tfsOk);
+        CHECK(tvsOk == GL_TRUE, "sampled vertex shader compiled");
+        CHECK(tfsOk == GL_TRUE, "sampled fragment shader compiled");
+        GLuint texProg = createProgram();
+        attachShader(texProg, texVs);
+        attachShader(texProg, texFs);
+        linkProgram(texProg);
+        GLint texLinkOk = 0;
+        getProgramiv(texProg, GL_LINK_STATUS, &texLinkOk);
+        CHECK(texLinkOk == GL_TRUE, "sampled program linked (GL_LINK_STATUS=%d)", texLinkOk);
+        deleteShader(texVs);
+        deleteShader(texFs);
+
+        /* 查询 UBO 块索引 + 采样器 uniform location */
+        GLuint blockIdx = getUniformBlockIndex(texProg, "DynColor");
+        CHECK(blockIdx != GL_INVALID_INDEX, "getUniformBlockIndex(DynColor)=%u", blockIdx);
+        GLint texLoc = getUniformLocation(texProg, "uTex");
+        CHECK(texLoc >= 0, "getUniformLocation(uTex)=%d", texLoc);
+        GLint tintLoc = getUniformLocation(texProg, "tint");
+        CHECK(tintLoc >= 0, "getUniformLocation(tint)=%d", tintLoc);
+
+        useProgram(texProg);
+        uniformBlockBinding(texProg, blockIdx, 1);   /* 绑定到 binding point 1 */
+        bindBufferBase(GL_UNIFORM_BUFFER, 1, ubo);   /* UBO 挂到 binding point 1 */
+        activeTexture(GL_TEXTURE0);
+        bindTexture(GL_TEXTURE_2D, sampTex);
+        if (texLoc >= 0) uniform1i(texLoc, 0);        /* sampler2D 使用 texture unit 0 */
+        CHECK(getError() == GL_NO_ERROR, "sampled program UBO+sampler binding leaves no error");
+
+        /* ---- 4d) 带 UV 的全屏三角形 VAO（aPos=0, aUV=1）----------------- */
+        GLuint texVao = 0, texVbo = 0;
+        const GLfloat texVerts[20] = {
+            /* aPos (2) + aUV (2) */
+            -1.0f, -1.0f,  0.0f, 0.0f,
+             3.0f, -1.0f,  2.0f, 0.0f,
+            -1.0f,  3.0f,  0.0f, 2.0f,
+        };
+        genVertexArrays(1, &texVao);
+        bindVertexArray(texVao);
+        genBuffers(1, &texVbo);
+        bindBuffer(GL_ARRAY_BUFFER, texVbo);
+        bufferData(GL_ARRAY_BUFFER, sizeof(texVerts), texVerts, GL_STATIC_DRAW);
+        vertexAttribPtr(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(GLfloat), (const void*)0);
+        enableAttrib(0);
+        vertexAttribPtr(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(GLfloat),
+                        (const void*)(2 * sizeof(GLfloat)));
+        enableAttrib(1);
+        CHECK(getError() == GL_NO_ERROR, "sampled VAO/VBO (pos+uv) setup leaves no error");
+
+        /* ---- 4e) 多帧动态 UBO + glFinish 稳定性 ------------------------- */
+        /* 每帧：改写 UBO（orphan-rename + descriptor memo 失效）→ draw →
+         * glFinish(vkQueueSubmit) → readback。连续 N 帧验证：
+         *   - 每帧读回颜色随 UBO tint 变化而变（动态 uniform 真正生效）；
+         *   - 全白纹理 × tint 的乘积 = tint 本身（验证采样链路颜色正确）；
+         *   - 全程无 GPU page fault / draw 丢弃（读回非黑即证明 draw 未被丢）。 */
+        const int NFRAMES = 8;
+        int stableFrames = 0;
+        for (int f = 0; f < NFRAMES; ++f) {
+            /* 动态改写 UBO：第 f 帧 tint = (f 递增的 R, 0, 0, 1) */
+            GLfloat tint[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+            tint[0] = (float)(30 + f * 20) / 255.0f;  /* 30,50,...,170 */
+            bindBuffer(GL_UNIFORM_BUFFER, ubo);
+            bufferData(GL_UNIFORM_BUFFER, sizeof(tint), tint, GL_DYNAMIC_DRAW);
+            clearColor(0.0f, 0.0f, 0.0f, 0.0f);
+            clear(GL_COLOR_BUFFER_BIT);
+            drawArrays(GL_TRIANGLES, 0, 3);
+            finish();  /* vkQueueSubmit + 等待，验证提交稳定性 */
+            if (getError() != GL_NO_ERROR) { ++failures; break; }
+
+            unsigned char fp[4] = {0,0,0,0};
+            readPixels(R / 2, C / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, fp);
+            int wantR = 30 + f * 20;
+            /* 允许 ±12 的线性采样/量化容差（float→uint8 四舍五入） */
+            if (fp[0] >= wantR - 12 && fp[0] <= wantR + 12 &&
+                fp[3] > 128 && fp[1] < 20 && fp[2] < 20) {
+                ++stableFrames;
+            } else {
+                printf("frame %d: sampled tint wantR~%d got=(%d,%d,%d,%d)\n",
+                       f, wantR, fp[0], fp[1], fp[2], fp[3]);
+            }
+        }
+        CHECK(stableFrames == NFRAMES,
+              "multi-frame sampled+UBO stability: %d/%d frames rendered correct color after glFinish",
+              stableFrames, NFRAMES);
+        CHECK(getError() == GL_NO_ERROR, "multi-frame test leaves no error");
+    }
 
     dlclose(h);
 

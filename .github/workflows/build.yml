@@ -214,7 +214,10 @@ jobs:
                      glVertexAttribPointer glEnableVertexAttribArray \
                      glCreateShader glShaderSource glCompileShader glGetShaderiv \
                      glCreateProgram glAttachShader glLinkProgram glGetProgramiv \
-                     glDeleteShader glUseProgram glReadPixels; do
+                     glDeleteShader glUseProgram glReadPixels \
+                     glActiveTexture glBindBufferBase glGetUniformLocation \
+                     glGetUniformBlockIndex glUniformBlockBinding \
+                     glUniform1i glUniform4f; do
             if echo "$NM_OUT" | grep -qE " [Tt] _?${sym}$"; then
               echo "ok   $sym"
             else
