@@ -1001,6 +1001,36 @@ void bind_program_descriptors(GLuint program, VkPipelineBindPoint bindPoint) {
                     auto tex_it = tex_tbl.find(tex_id);
                     if (tex_it != tex_tbl.end() && tex_it->second.view == view) {
                         sampledLayout = mithril::vk::sampled_layout_for_format(tex_it->second.format);
+
+                        // FIX (真机主菜单 page fault 诊断 - CRITICAL):
+                        // 真机在 atlas 创建后、主菜单首帧采样时触发 GPU address
+                        // fault (kIOGPUCommandBufferCallbackErrorPageFault)，而 CI
+                        // 全绿（2x2 小纹理不触发）。这里在 descriptor bind 时校验
+                        // 即将被采样的真实纹理资源状态，若存在异常则 WARN（限流），
+                        // 让用户无需开 MITHRIL_DEBUG（真机默认 Warning）也能定位
+                        // fault 前最后一次绑定的 atlas/纹理是哪个、坏在哪一环。
+                        //   a) image/view 为 NULL 或 view 与 descriptor 不一致 → 采
+                        //      样无效 GPU 地址；
+                        //   b) currentLayout 不是 read-only 采样布局（如停在
+                        //      TRANSFER_DST）而 descriptor 声明 read-only → 布局
+                        //      mismatch，MoltenVK/A11 读错地址。
+                        bool resBad = false;
+                        if (tex_it->second.image == VK_NULL_HANDLE) { resBad = true; }
+                        if (tex_it->second.view == VK_NULL_HANDLE) { resBad = true; }
+                        if (tex_it->second.currentLayout != sampledLayout) { resBad = true; }
+                        if (resBad) {
+                            static int layoutWarn = 0;
+                            if (layoutWarn <= 8) {
+                                MITHRIL_LOG_WARN("vk",
+                                    "sampler layout/resource check tex=%u imgValid=%d "
+                                    "viewValid=%d curLayout=%d declLayout=%d levels=%d",
+                                    tex_id, tex_it->second.image != VK_NULL_HANDLE,
+                                    tex_it->second.view != VK_NULL_HANDLE,
+                                    (int)tex_it->second.currentLayout,
+                                    (int)sampledLayout, (int)tex_it->second.levels);
+                            }
+                            layoutWarn++;
+                        }
                     }
                 }
                 VkDescriptorImageInfo ii{};
