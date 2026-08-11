@@ -401,50 +401,81 @@ int main(int argc, char** argv) {
             /* level0 经主 command buffer 上传（未 flush），随即 generateMipmap 走
              * 非重建分支——正是要验证的同步点。 */
             texSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 2, 2, GL_RGBA, GL_UNSIGNED_BYTE, stwhite);
-            texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
-            texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            /* 判别 A 前先不用 mipmap filter，单独验证 texStorage2D 的 level0 上传+采样 */
+            texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
             texParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
             texParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
-            generateMipmap(GL_TEXTURE_2D);
-            CHECK(getError() == GL_NO_ERROR, "disc-F storage mipmap generation leaves no error");
 
-            /* 采样读回：用已有的 attrib0 全屏三角形 vao/vbo，配独立 vs+fs（vs 只读
-             * attrib0，fs 采样 unit0 上的 stTex）。修复后 level0（白）经非重建分支
-             * 正确生成 level1 → 全屏采样应为白；若缺失 safe_device_wait_idle，level0
-             * 仍是未初始化内存 → 读回 garbage/黑。 */
+            /* 采样读回用已有的 attrib0 全屏三角形 vao/vbo。两个程序共用 attrib0 vs，
+             * fs 不同：fprogA 采样 level0（texture()，UV 恒定 LOD→level0）；
+             * fprogB 用 textureLod 强制采样 level1（CASCADE blit 生成的目标）。 */
             GLuint fvs = createShader(GL_VERTEX_SHADER);
             shaderSource(fvs, 1, &(const char*){
                 "#version 330 core\n"
                 "layout(location = 0) in vec2 aPos;\n"
                 "void main() { gl_Position = vec4(aPos, 0.0, 1.0); }\n" }, NULL);
             compileShader(fvs);
-            GLuint ffs = createShader(GL_FRAGMENT_SHADER);
-            shaderSource(ffs, 1, &(const char*){
+            GLuint ffsA = createShader(GL_FRAGMENT_SHADER);
+            shaderSource(ffsA, 1, &(const char*){
                 "#version 330 core\n"
                 "uniform sampler2D uTex;\n"
                 "out vec4 fragColor;\n"
                 "void main() { fragColor = texture(uTex, vec2(0.5, 0.5)); }\n" }, NULL);
-            compileShader(ffs);
-            GLuint fprog = createProgram();
-            attachShader(fprog, fvs);
-            attachShader(fprog, ffs);
-            linkProgram(fprog);
+            compileShader(ffsA);
+            GLuint ffsB = createShader(GL_FRAGMENT_SHADER);
+            shaderSource(ffsB, 1, &(const char*){
+                "#version 330 core\n"
+                "uniform sampler2D uTex;\n"
+                "out vec4 fragColor;\n"
+                "void main() { fragColor = textureLod(uTex, vec2(0.5, 0.5), 1.0); }\n" }, NULL);
+            compileShader(ffsB);
+            GLuint fprogA = createProgram();
+            attachShader(fprogA, fvs);
+            attachShader(fprogA, ffsA);
+            linkProgram(fprogA);
+            GLuint fprogB = createProgram();
+            attachShader(fprogB, fvs);
+            attachShader(fprogB, ffsB);
+            linkProgram(fprogB);
             deleteShader(fvs);
-            deleteShader(ffs);
-            useProgram(fprog);
+            deleteShader(ffsA);
+            deleteShader(ffsB);
             activeTexture(GL_TEXTURE0);
             bindTexture(GL_TEXTURE_2D, stTex);
             bindVertexArray(vao);
+
+            /* 判别 A：finish() flush level0 upload 后，无 mipmap 直接采样 level0。
+             * 隔离「texStorage2D 的 level0 上传」是否正常（若 A 黑，问题在上传，与
+             * mipmap 无关；若 A 白，问题在 CASCADE blit 生成的 level1）。 */
+            finish();
+            useProgram(fprogA);
             drawArrays(GL_TRIANGLES, 0, 3);
             finish();
-            unsigned char stpx[4] = {0,0,0,0};
-            readPixels(R / 2, C / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, stpx);
-            CHECK(getError() == GL_NO_ERROR,
-                  "disc-F storage-chain sampling readback leaves no error");
-            CHECK(stpx[0] > 200 && stpx[1] > 200 && stpx[2] > 200 && stpx[3] > 128,
-                  "disc-F non-rebuild mipmap branch samples WHITE from texStorage2D "
-                  "chain (r=%d g=%d b=%d a=%d) — cross-buffer sync OK", stpx[0], stpx[1], stpx[2], stpx[3]);
-            deleteProgram(fprog);
+            unsigned char fa[4] = {0,0,0,0};
+            readPixels(R / 2, C / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, fa);
+            CHECK(getError() == GL_NO_ERROR, "disc-F(A) level0 sampling readback leaves no error");
+            CHECK(fa[0] > 200 && fa[1] > 200 && fa[2] > 200 && fa[3] > 128,
+                  "disc-F(A) texStorage2D level0 upload+sample is WHITE "
+                  "(r=%d g=%d b=%d a=%d) — upload path OK", fa[0], fa[1], fa[2], fa[3]);
+
+            /* 判别 B：切到 mipmap filter 触发 CASCADE 非重建分支生成 level1，再
+             * textureLod(level1) 验证 blit 结果。若 A 白而 B 黑 → CASCADE blit 生成
+             * 黑 level1；若 B 也白 → CASCADE 修复正确。 */
+            texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+            generateMipmap(GL_TEXTURE_2D);
+            CHECK(getError() == GL_NO_ERROR, "disc-F storage mipmap generation leaves no error");
+            useProgram(fprogB);
+            drawArrays(GL_TRIANGLES, 0, 3);
+            finish();
+            unsigned char fb[4] = {0,0,0,0};
+            readPixels(R / 2, C / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, fb);
+            CHECK(getError() == GL_NO_ERROR, "disc-F(B) level1 sampling readback leaves no error");
+            CHECK(fb[0] > 200 && fb[1] > 200 && fb[2] > 200 && fb[3] > 128,
+                  "disc-F(B) CASCADE non-rebuild mipmap level1 is WHITE "
+                  "(r=%d g=%d b=%d a=%d) — cross-buffer sync + blit OK", fb[0], fb[1], fb[2], fb[3]);
+            deleteProgram(fprogA);
+            deleteProgram(fprogB);
             /* stTex 走 defer_destroy（后端持有跨帧存活），此处不手动删除 */
         }
 
