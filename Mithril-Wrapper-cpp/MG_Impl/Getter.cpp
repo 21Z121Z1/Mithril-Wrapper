@@ -227,14 +227,15 @@ void glGetBooleanv(GLenum pname, GLboolean* params) {
 void glGetIntegerv(GLenum pname, GLint* params) {
     MITHRIL_ENSURE_INIT();
     if (!params) return;
-    // Handle Mithril backend getter bypass: MITHRIL_BACKEND_GETTER + standard enum.
-    if (pname >= MITHRIL_BACKEND_GETTER) {
-        GLenum real = pname - MITHRIL_BACKEND_GETTER;
-        // For backend queries, return the real Vulkan backend values (not the
-        // OpenGL facade values). Currently both are the same since we ARE
-        // the backend, but this allows mods to distinguish.
-        pname = real;
-    }
+    // NOTE: Do NOT apply a blanket `pname >= MITHRIL_BACKEND_GETTER` offset here.
+    // MITHRIL_BACKEND_GETTER is 0x0401, but nearly every standard GL enum is a
+    // *larger* value (e.g. GL_MAJOR_VERSION = 0x821B, GL_VIEWPORT = 0x0BA2,
+    // GL_MAX_TEXTURE_SIZE = 0x0D33). A `>=` test would hijack all of them,
+    // subtract 0x0401, land in `default`, and return 0 — silently breaking
+    // glGetIntegerv for Minecraft (which queries GL_MAJOR_VERSION, GL_MAX_*,
+    // GL_VIEWPORT, ... on every frame). glGetString has no such blanket bypass:
+    // it matches `case MITHRIL_BACKEND_GETTER + GL_*` explicitly. glGetIntegerv
+    // has no backend-getter numeric cases, so no bypass is needed here at all.
     switch (pname) {
         /* ---- FIX (P1): GL_MAX_* 改为查询真实的 VkPhysicalDeviceLimits ----
          *
@@ -434,7 +435,13 @@ void glGetIntegerv(GLenum pname, GLint* params) {
          * to apply its own Y-flip / depth remap. */
         case 0x935C: /*GL_CLIP_ORIGIN*/       *params = (GLint)g_state->clipOrigin; break;
         case 0x935D: /*GL_CLIP_DEPTH_MODE*/   *params = (GLint)g_state->clipDepthMode; break;
-        default:                              *params = 0; break;
+        default:
+            // GL spec: an unrecognised pname must raise GL_INVALID_ENUM rather
+            // than silently returning 0 (Minecraft relies on the error flag to
+            // detect unsupported queries). Keep *params deterministic too.
+            *params = 0;
+            mithril::state_set_error(GL_INVALID_ENUM);
+            break;
     }
 }
 

@@ -217,6 +217,25 @@ void GLState::setCapability(GLenum cap, bool enabled) {
     bumpRenderVersion();
 }
 
+bool GLState::isKnownCapability(GLenum cap) const {
+    switch (cap) {
+        case GL_DEPTH_TEST: case GL_BLEND: case GL_STENCIL_TEST:
+        case GL_CULL_FACE: case GL_SCISSOR_TEST: case GL_DITHER:
+        case GL_MULTISAMPLE: case GL_SAMPLE_ALPHA_TO_COVERAGE:
+        case GL_SAMPLE_COVERAGE: case GL_SAMPLE_MASK:
+        case GL_PROGRAM_POINT_SIZE: case GL_PRIMITIVE_RESTART:
+        case GL_FRAMEBUFFER_SRGB: case GL_POLYGON_OFFSET_FILL:
+        case GL_DEPTH_CLAMP: case GL_RASTERIZER_DISCARD:
+        case GL_TEXTURE_CUBE_MAP_SEAMLESS:
+        case GL_CLIP_DISTANCE0: case GL_CLIP_DISTANCE1: case GL_CLIP_DISTANCE2:
+        case GL_CLIP_DISTANCE3: case GL_CLIP_DISTANCE4: case GL_CLIP_DISTANCE5:
+        case GL_CLIP_DISTANCE6: case GL_CLIP_DISTANCE7:
+            return true;
+        default:
+            return false;
+    }
+}
+
 bool GLState::isCapabilityEnabled(GLenum cap) const {
     switch (cap) {
         case GL_DEPTH_TEST:              return depthTest;

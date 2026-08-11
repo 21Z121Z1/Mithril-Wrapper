@@ -252,6 +252,11 @@ void glEnable(GLenum cap) {
         g_state->bumpRenderVersion();
         return;
     }
+    // GL spec: enabling an unrecognised capability raises GL_INVALID_ENUM.
+    if (!g_state->isKnownCapability(cap)) {
+        mithril::state_set_error(GL_INVALID_ENUM);
+        return;
+    }
     g_state->setCapability(cap, true);
 }
 
@@ -260,6 +265,11 @@ void glDisable(GLenum cap) {
     if (cap == GL_PRIMITIVE_RESTART_FIXED_INDEX) {
         g_state->primitiveRestartFixedIndex = false;
         g_state->bumpRenderVersion();
+        return;
+    }
+    // GL spec: disabling an unrecognised capability raises GL_INVALID_ENUM.
+    if (!g_state->isKnownCapability(cap)) {
+        mithril::state_set_error(GL_INVALID_ENUM);
         return;
     }
     g_state->setCapability(cap, false);

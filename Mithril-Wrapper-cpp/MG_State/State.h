@@ -738,6 +738,10 @@ struct GLState {
     // ---- Capability dispatch helpers ----
     void setCapability(GLenum cap, bool enabled);
     bool isCapabilityEnabled(GLenum cap) const;
+    // True iff `cap` is one of the capabilities this GLState actually tracks.
+    // glEnable/glDisable use this to raise GL_INVALID_ENUM for unrecognised
+    // caps per the GL spec, instead of silently ignoring them.
+    bool isKnownCapability(GLenum cap) const;
 
     // ---- Texture query helper (for backend DescriptorSet.cpp) ----
     // Returns the first non-zero texture name bound to `unit` across all targets.

@@ -186,15 +186,18 @@ jobs:
           # contains MoltenVK-linked code by checking for an indirect symbol.
           otool -L "$DYLIB" | head -20
 
-      - name: Compile-check + contract-check GL smoke test (tests/gl_smoke.c)
+      - name: Compile-check + contract-check GL smoke tests (gl_smoke.c + render_smoke.c)
         run: |
           # 参照 Uniaball/Mithril-Wrapper 的 test 集成：测试文件必须始终可编译，
           # 且其断言的 GL 符号必须存在于 dylib 导出表（否则 dlopen 冒烟会失败）。
           DYLIB="${{ steps.locate.outputs.path }}"
           # 1) 语法校验（用项目自带 GL/EGL 头，-fsyntax-only，不依赖构建产物）
+          #    render_smoke.c 是真正的离屏渲染测试（macOS 原生 dlopen 驱动 GPU）。
           clang -std=c11 -fsyntax-only -Wall -Wextra \
             -IMithril-Wrapper-cpp/include tests/gl_smoke.c
-          echo "syntax OK"
+          clang -std=c11 -fsyntax-only -Wall -Wextra \
+            -IMithril-Wrapper-cpp/include tests/render_smoke.c
+          echo "syntax OK (gl_smoke.c + render_smoke.c)"
           # 2) 契约断言：测试 dlopen 依赖的 GL 符号必须在导出表中
           NM_OUT=$(nm -gU "$DYLIB")
           missing=0
@@ -204,7 +207,14 @@ jobs:
                      glClearColor glClear glDepthMask glColorMask glBlendFunc \
                      glCullFace glFrontFace glDepthFunc glFinish glFlush \
                      glGenTextures glTexImage2D glTexParameteri \
-                     glGenerateMipmap glDrawArrays glDrawElements; do
+                     glGenerateMipmap glDrawArrays glDrawElements \
+                     glGenFramebuffers glBindFramebuffer glFramebufferTexture2D \
+                     glCheckFramebufferStatus glGenVertexArrays glBindVertexArray \
+                     glGenBuffers glBindBuffer glBufferData \
+                     glVertexAttribPointer glEnableVertexAttribArray \
+                     glCreateShader glShaderSource glCompileShader glGetShaderiv \
+                     glCreateProgram glAttachShader glLinkProgram glGetProgramiv \
+                     glDeleteShader glUseProgram glReadPixels; do
             if echo "$NM_OUT" | grep -qE " [Tt] _?${sym}$"; then
               echo "ok   $sym"
             else
@@ -213,10 +223,10 @@ jobs:
             fi
           done
           if [ "$missing" -ne 0 ]; then
-            echo "::error::gl_smoke test requires GL symbols missing from export table"
+            echo "::error::gl_smoke/render_smoke tests require GL symbols missing from export table"
             exit 1
           fi
-          echo "gl_smoke contract: all symbols exported"
+          echo "smoke contract: all symbols exported"
 
       - name: Ad-hoc codesign
         run: |
@@ -293,4 +303,24 @@ jobs:
           rc=$?
           set -e
           echo "=== gl_smoke exit: $rc ==="
+          [ "$rc" -eq 0 ]
+
+      - name: Run offscreen render smoke (dlopen + real GPU draw)
+        run: |
+          # 真正的离屏渲染测试：headless backend（proc_init→backend_init）下驱动
+          # 完整 GL 4.6 渲染管线——离屏纹理FBO + shader编译/链接 + VAO/VBO +
+          # glDrawArrays + glFinish(vkQueueSubmit) + glReadPixels 读回，验证 GPU
+          # 真正执行绘制。全程绑定用户 FBO（glBindFramebuffer(0) 无 swapchain 无目标）。
+          DYLIB=$(find build -name 'libmithril.dylib' -type f | head -1)
+          export DYLD_LIBRARY_PATH="$(brew --prefix)/lib"
+          echo "=== build render_smoke ==="
+          clang -std=c11 -O0 -Wall -Wextra \
+            -IMithril-Wrapper-cpp/include \
+            -o tests/render_smoke tests/render_smoke.c -ldl
+          echo "=== run render_smoke (offscreen GPU draw) ==="
+          set +e
+          ./tests/render_smoke "$DYLIB"
+          rc=$?
+          set -e
+          echo "=== render_smoke exit: $rc ==="
           [ "$rc" -eq 0 ]
