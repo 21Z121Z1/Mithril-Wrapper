@@ -347,6 +347,10 @@ int main(int argc, char** argv) {
      *      + readback，验证跨帧描述符复用/缓冲生命周期稳定。
      * ===================================================================== */
     {
+        /* 共享的 attrib-0-only 顶点着色器：由 4e 判别测试创建，供 4f UBO-only
+         * 复用，以隔离"顶点 shader 带 UV attrib"这一变量（见 4f 注释）。 */
+        GLuint attrib0Vs = 0;
+
         /* ---- 4a) 生成全白采样纹理（2x2）------------------------------- */
         GLuint sampTex = 0;
         genTextures(1, &sampTex);
@@ -471,7 +475,8 @@ int main(int argc, char** argv) {
             GLint discLink = 0;
             getProgramiv(discProg, GL_LINK_STATUS, &discLink);
             CHECK(discLink == GL_TRUE, "discriminant empty program linked (GL_LINK_STATUS=%d)", discLink);
-            deleteShader(dVs);
+            /* 保留 dVs 供 4f UBO-only 复用，不 deleteShader(dVs)。 */
+            attrib0Vs = dVs;
             deleteShader(dFs);
             useProgram(discProg);
             bindVertexArray(texVao);              /* 复用 4d 的 pos+uv VAO */
@@ -486,9 +491,12 @@ int main(int argc, char** argv) {
                   dpx[1], dpx[0], dpx[2], dpx[3]);
         }
 
-        /* ---- 4f) 隔离诊断 A：仅 UBO（无贴图）----------------------------
-         * fragColor = tint，纯色三角形验证动态 UBO 的 bufferData→descriptor
-         * 链路。若此读回随 tint 变红，则 UBO 路径正确，黑屏出在贴图采样。 */
+        /* ---- 4f) 隔离诊断 A：仅 UBO（无贴图），用 attrib-0-only 顶点 shader ----
+         * 关键判别：上一轮 UBO-only 用 texVs（attrib 0+1）读回黑；判别测试用
+         * discVs（attrib 0 only）绿。为区分"UBO descriptor"与"texVs UV 顶点
+         * shader 的 pipeline"两个变量，此测试改用已验证能画的 attrib0Vs：
+         *   - 若变红 → texVs（带 UV attrib）的 pipeline 是黑屏根因，UBO 正常。
+         *   - 若仍黑 → 问题确在 UBO descriptor 绑定（读了 0），与顶点 shader 无关。 */
         {
             const char* uboFsSrc = "#version 330 core\n"
                                    "out vec4 fragColor;\n"
@@ -501,7 +509,7 @@ int main(int argc, char** argv) {
             getShaderiv(uboFs, GL_COMPILE_STATUS, &uboFsOk);
             CHECK(uboFsOk == GL_TRUE, "UBO-only fragment shader compiled");
             GLuint uboProg = createProgram();
-            attachShader(uboProg, texVs);   /* 复用 4c 的顶点着色器（已 delete，重新 attach 需新建） */
+            attachShader(uboProg, attrib0Vs);   /* attrib-0-only，已验证能画 */
             attachShader(uboProg, uboFs);
             linkProgram(uboProg);
             GLint uboLinkOk = 0;
