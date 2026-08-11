@@ -6,7 +6,7 @@
 //
 // Only the definitions actually shared between two or more TUs live here:
 //  - object tables for VAO/VBO state (vertex + draw path),
-//  - the lazy program->Vulkan-program map (shader + draw path),
+//  - the lazy program->backend-program map (shader + draw path),
 //  - attribute fetch helpers (draw path, called through the header below).
 
 #pragma once
@@ -26,18 +26,20 @@
 
 #include <shader/shader.h>
 #include <state/state.h>
-#include <vk/engine.h>
+#include <backend/backend.h>
 
 namespace s = mithril::state;
-namespace v = mithril::vk;
+namespace v = mithril::backend;
 
 #define PUSH_ERROR(e) s::GetState().errors.Push((e))
 
 // ---- shared vertex attribute state (vertex.cpp owns the storage) --------
 
 constexpr GLuint kMaxAttribs = 16;
+constexpr GLuint kMaxUniformBufferBindings = 36;
+constexpr GLintptr kUniformBufferOffsetAlignment = 256;
 
-// One enabled/constant vertex attribute slot.
+// One VAO-owned vertex attribute array slot.
 struct AttribData {
     bool enabled = false;
     GLint size = 0;            // 1..4 components
@@ -47,8 +49,17 @@ struct AttribData {
     GLsizeiptr offset = 0;
     GLuint buffer = 0;         // GL_ARRAY_BUFFER bound at glVertexAttribPointer
     GLuint divisor = 0;        // glVertexAttribDivisor
-    bool is_pointer = false;   // array (pointer) vs generic constant value
+    bool is_pointer = false;   // an array pointer/format has been specified
+    bool integer = false;      // glVertexAttribIPointer (no float conversion)
+};
+
+// Current generic attribute values are context state, not VAO state. Keeping
+// them separate also makes disabled-array resolution independent of whichever
+// VAO last supplied the array format.
+struct CurrentAttribData {
     std::array<GLfloat, 4> constant{0.0f, 0.0f, 0.0f, 1.0f};
+    std::array<GLint, 4> constant_sint{0, 0, 0, 1};
+    std::array<GLuint, 4> constant_uint{0, 0, 0, 1};
 };
 
 struct VAOData {
@@ -57,34 +68,84 @@ struct VAOData {
 
 struct BufferData {
     std::vector<uint8_t> data;
+    uint64_t lifetime_id = 0;
+    uint64_t content_version = 0;
+    bool defined = false;
+    bool mapped = false;
+    bool map_writable = false;
+    size_t map_offset = 0;
 };
 
 // Storage lives in vertex.cpp; the draw path reads these through the header.
 extern std::unordered_map<GLuint, VAOData> g_vaos;
+extern std::array<CurrentAttribData, kMaxAttribs> g_current_attribs;
 extern std::unordered_map<GLuint, BufferData> g_buffers;
 extern GLuint g_bound_vao;           // default VAO is 0
 extern GLuint g_bound_array_buffer;
 extern GLuint g_bound_element_buffer;
+extern GLuint g_bound_uniform_buffer;
+extern GLuint g_bound_pixel_pack_buffer;
+extern GLuint g_bound_pixel_unpack_buffer;
 
-// GL program id -> Vulkan program handle (lazily created at first draw).
-extern std::unordered_map<GLuint, uint64_t> g_vk_programs;
+struct PixelPackDestination {
+    uint8_t* data = nullptr;
+    size_t row_stride = 0;
+    size_t image_stride = 0;
+    BufferData* buffer = nullptr;
+    bool provided = false;
+};
+
+// Resolve a client pointer or GL_PIXEL_PACK_BUFFER offset. The frontend owns
+// pixel-store layout and buffer lifetime; render backends only produce tightly
+// packed pixels.
+bool ResolvePixelPackDestination(void* pointer, uint32_t width,
+                                 uint32_t height, uint32_t images,
+                                 bool three_dimensional,
+                                 size_t bytes_per_pixel, size_t datum_bytes,
+                                 PixelPackDestination* output);
+bool ResolvePixelPackBytes(void* pointer, size_t byte_count,
+                           PixelPackDestination* output);
+void CommitPixelPackDestination(PixelPackDestination* destination);
+
+struct IndexedBufferBinding {
+    GLuint buffer = 0;
+    GLintptr offset = 0;
+    GLsizeiptr size = 0;
+    bool whole_buffer = false;
+};
+
+extern std::array<IndexedBufferBinding, kMaxUniformBufferBindings>
+    g_uniform_buffer_bindings;
+
+// GL program id -> selected-backend program handle (created on first draw).
+extern std::unordered_map<GLuint, uint64_t> g_backend_programs;
 
 // ---- shared texture state (texture.cpp owns the storage) ------------------
 
-// Mirrors the engine's texture-unit count (v::kMaxUnits); GL uses units
+// Mirrors the backend contract's texture-unit count; GL uses units
 // beyond this only as a no-op.
-constexpr GLuint kMaxTexUnits = 16;
+constexpr GLuint kMaxTexUnits = v::kMaxTextureUnits;
 
-// CPU-side image of one GL texture object (M4). Pixels are kept as an RGBA8
-// mip chain so TexSubImage/GenerateMipmap can rebuild the upload cheaply.
+// CPU-side image of one GL texture object (M4). Ordinary pixels are kept as
+// an RGBA8 mip chain so TexSubImage/GenerateMipmap can rebuild the upload
+// cheaply. Buffer textures keep their declared typed texel bytes instead.
 // Layered targets concatenate their slices inside each level buffer in the
-// same order vk::TexUpload expects (3D: z; array: layers; cube: 6 faces).
+// same order backend::TexUpload expects (3D: z; array: layers; cube: 6 faces).
 struct TexState {
-    GLenum target = GL_TEXTURE_2D;       // target bound at creation
+    GLenum target = 0;                   // first non-zero bind fixes the target
     GLenum min_filter = GL_LINEAR;       // sampler state (GL enums)
     GLenum mag_filter = GL_LINEAR;
     GLenum wrap_s = GL_REPEAT, wrap_t = GL_REPEAT, wrap_r = GL_REPEAT;
+    GLfloat min_lod = -1000.0f, max_lod = 1000.0f, lod_bias = 0.0f;
+    std::array<GLfloat, 4> border_color{0.f, 0.f, 0.f, 0.f};
+    GLenum compare_mode = GL_NONE;
+    GLenum compare_func = GL_LEQUAL;
+    uint64_t content_version = 0;
     uint32_t width = 0, height = 0, depth = 1;  // depth: 3D z / array layers
+    uint32_t samples = 1;
+    GLenum internal_format = GL_RGBA8;
+    v::TexelFormat image_backend_format = v::TexelFormat::RGBA8Unorm;
+    GLboolean fixed_sample_locations = GL_TRUE;
     std::vector<std::vector<uint8_t>> mip;      // [level] slices concatenated
     bool has_image = false;                    // level 0 present
     // Compressed mirror: raw S3TC bytes per level (kept for GetCompressedTexImage).
@@ -95,6 +156,9 @@ struct TexState {
     bool has_tex_buffer = false;
     GLuint tex_buffer = 0;
     GLenum tex_buffer_format = 0;
+    uint32_t tex_buffer_bytes_per_texel = 0;
+    uint64_t tex_buffer_source_version = UINT64_MAX;
+    v::TexelFormat tex_buffer_backend_format = v::TexelFormat::RGBA8Unorm;
 
     bool IsCube() const { return target == GL_TEXTURE_CUBE_MAP; }
     bool Is3D() const { return target == GL_TEXTURE_3D; }
@@ -113,13 +177,49 @@ struct TexState {
 };
 
 extern std::unordered_map<GLuint, TexState> g_textures;
-extern std::array<GLuint, kMaxTexUnits> g_texture_units;  // unit -> texture id
+constexpr size_t kTextureTargetSlots = 8;
+using TextureUnitBindings = std::array<GLuint, kTextureTargetSlots>;
+// GL texture bindings are independent per target within each texture unit.
+extern std::array<TextureUnitBindings, kMaxTexUnits> g_texture_units;
 extern GLuint g_next_texture;
 
-// Texture ids whose CPU mirror changed while the Vulkan backend was not yet
+struct SamplerData {
+    GLenum min_filter = GL_NEAREST_MIPMAP_LINEAR;
+    GLenum mag_filter = GL_LINEAR;
+    GLenum wrap_s = GL_REPEAT, wrap_t = GL_REPEAT, wrap_r = GL_REPEAT;
+    GLfloat min_lod = -1000.0f, max_lod = 1000.0f, lod_bias = 0.0f;
+    std::array<GLfloat, 4> border_color{0.f, 0.f, 0.f, 0.f};
+    GLenum compare_mode = GL_NONE;
+    GLenum compare_func = GL_LEQUAL;
+};
+
+extern std::unordered_map<GLuint, SamplerData> g_samplers;
+extern std::array<GLuint, kMaxTexUnits> g_sampler_units;
+extern GLuint g_next_sampler;
+
+// Resolve texture parameters vs a sampler-object override at draw time.
+v::TexSamplerInfo ResolveSamplerInfo(GLuint unit, const TexState& texture);
+
+// Resolve the texture target implied by a reflected sampler type, and the
+// object bound to that target in a given unit.
+GLenum TextureTargetForSampler(GLenum sampler_type);
+bool SamplerUsesDepthCompare(GLenum sampler_type);
+GLuint TextureBindingForUnit(GLuint unit, GLenum target);
+
+// Lazily refresh a buffer texture from its authoritative GL buffer storage.
+// Buffer mutations are versioned, so unchanged data never uploads per draw.
+void PrepareTextureForDraw(GLuint texture);
+void DetachBufferTextures(GLuint buffer);
+void NotifyTextureStorageChanged(GLuint texture);
+
+// Texture ids whose CPU mirror changed while the backend was not yet
 // initialized; flushed to the engine at the next draw (see DrawCommon).
 extern std::unordered_set<GLuint> g_dirty_textures;
 void FlushDirtyTextureUploads();   // defined in texture.cpp
+
+// Backend generation of the active occlusion query, snapshotted by each draw.
+// Query object names and target validation stay in query.cpp.
+uint64_t CurrentOcclusionQueryHandle();
 
 // ---- draw-time attribute fetch helpers (defined in draw.cpp) ------------
 

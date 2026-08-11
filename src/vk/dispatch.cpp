@@ -72,6 +72,7 @@ void LoadDeviceFunctions() {
     LOAD_DEV(CmdEndRenderPass);
     LOAD_DEV(CmdClearColorImage);
     LOAD_DEV(CmdClearDepthStencilImage);
+    LOAD_DEV(CmdClearAttachments);
     LOAD_DEV(CmdPipelineBarrier);
     LOAD_DEV(CmdCopyImageToBuffer);
     LOAD_DEV(CmdCopyBufferToImage);

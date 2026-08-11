@@ -22,6 +22,19 @@ static bool OpDrawBufEnabled(const FboObj& f, size_t i) {
     return false;
 }
 
+static bool OpClearColorEnabled(const FboObj* f,
+                                const ClearParams& clear, size_t attachment) {
+    if (clear.color_drawbuffer < 0)
+        return !f || OpDrawBufEnabled(*f, attachment);
+    if (!f)
+        return clear.color_drawbuffer == 0 && attachment == 0;
+    const size_t draw_index = static_cast<size_t>(clear.color_drawbuffer);
+    if (draw_index >= f->draw_bufs.size()) return false;
+    const GLenum selected = f->draw_bufs[draw_index];
+    return selected != GL_NONE &&
+           selected == GL_COLOR_ATTACHMENT0 + attachment;
+}
+
 // Create a host-visible staging buffer of `size` bytes and copy `data` in.
 bool StageBytes(const void* data, VkDeviceSize size, VkBufferUsageFlags usage,
                 VkBuffer* buf, VkDeviceMemory* mem) {
@@ -38,11 +51,18 @@ bool StageBytes(const void* data, VkDeviceSize size, VkBufferUsageFlags usage,
     return true;
 }
 
-// Stage a float32 stream into buf/mem (no-op for an empty stream).
+// Stage either a frontend-resolved stream or its raw resident-source snapshot.
+// Vulkan remains the reference backend and deliberately keeps its existing
+// per-draw staging ownership; the shared contract no longer requires repacking.
 bool StageStream(const VertexStream& stream, VkBuffer* buf,
                  VkDeviceMemory* mem) {
-    if (stream.data.empty() || stream.stride == 0) return true;
-    return StageBytes(stream.data.data(), stream.data.size() * sizeof(float),
+    if (!stream.HasStorage() || stream.stride == 0) return true;
+    const void* bytes = stream.HasResidentSource()
+        ? static_cast<const void*>(stream.source_data)
+        : static_cast<const void*>(stream.data.data());
+    const size_t size = stream.HasResidentSource()
+        ? stream.source_size : stream.data.size();
+    return StageBytes(bytes, size,
                       VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, buf, mem);
 }
 
@@ -53,13 +73,50 @@ void Draw(const DrawParams& params) {
     auto prog_it = g_programs.find(params.program);
     if (prog_it == g_programs.end()) return;
     const Program& prog = prog_it->second;
-    if (params.vertex_stream.data.empty()) return;
+    if (!params.vertex_stream.HasStorage()) return;
     // Ensure the bound draw framebuffer's device resources exist (rebuilds
     // them lazily); the pass identity flows into the pipeline cache key.
     FboObj fbo;
     bool rp_ok = ResolveDrawFbo(&fbo);
     if (!rp_ok) return;
     (void)fbo;
+
+    struct ResolvedSample {
+        uint32_t binding = 0;
+        TexObj* texture = nullptr;
+        VkSampler sampler = VK_NULL_HANDLE;
+    };
+    std::vector<ResolvedSample> resolved_samples;
+    resolved_samples.reserve(params.sampled_textures.size());
+    for (const auto& sampled : params.sampled_textures) {
+        TexObj* texture = GetTexObj(sampled.texture);
+        if (!texture) {
+            ML_LOG_ERROR("vk: sampled texture %llu is not resident",
+                         (unsigned long long)sampled.texture);
+            return;
+        }
+        if (sampled.sampler.mip != backend::TexMipFilter::None) {
+            uint32_t largest = std::max(texture->width, texture->height);
+            if (texture->is_3d) largest = std::max(largest, texture->depth);
+            uint32_t expected = 1;
+            while (largest > 1) {
+                largest >>= 1;
+                ++expected;
+            }
+            if (texture->levels < expected) {
+                ML_LOG_ERROR("vk: incomplete mip chain for sampled texture %llu",
+                             (unsigned long long)sampled.texture);
+                return;
+            }
+        }
+        VkSampler sampler = ResolveSampler(sampled.sampler, texture->levels);
+        if (!sampler) {
+            ML_LOG_ERROR("vk: sampler state is not representable for binding %u",
+                         sampled.binding);
+            return;
+        }
+        resolved_samples.push_back({sampled.binding, texture, sampler});
+    }
 
     DrawOp op;
     op.program = params.program;
@@ -69,11 +126,18 @@ void Draw(const DrawParams& params) {
     op.i_stride = params.instance_stream.stride;
     op.i_attrs = params.instance_stream.attrs;
     op.instance_count = std::max<uint32_t>(params.instance_count, 1);
-    op.vertex_count =
-        (uint32_t)(params.vertex_stream.data.size() * sizeof(float) /
-                   op.v_stride);
+    const size_t vertex_bytes = params.vertex_stream.HasResidentSource()
+        ? params.vertex_stream.source_size
+        : params.vertex_stream.data.size();
+    op.vertex_count = params.vertex_stream.record_count
+        ? params.vertex_stream.record_count
+        : (uint32_t)(vertex_bytes / op.v_stride);
+    op.vertex_offset = params.vertex_stream.binding_offset;
+    op.instance_offset = params.instance_stream.binding_offset;
     op.index_count = (uint32_t)params.indices.size();
+    op.primitive_restart = params.primitive_restart;
     op.pipe = params.pipeline;
+    op.dynamic = params.dynamic;
     if (g.bound_draw_fbo) {
         // resolve the FBO material in case Draw() ran before flush
         ResolveDrawFbo(&fbo);
@@ -91,7 +155,8 @@ void Draw(const DrawParams& params) {
     std::string base_key =
         BuildPipelineKey(params.program, op.topology, op.v_attrs, op.v_stride,
                          op.i_attrs, op.i_stride) +
-        StateSignature(params.pipeline);
+        StateSignature(params.pipeline) +
+        "|PR" + std::to_string(op.primitive_restart);
     op.pipeline_key = base_key + "|RP" + (op.rp_sig.empty() ? "default" : op.rp_sig);
 
     if (!StageStream(params.vertex_stream, &op.vertex_buffer,
@@ -173,21 +238,21 @@ void Draw(const DrawParams& params) {
     w.pBufferInfo = &dbi;
     writes.push_back(w);
 
-    // Combined image samplers: one per (binding, gl texture id) handed over
-    // by the GL layer; unbound units resolve to the 1x1 white dummy.
+    // Combined image samplers: image and independently resolved sampler state
+    // are captured together for this draw. Unbound textures resolve to the
+    // 1x1 white dummy without changing the sampler-object semantics.
     std::vector<VkDescriptorImageInfo> tis;
-    for (const auto& sb : params.sampler_binds) {
-        TexObj* tex = GetTexObj(sb.second);
-        if (!tex) continue;
+    tis.reserve(resolved_samples.size());
+    for (const auto& sampled : resolved_samples) {
         VkDescriptorImageInfo di{};
-        di.sampler = tex->sampler;
-        di.imageView = tex->view;
+        di.sampler = sampled.sampler;
+        di.imageView = sampled.texture->view;
         di.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         tis.push_back(di);
         VkWriteDescriptorSet ws{};
         ws.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         ws.dstSet = op.desc_set;
-        ws.dstBinding = sb.first;
+        ws.dstBinding = sampled.binding;
         ws.descriptorCount = 1;
         ws.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         ws.pImageInfo = &tis.back();
@@ -246,13 +311,16 @@ void SubmitFlush() {
     // Optional explicit clear of the current target. MRT: one clear per
     // colour attachment (only those selected by the draw buffers).
     VkImageSubresourceRange color_range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-    if (g.pending_clear) {
-        if (g.clear_mask & GL_COLOR_BUFFER_BIT) {
+    const bool clear_in_render_pass = g.pending_clear && g.clear.scissor_test;
+    if (g.pending_clear && !clear_in_render_pass) {
+        if ((g.clear.mask & GL_COLOR_BUFFER_BIT) &&
+            (g.clear.color_write[0] || g.clear.color_write[1] ||
+             g.clear.color_write[2] || g.clear.color_write[3])) {
             VkClearColorValue c{};
-            c.float32[0] = g.clear_r;
-            c.float32[1] = g.clear_g;
-            c.float32[2] = g.clear_b;
-            c.float32[3] = g.clear_a;
+            c.float32[0] = g.clear.color[0];
+            c.float32[1] = g.clear.color[1];
+            c.float32[2] = g.clear.color[2];
+            c.float32[3] = g.clear.color[3];
             auto clear_img = [&](VkImage img, VkImageLayout lay) {
                 if (img == VK_NULL_HANDLE) return;
                 TransitionLayout(g.cmd, img, lay,
@@ -262,10 +330,11 @@ void SubmitFlush() {
                                         &c, 1, &color_range);
             };
             if (!fbo) {
-                clear_img(color_img, *color_layout);
+                if (OpClearColorEnabled(nullptr, g.clear, 0))
+                    clear_img(color_img, *color_layout);
             } else {
                 for (size_t i = 0; i < fbo->colors.size(); ++i) {
-                    if (!(OpDrawBufEnabled(*fbo, i))) continue;
+                    if (!OpClearColorEnabled(fbo, g.clear, i)) continue;
                     clear_img(FboColorImage(*fbo, (int)i),
                               VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
                     if (fbo->color_msaa[i])
@@ -275,11 +344,14 @@ void SubmitFlush() {
             }
         }
     }
-    if (g.pending_clear && has_depth &&
-        (g.clear_mask & (GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT))) {
-        VkImageAspectFlags aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
-        if (g.clear_mask & GL_STENCIL_BUFFER_BIT)
-            aspect |= VK_IMAGE_ASPECT_STENCIL_BIT;
+    VkImageAspectFlags clear_depth_stencil_aspects = 0;
+    if ((g.clear.mask & GL_DEPTH_BUFFER_BIT) && g.clear.depth_write)
+        clear_depth_stencil_aspects |= VK_IMAGE_ASPECT_DEPTH_BIT;
+    if ((g.clear.mask & GL_STENCIL_BUFFER_BIT) && g.clear.stencil_write_mask)
+        clear_depth_stencil_aspects |= VK_IMAGE_ASPECT_STENCIL_BIT;
+    if (g.pending_clear && !clear_in_render_pass && has_depth &&
+        clear_depth_stencil_aspects) {
+        VkImageAspectFlags aspect = clear_depth_stencil_aspects;
         if (*depth_layout != VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
             TransitionLayoutAspect(g.cmd, depth_img, {aspect, 0, 1, 0, 1},
                                    *depth_layout,
@@ -287,8 +359,8 @@ void SubmitFlush() {
             *depth_layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
         }
         VkClearDepthStencilValue c{};
-        c.depth = (float)g.clear_depth;
-        c.stencil = (uint32_t)g.clear_stencil;
+        c.depth = (float)g.clear.depth;
+        c.stencil = g.clear.stencil;
         VkImageSubresourceRange depth_range{aspect, 0, 1, 0, 1};
         g.fn.CmdClearDepthStencilImage(g.cmd, depth_img,
                                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
@@ -320,7 +392,7 @@ void SubmitFlush() {
         *depth_layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
     }
 
-    if (!g.frame_draws.empty()) {
+    if (!g.frame_draws.empty() || clear_in_render_pass) {
         VkRenderPassBeginInfo rbi{};
         rbi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
         rbi.renderPass = rp;
@@ -328,35 +400,96 @@ void SubmitFlush() {
         rbi.renderArea = {0, 0, pw, ph};
         g.fn.CmdBeginRenderPass(g.cmd, &rbi, VK_SUBPASS_CONTENTS_INLINE);
 
-        VkViewport vp{};
-        vp.x = g.vp_x;
-        vp.y = g.vp_y;
-        vp.width = std::min<float>(g.vp_w, pw);
-        vp.height = std::min<float>(g.vp_h, ph);
-        vp.minDepth = 0.f;
-        vp.maxDepth = 1.f;
-        g.fn.CmdSetViewport(g.cmd, 0, 1, &vp);
+        if (clear_in_render_pass) {
+            std::vector<VkClearAttachment> attachments;
+            if ((g.clear.mask & GL_COLOR_BUFFER_BIT) &&
+                (g.clear.color_write[0] || g.clear.color_write[1] ||
+                 g.clear.color_write[2] || g.clear.color_write[3])) {
+                const uint32_t color_count = fbo
+                    ? static_cast<uint32_t>(fbo->colors.size()) : 1;
+                for (uint32_t i = 0; i < color_count; ++i) {
+                    if (!OpClearColorEnabled(fbo, g.clear, i)) continue;
+                    VkClearAttachment attachment{};
+                    attachment.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+                    attachment.colorAttachment = i;
+                    std::copy(g.clear.color.begin(), g.clear.color.end(),
+                              attachment.clearValue.color.float32);
+                    attachments.push_back(attachment);
+                }
+            }
+            VkImageAspectFlags aspects = 0;
+            if (has_depth && (g.clear.mask & GL_DEPTH_BUFFER_BIT) &&
+                g.clear.depth_write)
+                aspects |= VK_IMAGE_ASPECT_DEPTH_BIT;
+            if (has_depth && (g.clear.mask & GL_STENCIL_BUFFER_BIT) &&
+                g.clear.stencil_write_mask)
+                aspects |= VK_IMAGE_ASPECT_STENCIL_BIT;
+            if (aspects) {
+                VkClearAttachment attachment{};
+                attachment.aspectMask = aspects;
+                attachment.clearValue.depthStencil.depth =
+                    static_cast<float>(g.clear.depth);
+                attachment.clearValue.depthStencil.stencil = g.clear.stencil;
+                attachments.push_back(attachment);
+            }
 
-        // Per-draw scissor: GL_SCISSOR_TEST gates a per-draw rectangle
-        // (dynamic state), otherwise the full target.
+            const int32_t x0 = std::clamp<int32_t>(g.clear.scissor[0], 0, pw);
+            const int32_t y0_bottom = std::clamp<int32_t>(
+                g.clear.scissor[1], 0, ph);
+            const int32_t x1 = std::clamp<int32_t>(
+                g.clear.scissor[0] + g.clear.scissor[2], 0, pw);
+            const int32_t y1_bottom = std::clamp<int32_t>(
+                g.clear.scissor[1] + g.clear.scissor[3], 0, ph);
+            if (!attachments.empty() && x1 > x0 && y1_bottom > y0_bottom) {
+                VkClearRect rect{};
+                rect.rect.offset = {x0, static_cast<int32_t>(ph) - y1_bottom};
+                rect.rect.extent = {static_cast<uint32_t>(x1 - x0),
+                                    static_cast<uint32_t>(y1_bottom - y0_bottom)};
+                rect.baseArrayLayer = 0;
+                rect.layerCount = 1;
+                g.fn.CmdClearAttachments(g.cmd,
+                    static_cast<uint32_t>(attachments.size()),
+                    attachments.data(), 1, &rect);
+            }
+        }
+
+        // Viewport and scissor are captured per draw. A whole GL batch can
+        // therefore be encoded later without collapsing state transitions.
         for (const auto& op : g.frame_draws) {
             VkPipeline pipe =
                 GetOrCreatePipeline(g_programs.at(op.program), op);
             if (pipe == VK_NULL_HANDLE) continue;
             g.fn.CmdBindPipeline(g.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
 
+            // GL window coordinates are bottom-left-origin while the Vulkan
+            // framebuffer is top-left-origin. Vulkan 1.1 permits a negative
+            // viewport height, so flip during rasterization and keep readback,
+            // scissor and framebuffer coordinates in their natural conventions.
+            VkViewport vp{};
+            vp.x = op.dynamic.viewport[0];
+            vp.y = static_cast<float>(ph) - op.dynamic.viewport[1];
+            vp.width = std::min<float>(op.dynamic.viewport[2], pw);
+            vp.height = -std::min<float>(op.dynamic.viewport[3], ph);
+            vp.minDepth = 0.f;
+            vp.maxDepth = 1.f;
+            g.fn.CmdSetViewport(g.cmd, 0, 1, &vp);
+
             // Dynamic scissor for this draw (GL_SCISSOR_TEST).
             VkRect2D sc;
-            if (op.pipe.scissor_test && g.sc_w > 0 && g.sc_h > 0) {
+            const auto& dynamic_scissor = op.dynamic.scissor;
+            if (op.pipe.scissor_test && dynamic_scissor[2] > 0 &&
+                dynamic_scissor[3] > 0) {
                 // GL scissor has a bottom-left origin; Vulkan is top-left, so
                 // flip Y and clamp the rectangle to the target.
-                int32_t sx = std::clamp<int32_t>((int32_t)g.sc_x, 0,
+                int32_t sx = std::clamp<int32_t>((int32_t)dynamic_scissor[0], 0,
                                                  (int32_t)pw);
-                int32_t sy = std::clamp<int32_t>((int32_t)ph - ((int32_t)g.sc_y + (int32_t)g.sc_h), 0,
+                int32_t sy = std::clamp<int32_t>((int32_t)ph -
+                                                 ((int32_t)dynamic_scissor[1] +
+                                                  (int32_t)dynamic_scissor[3]), 0,
                                                  (int32_t)ph);
-                uint32_t sw = std::min<uint32_t>((uint32_t)g.sc_w,
+                uint32_t sw = std::min<uint32_t>((uint32_t)dynamic_scissor[2],
                                                  pw - (uint32_t)sx);
-                uint32_t sh = std::min<uint32_t>((uint32_t)g.sc_h,
+                uint32_t sh = std::min<uint32_t>((uint32_t)dynamic_scissor[3],
                                                  ph - (uint32_t)sy);
                 sc.offset = {sx, sy};
                 sc.extent = {sw, sh};
@@ -367,9 +500,10 @@ void SubmitFlush() {
             g.fn.CmdSetScissor(g.cmd, 0, 1, &sc);
 
             const VkBuffer binds[2] = {op.vertex_buffer, op.instance_buffer};
-            const VkDeviceSize zeros[2] = {0, 0};
+            const VkDeviceSize offsets[2] = {op.vertex_offset,
+                                             op.instance_offset};
             uint32_t nb = op.instance_buffer ? 2 : 1;
-            g.fn.CmdBindVertexBuffers(g.cmd, 0, nb, binds, zeros);
+            g.fn.CmdBindVertexBuffers(g.cmd, 0, nb, binds, offsets);
 
             if (op.index_count) {
                 g.fn.CmdBindIndexBuffer(g.cmd, op.index_buffer, 0,

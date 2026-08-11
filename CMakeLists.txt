@@ -12,6 +12,12 @@ endif()
 option(MITHRIL_IOS "Build for iOS instead of macOS when APPLE is set" OFF)
 set(MITHRIL_VULKAN_LIBRARY "" CACHE FILEPATH "Vulkan loader/MoltenVK library to link (iOS)")
 
+if(MITHRIL_IOS AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    message(FATAL_ERROR
+        "MITHRIL_IOS=ON requires an iPhoneOS CMake toolchain "
+        "(-DCMAKE_SYSTEM_NAME=iOS, normally with -DCMAKE_OSX_SYSROOT=iphoneos)")
+endif()
+
 # ---- third-party: glslang (GLSL -> SPIR-V) and SPIRV-Cross (reflection) ----
 set(ENABLE_HLSL OFF CACHE BOOL "No HLSL support needed (GLES/GL only)")
 set(ENABLE_OPT OFF CACHE BOOL "No spirv-opt: keep the dependency graph small")
@@ -26,6 +32,7 @@ add_subdirectory(third_party/glslang EXCLUDE_FROM_ALL)
 add_subdirectory(third_party/Vulkan-Headers EXCLUDE_FROM_ALL)
 
 add_library(mithril SHARED
+    src/backend/backend.cpp
     src/egl/impl.cpp
     src/egl/exports.cpp
     src/gl/exports.cpp
@@ -36,6 +43,8 @@ add_library(mithril SHARED
     src/gl/draw.cpp
     src/gl/stub.cpp
     src/gl/fbo.cpp
+    src/gl/sync.cpp
+    src/gl/query.cpp
     src/shader/glsl.cpp
     src/shader/reflect.cpp
     src/shader/registry.cpp
@@ -63,6 +72,24 @@ target_link_libraries(mithril PRIVATE
     Vulkan::Headers
 )
 
+if(APPLE)
+    enable_language(OBJCXX)
+    set(CMAKE_OBJCXX_STANDARD 17)
+    set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
+    # engine_apple.mm includes the shared engine implementation and replaces
+    # only the CAMetalLayer presentation seam. Do not compile engine.mm as a
+    # second translation unit or SetNativeWindow/Present would be duplicated.
+    target_sources(mithril PRIVATE src/metal/engine_apple.mm)
+    target_compile_definitions(mithril PRIVATE MITHRIL_HAS_DIRECT_METAL=1)
+    set_source_files_properties(src/metal/engine_apple.mm PROPERTIES
+        COMPILE_FLAGS "-fobjc-arc")
+    target_link_libraries(mithril PRIVATE
+        spirv-cross-msl
+        "-framework Metal"
+        "-framework Foundation"
+        "-framework QuartzCore")
+endif()
+
 set_target_properties(mithril PROPERTIES
     OUTPUT_NAME mithril
     LIBRARY_OUTPUT_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/output
@@ -73,6 +100,12 @@ if(UNIX AND NOT APPLE)
     # Linux: plain shared library for local dev loop.
 elseif(APPLE AND MITHRIL_IOS)
     target_compile_definitions(mithril PUBLIC MITHRIL_IOS=1)
+    # Amethyst resolves the renderer from AngelAuraAmethyst.app/Frameworks via
+    # @rpath/libmithril.dylib. Make the Mach-O identity match that runtime
+    # contract even for an uninstalled CI build artifact.
+    set_target_properties(mithril PROPERTIES
+        INSTALL_NAME_DIR "@rpath"
+        BUILD_WITH_INSTALL_NAME_DIR ON)
     target_link_libraries(mithril PUBLIC
         "-framework CoreGraphics"
         "-framework Foundation"

@@ -7,7 +7,9 @@
 
 #include <cstring>
 
+#include <backend/backend.h>
 #include <egl/internal.h>
+#include <state/state.h>
 #include <util/log.h>
 
 using namespace mithril::egl;
@@ -161,6 +163,7 @@ EGLContext eglCreateContext(EGLDisplay dpy, EGLConfig config, EGLContext share_c
                             const EGLint* attrib_list) {
     (void)attrib_list;
     globals().context.config = config;
+    globals().context.drawable_state_initialized = false;
     ML_LOG_DEBUG("eglCreateContext(config=%p, share=%p)", config, share_context);
     SetError(EGL_SUCCESS);
     return reinterpret_cast<EGLContext>(&globals().context);
@@ -171,6 +174,7 @@ EGLBoolean eglDestroyContext(EGLDisplay dpy, EGLContext ctx) {
         SetError(EGL_BAD_CONTEXT);
         return EGL_FALSE;
     }
+    globals().context.drawable_state_initialized = false;
     SetError(EGL_SUCCESS);
     return EGL_TRUE;
 }
@@ -194,6 +198,16 @@ EGLBoolean eglMakeCurrent(EGLDisplay dpy, EGLSurface draw, EGLSurface read, EGLC
         SetError(EGL_SUCCESS);
         return EGL_TRUE;
     }
+    if (ctx == reinterpret_cast<EGLContext>(&globals().context) &&
+        draw == reinterpret_cast<EGLSurface>(&globals().surface) &&
+        !globals().context.drawable_state_initialized) {
+        const GLsizei width = static_cast<GLsizei>(mithril::backend::TargetWidth());
+        const GLsizei height = static_cast<GLsizei>(mithril::backend::TargetHeight());
+        auto& state = mithril::state::GetState();
+        state.viewport = {0, 0, width, height, true};
+        state.scissor = {0, 0, width, height, true};
+        globals().context.drawable_state_initialized = true;
+    }
     SetError(EGL_SUCCESS);
     return EGL_TRUE;
 }
@@ -212,6 +226,12 @@ EGLSurface eglCreateWindowSurface(EGLDisplay dpy, EGLConfig config,
     globals().surface.is_window = true;
     globals().surface.swap_interval = 1;
     ML_LOG_DEBUG("eglCreateWindowSurface(win=%p)", (void*)win);
+    if (!mithril::backend::SetNativeWindow((void*)win)) {
+        globals().surface.native_window = nullptr;
+        globals().surface.is_window = false;
+        SetError(EGL_BAD_NATIVE_WINDOW);
+        return EGL_NO_SURFACE;
+    }
     SetError(EGL_SUCCESS);
     return reinterpret_cast<EGLSurface>(&globals().surface);
 }
@@ -222,13 +242,21 @@ EGLSurface eglCreatePlatformWindowSurface(EGLDisplay dpy, EGLConfig config, void
     globals().surface.native_window = native_window;
     globals().surface.is_window = true;
     globals().surface.swap_interval = 1;
+    if (!mithril::backend::SetNativeWindow(native_window)) {
+        globals().surface.native_window = nullptr;
+        globals().surface.is_window = false;
+        SetError(EGL_BAD_NATIVE_WINDOW);
+        return EGL_NO_SURFACE;
+    }
     SetError(EGL_SUCCESS);
     return reinterpret_cast<EGLSurface>(&globals().surface);
 }
 
 EGLSurface eglCreatePbufferSurface(EGLDisplay dpy, EGLConfig config, const EGLint* attrib_list) {
     globals().surface.config = config;
+    globals().surface.native_window = nullptr;
     globals().surface.is_window = false;
+    mithril::backend::SetNativeWindow(nullptr);
     SetError(EGL_SUCCESS);
     return reinterpret_cast<EGLSurface>(&globals().surface);
 }
@@ -238,14 +266,21 @@ EGLBoolean eglDestroySurface(EGLDisplay dpy, EGLSurface surface) {
         SetError(EGL_BAD_SURFACE);
         return EGL_FALSE;
     }
+    mithril::backend::SetNativeWindow(nullptr);
+    globals().surface.native_window = nullptr;
+    globals().surface.is_window = false;
     SetError(EGL_SUCCESS);
     return EGL_TRUE;
 }
 
 EGLBoolean eglQuerySurface(EGLDisplay dpy, EGLSurface surface, EGLint attribute, EGLint* value) {
+    if (surface != reinterpret_cast<EGLSurface>(&globals().surface) || !value) {
+        SetError(EGL_BAD_SURFACE);
+        return EGL_FALSE;
+    }
     switch (attribute) {
-        case EGL_WIDTH: *value = 0; break;
-        case EGL_HEIGHT: *value = 0; break;
+        case EGL_WIDTH: *value = static_cast<EGLint>(mithril::backend::TargetWidth()); break;
+        case EGL_HEIGHT: *value = static_cast<EGLint>(mithril::backend::TargetHeight()); break;
         default:
             SetError(EGL_BAD_ATTRIBUTE);
             return EGL_FALSE;
@@ -266,6 +301,19 @@ EGLBoolean eglSwapInterval(EGLDisplay dpy, EGLint interval) {
 }
 
 EGLBoolean eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
+    if (surface != reinterpret_cast<EGLSurface>(&globals().surface)) {
+        SetError(EGL_BAD_SURFACE);
+        return EGL_FALSE;
+    }
+    if (!globals().surface.is_window) {
+        mithril::backend::SubmitFlush(false);
+        SetError(EGL_SUCCESS);
+        return EGL_TRUE;
+    }
+    if (!mithril::backend::SwapBuffers()) {
+        SetError(EGL_BAD_SURFACE);
+        return EGL_FALSE;
+    }
     SetError(EGL_SUCCESS);
     return EGL_TRUE;
 }

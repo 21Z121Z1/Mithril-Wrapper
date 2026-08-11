@@ -1,6 +1,6 @@
 // Mithril-Wrapper GL entry points -- S4 texture domain (M4).
-// Texture object table (name pool + CPU RGBA8 mip mirror + sampler state),
-// glTexImage*/TexSubImage* uploads through vk::UploadTexture, box-filtered
+// Texture object table (name pool + versioned CPU image mirror + sampler state),
+// glTexImage*/TexSubImage* uploads through backend::UploadTexture, box-filtered
 // mip generation, S3TC decompression, framebuffer copies, and the
 // unit/binding bookkeeping the draw path needs to resolve sampler uniforms
 // to textures.  Unsupported targets/formats stay in the CPU mirror but are
@@ -9,13 +9,15 @@
 //
 // Layout of the CPU mirror (TexState::mip[level]): every "slice" of the
 // level is a width*height*4 plane of RGBA8 rows; slices are concatenated in
-// the same order vk::TexUpload expects (3D: z; 2D/1D arrays: layer; cubemap:
+// the same order backend::TexUpload expects (3D: z; 2D/1D arrays: layer; cubemap:
 // the six faces in POSITIVE_X..NEGATIVE_Z order).
 
 #include "internal.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
+#include <limits>
 
 #include <util/log.h>
 
@@ -162,20 +164,21 @@ void EncodeRowRGBA8(const uint8_t* src, uint8_t* dst, GLsizei width,
 
 // Row stride of `w`-wide pixels using the UNPACK_* pixel store state; the
 // PACK variant reads pack_* instead.
-uint32_t RowBytes(uint32_t w, GLenum format, GLenum type, bool pack) {
+size_t RowBytes(uint32_t w, GLenum format, GLenum type, bool pack) {
     const s::PixelStore& ps = s::GetState().pixels;
     uint32_t row_px = (pack ? ps.pack_row_length : ps.unpack_row_length)
                           ? (pack ? (uint32_t)ps.pack_row_length
                                   : (uint32_t)ps.unpack_row_length)
                           : w;
-    uint32_t bytes = row_px * FormatComponents(format) * TypeBytes(type);
-    uint32_t align =
-        std::max<uint32_t>(1, (uint32_t)(pack ? ps.pack_alignment
-                                              : ps.unpack_alignment));
+    const size_t bytes = static_cast<size_t>(row_px) *
+                         FormatComponents(format) * TypeBytes(type);
+    const size_t align = std::max<size_t>(
+        1, static_cast<size_t>(pack ? ps.pack_alignment
+                                    : ps.unpack_alignment));
     return ((bytes + align - 1) / align) * align;
 }
 
-uint32_t UnpackRowBytes(uint32_t w, GLenum format, GLenum type) {
+size_t UnpackRowBytes(uint32_t w, GLenum format, GLenum type) {
     return RowBytes(w, format, type, false);
 }
 
@@ -184,6 +187,118 @@ uint32_t PlaneRows(uint32_t h, bool pack) {
     GLint ih = pack ? s::GetState().pixels.pack_image_height
                     : s::GetState().pixels.unpack_image_height;
     return ih > 0 ? (uint32_t)ih : h;
+}
+
+struct UnpackSource {
+    const void* data = nullptr;
+    bool provided = false;
+};
+
+bool CheckedAddProduct(uint64_t* total, uint64_t left, uint64_t right) {
+    if (left && right > std::numeric_limits<uint64_t>::max() / left)
+        return false;
+    const uint64_t product = left * right;
+    if (*total > std::numeric_limits<uint64_t>::max() - product) return false;
+    *total += product;
+    return true;
+}
+
+// Resolve a GL client pointer or PIXEL_UNPACK_BUFFER byte offset into the
+// same immutable call-time byte snapshot consumed by StoreSlices. Pixel-store
+// skips are applied here; row/image strides remain visible to StoreSlices.
+bool ResolveUnpackSource(const void* pixels, uint32_t width, uint32_t height,
+                         uint32_t planes, bool three_dimensional,
+                         GLenum format, GLenum type, UnpackSource* output) {
+    if (!output) return false;
+    *output = {};
+    const bool uses_pbo = g_bound_pixel_unpack_buffer != 0;
+    if (!uses_pbo && !pixels) return true;
+
+    const uint32_t components = FormatComponents(format);
+    const uint32_t type_bytes = TypeBytes(type);
+    if (!components || !type_bytes) {
+        PUSH_ERROR(GL_INVALID_ENUM);
+        return false;
+    }
+    const uint64_t bytes_per_pixel =
+        static_cast<uint64_t>(components) * type_bytes;
+    const uint64_t row_bytes = UnpackRowBytes(width, format, type);
+    const uint64_t plane_rows = three_dimensional
+        ? PlaneRows(height, false) : height;
+    const s::PixelStore& store = s::GetState().pixels;
+
+    uint64_t plane_stride = 0;
+    if (!CheckedAddProduct(&plane_stride, plane_rows, row_bytes)) {
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return false;
+    }
+    uint64_t base = 0;
+    if ((three_dimensional &&
+         !CheckedAddProduct(&base,
+                            static_cast<uint64_t>(store.unpack_skip_images),
+                            plane_stride)) ||
+        !CheckedAddProduct(&base, static_cast<uint64_t>(store.unpack_skip_rows),
+                           row_bytes) ||
+        !CheckedAddProduct(&base, static_cast<uint64_t>(store.unpack_skip_pixels),
+                           bytes_per_pixel)) {
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return false;
+    }
+    uint64_t span = 0;
+    if (width && height && planes) {
+        if (!CheckedAddProduct(&span, planes - 1, plane_stride) ||
+            !CheckedAddProduct(&span, height - 1, row_bytes) ||
+            !CheckedAddProduct(&span, width, bytes_per_pixel)) {
+            PUSH_ERROR(GL_INVALID_OPERATION);
+            return false;
+        }
+    }
+
+    if (uses_pbo) {
+        const auto buffer = g_buffers.find(g_bound_pixel_unpack_buffer);
+        const uint64_t offset = reinterpret_cast<uintptr_t>(pixels);
+        if (buffer == g_buffers.end() || buffer->second.mapped ||
+            offset % type_bytes != 0 || offset > buffer->second.data.size() ||
+            base > buffer->second.data.size() - offset ||
+            span > buffer->second.data.size() - offset - base) {
+            PUSH_ERROR(GL_INVALID_OPERATION);
+            return false;
+        }
+        output->data = buffer->second.data.empty()
+            ? nullptr : buffer->second.data.data() + offset + base;
+    } else {
+        const uintptr_t address = reinterpret_cast<uintptr_t>(pixels);
+        if (address > std::numeric_limits<uintptr_t>::max() - base) {
+            PUSH_ERROR(GL_INVALID_OPERATION);
+            return false;
+        }
+        output->data = reinterpret_cast<const void*>(address + base);
+    }
+    output->provided = true;
+    return true;
+}
+
+bool ResolveUnpackBytes(const void* pointer, uint64_t byte_count,
+                        UnpackSource* output) {
+    if (!output) return false;
+    *output = {};
+    if (!g_bound_pixel_unpack_buffer) {
+        output->data = pointer;
+        output->provided = pointer != nullptr;
+        return true;
+    }
+    const auto buffer = g_buffers.find(g_bound_pixel_unpack_buffer);
+    const uint64_t offset = reinterpret_cast<uintptr_t>(pointer);
+    if (buffer == g_buffers.end() || buffer->second.mapped ||
+        offset > buffer->second.data.size() ||
+        byte_count > buffer->second.data.size() - offset) {
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return false;
+    }
+    output->data = buffer->second.data.empty()
+        ? nullptr : buffer->second.data.data() + offset;
+    output->provided = true;
+    return true;
 }
 
 // Byte offset of slice `slice` inside `st.mip[level]`.
@@ -225,7 +340,7 @@ void StoreSlices(TexState& st, uint32_t level, uint32_t slice0, uint32_t count,
                  GLenum format, GLenum type, const void* data) {
     if (!FormatComponents(format) || !TypeBytes(type)) return;
     uint32_t lvl_w = std::max<uint32_t>(1, st.width >> level);
-    uint32_t row_src = UnpackRowBytes(w, format, type);
+    size_t row_src = UnpackRowBytes(w, format, type);
     uint32_t plane_rows = PlaneRows(h, false);
     for (uint32_t s = 0; s < count; ++s) {
         const uint8_t* plane = (const uint8_t*)data + (size_t)s * plane_rows * row_src;
@@ -233,6 +348,24 @@ void StoreSlices(TexState& st, uint32_t level, uint32_t slice0, uint32_t count,
         for (uint32_t r = 0; r < h; ++r)
             DecodeRowRGBA8(plane + (size_t)r * row_src, dst + (size_t)r * lvl_w * 4,
                            (GLsizei)w, format, type);
+    }
+}
+
+// A 1D-array image is specified by the 2D texture upload commands: source
+// rows are array layers, so GL_UNPACK_IMAGE_HEIGHT must not become a layer
+// stride. Keep that API-dimensional semantic out of backend storage layout.
+void Store1DArraySlices(TexState& st, uint32_t level, uint32_t slice0,
+                        uint32_t count, uint32_t x, uint32_t width,
+                        GLenum format, GLenum type, const void* data) {
+    if (!FormatComponents(format) || !TypeBytes(type)) return;
+    const size_t source_row_bytes = UnpackRowBytes(width, format, type);
+    for (uint32_t layer = 0; layer < count; ++layer) {
+        const auto* source = static_cast<const uint8_t*>(data) +
+                             static_cast<size_t>(layer) * source_row_bytes;
+        uint8_t* destination = SlicePtr(st, level, slice0 + layer) +
+                               static_cast<size_t>(x) * 4;
+        DecodeRowRGBA8(source, destination, static_cast<GLsizei>(width),
+                       format, type);
     }
 }
 
@@ -363,36 +496,89 @@ bool IsS3TC(GLenum fmt) {
            fmt == GL_COMPRESSED_RGBA_S3TC_DXT5_EXT;
 }
 
+bool IsDepthInternalFormat(GLenum format) {
+    return format == GL_DEPTH_COMPONENT || format == GL_DEPTH_COMPONENT16 ||
+           format == GL_DEPTH_COMPONENT24 || format == GL_DEPTH_COMPONENT32 ||
+           format == GL_DEPTH_COMPONENT32F || format == GL_DEPTH_STENCIL ||
+           format == GL_DEPTH24_STENCIL8 || format == GL_DEPTH32F_STENCIL8;
+}
+
+bool BufferTexelFormat(GLenum internalformat, v::TexelFormat* format,
+                       uint32_t* bytes_per_texel) {
+    switch (internalformat) {
+        case GL_RGBA8:
+            *format = v::TexelFormat::RGBA8Unorm;
+            *bytes_per_texel = 4;
+            return true;
+        case GL_R8I:
+            *format = v::TexelFormat::R8Sint;
+            *bytes_per_texel = 1;
+            return true;
+        case GL_R8UI:
+            *format = v::TexelFormat::R8Uint;
+            *bytes_per_texel = 1;
+            return true;
+        case GL_R32I:
+            *format = v::TexelFormat::R32Sint;
+            *bytes_per_texel = 4;
+            return true;
+        case GL_R32UI:
+            *format = v::TexelFormat::R32Uint;
+            *bytes_per_texel = 4;
+            return true;
+        case GL_R32F:
+            *format = v::TexelFormat::R32Float;
+            *bytes_per_texel = 4;
+            return true;
+        default:
+            return false;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Sampler state -> engine projection
 // ---------------------------------------------------------------------------
 
-v::TexSamplerInfo ToSamplerInfo(const TexState& st) {
+template <typename T>
+v::TexSamplerInfo ToSamplerInfo(const T& st) {
     v::TexSamplerInfo si;
     si.mag = st.mag_filter == GL_NEAREST ? v::TexFilter::Nearest
                                          : v::TexFilter::Linear;
-    bool mip = st.min_filter == GL_NEAREST_MIPMAP_NEAREST ||
-               st.min_filter == GL_NEAREST_MIPMAP_LINEAR ||
-               st.min_filter == GL_LINEAR_MIPMAP_NEAREST ||
-               st.min_filter == GL_LINEAR_MIPMAP_LINEAR;
-    si.mip = mip;
     si.min = (st.min_filter == GL_NEAREST ||
-              st.min_filter == GL_NEAREST_MIPMAP_NEAREST)
+              st.min_filter == GL_NEAREST_MIPMAP_NEAREST ||
+              st.min_filter == GL_NEAREST_MIPMAP_LINEAR)
                  ? v::TexFilter::Nearest
                  : v::TexFilter::Linear;
+    if (st.min_filter == GL_NEAREST_MIPMAP_NEAREST ||
+        st.min_filter == GL_LINEAR_MIPMAP_NEAREST)
+        si.mip = v::TexMipFilter::Nearest;
+    else if (st.min_filter == GL_NEAREST_MIPMAP_LINEAR ||
+             st.min_filter == GL_LINEAR_MIPMAP_LINEAR)
+        si.mip = v::TexMipFilter::Linear;
+    else
+        si.mip = v::TexMipFilter::None;
     si.wrap_s = st.wrap_s;
     si.wrap_t = st.wrap_t;
     si.wrap_r = st.wrap_r;
+    si.min_lod = st.min_lod;
+    si.max_lod = st.max_lod;
+    si.lod_bias = st.lod_bias;
+    si.border_color = st.border_color;
+    si.compare_mode = st.compare_mode;
+    si.compare_func = st.compare_func;
     return si;
 }
 
 // Push the CPU mirror of `id` (level 0 + any explicit chain) to the engine.
 void ReUpload(TexState& st, GLuint id) {
-    if (!st.has_image || st.mip.empty()) return;
+    const bool multisample = st.target == GL_TEXTURE_2D_MULTISAMPLE;
+    if (!st.has_image || (!multisample && st.mip.empty())) return;
     bool served = st.target == GL_TEXTURE_2D || st.target == GL_TEXTURE_1D ||
                   st.target == GL_TEXTURE_3D || st.target == GL_TEXTURE_CUBE_MAP ||
                   st.target == GL_TEXTURE_2D_ARRAY ||
-                  st.target == GL_TEXTURE_1D_ARRAY;
+                  st.target == GL_TEXTURE_1D_ARRAY ||
+                  st.target == GL_TEXTURE_2D_MULTISAMPLE ||
+                  st.target == GL_TEXTURE_BUFFER;
     if (!served) {
         ML_LOG_DEBUG("gl: target %x not served yet; texture %u stays dummy",
                      st.target, id);
@@ -402,8 +588,23 @@ void ReUpload(TexState& st, GLuint id) {
     img.width = st.width;
     img.height = st.height;
     img.depth = st.IsCube() ? 1 : st.depth;
+    img.samples = st.samples;
+    img.is_multisample = multisample;
     img.is_3d = st.Is3D();
     img.is_cube = st.IsCube();
+    img.is_buffer = st.has_tex_buffer;
+    img.format = st.has_tex_buffer ? st.tex_buffer_backend_format
+                                   : st.image_backend_format;
+    img.content_version = st.content_version;
+    if (multisample) {
+        v::UploadTexture(id, img);
+        return;
+    }
+    if (st.has_tex_buffer) {
+        img.mip.push_back(st.mip.front());
+        v::UploadTexture(id, img);
+        return;
+    }
     uint32_t w = st.width, h = st.height;
     size_t slices = st.SliceCount();
     for (uint32_t l = 0; l < st.mip.size(); ++l) {
@@ -411,14 +612,13 @@ void ReUpload(TexState& st, GLuint id) {
         img.mip.push_back(st.mip[l]);
         w = std::max<uint32_t>(1, w / 2);
         h = std::max<uint32_t>(1, h / 2);
-        if (w == 1 && h == 1) break;
     }
     if (img.mip.empty()) return;
     ML_LOG_DEBUG("gl: upload texture %u (%ux%ux%u, %zu mips, %s%s)", id,
                  img.width, img.height, img.depth, img.mip.size(),
                  img.is_cube ? "cube" : img.is_3d ? "3d" : "2d",
                  slices > 1 ? " layered" : "");
-    v::UploadTexture(id, img, ToSamplerInfo(st));
+    v::UploadTexture(id, img);
 }
 
 // Box-filter one level into the next (average 2x2 neighbourhood) for every
@@ -453,13 +653,208 @@ void GenerateNextMip(const std::vector<uint8_t>& src, uint32_t sw, uint32_t sh,
     }
 }
 
-// The texture bound to the active texture unit (0 when none).
-GLuint ActiveBound() {
+size_t TextureTargetSlot(GLenum target) {
+    if (IsCubeFace(target)) target = GL_TEXTURE_CUBE_MAP;
+    switch (target) {
+        case GL_TEXTURE_1D: return 0;
+        case GL_TEXTURE_2D: return 1;
+        case GL_TEXTURE_3D: return 2;
+        case GL_TEXTURE_CUBE_MAP: return 3;
+        case GL_TEXTURE_1D_ARRAY: return 4;
+        case GL_TEXTURE_2D_ARRAY: return 5;
+        case GL_TEXTURE_BUFFER: return 6;
+        case GL_TEXTURE_2D_MULTISAMPLE: return 7;
+        default: return kTextureTargetSlots;
+    }
+}
+
+// The texture bound to `target` on the active texture unit (0 when none).
+GLuint ActiveBound(GLenum target) {
     GLuint unit = (GLuint)(s::GetState().active_texture - GL_TEXTURE0);
-    return unit < kMaxTexUnits ? g_texture_units[unit] : 0;
+    return TextureBindingForUnit(unit, target);
+}
+
+bool ValidMinFilter(GLenum value) {
+    return value == GL_NEAREST || value == GL_LINEAR ||
+           value == GL_NEAREST_MIPMAP_NEAREST ||
+           value == GL_LINEAR_MIPMAP_NEAREST ||
+           value == GL_NEAREST_MIPMAP_LINEAR ||
+           value == GL_LINEAR_MIPMAP_LINEAR;
+}
+
+bool ValidWrap(GLenum value) {
+    return value == GL_REPEAT || value == GL_MIRRORED_REPEAT ||
+           value == GL_CLAMP_TO_EDGE || value == GL_CLAMP_TO_BORDER;
+}
+
+bool ValidCompareFunc(GLenum value) {
+    switch (value) {
+        case GL_NEVER: case GL_LESS: case GL_EQUAL: case GL_LEQUAL:
+        case GL_GREATER: case GL_NOTEQUAL: case GL_GEQUAL: case GL_ALWAYS:
+            return true;
+        default: return false;
+    }
+}
+
+template <typename T>
+bool SetSamplerScalar(T& state, GLenum pname, GLfloat value, GLenum* error) {
+    auto set_enum = [&](GLenum& destination, GLenum next) {
+        if (destination == next) return false;
+        destination = next;
+        return true;
+    };
+    auto set_float = [&](GLfloat& destination) {
+        if (destination == value) return false;
+        destination = value;
+        return true;
+    };
+    const GLenum parameter = static_cast<GLenum>(value);
+    switch (pname) {
+        case GL_TEXTURE_MIN_FILTER:
+            if (!ValidMinFilter(parameter)) { *error = GL_INVALID_ENUM; return false; }
+            return set_enum(state.min_filter, parameter);
+        case GL_TEXTURE_MAG_FILTER:
+            if (parameter != GL_NEAREST && parameter != GL_LINEAR) {
+                *error = GL_INVALID_ENUM; return false;
+            }
+            return set_enum(state.mag_filter, parameter);
+        case GL_TEXTURE_WRAP_S:
+            if (!ValidWrap(parameter)) { *error = GL_INVALID_ENUM; return false; }
+            return set_enum(state.wrap_s, parameter);
+        case GL_TEXTURE_WRAP_T:
+            if (!ValidWrap(parameter)) { *error = GL_INVALID_ENUM; return false; }
+            return set_enum(state.wrap_t, parameter);
+        case GL_TEXTURE_WRAP_R:
+            if (!ValidWrap(parameter)) { *error = GL_INVALID_ENUM; return false; }
+            return set_enum(state.wrap_r, parameter);
+        case GL_TEXTURE_MIN_LOD: return set_float(state.min_lod);
+        case GL_TEXTURE_MAX_LOD: return set_float(state.max_lod);
+        case GL_TEXTURE_LOD_BIAS: return set_float(state.lod_bias);
+        case GL_TEXTURE_COMPARE_MODE:
+            if (parameter != GL_NONE && parameter != GL_COMPARE_REF_TO_TEXTURE) {
+                *error = GL_INVALID_ENUM; return false;
+            }
+            return set_enum(state.compare_mode, parameter);
+        case GL_TEXTURE_COMPARE_FUNC:
+            if (!ValidCompareFunc(parameter)) { *error = GL_INVALID_ENUM; return false; }
+            return set_enum(state.compare_func, parameter);
+        default: *error = GL_INVALID_ENUM; return false;
+    }
+}
+
+template <typename T>
+bool SetBorderColor(T& state, const GLfloat* color) {
+    if (std::equal(state.border_color.begin(), state.border_color.end(), color))
+        return false;
+    std::copy(color, color + 4, state.border_color.begin());
+    return true;
+}
+
+GLfloat SignedBorderToFloat(GLint value) {
+    constexpr double denominator = 4294967295.0; // 2^32 - 1
+    return static_cast<GLfloat>((2.0 * value + 1.0) / denominator);
+}
+
+GLint FloatBorderToSigned(GLfloat value) {
+    constexpr double denominator = 4294967295.0;
+    const double clamped = std::clamp<double>(value, -1.0, 1.0);
+    const double mapped = (clamped * denominator - 1.0) * 0.5;
+    return static_cast<GLint>(std::nearbyint(mapped));
+}
+
+template <typename T>
+GLfloat GetSamplerScalar(const T& state, GLenum pname, GLenum* error) {
+    switch (pname) {
+        case GL_TEXTURE_MIN_FILTER: return static_cast<GLfloat>(state.min_filter);
+        case GL_TEXTURE_MAG_FILTER: return static_cast<GLfloat>(state.mag_filter);
+        case GL_TEXTURE_WRAP_S: return static_cast<GLfloat>(state.wrap_s);
+        case GL_TEXTURE_WRAP_T: return static_cast<GLfloat>(state.wrap_t);
+        case GL_TEXTURE_WRAP_R: return static_cast<GLfloat>(state.wrap_r);
+        case GL_TEXTURE_MIN_LOD: return state.min_lod;
+        case GL_TEXTURE_MAX_LOD: return state.max_lod;
+        case GL_TEXTURE_LOD_BIAS: return state.lod_bias;
+        case GL_TEXTURE_COMPARE_MODE: return static_cast<GLfloat>(state.compare_mode);
+        case GL_TEXTURE_COMPARE_FUNC: return static_cast<GLfloat>(state.compare_func);
+        default: *error = GL_INVALID_ENUM; return 0.0f;
+    }
 }
 
 } // namespace
+
+GLenum TextureTargetForSampler(GLenum sampler_type) {
+    switch (sampler_type) {
+        case GL_SAMPLER_1D:
+        case GL_INT_SAMPLER_1D:
+        case GL_UNSIGNED_INT_SAMPLER_1D:
+        case GL_SAMPLER_1D_SHADOW:
+            return GL_TEXTURE_1D;
+        case GL_SAMPLER_3D:
+        case GL_INT_SAMPLER_3D:
+        case GL_UNSIGNED_INT_SAMPLER_3D:
+            return GL_TEXTURE_3D;
+        case GL_SAMPLER_CUBE:
+        case GL_INT_SAMPLER_CUBE:
+        case GL_UNSIGNED_INT_SAMPLER_CUBE:
+        case GL_SAMPLER_CUBE_SHADOW:
+            return GL_TEXTURE_CUBE_MAP;
+        case GL_SAMPLER_1D_ARRAY:
+        case GL_INT_SAMPLER_1D_ARRAY:
+        case GL_UNSIGNED_INT_SAMPLER_1D_ARRAY:
+        case GL_SAMPLER_1D_ARRAY_SHADOW:
+            return GL_TEXTURE_1D_ARRAY;
+        case GL_SAMPLER_2D_ARRAY:
+        case GL_INT_SAMPLER_2D_ARRAY:
+        case GL_UNSIGNED_INT_SAMPLER_2D_ARRAY:
+        case GL_SAMPLER_2D_ARRAY_SHADOW:
+            return GL_TEXTURE_2D_ARRAY;
+        case GL_SAMPLER_BUFFER:
+        case GL_INT_SAMPLER_BUFFER:
+        case GL_UNSIGNED_INT_SAMPLER_BUFFER:
+            return GL_TEXTURE_BUFFER;
+        case GL_SAMPLER_2D_MULTISAMPLE:
+        case GL_INT_SAMPLER_2D_MULTISAMPLE:
+        case GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE:
+            return GL_TEXTURE_2D_MULTISAMPLE;
+        default:
+            return GL_TEXTURE_2D;
+    }
+}
+
+bool SamplerUsesDepthCompare(GLenum sampler_type) {
+    switch (sampler_type) {
+        case GL_SAMPLER_1D_SHADOW:
+        case GL_SAMPLER_2D_SHADOW:
+        case GL_SAMPLER_CUBE_SHADOW:
+        case GL_SAMPLER_1D_ARRAY_SHADOW:
+        case GL_SAMPLER_2D_ARRAY_SHADOW:
+            return true;
+        default:
+            return false;
+    }
+}
+
+GLuint TextureBindingForUnit(GLuint unit, GLenum target) {
+    const size_t slot = TextureTargetSlot(target);
+    return unit < kMaxTexUnits && slot < kTextureTargetSlots
+        ? g_texture_units[unit][slot] : 0;
+}
+
+v::TexSamplerInfo ResolveSamplerInfo(GLuint unit, const TexState& texture) {
+    if (texture.has_tex_buffer) {
+        v::TexSamplerInfo info;
+        info.mag = v::TexFilter::Nearest;
+        info.min = v::TexFilter::Nearest;
+        info.mip = v::TexMipFilter::None;
+        info.wrap_s = info.wrap_t = info.wrap_r = GL_CLAMP_TO_EDGE;
+        return info;
+    }
+    if (unit < kMaxTexUnits) {
+        const auto sampler = g_samplers.find(g_sampler_units[unit]);
+        if (sampler != g_samplers.end())
+            return ToSamplerInfo(sampler->second);
+    }
+    return ToSamplerInfo(texture);
+}
 
 void FlushDirtyTextureUploads() {
     std::vector<GLuint> ids(g_dirty_textures.begin(), g_dirty_textures.end());
@@ -474,17 +869,228 @@ void FlushDirtyTextureUploads() {
 }
 
 // Mark `id` as needing a (re)upload and try it immediately when the backend
-// is already up. Uploads made before vk::EnsureInit are replayed by
+// is already up. Uploads made before backend::EnsureInit are replayed by
 // FlushDirtyTextureUploads at the first draw.
-void MarkTextureDirty(TexState& st, GLuint id) {
-    if (!st.has_image || st.mip.empty()) return;
+void MarkTextureDirty(TexState& st, GLuint id, bool sampler_only = false) {
+    if (sampler_only) {
+        // Native samplers are resolved and content-keyed at draw time. Image
+        // ownership is unchanged by texture sampling-parameter mutations.
+        return;
+    }
+    NotifyTextureStorageChanged(id);
+    ++st.content_version;
+    if (!st.has_image ||
+        (st.target != GL_TEXTURE_2D_MULTISAMPLE && st.mip.empty())) return;
     g_dirty_textures.insert(id);
     if (v::IsInitialized()) FlushDirtyTextureUploads();
+}
+
+namespace {
+
+void SyncBufferTexture(TexState& texture, GLuint texture_id) {
+    if (!texture.has_tex_buffer || texture.tex_buffer == 0) return;
+    const auto buffer = g_buffers.find(texture.tex_buffer);
+    if (buffer == g_buffers.end() ||
+        texture.tex_buffer_source_version == buffer->second.content_version)
+        return;
+
+    const uint32_t bytes_per_texel = texture.tex_buffer_bytes_per_texel;
+    const size_t available_texels = bytes_per_texel
+        ? buffer->second.data.size() / bytes_per_texel : 0;
+    texture.width = static_cast<uint32_t>(std::min<size_t>(
+        available_texels, static_cast<size_t>(UINT32_MAX)));
+    const size_t visible_bytes = static_cast<size_t>(texture.width) *
+                                 bytes_per_texel;
+    texture.height = 1;
+    texture.depth = 1;
+    texture.has_image = texture.width != 0;
+    texture.mip.clear();
+    if (texture.has_image)
+        texture.mip.emplace_back(buffer->second.data.begin(),
+                                 buffer->second.data.begin() + visible_bytes);
+    texture.tex_buffer_source_version = buffer->second.content_version;
+    if (texture.has_image) {
+        MarkTextureDirty(texture, texture_id);
+    } else if (v::IsInitialized()) {
+        v::DestroyResidentTexture(texture_id);
+        g_dirty_textures.erase(texture_id);
+    }
+}
+
+} // namespace
+
+void PrepareTextureForDraw(GLuint texture) {
+    auto found = g_textures.find(texture);
+    if (found == g_textures.end()) return;
+    SyncBufferTexture(found->second, texture);
+    if (g_dirty_textures.count(texture) && v::IsInitialized())
+        FlushDirtyTextureUploads();
+}
+
+void DetachBufferTextures(GLuint buffer) {
+    for (auto& entry : g_textures) {
+        TexState& texture = entry.second;
+        if (!texture.has_tex_buffer || texture.tex_buffer != buffer) continue;
+        SyncBufferTexture(texture, entry.first);
+        // Deleting the GL name does not invalidate storage already attached
+        // to a texture buffer. The synchronized mirror becomes authoritative.
+        texture.tex_buffer = 0;
+    }
 }
 
 extern "C" {
 
 // ---- texture objects ------------------------------------------------------
+
+void APIENTRY glGenSamplers(GLsizei count, GLuint* samplers) {
+    if (count < 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+    if (!samplers || count == 0) return;
+    for (GLsizei i = 0; i < count; ++i) {
+        while (g_samplers.count(g_next_sampler)) ++g_next_sampler;
+        samplers[i] = g_next_sampler++;
+        g_samplers.emplace(samplers[i], SamplerData{});
+    }
+}
+
+void APIENTRY glDeleteSamplers(GLsizei count, const GLuint* samplers) {
+    if (count < 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+    if (!samplers) return;
+    for (GLsizei i = 0; i < count; ++i) {
+        if (!samplers[i]) continue;
+        for (auto& unit : g_sampler_units)
+            if (unit == samplers[i]) unit = 0;
+        g_samplers.erase(samplers[i]);
+    }
+}
+
+GLboolean APIENTRY glIsSampler(GLuint sampler) {
+    return sampler && g_samplers.count(sampler) ? GL_TRUE : GL_FALSE;
+}
+
+void APIENTRY glBindSampler(GLuint unit, GLuint sampler) {
+    if (unit >= kMaxTexUnits) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+    if (sampler && !g_samplers.count(sampler)) {
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return;
+    }
+    g_sampler_units[unit] = sampler;
+}
+
+void APIENTRY glSamplerParameterf(GLuint sampler, GLenum pname, GLfloat param) {
+    auto it = g_samplers.find(sampler);
+    if (it == g_samplers.end()) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+    GLenum error = GL_NO_ERROR;
+    (void)SetSamplerScalar(it->second, pname, param, &error);
+    if (error != GL_NO_ERROR) PUSH_ERROR(error);
+}
+
+void APIENTRY glSamplerParameteri(GLuint sampler, GLenum pname, GLint param) {
+    glSamplerParameterf(sampler, pname, static_cast<GLfloat>(param));
+}
+
+void APIENTRY glSamplerParameterfv(GLuint sampler, GLenum pname,
+                                   const GLfloat* param) {
+    if (!param) return;
+    if (pname != GL_TEXTURE_BORDER_COLOR) {
+        glSamplerParameterf(sampler, pname, param[0]);
+        return;
+    }
+    auto it = g_samplers.find(sampler);
+    if (it == g_samplers.end()) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+    (void)SetBorderColor(it->second, param);
+}
+
+void APIENTRY glSamplerParameteriv(GLuint sampler, GLenum pname,
+                                   const GLint* param) {
+    if (!param) return;
+    if (pname == GL_TEXTURE_BORDER_COLOR) {
+        GLfloat color[4];
+        for (int i = 0; i < 4; ++i)
+            color[i] = SignedBorderToFloat(param[i]);
+        glSamplerParameterfv(sampler, pname, color);
+    } else {
+        glSamplerParameteri(sampler, pname, param[0]);
+    }
+}
+
+void APIENTRY glSamplerParameterIiv(GLuint sampler, GLenum pname,
+                                    const GLint* param) {
+    if (pname == GL_TEXTURE_BORDER_COLOR) {
+        // Integer texture formats are not represented by the current RGBA8
+        // backend contract. Do not silently reinterpret integer border state.
+        if (!g_samplers.count(sampler)) PUSH_ERROR(GL_INVALID_VALUE);
+        else PUSH_ERROR(GL_INVALID_OPERATION);
+        return;
+    }
+    glSamplerParameteriv(sampler, pname, param);
+}
+
+void APIENTRY glSamplerParameterIuiv(GLuint sampler, GLenum pname,
+                                     const GLuint* param) {
+    if (!param) return;
+    if (pname == GL_TEXTURE_BORDER_COLOR) {
+        if (!g_samplers.count(sampler)) PUSH_ERROR(GL_INVALID_VALUE);
+        else PUSH_ERROR(GL_INVALID_OPERATION);
+        return;
+    }
+    GLint values[4];
+    const int count = pname == GL_TEXTURE_BORDER_COLOR ? 4 : 1;
+    for (int i = 0; i < count; ++i)
+        values[i] = static_cast<GLint>(param[i]);
+    glSamplerParameteriv(sampler, pname, values);
+}
+
+void APIENTRY glGetSamplerParameterfv(GLuint sampler, GLenum pname,
+                                      GLfloat* params) {
+    if (!params) return;
+    auto it = g_samplers.find(sampler);
+    if (it == g_samplers.end()) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+    if (pname == GL_TEXTURE_BORDER_COLOR) {
+        std::copy(it->second.border_color.begin(),
+                  it->second.border_color.end(), params);
+        return;
+    }
+    GLenum error = GL_NO_ERROR;
+    *params = GetSamplerScalar(it->second, pname, &error);
+    if (error != GL_NO_ERROR) PUSH_ERROR(error);
+}
+
+void APIENTRY glGetSamplerParameteriv(GLuint sampler, GLenum pname,
+                                      GLint* params) {
+    if (!params) return;
+    GLfloat values[4]{};
+    glGetSamplerParameterfv(sampler, pname, values);
+    const int count = pname == GL_TEXTURE_BORDER_COLOR ? 4 : 1;
+    for (int i = 0; i < count; ++i) {
+        params[i] = pname == GL_TEXTURE_BORDER_COLOR
+            ? FloatBorderToSigned(values[i]) : static_cast<GLint>(values[i]);
+    }
+}
+
+void APIENTRY glGetSamplerParameterIiv(GLuint sampler, GLenum pname,
+                                       GLint* params) {
+    if (pname == GL_TEXTURE_BORDER_COLOR) {
+        if (!g_samplers.count(sampler)) PUSH_ERROR(GL_INVALID_VALUE);
+        else PUSH_ERROR(GL_INVALID_OPERATION);
+        return;
+    }
+    glGetSamplerParameteriv(sampler, pname, params);
+}
+
+void APIENTRY glGetSamplerParameterIuiv(GLuint sampler, GLenum pname,
+                                        GLuint* params) {
+    if (!params) return;
+    if (pname == GL_TEXTURE_BORDER_COLOR) {
+        if (!g_samplers.count(sampler)) PUSH_ERROR(GL_INVALID_VALUE);
+        else PUSH_ERROR(GL_INVALID_OPERATION);
+        return;
+    }
+    GLint values[4]{};
+    glGetSamplerParameteriv(sampler, pname, values);
+    const int count = pname == GL_TEXTURE_BORDER_COLOR ? 4 : 1;
+    for (int i = 0; i < count; ++i)
+        params[i] = static_cast<GLuint>(values[i]);
+}
 
 void APIENTRY glGenTextures(GLsizei n, GLuint* textures) {
     if (n < 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
@@ -501,7 +1107,8 @@ void APIENTRY glDeleteTextures(GLsizei n, const GLuint* textures) {
     if (!textures) return;
     for (GLsizei i = 0; i < n; ++i) {
         for (auto& unit : g_texture_units)
-            if (unit == textures[i]) unit = 0;
+            for (GLuint& binding : unit)
+                if (binding == textures[i]) binding = 0;
         g_textures.erase(textures[i]);
         v::DestroyResidentTexture(textures[i]);
     }
@@ -515,25 +1122,26 @@ void APIENTRY glBindTexture(GLenum target, GLuint texture) {
     bool valid = target == GL_TEXTURE_1D || target == GL_TEXTURE_2D ||
                  target == GL_TEXTURE_3D || target == GL_TEXTURE_CUBE_MAP ||
                  target == GL_TEXTURE_1D_ARRAY || target == GL_TEXTURE_2D_ARRAY ||
-                 target == GL_TEXTURE_BUFFER;
+                 target == GL_TEXTURE_BUFFER ||
+                 target == GL_TEXTURE_2D_MULTISAMPLE;
     if (!valid) { PUSH_ERROR(GL_INVALID_ENUM); return; }
     if (texture != 0 && !g_textures.count(texture)) {
         PUSH_ERROR(GL_INVALID_OPERATION);   // not a generated name
         return;
     }
     GLuint unit = (GLuint)(s::GetState().active_texture - GL_TEXTURE0);
+    const size_t slot = TextureTargetSlot(target);
     if (texture == 0) {
-        if (unit < kMaxTexUnits) g_texture_units[unit] = 0;
+        if (unit < kMaxTexUnits) g_texture_units[unit][slot] = 0;
         return;
     }
     TexState& st = g_textures[texture];
-    if (st.target != GL_TEXTURE_2D && st.target != GL_TEXTURE_CUBE_MAP &&
-        st.target != target) {
+    if (st.target != 0 && st.target != target) {
         PUSH_ERROR(GL_INVALID_OPERATION);   // first bind fixes the target
         return;
     }
     st.target = target;
-    if (unit < kMaxTexUnits) g_texture_units[unit] = texture;
+    if (unit < kMaxTexUnits) g_texture_units[unit][slot] = texture;
 }
 
 void APIENTRY glActiveTexture(GLenum texture) {
@@ -550,7 +1158,6 @@ void APIENTRY glActiveTexture(GLenum texture) {
 void APIENTRY glTexImage2D(GLenum target, GLint level, GLint internalformat,
                            GLsizei width, GLsizei height, GLint border,
                            GLenum format, GLenum type, const void* pixels) {
-    (void)internalformat;   // everything is normalized to RGBA8 in the mirror
     if (border != 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
     if (width < 0 || height < 0 || level < 0) {
         PUSH_ERROR(GL_INVALID_VALUE);
@@ -561,9 +1168,55 @@ void APIENTRY glTexImage2D(GLenum target, GLint level, GLint internalformat,
         PUSH_ERROR(GL_INVALID_ENUM);
         return;
     }
-    GLuint id = ActiveBound();
+    GLuint id = ActiveBound(target);
     if (id == 0) return;
     TexState& st = g_textures[id];
+
+    if (IsDepthInternalFormat((GLenum)internalformat)) {
+        // The first DirectMetal depth-texture slice has one exact, native
+        // representation. Do not silently reinterpret D16/D24, packed
+        // depth/stencil, mip levels, or client payloads as Depth32Float.
+        if (target != GL_TEXTURE_2D || level != 0 ||
+            internalformat != GL_DEPTH_COMPONENT32F ||
+            format != GL_DEPTH_COMPONENT || type != GL_FLOAT || pixels ||
+            g_bound_pixel_unpack_buffer ||
+            !v::SupportsDepthTextures()) {
+            PUSH_ERROR(GL_INVALID_OPERATION);
+            return;
+        }
+        st.width = static_cast<uint32_t>(width);
+        st.height = static_cast<uint32_t>(height);
+        st.depth = 1;
+        st.samples = 1;
+        st.internal_format = GL_DEPTH_COMPONENT32F;
+        st.image_backend_format = v::TexelFormat::Depth32Float;
+        st.fixed_sample_locations = GL_TRUE;
+        st.has_image = width > 0 && height > 0;
+        st.mip.clear();
+        st.comp.clear();
+        st.has_comp = false;
+        st.has_tex_buffer = false;
+        if (!st.has_image) {
+            NotifyTextureStorageChanged(id);
+            ++st.content_version;
+            g_dirty_textures.erase(id);
+            if (v::IsInitialized()) v::DestroyResidentTexture(id);
+            return;
+        }
+        // One placeholder level records definition/versioning. The Metal
+        // backend allocates private depth storage and never uploads these
+        // bytes as authoritative depth contents.
+        st.mip.emplace_back(static_cast<size_t>(width) * height * 4, 0);
+        MarkTextureDirty(st, id);
+        return;
+    }
+
+    UnpackSource source;
+    if (!ResolveUnpackSource(pixels, static_cast<uint32_t>(width),
+                             static_cast<uint32_t>(height), 1,
+                             /*three_dimensional=*/false, format, type,
+                             &source))
+        return;
 
     if (level == 0) {
         if (st.has_image && !face && st.SliceCount() > 1) {
@@ -578,6 +1231,9 @@ void APIENTRY glTexImage2D(GLenum target, GLint level, GLint internalformat,
         st.width = (uint32_t)width;
         st.height = target == GL_TEXTURE_1D_ARRAY ? 1 : (uint32_t)height;
         st.depth = target == GL_TEXTURE_1D_ARRAY ? (uint32_t)height : 1;
+        st.samples = 1;
+        st.internal_format = GL_RGBA8;
+        st.image_backend_format = v::TexelFormat::RGBA8Unorm;
         st.has_image = width > 0 && height > 0;
     }
     if (!st.has_image) return;
@@ -587,29 +1243,101 @@ void APIENTRY glTexImage2D(GLenum target, GLint level, GLint internalformat,
     AllocLevel(st, (uint32_t)level);
     uint32_t lvl_w = std::max<uint32_t>(1, st.width >> level);
     uint32_t lvl_h = std::max<uint32_t>(1, st.height >> level);
-    if (pixels && (uint32_t)width == lvl_w && (uint32_t)height == lvl_h &&
+    if (source.provided && (uint32_t)width == lvl_w &&
+        (uint32_t)height == lvl_h &&
         face && st.IsCube())
         StoreSlices(st, (uint32_t)level, slice, 1, 0, 0, (uint32_t)width,
-                    (uint32_t)height, format, type, pixels);
-    else if (pixels && (uint32_t)width == lvl_w && !face &&
+                    (uint32_t)height, format, type, source.data);
+    else if (source.provided && (uint32_t)width == lvl_w && !face &&
              target != GL_TEXTURE_1D_ARRAY)
         StoreSlices(st, (uint32_t)level, 0, 1, 0, 0, (uint32_t)width,
-                    (uint32_t)height, format, type, pixels);
-    else if (pixels && target == GL_TEXTURE_1D_ARRAY &&
+                    (uint32_t)height, format, type, source.data);
+    else if (source.provided && target == GL_TEXTURE_1D_ARRAY &&
              (uint32_t)width == lvl_w && (uint32_t)st.depth == (uint32_t)height)
-        StoreSlices(st, (uint32_t)level, 0, st.depth, 0, 0, (uint32_t)width, 1,
-                    format, type, pixels);
+        Store1DArraySlices(st, static_cast<uint32_t>(level), 0, st.depth, 0,
+                           static_cast<uint32_t>(width), format, type,
+                           source.data);
 
-    if (level == 0) MarkTextureDirty(st, id);
+    MarkTextureDirty(st, id);
+}
+
+void APIENTRY glTexImage2DMultisample(GLenum target, GLsizei samples,
+                                      GLenum internalformat, GLsizei width,
+                                      GLsizei height,
+                                      GLboolean fixedsamplelocations) {
+    if (target != GL_TEXTURE_2D_MULTISAMPLE) {
+        PUSH_ERROR(GL_INVALID_ENUM);
+        return;
+    }
+    if (samples <= 0 || width < 0 || height < 0 ||
+        width > 16384 || height > 16384) {
+        PUSH_ERROR(GL_INVALID_VALUE);
+        return;
+    }
+    // This slice has one native color representation. Reject other sized
+    // formats instead of silently changing the texture's observable ABI.
+    if (internalformat != GL_RGBA8) {
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return;
+    }
+    const uint32_t maximum = v::MaxColorTextureSamples();
+    if (!maximum || static_cast<uint32_t>(samples) > maximum) {
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return;
+    }
+    const GLuint id = ActiveBound(target);
+    if (!id) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
+    TexState& state = g_textures[id];
+    state.width = static_cast<uint32_t>(width);
+    state.height = static_cast<uint32_t>(height);
+    state.depth = 1;
+    state.samples = static_cast<uint32_t>(samples);
+    state.internal_format = internalformat;
+    state.fixed_sample_locations = fixedsamplelocations ? GL_TRUE : GL_FALSE;
+    state.has_image = width > 0 && height > 0;
+    state.mip.clear();
+    state.comp.clear();
+    state.has_comp = false;
+    state.has_tex_buffer = false;
+    if (!state.has_image) {
+        ++state.content_version;
+        g_dirty_textures.erase(id);
+        if (v::IsInitialized()) v::DestroyResidentTexture(id);
+        return;
+    }
+    MarkTextureDirty(state, id);
 }
 
 void APIENTRY glTexImage1D(GLenum target, GLint level, GLint internalformat,
                            GLsizei width, GLint border, GLenum format,
                            GLenum type, const void* pixels) {
-    (void)target;  // 1D images live in the same 2D slot on the engine side
-    // Engine-side 1D and 2D share the same image; treat as height-1 2D.
-    glTexImage2D(GL_TEXTURE_2D, level, internalformat, width, 1, border,
-                 format, type, pixels);
+    (void)internalformat;
+    if (target != GL_TEXTURE_1D) { PUSH_ERROR(GL_INVALID_ENUM); return; }
+    if (border != 0 || width < 0 || level < 0) {
+        PUSH_ERROR(GL_INVALID_VALUE);
+        return;
+    }
+    GLuint id = ActiveBound(target);
+    if (!id) return;
+    UnpackSource source;
+    if (!ResolveUnpackSource(pixels, static_cast<uint32_t>(width), 1, 1,
+                             /*three_dimensional=*/false, format, type,
+                             &source))
+        return;
+    TexState& st = g_textures[id];
+    if (level == 0) {
+        st.width = static_cast<uint32_t>(width);
+        st.height = 1;
+        st.depth = 1;
+        st.has_image = width > 0;
+    }
+    if (!st.has_image) return;
+    AllocLevel(st, static_cast<uint32_t>(level));
+    const uint32_t level_width = std::max<uint32_t>(1, st.width >> level);
+    if (source.provided && static_cast<uint32_t>(width) == level_width)
+        StoreSlices(st, static_cast<uint32_t>(level), 0, 1, 0, 0,
+                    static_cast<uint32_t>(width), 1, format, type, source.data);
+    MarkTextureDirty(st, id);
 }
 
 void APIENTRY glTexImage3D(GLenum target, GLint level, GLint internalformat,
@@ -626,8 +1354,14 @@ void APIENTRY glTexImage3D(GLenum target, GLint level, GLint internalformat,
         PUSH_ERROR(GL_INVALID_VALUE);
         return;
     }
-    GLuint id = ActiveBound();
+    GLuint id = ActiveBound(target);
     if (id == 0) return;
+    UnpackSource source;
+    if (!ResolveUnpackSource(pixels, static_cast<uint32_t>(width),
+                             static_cast<uint32_t>(height),
+                             static_cast<uint32_t>(depth),
+                             /*three_dimensional=*/true, format, type, &source))
+        return;
     TexState& st = g_textures[id];
     // 2D array image height is the "width" of one layer; 3D keeps z as depth.
     if (level == 0) {
@@ -640,11 +1374,12 @@ void APIENTRY glTexImage3D(GLenum target, GLint level, GLint internalformat,
     AllocLevel(st, (uint32_t)level);
     uint32_t lvl_w = std::max<uint32_t>(1, st.width >> level);
     uint32_t lvl_h = std::max<uint32_t>(1, st.height >> level);
-    if (pixels && (uint32_t)width == lvl_w && (uint32_t)height == lvl_h &&
+    if (source.provided && (uint32_t)width == lvl_w &&
+        (uint32_t)height == lvl_h &&
         (uint32_t)depth == st.depth)
         StoreSlices(st, (uint32_t)level, 0, st.depth, 0, 0, (uint32_t)width,
-                    (uint32_t)height, format, type, pixels);
-    if (level == 0) MarkTextureDirty(st, id);
+                    (uint32_t)height, format, type, source.data);
+    MarkTextureDirty(st, id);
 }
 
 void APIENTRY glTexSubImage2D(GLenum target, GLint level, GLint xoffset,
@@ -659,9 +1394,19 @@ void APIENTRY glTexSubImage2D(GLenum target, GLint level, GLint xoffset,
         PUSH_ERROR(GL_INVALID_VALUE);
         return;
     }
-    GLuint id = ActiveBound();
+    GLuint id = ActiveBound(target);
     if (!id) return;
+    UnpackSource source;
+    if (!ResolveUnpackSource(pixels, static_cast<uint32_t>(width),
+                             static_cast<uint32_t>(height), 1,
+                             /*three_dimensional=*/false, format, type,
+                             &source))
+        return;
     TexState& st = g_textures[id];
+    if (st.image_backend_format == v::TexelFormat::Depth32Float) {
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return;
+    }
     if (!st.has_image || st.mip.size() <= (size_t)level) {
         PUSH_ERROR(GL_INVALID_OPERATION);
         return;
@@ -670,16 +1415,34 @@ void APIENTRY glTexSubImage2D(GLenum target, GLint level, GLint xoffset,
     if (slice >= st.SliceCount()) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
     uint32_t lvl_w = std::max<uint32_t>(1, st.width >> level);
     uint32_t lvl_h = std::max<uint32_t>(1, st.height >> level);
+    if (target == GL_TEXTURE_1D_ARRAY) {
+        if (static_cast<uint32_t>(xoffset) + static_cast<uint32_t>(width) >
+                lvl_w ||
+            static_cast<uint32_t>(yoffset) + static_cast<uint32_t>(height) >
+                st.depth) {
+            PUSH_ERROR(GL_INVALID_VALUE);
+            return;
+        }
+        if (source.provided && width > 0 && height > 0)
+            Store1DArraySlices(st, static_cast<uint32_t>(level),
+                               static_cast<uint32_t>(yoffset),
+                               static_cast<uint32_t>(height),
+                               static_cast<uint32_t>(xoffset),
+                               static_cast<uint32_t>(width), format, type,
+                               source.data);
+        MarkTextureDirty(st, id);
+        return;
+    }
     if ((uint32_t)xoffset + (uint32_t)width > lvl_w ||
         (uint32_t)yoffset + (uint32_t)height > lvl_h) {
         PUSH_ERROR(GL_INVALID_VALUE);
         return;
     }
-    if (!st.mip[level].empty() && pixels)
+    if (!st.mip[level].empty() && source.provided)
         StoreSlices(st, (uint32_t)level, slice, 1, (uint32_t)xoffset,
                     (uint32_t)yoffset, (uint32_t)width, (uint32_t)height,
-                    format, type, pixels);
-    if (level == 0) MarkTextureDirty(st, id);
+                    format, type, source.data);
+    MarkTextureDirty(st, id);
 }
 
 void APIENTRY glTexSubImage3D(GLenum target, GLint level, GLint xoffset,
@@ -695,9 +1458,19 @@ void APIENTRY glTexSubImage3D(GLenum target, GLint level, GLint xoffset,
         PUSH_ERROR(GL_INVALID_VALUE);
         return;
     }
-    GLuint id = ActiveBound();
+    GLuint id = ActiveBound(target);
     if (!id) return;
+    UnpackSource source;
+    if (!ResolveUnpackSource(pixels, static_cast<uint32_t>(width),
+                             static_cast<uint32_t>(height),
+                             static_cast<uint32_t>(depth),
+                             /*three_dimensional=*/true, format, type, &source))
+        return;
     TexState& st = g_textures[id];
+    if (st.image_backend_format == v::TexelFormat::Depth32Float) {
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return;
+    }
     if (!st.has_image || st.mip.size() <= (size_t)level) {
         PUSH_ERROR(GL_INVALID_OPERATION);
         return;
@@ -710,19 +1483,44 @@ void APIENTRY glTexSubImage3D(GLenum target, GLint level, GLint xoffset,
         PUSH_ERROR(GL_INVALID_VALUE);
         return;
     }
-    if (pixels)
+    if (source.provided)
         StoreSlices(st, (uint32_t)level, (uint32_t)zoffset, (uint32_t)depth,
                     (uint32_t)xoffset, (uint32_t)yoffset, (uint32_t)width,
-                    (uint32_t)height, format, type, pixels);
-    if (level == 0) MarkTextureDirty(st, id);
+                    (uint32_t)height, format, type, source.data);
+    MarkTextureDirty(st, id);
 }
 
 void APIENTRY glTexSubImage1D(GLenum target, GLint level, GLint xoffset,
                               GLsizei width, GLenum format, GLenum type,
                               const void* pixels) {
-    (void)target;   // 1D images live in the same 2D slot on the engine side
-    glTexSubImage2D(GL_TEXTURE_2D, level, xoffset, 0, width, 1, format, type,
-                    pixels);
+    if (target != GL_TEXTURE_1D) { PUSH_ERROR(GL_INVALID_ENUM); return; }
+    if (xoffset < 0 || width < 0 || level < 0) {
+        PUSH_ERROR(GL_INVALID_VALUE);
+        return;
+    }
+    GLuint id = ActiveBound(target);
+    if (!id) return;
+    UnpackSource source;
+    if (!ResolveUnpackSource(pixels, static_cast<uint32_t>(width), 1, 1,
+                             /*three_dimensional=*/false, format, type,
+                             &source))
+        return;
+    TexState& st = g_textures[id];
+    if (!st.has_image || st.mip.size() <= static_cast<size_t>(level)) {
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return;
+    }
+    const uint32_t level_width = std::max<uint32_t>(1, st.width >> level);
+    if (static_cast<uint32_t>(xoffset) + static_cast<uint32_t>(width) >
+        level_width) {
+        PUSH_ERROR(GL_INVALID_VALUE);
+        return;
+    }
+    if (source.provided)
+        StoreSlices(st, static_cast<uint32_t>(level), 0, 1,
+                    static_cast<uint32_t>(xoffset), 0,
+                    static_cast<uint32_t>(width), 1, format, type, source.data);
+    MarkTextureDirty(st, id);
 }
 
 void APIENTRY glGenerateMipmap(GLenum target) {
@@ -733,9 +1531,13 @@ void APIENTRY glGenerateMipmap(GLenum target) {
         PUSH_ERROR(GL_INVALID_ENUM);
         return;
     }
-    GLuint id = ActiveBound();
+    GLuint id = ActiveBound(target);
     if (id == 0) return;
     TexState& st = g_textures[id];
+    if (st.image_backend_format == v::TexelFormat::Depth32Float) {
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return;
+    }
     if (!st.has_image || st.mip.empty()) {
         PUSH_ERROR(GL_INVALID_OPERATION);
         return;
@@ -743,6 +1545,7 @@ void APIENTRY glGenerateMipmap(GLenum target) {
     uint32_t w = st.width, h = st.height;
     size_t slices = st.SliceCount();
     std::vector<uint8_t> cur = st.mip[0];
+    st.mip.resize(1);
     while (w > 1 || h > 1) {
         std::vector<uint8_t> next;
         GenerateNextMip(cur, w, h, (uint32_t)slices, next);
@@ -762,24 +1565,27 @@ void APIENTRY glGetTexImage(GLenum target, GLint level, GLenum format,
     bool face = IsCubeFace(target);
     bool ok = target == GL_TEXTURE_2D || target == GL_TEXTURE_1D ||
               target == GL_TEXTURE_3D || target == GL_TEXTURE_2D_ARRAY ||
-              target == GL_TEXTURE_1D_ARRAY || target == GL_TEXTURE_BUFFER ||
-              face;
+              target == GL_TEXTURE_1D_ARRAY || face;
     if (!ok) { PUSH_ERROR(GL_INVALID_ENUM); return; }
-    if (!pixels) return;
-    GLuint id = ActiveBound();
+    GLuint id = ActiveBound(target);
     if (!id) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
     TexState& st = g_textures[id];
+    if (st.image_backend_format == v::TexelFormat::Depth32Float) {
+        // Depth contents are authoritative in private GPU storage. Until a
+        // typed backend readback exists, returning the allocation placeholder
+        // would be observably false.
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return;
+    }
     if (!st.has_image || level < 0 || st.mip.size() <= (size_t)level) {
         PUSH_ERROR(GL_INVALID_VALUE);
         return;
     }
     if (face && !st.IsCube()) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
     // The queried target must match the texture's own target (1D textures
-    // live in the engine's 2D slot, so GL_TEXTURE_2D also serves them; the
-    // same applies to buffer textures, which mirror as 1xN 2D images).
+    // live in the engine's 2D slot, so GL_TEXTURE_2D also serves them).
     bool tgt_ok = face || target == st.target ||
-                  (st.target == GL_TEXTURE_1D && target == GL_TEXTURE_2D) ||
-                  (st.target == GL_TEXTURE_BUFFER && target == GL_TEXTURE_2D);
+                  (st.target == GL_TEXTURE_1D && target == GL_TEXTURE_2D);
     if (!tgt_ok) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
     // Only the requested face of a cubemap is returned per call.
     if (st.IsCube() && !face) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
@@ -796,18 +1602,39 @@ void APIENTRY glGetTexImage(GLenum target, GLint level, GLenum format,
 
     uint32_t lvl_w = std::max<uint32_t>(1, st.width >> level);
     uint32_t lvl_h = std::max<uint32_t>(1, st.height >> level);
+    const uint32_t components = FormatComponents(format);
+    if (!components) { PUSH_ERROR(GL_INVALID_ENUM); return; }
+    const bool one_dimensional_array = target == GL_TEXTURE_1D_ARRAY;
+    const bool three_dimensional = st.Is3D() || target == GL_TEXTURE_2D_ARRAY;
+    const uint32_t pack_height = one_dimensional_array ? count : lvl_h;
+    const uint32_t pack_images = three_dimensional ? count : 1;
+    PixelPackDestination destination;
+    if (!ResolvePixelPackDestination(
+            pixels, lvl_w, pack_height, pack_images, three_dimensional,
+            static_cast<size_t>(components) * TypeBytes(type), TypeBytes(type),
+            &destination))
+        return;
+    if (!destination.provided) return;
     uint32_t row_src = lvl_w * 4;
-    uint32_t row_dst = RowBytes(lvl_w, format, type, /*pack=*/true);
-    uint32_t plane_dst_rows = PlaneRows(lvl_h, /*pack=*/true);
     for (uint32_t s = 0; s < count; ++s) {
         const uint8_t* src = SlicePtrC(st, (uint32_t)level, slice0 + s);
+        if (one_dimensional_array) {
+            EncodeRowRGBA8(src,
+                           destination.data +
+                               static_cast<size_t>(s) * destination.row_stride,
+                           static_cast<GLsizei>(lvl_w), format, type);
+            continue;
+        }
         for (uint32_t y = 0; y < lvl_h; ++y) {
             EncodeRowRGBA8(src + (size_t)y * row_src,
-                           (uint8_t*)pixels +
-                               (size_t)(s * plane_dst_rows + y) * row_dst,
+                           destination.data +
+                               static_cast<size_t>(s) *
+                                   destination.image_stride +
+                               static_cast<size_t>(y) * destination.row_stride,
                            (GLsizei)lvl_w, format, type);
         }
     }
+    CommitPixelPackDestination(&destination);
 }
 
 // ---- sampler parameters ---------------------------------------------------
@@ -821,92 +1648,141 @@ void APIENTRY glTexParameteri(GLenum target, GLenum pname, GLint param) {
         PUSH_ERROR(GL_INVALID_ENUM);
         return;
     }
-    GLuint id = ActiveBound();
+    GLuint id = ActiveBound(target);
     if (id == 0) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
     TexState& st = g_textures[id];
-    switch (pname) {
-        case GL_TEXTURE_MIN_FILTER: st.min_filter = (GLenum)param; break;
-        case GL_TEXTURE_MAG_FILTER: st.mag_filter = (GLenum)param; break;
-        case GL_TEXTURE_WRAP_S: st.wrap_s = (GLenum)param; break;
-        case GL_TEXTURE_WRAP_T: st.wrap_t = (GLenum)param; break;
-        case GL_TEXTURE_WRAP_R: st.wrap_r = (GLenum)param; break;
-        case GL_TEXTURE_MIN_LOD:
-        case GL_TEXTURE_MAX_LOD:
-        case GL_TEXTURE_LOD_BIAS:
-        case GL_TEXTURE_BASE_LEVEL:
-        case GL_TEXTURE_MAX_LEVEL:
-            break;   // accepted; mip chain is rebuilt from CPU mirror anyway
-        default:
-            PUSH_ERROR(GL_INVALID_ENUM);
-            return;
+    if (pname == GL_TEXTURE_BASE_LEVEL || pname == GL_TEXTURE_MAX_LEVEL) {
+        // Image-level selection remains texture state. The CPU mirror already
+        // owns the complete explicit chain; level-window lowering is future.
+        return;
     }
-    MarkTextureDirty(st, id);
-}
-
-void APIENTRY glTexParameteriv(GLenum target, GLenum pname, const GLint* param) {
-    if (!param) return;
-    glTexParameteri(target, pname, param[0]);
+    GLenum error = GL_NO_ERROR;
+    const bool changed = SetSamplerScalar(st, pname,
+                                          static_cast<GLfloat>(param), &error);
+    if (error != GL_NO_ERROR) {
+        PUSH_ERROR(error);
+        return;
+    }
+    if (changed) MarkTextureDirty(st, id, true);
 }
 
 void APIENTRY glTexParameterf(GLenum target, GLenum pname, GLfloat param) {
-    glTexParameteri(target, pname, (GLint)param);
+    bool valid = target == GL_TEXTURE_2D || target == GL_TEXTURE_1D ||
+                 target == GL_TEXTURE_3D || target == GL_TEXTURE_2D_ARRAY ||
+                 target == GL_TEXTURE_1D_ARRAY || target == GL_TEXTURE_CUBE_MAP ||
+                 target == GL_TEXTURE_BUFFER || IsCubeFace(target);
+    if (!valid) { PUSH_ERROR(GL_INVALID_ENUM); return; }
+    GLuint id = ActiveBound(target);
+    if (!id) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
+    TexState& state = g_textures[id];
+    if (pname == GL_TEXTURE_BASE_LEVEL || pname == GL_TEXTURE_MAX_LEVEL)
+        return;
+    GLenum error = GL_NO_ERROR;
+    const bool changed = SetSamplerScalar(state, pname, param, &error);
+    if (error != GL_NO_ERROR) { PUSH_ERROR(error); return; }
+    if (changed) MarkTextureDirty(state, id, true);
 }
 
 void APIENTRY glTexParameterfv(GLenum target, GLenum pname, const GLfloat* param) {
     if (!param) return;
-    glTexParameteri(target, pname, (GLint)param[0]);
+    if (pname != GL_TEXTURE_BORDER_COLOR) {
+        glTexParameterf(target, pname, param[0]);
+        return;
+    }
+    bool valid = target == GL_TEXTURE_2D || target == GL_TEXTURE_1D ||
+                 target == GL_TEXTURE_3D || target == GL_TEXTURE_2D_ARRAY ||
+                 target == GL_TEXTURE_1D_ARRAY || target == GL_TEXTURE_CUBE_MAP ||
+                 target == GL_TEXTURE_BUFFER || IsCubeFace(target);
+    if (!valid) { PUSH_ERROR(GL_INVALID_ENUM); return; }
+    GLuint id = ActiveBound(target);
+    if (!id) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
+    TexState& state = g_textures[id];
+    if (SetBorderColor(state, param)) MarkTextureDirty(state, id, true);
+}
+
+void APIENTRY glTexParameteriv(GLenum target, GLenum pname, const GLint* param) {
+    if (!param) return;
+    if (pname == GL_TEXTURE_BORDER_COLOR) {
+        GLfloat color[4];
+        for (int i = 0; i < 4; ++i) color[i] = SignedBorderToFloat(param[i]);
+        glTexParameterfv(target, pname, color);
+    } else {
+        glTexParameteri(target, pname, param[0]);
+    }
 }
 
 void APIENTRY glTexParameterIiv(GLenum target, GLenum pname, const GLint* param) {
+    if (pname == GL_TEXTURE_BORDER_COLOR) {
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return;
+    }
     glTexParameteriv(target, pname, param);
 }
 
 void APIENTRY glTexParameterIuiv(GLenum target, GLenum pname, const GLuint* param) {
     if (!param) return;
-    glTexParameteri(target, pname, (GLint)param[0]);
+    if (pname == GL_TEXTURE_BORDER_COLOR) {
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return;
+    }
+    GLint values[4];
+    const int count = pname == GL_TEXTURE_BORDER_COLOR ? 4 : 1;
+    for (int i = 0; i < count; ++i) values[i] = static_cast<GLint>(param[i]);
+    glTexParameteriv(target, pname, values);
 }
 
 // ---- queries --------------------------------------------------------------
 
-void APIENTRY glGetTexParameteriv(GLenum target, GLenum pname, GLint* params) {
-    if (target != GL_TEXTURE_2D && target != GL_TEXTURE_1D &&
-        target != GL_TEXTURE_3D && target != GL_TEXTURE_2D_ARRAY &&
-        target != GL_TEXTURE_1D_ARRAY && target != GL_TEXTURE_CUBE_MAP &&
-        target != GL_TEXTURE_BUFFER && !IsCubeFace(target)) {
-        PUSH_ERROR(GL_INVALID_ENUM);
+void APIENTRY glGetTexParameterfv(GLenum target, GLenum pname, GLfloat* params) {
+    if (!params) return;
+    bool valid = target == GL_TEXTURE_2D || target == GL_TEXTURE_1D ||
+                 target == GL_TEXTURE_3D || target == GL_TEXTURE_2D_ARRAY ||
+                 target == GL_TEXTURE_1D_ARRAY || target == GL_TEXTURE_CUBE_MAP ||
+                 target == GL_TEXTURE_BUFFER || IsCubeFace(target);
+    if (!valid) { PUSH_ERROR(GL_INVALID_ENUM); return; }
+    GLuint id = ActiveBound(target);
+    if (!id) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
+    const TexState& state = g_textures[id];
+    if (pname == GL_TEXTURE_BORDER_COLOR) {
+        std::copy(state.border_color.begin(), state.border_color.end(), params);
         return;
     }
-    if (!params) return;
-    GLuint id = ActiveBound();
-    if (id == 0) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
-    const TexState& st = g_textures[id];
-    switch (pname) {
-        case GL_TEXTURE_MIN_FILTER: *params = st.min_filter; break;
-        case GL_TEXTURE_MAG_FILTER: *params = st.mag_filter; break;
-        case GL_TEXTURE_WRAP_S: *params = st.wrap_s; break;
-        case GL_TEXTURE_WRAP_T: *params = st.wrap_t; break;
-        case GL_TEXTURE_WRAP_R: *params = st.wrap_r; break;
-        case GL_TEXTURE_MIN_LOD: *params = 0; break;
-        case GL_TEXTURE_MAX_LOD: *params = 1000; break;
-        case GL_TEXTURE_LOD_BIAS: *params = 0; break;
-        default: PUSH_ERROR(GL_INVALID_ENUM); return;
-    }
+    if (pname == GL_TEXTURE_BASE_LEVEL) { *params = 0.0f; return; }
+    if (pname == GL_TEXTURE_MAX_LEVEL) { *params = 1000.0f; return; }
+    GLenum error = GL_NO_ERROR;
+    *params = GetSamplerScalar(state, pname, &error);
+    if (error != GL_NO_ERROR) PUSH_ERROR(error);
 }
 
-void APIENTRY glGetTexParameterfv(GLenum target, GLenum pname, GLfloat* params) {
-    GLint v = 0;
-    glGetTexParameteriv(target, pname, &v);
-    if (params) *params = (GLfloat)v;
+void APIENTRY glGetTexParameteriv(GLenum target, GLenum pname, GLint* params) {
+    if (!params) return;
+    GLfloat values[4]{};
+    glGetTexParameterfv(target, pname, values);
+    const int count = pname == GL_TEXTURE_BORDER_COLOR ? 4 : 1;
+    for (int i = 0; i < count; ++i) {
+        params[i] = pname == GL_TEXTURE_BORDER_COLOR
+            ? FloatBorderToSigned(values[i]) : static_cast<GLint>(values[i]);
+    }
 }
 
 void APIENTRY glGetTexParameterIiv(GLenum target, GLenum pname, GLint* params) {
+    if (pname == GL_TEXTURE_BORDER_COLOR) {
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return;
+    }
     glGetTexParameteriv(target, pname, params);
 }
 
 void APIENTRY glGetTexParameterIuiv(GLenum target, GLenum pname, GLuint* params) {
-    GLint v = 0;
-    glGetTexParameteriv(target, pname, &v);
-    if (params) *params = (GLuint)v;
+    if (!params) return;
+    if (pname == GL_TEXTURE_BORDER_COLOR) {
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return;
+    }
+    GLint values[4]{};
+    glGetTexParameteriv(target, pname, values);
+    const int count = pname == GL_TEXTURE_BORDER_COLOR ? 4 : 1;
+    for (int i = 0; i < count; ++i) params[i] = static_cast<GLuint>(values[i]);
 }
 
 void APIENTRY glGetTexLevelParameteriv(GLenum target, GLint level, GLenum pname,
@@ -914,13 +1790,24 @@ void APIENTRY glGetTexLevelParameteriv(GLenum target, GLint level, GLenum pname,
     bool ok = target == GL_TEXTURE_2D || target == GL_TEXTURE_3D ||
               target == GL_TEXTURE_2D_ARRAY || target == GL_TEXTURE_CUBE_MAP ||
               IsCubeFace(target) || target == GL_TEXTURE_1D_ARRAY ||
-              target == GL_TEXTURE_1D;
+              target == GL_TEXTURE_1D || target == GL_TEXTURE_BUFFER ||
+              target == GL_TEXTURE_2D_MULTISAMPLE;
     if (!ok || level < 0) { PUSH_ERROR(GL_INVALID_ENUM); return; }
     if (!params) return;
-    GLuint id = ActiveBound();
+    GLuint id = ActiveBound(target);
     if (id == 0) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
-    const TexState& st = g_textures[id];
-    if (st.mip.size() <= (size_t)level) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+    TexState& st = g_textures[id];
+    if (st.has_tex_buffer) SyncBufferTexture(st, id);
+    if ((!st.has_image || (st.target != GL_TEXTURE_2D_MULTISAMPLE &&
+         st.mip.size() <= (size_t)level)) &&
+        !(st.has_tex_buffer && level == 0)) {
+        PUSH_ERROR(GL_INVALID_VALUE);
+        return;
+    }
+    if (st.target == GL_TEXTURE_2D_MULTISAMPLE && level != 0) {
+        PUSH_ERROR(GL_INVALID_VALUE);
+        return;
+    }
     uint32_t lvl_w = std::max<uint32_t>(1, st.width >> level);
     uint32_t lvl_h = std::max<uint32_t>(1, st.height >> level);
     switch (pname) {
@@ -935,7 +1822,13 @@ void APIENTRY glGetTexLevelParameteriv(GLenum target, GLint level, GLenum pname,
                 *params = (GLint)st.depth;
             break;
         case GL_TEXTURE_INTERNAL_FORMAT:
-            *params = st.has_comp ? (GLint)st.comp_format : GL_RGBA8;
+            *params = st.has_tex_buffer ? (GLint)st.tex_buffer_format
+                    : st.has_comp ? (GLint)st.comp_format
+                                  : (GLint)st.internal_format;
+            break;
+        case GL_TEXTURE_SAMPLES: *params = static_cast<GLint>(st.samples); break;
+        case GL_TEXTURE_FIXED_SAMPLE_LOCATIONS:
+            *params = st.fixed_sample_locations;
             break;
         case GL_TEXTURE_COMPRESSED:
             *params = st.has_comp ? GL_TRUE : GL_FALSE;
@@ -947,10 +1840,14 @@ void APIENTRY glGetTexLevelParameteriv(GLenum target, GLint level, GLenum pname,
                     : 0;
             break;
         case GL_TEXTURE_RED_TYPE:
+            *params = st.image_backend_format == v::TexelFormat::Depth32Float
+                ? GL_FLOAT : GL_UNSIGNED_NORMALIZED;
+            break;
         case GL_TEXTURE_GREEN_TYPE:
         case GL_TEXTURE_BLUE_TYPE:
         case GL_TEXTURE_ALPHA_TYPE:
-            *params = GL_UNSIGNED_NORMALIZED;
+            *params = st.image_backend_format == v::TexelFormat::Depth32Float
+                ? GL_NONE : GL_UNSIGNED_NORMALIZED;
             break;
         default: PUSH_ERROR(GL_INVALID_ENUM); return;
     }
@@ -976,9 +1873,14 @@ void APIENTRY glCompressedTexImage2D(GLenum target, GLint level,
     }
     bool face = IsCubeFace(target);
     if (target != GL_TEXTURE_2D && !face) { PUSH_ERROR(GL_INVALID_ENUM); return; }
-    if (width < 0 || height < 0 || level < 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
-    GLuint id = ActiveBound();
+    if (width < 0 || height < 0 || level < 0 || imageSize < 0) {
+        PUSH_ERROR(GL_INVALID_VALUE); return;
+    }
+    GLuint id = ActiveBound(target);
     if (!id) return;
+    UnpackSource source;
+    if (!ResolveUnpackBytes(data, static_cast<uint64_t>(imageSize), &source))
+        return;
     TexState& st = g_textures[id];
 
     if (level == 0) {
@@ -994,28 +1896,59 @@ void APIENTRY glCompressedTexImage2D(GLenum target, GLint level,
     if (!st.has_image) return;
     uint32_t slice = face ? CubeFaceIndex(target) : 0;
     AllocLevel(st, (uint32_t)level);
-    if (data != nullptr) {
+    if (source.provided) {
         // Keep the raw compressed bytes and decompress into the mirror.
         if (st.comp.size() <= (size_t)level) st.comp.resize(level + 1);
-        st.comp[level].assign((const uint8_t*)data,
-                              (const uint8_t*)data + (size_t)imageSize);
+        st.comp[level].assign((const uint8_t*)source.data,
+                              (const uint8_t*)source.data + (size_t)imageSize);
         st.has_comp = true;
         st.comp_format = internalformat;
         uint32_t lvl_w = std::max<uint32_t>(1, st.width >> level);
         uint32_t lvl_h = std::max<uint32_t>(1, st.height >> level);
-        DecodeCompressedPlane(SlicePtr(st, level, slice), (const uint8_t*)data,
-                              lvl_w, lvl_h, internalformat);
+        DecodeCompressedPlane(SlicePtr(st, level, slice),
+                              (const uint8_t*)source.data, lvl_w, lvl_h,
+                              internalformat);
     }
-    if (level == 0) MarkTextureDirty(st, id);
+    MarkTextureDirty(st, id);
 }
 
 void APIENTRY glCompressedTexImage1D(GLenum target, GLint level,
                                      GLenum internalformat, GLsizei width,
                                      GLint border, GLsizei imageSize,
                                      const void* data) {
-    (void)target;
-    glCompressedTexImage2D(GL_TEXTURE_2D, level, internalformat, width, 1,
-                           border, imageSize, data);
+    if (target != GL_TEXTURE_1D) { PUSH_ERROR(GL_INVALID_ENUM); return; }
+    if (border != 0 || width < 0 || level < 0 || imageSize < 0) {
+        PUSH_ERROR(GL_INVALID_VALUE);
+        return;
+    }
+    if (!IsS3TC(internalformat)) { PUSH_ERROR(GL_INVALID_ENUM); return; }
+    GLuint id = ActiveBound(target);
+    if (!id) return;
+    UnpackSource source;
+    if (!ResolveUnpackBytes(data, static_cast<uint64_t>(imageSize), &source))
+        return;
+    TexState& st = g_textures[id];
+    if (level == 0) {
+        st.width = static_cast<uint32_t>(width);
+        st.height = 1;
+        st.depth = 1;
+        st.has_image = width > 0;
+    }
+    if (!st.has_image) return;
+    AllocLevel(st, static_cast<uint32_t>(level));
+    if (source.provided) {
+        if (st.comp.size() <= static_cast<size_t>(level))
+            st.comp.resize(static_cast<size_t>(level) + 1);
+        st.comp[level].assign(static_cast<const uint8_t*>(source.data),
+                              static_cast<const uint8_t*>(source.data) + imageSize);
+        st.has_comp = true;
+        st.comp_format = internalformat;
+        DecodeCompressedPlane(SlicePtr(st, static_cast<uint32_t>(level), 0),
+                              static_cast<const uint8_t*>(source.data),
+                              std::max<uint32_t>(1, st.width >> level), 1,
+                              internalformat);
+    }
+    MarkTextureDirty(st, id);
 }
 
 void APIENTRY glCompressedTexImage3D(GLenum target, GLint level,
@@ -1029,12 +1962,15 @@ void APIENTRY glCompressedTexImage3D(GLenum target, GLint level,
         PUSH_ERROR(GL_INVALID_ENUM);
         return;
     }
-    if (width < 0 || height < 0 || depth < 0 || level < 0) {
+    if (width < 0 || height < 0 || depth < 0 || level < 0 || imageSize < 0) {
         PUSH_ERROR(GL_INVALID_VALUE);
         return;
     }
-    GLuint id = ActiveBound();
+    GLuint id = ActiveBound(target);
     if (!id) return;
+    UnpackSource source;
+    if (!ResolveUnpackBytes(data, static_cast<uint64_t>(imageSize), &source))
+        return;
     TexState& st = g_textures[id];
     if (level == 0) {
         st.width = (uint32_t)width;
@@ -1044,14 +1980,14 @@ void APIENTRY glCompressedTexImage3D(GLenum target, GLint level,
     }
     if (!st.has_image) return;
     AllocLevel(st, (uint32_t)level);
-    if (data && st.comp.size() <= (size_t)level) {
+    if (source.provided && st.comp.size() <= (size_t)level) {
         st.comp.resize(level + 1);
-        st.comp[level].assign((const uint8_t*)data,
-                              (const uint8_t*)data + (size_t)imageSize);
+        st.comp[level].assign((const uint8_t*)source.data,
+                              (const uint8_t*)source.data + (size_t)imageSize);
         st.has_comp = true;
         st.comp_format = internalformat;
     }
-    if (level == 0) MarkTextureDirty(st, id);
+    MarkTextureDirty(st, id);
 }
 
 void APIENTRY glCompressedTexSubImage2D(GLenum target, GLint level,
@@ -1061,12 +1997,16 @@ void APIENTRY glCompressedTexSubImage2D(GLenum target, GLint level,
                                         const void* data) {
     bool face = IsCubeFace(target);
     if (target != GL_TEXTURE_2D && !face) { PUSH_ERROR(GL_INVALID_ENUM); return; }
-    if (xoffset < 0 || yoffset < 0 || width < 0 || height < 0 || level < 0) {
+    if (xoffset < 0 || yoffset < 0 || width < 0 || height < 0 || level < 0 ||
+        imageSize < 0) {
         PUSH_ERROR(GL_INVALID_VALUE);
         return;
     }
-    GLuint id = ActiveBound();
+    GLuint id = ActiveBound(target);
     if (!id) return;
+    UnpackSource source;
+    if (!ResolveUnpackBytes(data, static_cast<uint64_t>(imageSize), &source))
+        return;
     TexState& st = g_textures[id];
     if (!st.has_image || st.mip.size() <= (size_t)level) {
         PUSH_ERROR(GL_INVALID_OPERATION);
@@ -1080,22 +2020,23 @@ void APIENTRY glCompressedTexSubImage2D(GLenum target, GLint level,
         PUSH_ERROR(GL_INVALID_VALUE);
         return;
     }
-    if (data) {
+    if (source.provided) {
         // Only fully-aligned sub-regions are decoded; anything else is
         // re-encoded on the fly is not worth it for MC.
         DecodeCompressedPlane(SlicePtr(st, level, slice) +
                               ((size_t)yoffset * lvl_w + xoffset) * 4,
-                              (const uint8_t*)data,
+                              (const uint8_t*)source.data,
                               (uint32_t)width, (uint32_t)height, format);
         if (st.comp.size() <= (size_t)level) {
             st.comp.resize(level + 1);
             st.comp[level].assign(
-                (const uint8_t*)data, (const uint8_t*)data + (size_t)imageSize);
+                (const uint8_t*)source.data,
+                (const uint8_t*)source.data + (size_t)imageSize);
             st.has_comp = true;
             st.comp_format = format;
         }
     }
-    if (level == 0) MarkTextureDirty(st, id);
+    MarkTextureDirty(st, id);
 }
 
 void APIENTRY glCompressedTexSubImage3D(GLenum target, GLint level,
@@ -1109,22 +2050,25 @@ void APIENTRY glCompressedTexSubImage3D(GLenum target, GLint level,
         return;
     }
     if (xoffset < 0 || yoffset < 0 || zoffset < 0 || width < 0 || height < 0 ||
-        depth < 0 || level < 0) {
+        depth < 0 || level < 0 || imageSize < 0) {
         PUSH_ERROR(GL_INVALID_VALUE);
         return;
     }
-    GLuint id = ActiveBound();
+    GLuint id = ActiveBound(target);
     if (!id) return;
+    UnpackSource source;
+    if (!ResolveUnpackBytes(data, static_cast<uint64_t>(imageSize), &source))
+        return;
     TexState& st = g_textures[id];
     if (!st.has_image || st.mip.size() <= (size_t)level) {
         PUSH_ERROR(GL_INVALID_OPERATION);
         return;
     }
-    if (data) {
+    if (source.provided) {
         if (st.comp.size() <= (size_t)level) {
             st.comp.resize(level + 1);
-            st.comp[level].assign((const uint8_t*)data,
-                                  (const uint8_t*)data + (size_t)imageSize);
+            st.comp[level].assign((const uint8_t*)source.data,
+                                  (const uint8_t*)source.data + (size_t)imageSize);
             st.has_comp = true;
             st.comp_format = format;
         }
@@ -1136,24 +2080,29 @@ void APIENTRY glCompressedTexSubImage3D(GLenum target, GLint level,
             DecodeCompressedPlane(
                 SlicePtr(st, level, (uint32_t)(zoffset + z)) +
                     ((size_t)yoffset * lvl_w + xoffset) * 4,
-                (const uint8_t*)data + (size_t)z * dsz, (uint32_t)width,
+                (const uint8_t*)source.data + (size_t)z * dsz,
+                (uint32_t)width,
                 (uint32_t)height, format);
         }
     }
-    if (level == 0) MarkTextureDirty(st, id);
+    MarkTextureDirty(st, id);
 }
 
 void APIENTRY glGetCompressedTexImage(GLenum target, GLint level, void* pixels) {
     (void)target;   // whole-level copy; cube faces share the level buffer
-    if (!pixels) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
-    GLuint id = ActiveBound();
+    GLuint id = ActiveBound(target);
     if (!id) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
     TexState& st = g_textures[id];
     if (!st.has_comp || st.comp.size() <= (size_t)level) {
         PUSH_ERROR(GL_INVALID_OPERATION);
         return;
     }
-    std::memcpy(pixels, st.comp[level].data(), st.comp[level].size());
+    PixelPackDestination destination;
+    if (!ResolvePixelPackBytes(pixels, st.comp[level].size(), &destination))
+        return;
+    if (!destination.provided) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
+    std::memcpy(destination.data, st.comp[level].data(), st.comp[level].size());
+    CommitPixelPackDestination(&destination);
 }
 
 // ---- framebuffer copies ------------------------------------------------------
@@ -1181,9 +2130,13 @@ void CopyFramebufferToTexture(TexState& st, GLint level,
 void APIENTRY glCopyTexImage1D(GLenum target, GLint level,
                                GLenum internalformat, GLint x, GLint y,
                                GLsizei width, GLint border) {
-    (void)target; (void)internalformat;
+    (void)target;
     if (border != 0 || width < 0 || level < 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
-    GLuint id = ActiveBound();
+    if (IsDepthInternalFormat(internalformat)) {
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return;
+    }
+    GLuint id = ActiveBound(target);
     if (!id) return;
     TexState& st = g_textures[id];
     st.width = (uint32_t)width;
@@ -1193,23 +2146,29 @@ void APIENTRY glCopyTexImage1D(GLenum target, GLint level,
     if (!st.has_image) return;
     AllocLevel(st, (uint32_t)level);
     CopyFramebufferToTexture(st, level, 0, 0, x, y, width, 1);
-    if (level == 0) MarkTextureDirty(st, id);
+    MarkTextureDirty(st, id);
 }
 
 void APIENTRY glCopyTexImage2D(GLenum target, GLint level,
                                GLenum internalformat, GLint x, GLint y,
                                GLsizei width, GLsizei height, GLint border) {
-    (void)internalformat;
     if (border != 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+    if (IsDepthInternalFormat(internalformat)) {
+        // Color readback cannot define truthful depth storage.
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return;
+    }
     bool face = IsCubeFace(target);
     if (target != GL_TEXTURE_2D && !face) { PUSH_ERROR(GL_INVALID_ENUM); return; }
     if (width < 0 || height < 0 || level < 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
-    GLuint id = ActiveBound();
+    GLuint id = ActiveBound(target);
     if (!id) return;
     TexState& st = g_textures[id];
     uint32_t slice = face ? CubeFaceIndex(target) : 0;
     if (slice >= st.SliceCount()) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
     if (level == 0) {
+        st.internal_format = GL_RGBA8;
+        st.image_backend_format = v::TexelFormat::RGBA8Unorm;
         if (face) {
             st.width = (uint32_t)width;
             st.height = (uint32_t)height;
@@ -1236,17 +2195,22 @@ void APIENTRY glCopyTexImage2D(GLenum target, GLint level,
     } else {
         CopyFramebufferToTexture(st, (GLint)level, 0, 0, x, y, width, height);
     }
-    if (level == 0) MarkTextureDirty(st, id);
+    MarkTextureDirty(st, id);
 }
 
 void APIENTRY glCopyTexSubImage1D(GLenum target, GLint level, GLint xoffset,
                                   GLint x, GLint y, GLsizei width) {
     if (target != GL_TEXTURE_1D) { PUSH_ERROR(GL_INVALID_ENUM); return; }
-    GLuint id = ActiveBound();
+    GLuint id = ActiveBound(target);
     if (!id) return;
     TexState& st = g_textures[id];
+    if (st.image_backend_format == v::TexelFormat::Depth32Float) {
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return;
+    }
     if (!st.has_image || st.mip.size() <= (size_t)level) {
         PUSH_ERROR(GL_INVALID_OPERATION);
+        return;
     }
     CopyFramebufferToTexture(st, level, xoffset, 0, x, y, width, 1);
 }
@@ -1259,9 +2223,13 @@ void APIENTRY glCopyTexSubImage2D(GLenum target, GLint level, GLint xoffset,
         PUSH_ERROR(GL_INVALID_ENUM);
         return;
     }
-    GLuint id = ActiveBound();
+    GLuint id = ActiveBound(target);
     if (!id) return;
     TexState& st = g_textures[id];
+    if (st.image_backend_format == v::TexelFormat::Depth32Float) {
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return;
+    }
     if (!st.has_image || st.mip.size() <= (size_t)level) {
         PUSH_ERROR(GL_INVALID_OPERATION);
         return;
@@ -1285,7 +2253,7 @@ void APIENTRY glCopyTexSubImage2D(GLenum target, GLint level, GLint xoffset,
     } else {
         CopyFramebufferToTexture(st, level, xoffset, yoffset, x, y, width, height);
     }
-    if (level == 0) MarkTextureDirty(st, id);
+    MarkTextureDirty(st, id);
 }
 
 void APIENTRY glCopyTexSubImage3D(GLenum target, GLint level, GLint xoffset,
@@ -1295,7 +2263,7 @@ void APIENTRY glCopyTexSubImage3D(GLenum target, GLint level, GLint xoffset,
         PUSH_ERROR(GL_INVALID_ENUM); return;
     }
     if (zoffset < 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
-    GLuint id = ActiveBound();
+    GLuint id = ActiveBound(target);
     if (!id) return;
     TexState& st = g_textures[id];
     if (!st.has_image || st.mip.size() <= (size_t)level) {
@@ -1314,16 +2282,23 @@ void APIENTRY glCopyTexSubImage3D(GLenum target, GLint level, GLint xoffset,
         std::memcpy(SlicePtr(st, (uint32_t)level, (uint32_t)zoffset) +
                         ((size_t)(yoffset + r) * lvl_w + xoffset) * 4,
                     tmp.data() + (size_t)r * width * 4, (size_t)width * 4);
-    if (level == 0) MarkTextureDirty(st, id);
+    MarkTextureDirty(st, id);
 }
 
 // ---- buffer textures (glTexBuffer) ------------------------------------------
 
 void APIENTRY glTexBuffer(GLenum target, GLenum internalformat, GLuint buffer) {
     if (target != GL_TEXTURE_BUFFER) { PUSH_ERROR(GL_INVALID_ENUM); return; }
-    GLuint id = ActiveBound();
+    GLuint id = ActiveBound(target);
     if (!id) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
     TexState& st = g_textures[id];
+    v::TexelFormat backend_format = v::TexelFormat::RGBA8Unorm;
+    uint32_t bytes_per_texel = 0;
+    if (!BufferTexelFormat(internalformat, &backend_format,
+                           &bytes_per_texel)) {
+        PUSH_ERROR(GL_INVALID_ENUM);
+        return;
+    }
     auto it = g_buffers.find(buffer);
     if (buffer != 0 && it == g_buffers.end()) {
         PUSH_ERROR(GL_INVALID_VALUE);   // not the name of a buffer object
@@ -1332,6 +2307,9 @@ void APIENTRY glTexBuffer(GLenum target, GLenum internalformat, GLuint buffer) {
     if (buffer == 0) {
         st.has_tex_buffer = false;
         st.tex_buffer = 0;
+        st.tex_buffer_format = 0;
+        st.tex_buffer_bytes_per_texel = 0;
+        st.tex_buffer_source_version = UINT64_MAX;
         st.has_image = false;
         st.mip.clear();
         st.depth = 1;
@@ -1341,20 +2319,16 @@ void APIENTRY glTexBuffer(GLenum target, GLenum internalformat, GLuint buffer) {
         }
         return;
     }
-    // The buffer is mirrored as a 1xN RGBA8 image (texels assumed 4 bytes).
-    const std::vector<uint8_t>& data = it->second.data;
+    // The buffer remains authoritative while its GL name exists. A versioned
+    // derived mirror is refreshed at draw time, so buffer writes do not cause
+    // per-draw native allocation and deletion can retain the final contents.
     st.has_tex_buffer = true;
     st.tex_buffer = buffer;
     st.tex_buffer_format = internalformat;
-    st.width = (uint32_t)(data.size() / 4);
-    st.height = 1;
-    st.depth = 1;
-    st.has_image = !data.empty();
-    st.mip.clear();
-    if (st.has_image) {
-        st.mip.push_back(data);   // RGBA8 texel stream == the mirror
-        MarkTextureDirty(st, id);
-    }
+    st.tex_buffer_bytes_per_texel = bytes_per_texel;
+    st.tex_buffer_backend_format = backend_format;
+    st.tex_buffer_source_version = UINT64_MAX;
+    SyncBufferTexture(st, id);
 }
 
 // ---- pixel store (float variant) -------------------------------------------
@@ -1368,6 +2342,9 @@ void APIENTRY glPixelStoref(GLenum pname, GLfloat param) {
 // ---- shared table storage (declared in internal.h) ------------------------
 
 std::unordered_map<GLuint, TexState> g_textures;
-std::array<GLuint, kMaxTexUnits> g_texture_units{};
+std::array<TextureUnitBindings, kMaxTexUnits> g_texture_units{};
 GLuint g_next_texture = 1;
+std::unordered_map<GLuint, SamplerData> g_samplers;
+std::array<GLuint, kMaxTexUnits> g_sampler_units{};
+GLuint g_next_sampler = 1;
 std::unordered_set<GLuint> g_dirty_textures;

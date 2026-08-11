@@ -19,6 +19,7 @@ struct Display {
 
 struct Context {
     EGLConfig config = EGL_NO_CONFIG;
+    bool drawable_state_initialized = false;
 };
 
 struct Surface {

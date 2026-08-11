@@ -32,7 +32,9 @@
 #define GL_COLOR_BUFFER_BIT   0x00004000
 #define GL_DEPTH_BUFFER_BIT   0x00000100
 #define GL_STENCIL_BUFFER_BIT 0x00000400
+#define GL_COLOR              0x1800
 #define GL_RGBA               0x1908
+#define GL_DEPTH_COMPONENT    0x1902
 #define GL_UNSIGNED_BYTE      0x1401
 #define GL_DEPTH_TEST         0x0B71
 #define GL_BLEND              0x0BE2
@@ -66,6 +68,16 @@
 #define GL_FRAMEBUFFER_COMPLETE 0x8CD5
 #define GL_RENDERBUFFER        0x8D41
 #define GL_TEXTURE_2D          0x0DE1
+#define GL_TEXTURE_2D_MULTISAMPLE 0x9100
+#define GL_TEXTURE_SAMPLES     0x9106
+#define GL_TEXTURE_FIXED_SAMPLE_LOCATIONS 0x9107
+#define GL_RGBA8               0x8058
+#define GL_DEPTH_COMPONENT32F  0x8CAC
+#define GL_TEXTURE_INTERNAL_FORMAT 0x1003
+#define GL_TEXTURE_RED_TYPE    0x8C10
+#define GL_TEXTURE_COMPARE_MODE 0x884C
+#define GL_TEXTURE_COMPARE_FUNC 0x884D
+#define GL_COMPARE_REF_TO_TEXTURE 0x884E
 #define GL_NEAREST             0x2600
 #define GL_LINEAR              0x2601
 #define GL_COLOR_ATTACHMENT0   0x8CE0
@@ -73,6 +85,9 @@
 #define GL_DEPTH_STENCIL       0x84F9
 #define GL_DEPTH_ATTACHMENT    0x8D00
 #define GL_STENCIL_ATTACHMENT  0x8D20
+#define GL_MAX_DRAW_BUFFERS     0x8824
+#define GL_MAX_COLOR_TEXTURE_SAMPLES 0x910E
+#define GL_MAX_DUAL_SOURCE_DRAW_BUFFERS 0x88FC
 
 typedef unsigned int GLuint;
 typedef unsigned int GLenum;
@@ -86,9 +101,11 @@ typedef void* GLvoid;
 
 typedef void (*fn_glClearColor)(float, float, float, float);
 typedef void (*fn_glClear)(GLenum);
+typedef void (*fn_glClearBufferfv)(GLenum, GLint, const float*);
 typedef void (*fn_glEnable)(GLenum);
 typedef void (*fn_glDisable)(GLenum);
 typedef void (*fn_glDepthFunc)(GLenum);
+typedef void (*fn_glViewport)(GLint, GLint, GLsizei, GLsizei);
 typedef void (*fn_glScissor)(GLint, GLint, GLsizei, GLsizei);
 typedef void (*fn_glBlendFunc)(GLenum, GLenum);
 typedef void (*fn_glCullFace)(GLenum);
@@ -103,6 +120,13 @@ typedef void (*fn_glShaderSource)(GLuint, GLsizei, const char* const*, const GLi
 typedef void (*fn_glCompileShader)(GLuint);
 typedef GLuint (*fn_glCreateProgram)(void);
 typedef void (*fn_glAttachShader)(GLuint, GLuint);
+typedef void (*fn_glBindAttribLocation)(GLuint, GLuint, const char*);
+typedef GLint (*fn_glGetAttribLocation)(GLuint, const char*);
+typedef void (*fn_glBindFragDataLocation)(GLuint, GLuint, const char*);
+typedef void (*fn_glBindFragDataLocationIndexed)(GLuint, GLuint, GLuint,
+                                                  const char*);
+typedef GLint (*fn_glGetFragDataLocation)(GLuint, const char*);
+typedef GLint (*fn_glGetFragDataIndex)(GLuint, const char*);
 typedef void (*fn_glLinkProgram)(GLuint);
 typedef void (*fn_glUseProgram)(GLuint);
 typedef GLint (*fn_glGetUniformLocation)(GLuint, const char*);
@@ -131,6 +155,10 @@ typedef void (*fn_glGenTextures)(GLsizei, GLuint*);
 typedef void (*fn_glBindTexture)(GLenum, GLuint);
 typedef void (*fn_glDeleteTextures)(GLsizei, const GLuint*);
 typedef void (*fn_glTexImage2D)(GLenum, GLint, GLint, GLsizei, GLsizei, GLint, GLenum, GLenum, const void*);
+typedef void (*fn_glTexParameteri)(GLenum, GLenum, GLint);
+typedef void (*fn_glTexImage2DMultisample)(GLenum, GLsizei, GLenum, GLsizei,
+                                           GLsizei, GLboolean);
+typedef void (*fn_glGetTexLevelParameteriv)(GLenum, GLint, GLenum, GLint*);
 typedef void (*fn_glBlitFramebuffer)(GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLbitfield, GLenum);
 typedef void (*fn_glDrawBuffers)(GLsizei, const GLenum*);
 typedef void (*fn_glDrawBuffer)(GLenum);
@@ -170,17 +198,55 @@ static const char* FS =
     "    fragColor = vColor;\n"
     "}\n";
 
+/* Declaration order deliberately disagrees with the requested vertex slots.
+ * A pre-link binding must map pos to slot 0 and col to slot 1. */
+static const char* VS_BOUND =
+    "#version 150\n"
+    "in vec4 col;\n"
+    "in vec3 pos;\n"
+    "out vec4 vColor;\n"
+    "void main() {\n"
+    "    vColor = col;\n"
+    "    gl_Position = vec4(pos, 1.0);\n"
+    "}\n";
+
 /* S5-MRT: writes the input color to colour attachment 0 and a fixed green
  * to attachment 1. Both outputs come from a uniforms-free constant path so
  * the fixed-function MRT plumbing is what's exercised. */
 static const char* FS_MRT =
     "#version 150\n"
     "in vec4 vColor;\n"
-    "layout(location=0) out vec4 fragColor0;\n"
-    "layout(location=1) out vec4 fragColor1;\n"
+    "out vec4 fragColor1;\n"
+    "out vec4 fragColor0;\n"
     "void main() {\n"
     "    fragColor0 = vColor;\n"
     "    fragColor1 = vec4(0.0, 1.0, 0.0, 1.0);\n"
+    "}\n";
+
+static const char* FS_MULTISAMPLE =
+    "#version 150\n"
+    "uniform sampler2DMS msColor;\n"
+    "layout(location=0) out vec4 fragColor;\n"
+    "void main() {\n"
+    "    fragColor = texelFetch(msColor, ivec2(16, 16), 0);\n"
+    "}\n";
+
+static const char* FS_DEPTH_TEXTURE =
+    "#version 150\n"
+    "uniform sampler2D depthImage;\n"
+    "layout(location=0) out vec4 fragColor;\n"
+    "void main() {\n"
+    "    float d = texelFetch(depthImage, ivec2(16, 16), 0).r;\n"
+    "    fragColor = vec4(d, 0.0, 0.0, 1.0);\n"
+    "}\n";
+
+static const char* FS_DEPTH_SHADOW =
+    "#version 150\n"
+    "uniform sampler2DShadow depthImage;\n"
+    "layout(location=0) out vec4 fragColor;\n"
+    "void main() {\n"
+    "    float visible = texture(depthImage, vec3(0.5, 0.5, 0.25));\n"
+    "    fragColor = vec4(visible, 0.0, 0.0, 1.0);\n"
     "}\n";
 
 int main(void) {
@@ -189,9 +255,12 @@ int main(void) {
 
     fn_glClearColor clearColor = (fn_glClearColor)dlsym(h, "glClearColor");
     fn_glClear clear = (fn_glClear)dlsym(h, "glClear");
+    fn_glClearBufferfv clearBufferfv =
+        (fn_glClearBufferfv)dlsym(h, "glClearBufferfv");
     fn_glEnable enable = (fn_glEnable)dlsym(h, "glEnable");
     fn_glDisable disable = (fn_glDisable)dlsym(h, "glDisable");
     fn_glDepthFunc depthFunc = (fn_glDepthFunc)dlsym(h, "glDepthFunc");
+    fn_glViewport viewport = (fn_glViewport)dlsym(h, "glViewport");
     fn_glScissor scissor = (fn_glScissor)dlsym(h, "glScissor");
     fn_glBlendFunc blendFunc = (fn_glBlendFunc)dlsym(h, "glBlendFunc");
     fn_glCullFace cullFace = (fn_glCullFace)dlsym(h, "glCullFace");
@@ -206,6 +275,19 @@ int main(void) {
     fn_glCompileShader compileShader = (fn_glCompileShader)dlsym(h, "glCompileShader");
     fn_glCreateProgram createProgram = (fn_glCreateProgram)dlsym(h, "glCreateProgram");
     fn_glAttachShader attachShader = (fn_glAttachShader)dlsym(h, "glAttachShader");
+    fn_glBindAttribLocation bindAttribLocation =
+        (fn_glBindAttribLocation)dlsym(h, "glBindAttribLocation");
+    fn_glGetAttribLocation getAttribLocation =
+        (fn_glGetAttribLocation)dlsym(h, "glGetAttribLocation");
+    fn_glBindFragDataLocation bindFragDataLocation =
+        (fn_glBindFragDataLocation)dlsym(h, "glBindFragDataLocation");
+    fn_glBindFragDataLocationIndexed bindFragDataLocationIndexed =
+        (fn_glBindFragDataLocationIndexed)dlsym(
+            h, "glBindFragDataLocationIndexed");
+    fn_glGetFragDataLocation getFragDataLocation =
+        (fn_glGetFragDataLocation)dlsym(h, "glGetFragDataLocation");
+    fn_glGetFragDataIndex getFragDataIndex =
+        (fn_glGetFragDataIndex)dlsym(h, "glGetFragDataIndex");
     fn_glLinkProgram linkProgram = (fn_glLinkProgram)dlsym(h, "glLinkProgram");
     fn_glUseProgram useProgram = (fn_glUseProgram)dlsym(h, "glUseProgram");
     fn_glGetUniformLocation getUniformLoc = (fn_glGetUniformLocation)dlsym(h, "glGetUniformLocation");
@@ -234,6 +316,12 @@ int main(void) {
     fn_glBindTexture bindTexture = (fn_glBindTexture)dlsym(h, "glBindTexture");
     fn_glDeleteTextures deleteTextures = (fn_glDeleteTextures)dlsym(h, "glDeleteTextures");
     fn_glTexImage2D texImage2D = (fn_glTexImage2D)dlsym(h, "glTexImage2D");
+    fn_glTexParameteri texParameteri =
+        (fn_glTexParameteri)dlsym(h, "glTexParameteri");
+    fn_glTexImage2DMultisample texImage2DMultisample =
+        (fn_glTexImage2DMultisample)dlsym(h, "glTexImage2DMultisample");
+    fn_glGetTexLevelParameteriv getTexLevelParameteriv =
+        (fn_glGetTexLevelParameteriv)dlsym(h, "glGetTexLevelParameteriv");
     fn_glBlitFramebuffer blitFramebuffer = (fn_glBlitFramebuffer)dlsym(h, "glBlitFramebuffer");
     fn_glDrawBuffers drawBuffers = (fn_glDrawBuffers)dlsym(h, "glDrawBuffers");
     fn_glDrawBuffer drawBuffer = (fn_glDrawBuffer)dlsym(h, "glDrawBuffer");
@@ -242,11 +330,13 @@ int main(void) {
     fn_glGetRenderbufferParameteriv getRboParam = (fn_glGetRenderbufferParameteriv)dlsym(h, "glGetRenderbufferParameteriv");
     fn_glGetIntegerv getIntegerv = (fn_glGetIntegerv)dlsym(h, "glGetIntegerv");
 
-    CHECK(clearColor && clear && enable && depthFunc && scissor && blendFunc &&
+    CHECK(clearColor && clear && clearBufferfv && enable && depthFunc && viewport && scissor && blendFunc &&
           cullFace && frontFace && stencilFunc && stencilOp && stencilMask &&
           colorMask && polygonMode &&
           createShader && shaderSource && compileShader && createProgram &&
-          attachShader && linkProgram && useProgram && getUniformLoc &&
+          attachShader && bindAttribLocation && getAttribLocation &&
+          bindFragDataLocation && bindFragDataLocationIndexed &&
+          getFragDataLocation && getFragDataIndex && linkProgram && useProgram && getUniformLoc &&
           uniform4f && genVertexArrays && bindVertexArray && genBuffers &&
           bindBuffer && bufferData && enableAttrib && vertexAttribPtr &&
           drawArrays && finish && readPixels &&
@@ -254,6 +344,8 @@ int main(void) {
           framebufferTexture2D && framebufferRenderbuffer &&
           checkFramebufferStatus && genRenderbuffers && bindRenderbuffer &&
           renderbufferStorage && genTextures && bindTexture && texImage2D &&
+          texParameteri &&
+          texImage2DMultisample && getTexLevelParameteriv &&
           blitFramebuffer && drawBuffers && drawBuffer && readBuffer &&
           rboMultisample && getRboParam && getIntegerv,
           "all required GL symbols resolved");
@@ -268,7 +360,12 @@ int main(void) {
     GLuint prog = createProgram();
     attachShader(prog, vs);
     attachShader(prog, fs);
+    bindAttribLocation(prog, 5, "pos");
+    bindFragDataLocation(prog, 1, "fragColor");
     linkProgram(prog);
+    CHECK(getAttribLocation(prog, "pos") == 0 &&
+              getFragDataLocation(prog, "fragColor") == 0,
+          "explicit layout(location=) overrides pre-link API bindings");
     useProgram(prog);
 
     /* -- vertex setup ------------------------------------------- */
@@ -338,10 +435,11 @@ int main(void) {
             {-1,  3, 0.0f, 1, 1, 1, 1},
         };
         bufferData(GL_ARRAY_BUFFER, (GLsizeiptr)sizeof(white), white, 0x88E4);
-        enable(GL_SCISSOR_TEST);
         scissor(0, 0, 3, 3);
         clearColor(0.10f, 0.20f, 0.30f, 1.0f);
+        disable(GL_SCISSOR_TEST);
         clear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        enable(GL_SCISSOR_TEST);
         drawArrays(GL_TRIANGLES, 0, 3);
         finish();
         readPixels(256, 300, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
@@ -357,6 +455,90 @@ int main(void) {
         CHECK(px_match(px, 255, 255, 255, 255),
               "scissored region still receives the triangle (r=%d g=%d b=%d)",
               px[0], px[1], px[2]);
+
+        /* glClear itself is scissored: clear a red 16x16 corner over blue. */
+        disable(GL_SCISSOR_TEST);
+        clearColor(0, 0, 1, 1);
+        clear(GL_COLOR_BUFFER_BIT);
+        enable(GL_SCISSOR_TEST);
+        scissor(0, 0, 16, 16);
+        clearColor(1, 0, 0, 1);
+        clear(GL_COLOR_BUFFER_BIT);
+        finish();
+        readPixels(8, 8, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        CHECK(px_match(px, 255, 0, 0, 255),
+              "scissored clear updates its rectangle (r=%d g=%d b=%d)",
+              px[0], px[1], px[2]);
+        readPixels(32, 32, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        CHECK(px_match(px, 0, 0, 255, 255),
+              "scissored clear preserves pixels outside (r=%d g=%d b=%d)",
+              px[0], px[1], px[2]);
+
+        /* A later clear is ordered after prior draws, and its value is a
+           snapshot: changing clearColor again must not rewrite it. */
+        disable(GL_SCISSOR_TEST);
+        disable(GL_DEPTH_TEST);
+        float ordered_red[3][7] = {
+            {-1, -1, 0.0f, 1, 0, 0, 1},
+            { 3, -1, 0.0f, 1, 0, 0, 1},
+            {-1,  3, 0.0f, 1, 0, 0, 1},
+        };
+        clearColor(0, 0, 0, 1);
+        clear(GL_COLOR_BUFFER_BIT);
+        bufferData(GL_ARRAY_BUFFER, (GLsizeiptr)sizeof(ordered_red),
+                   ordered_red, 0x88E4);
+        drawArrays(GL_TRIANGLES, 0, 3);
+        clearColor(0, 0, 1, 1);
+        clear(GL_COLOR_BUFFER_BIT);
+        clearColor(0, 1, 0, 1); /* state change only; no third clear */
+        finish();
+        readPixels(256, 256, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        CHECK(px_match(px, 0, 0, 255, 255),
+              "ordered clear keeps its captured value after prior draw (r=%d g=%d b=%d)",
+              px[0], px[1], px[2]);
+    }
+
+    /* -- deferred encoding: viewport/scissor are per-draw snapshots ------- */
+    {
+        float red[3][7] = {
+            {-1, -1, 0.0f, 1, 0, 0, 1},
+            { 3, -1, 0.0f, 1, 0, 0, 1},
+            {-1,  3, 0.0f, 1, 0, 0, 1},
+        };
+        float green[3][7] = {
+            {-1, -1, 0.0f, 0, 1, 0, 1},
+            { 3, -1, 0.0f, 0, 1, 0, 1},
+            {-1,  3, 0.0f, 0, 1, 0, 1},
+        };
+        disable(GL_DEPTH_TEST);
+        disable(GL_SCISSOR_TEST);
+        clearColor(0, 0, 0, 1);
+        clear(GL_COLOR_BUFFER_BIT);
+
+        enable(GL_SCISSOR_TEST);
+        viewport(0, 0, 256, 512);
+        scissor(0, 0, 256, 512);
+        bufferData(GL_ARRAY_BUFFER, (GLsizeiptr)sizeof(red), red, 0x88E4);
+        drawArrays(GL_TRIANGLES, 0, 3);
+
+        viewport(256, 0, 256, 512);
+        scissor(256, 0, 256, 512);
+        bufferData(GL_ARRAY_BUFFER, (GLsizeiptr)sizeof(green), green, 0x88E4);
+        drawArrays(GL_TRIANGLES, 0, 3);
+        /* Both draws must still be pending when their dynamic state changes. */
+        finish();
+        readPixels(128, 256, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        CHECK(px_match(px, 255, 0, 0, 255),
+              "first deferred draw keeps left viewport/scissor (r=%d g=%d b=%d)",
+              px[0], px[1], px[2]);
+        readPixels(384, 256, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        CHECK(px_match(px, 0, 255, 0, 255),
+              "second deferred draw keeps right viewport/scissor (r=%d g=%d b=%d)",
+              px[0], px[1], px[2]);
+
+        viewport(0, 0, 512, 512);
+        scissor(0, 0, 512, 512);
+        disable(GL_SCISSOR_TEST);
     }
 
     /* -- blend: SRC_ALPHA/ONE_MINUS_SRC_ALPHA --------------------- */
@@ -740,18 +922,54 @@ int main(void) {
               "MRT FBO with two colour textures is complete");
 
         /* Swap in the MRT fragment shader (re-link a fresh program). */
+        GLuint vs2 = createShader(GL_VERTEX_SHADER);
+        shaderSource(vs2, 1, &VS_BOUND, 0);
+        compileShader(vs2);
         GLuint fs2 = createShader(GL_FRAGMENT_SHADER);
         shaderSource(fs2, 1, &FS_MRT, 0);
         compileShader(fs2);
         GLuint prog2 = createProgram();
-        attachShader(prog2, vs);
+        attachShader(prog2, vs2);
         attachShader(prog2, fs2);
+        bindAttribLocation(prog2, 0, "pos");
+        bindAttribLocation(prog2, 1, "col");
+        bindFragDataLocation(prog2, 0, "fragColor0");
+        bindFragDataLocationIndexed(prog2, 1, 0, "fragColor1");
         linkProgram(prog2);
+        GLint max_draw_buffers = 0, max_dual_source = -1;
+        getIntegerv(GL_MAX_DRAW_BUFFERS, &max_draw_buffers);
+        getIntegerv(GL_MAX_DUAL_SOURCE_DRAW_BUFFERS, &max_dual_source);
+        CHECK(getAttribLocation(prog2, "pos") == 0 &&
+                  getAttribLocation(prog2, "col") == 1 &&
+                  getFragDataLocation(prog2, "fragColor0") == 0 &&
+                  getFragDataLocation(prog2, "fragColor1") == 1 &&
+                  getFragDataIndex(prog2, "fragColor1") == 0 &&
+                  max_draw_buffers == 8 && max_dual_source == 0,
+              "pre-link shader I/O bindings survive shared SPIR-V lowering");
         useProgram(prog2);
 
         clearColor(0, 0, 0, 1.0f);
         GLenum bufs2[2] = {GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1};
         drawBuffers(2, bufs2);
+
+        /* Clear GL_DRAW_BUFFER0 and GL_DRAW_BUFFER1 to different values.
+           This is the MRT behavior glClear cannot express. */
+        const float clear_red[4] = {1, 0, 0, 1};
+        const float clear_blue[4] = {0, 0, 1, 1};
+        clearBufferfv(GL_COLOR, 0, clear_red);
+        clearBufferfv(GL_COLOR, 1, clear_blue);
+        finish();
+        readBuffer(GL_COLOR_ATTACHMENT0);
+        readPixels(16, 16, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        CHECK(px_match(px, 255, 0, 0, 255),
+              "glClearBufferfv targets MRT draw buffer 0 (r=%d g=%d b=%d)",
+              px[0], px[1], px[2]);
+        readBuffer(GL_COLOR_ATTACHMENT1);
+        readPixels(16, 16, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        CHECK(px_match(px, 0, 0, 255, 255),
+              "glClearBufferfv targets MRT draw buffer 1 (r=%d g=%d b=%d)",
+              px[0], px[1], px[2]);
+
         clear(GL_COLOR_BUFFER_BIT);
         /* full-viewport red triangle; both attachments receive it. */
         float red[3][7] = {
@@ -828,6 +1046,224 @@ int main(void) {
         bindFramebuffer(GL_FRAMEBUFFER, 0);
         deleteFramebuffers(1, &fbo);
         deleteRenderbuffers(1, &rbo);
+    }
+
+    /* -- multisample texture: render attachment -> sampler2DMS ------------ */
+    {
+        GLint max_samples = 0;
+        getIntegerv(GL_MAX_COLOR_TEXTURE_SAMPLES, &max_samples);
+        if (max_samples < 4) {
+            CHECK(max_samples == 0,
+                  "backend explicitly leaves multisample textures unavailable");
+        } else {
+            CHECK(max_samples >= 4,
+                  "DirectMetal reports a usable color texture sample count (%d)",
+                  max_samples);
+
+            GLuint texture = 0, fbo = 0;
+            genTextures(1, &texture);
+            bindTexture(GL_TEXTURE_2D_MULTISAMPLE, texture);
+            texImage2DMultisample(GL_TEXTURE_2D_MULTISAMPLE, 4, GL_RGBA8,
+                                  32, 32, GL_TRUE);
+            GLint texture_samples = 0, fixed_locations = 0;
+            getTexLevelParameteriv(GL_TEXTURE_2D_MULTISAMPLE, 0,
+                                   GL_TEXTURE_SAMPLES, &texture_samples);
+            getTexLevelParameteriv(GL_TEXTURE_2D_MULTISAMPLE, 0,
+                                   GL_TEXTURE_FIXED_SAMPLE_LOCATIONS,
+                                   &fixed_locations);
+            CHECK(texture_samples == 4 && fixed_locations == GL_TRUE,
+                  "multisample texture reports 4 fixed samples");
+
+            genFramebuffers(1, &fbo);
+            bindFramebuffer(GL_FRAMEBUFFER, fbo);
+            framebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                 GL_TEXTURE_2D_MULTISAMPLE, texture, 0);
+            CHECK(checkFramebufferStatus(GL_FRAMEBUFFER) ==
+                      GL_FRAMEBUFFER_COMPLETE,
+                  "4-sample texture is a complete Metal FBO attachment");
+
+            GLuint single_sample = 0;
+            genTextures(1, &single_sample);
+            bindTexture(GL_TEXTURE_2D, single_sample);
+            texImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 32, 32, 0, GL_RGBA,
+                       GL_UNSIGNED_BYTE, 0);
+            framebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1,
+                                 GL_TEXTURE_2D, single_sample, 0);
+            CHECK(checkFramebufferStatus(GL_FRAMEBUFFER) !=
+                      GL_FRAMEBUFFER_COMPLETE,
+                  "mixed sample-count attachments are not reported complete");
+            framebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1,
+                                 GL_TEXTURE_2D, 0, 0);
+            CHECK(checkFramebufferStatus(GL_FRAMEBUFFER) ==
+                      GL_FRAMEBUFFER_COMPLETE,
+                  "detaching the mismatched image restores completeness");
+            deleteTextures(1, &single_sample);
+
+            useProgram(prog);
+            disable(GL_DEPTH_TEST);
+            viewport(0, 0, 32, 32);
+            const float magenta[3][7] = {
+                {-1, -1, 0.0f, 1, 0, 1, 1},
+                { 3, -1, 0.0f, 1, 0, 1, 1},
+                {-1,  3, 0.0f, 1, 0, 1, 1},
+            };
+            bufferData(GL_ARRAY_BUFFER, (GLsizeiptr)sizeof(magenta), magenta,
+                       0x88E4);
+            clearColor(0, 0, 0, 1);
+            clear(GL_COLOR_BUFFER_BIT);
+            drawArrays(GL_TRIANGLES, 0, 3);
+
+            /* Switching targets submits the producer on the same Metal queue;
+               the consumer reads the native multisample texture directly. */
+            bindFramebuffer(GL_FRAMEBUFFER, 0);
+            viewport(0, 0, 512, 512);
+            GLuint vs_ms = createShader(GL_VERTEX_SHADER);
+            shaderSource(vs_ms, 1, &VS, 0);
+            compileShader(vs_ms);
+            GLuint fs_ms = createShader(GL_FRAGMENT_SHADER);
+            shaderSource(fs_ms, 1, &FS_MULTISAMPLE, 0);
+            compileShader(fs_ms);
+            GLuint program_ms = createProgram();
+            attachShader(program_ms, vs_ms);
+            attachShader(program_ms, fs_ms);
+            linkProgram(program_ms);
+            useProgram(program_ms);
+            clearColor(0, 0, 0, 1);
+            clear(GL_COLOR_BUFFER_BIT);
+            drawArrays(GL_TRIANGLES, 0, 3);
+            finish();
+            readPixels(256, 256, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+            CHECK(px_match(px, 255, 0, 255, 255),
+                  "sampler2DMS reads the texture rendered by native Metal "
+                  "(r=%d g=%d b=%d)", px[0], px[1], px[2]);
+
+            deleteFramebuffers(1, &fbo);
+            deleteTextures(1, &texture);
+        }
+    }
+
+    /* -- depth texture: native attachment write -> shader read ------------ */
+    {
+        /* The Vulkan reference backend reports this capability marker as 0;
+           this focused vertical slice executes only on DirectMetal. */
+        GLint direct_metal_marker = 0;
+        getIntegerv(GL_MAX_COLOR_TEXTURE_SAMPLES, &direct_metal_marker);
+        if (direct_metal_marker > 0) {
+            GLuint color = 0, depth = 0, fbo = 0;
+            genTextures(1, &color);
+            bindTexture(GL_TEXTURE_2D, color);
+            texImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 32, 32, 0, GL_RGBA,
+                       GL_UNSIGNED_BYTE, 0);
+            genTextures(1, &depth);
+            bindTexture(GL_TEXTURE_2D, depth);
+            texImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT32F, 32, 32, 0,
+                       GL_DEPTH_COMPONENT, GL_FLOAT, 0);
+            GLint depth_format = 0, depth_type = 0;
+            getTexLevelParameteriv(GL_TEXTURE_2D, 0,
+                                   GL_TEXTURE_INTERNAL_FORMAT, &depth_format);
+            getTexLevelParameteriv(GL_TEXTURE_2D, 0,
+                                   GL_TEXTURE_RED_TYPE, &depth_type);
+            CHECK(depth_format == GL_DEPTH_COMPONENT32F &&
+                      depth_type == GL_FLOAT,
+                  "depth texture preserves its Depth32F storage ABI");
+
+            genFramebuffers(1, &fbo);
+            bindFramebuffer(GL_FRAMEBUFFER, fbo);
+            framebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                 GL_TEXTURE_2D, color, 0);
+            framebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                                 GL_TEXTURE_2D, depth, 0);
+            CHECK(checkFramebufferStatus(GL_FRAMEBUFFER) ==
+                      GL_FRAMEBUFFER_COMPLETE,
+                  "color plus Depth32F texture forms a complete Metal FBO");
+
+            framebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                 GL_TEXTURE_2D, depth, 0);
+            CHECK(checkFramebufferStatus(GL_FRAMEBUFFER) !=
+                      GL_FRAMEBUFFER_COMPLETE,
+                  "depth texture is rejected from a color attachment");
+            framebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                                 GL_TEXTURE_2D, color, 0);
+            framebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                                 GL_TEXTURE_2D, color, 0);
+            CHECK(checkFramebufferStatus(GL_FRAMEBUFFER) !=
+                      GL_FRAMEBUFFER_COMPLETE,
+                  "color texture is rejected from a depth attachment");
+            framebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                                 GL_TEXTURE_2D, depth, 0);
+            CHECK(checkFramebufferStatus(GL_FRAMEBUFFER) ==
+                      GL_FRAMEBUFFER_COMPLETE,
+                  "restoring typed attachments restores completeness");
+
+            useProgram(prog);
+            viewport(0, 0, 32, 32);
+            enable(GL_DEPTH_TEST);
+            depthFunc(GL_LEQUAL);
+            const float full_screen[3][7] = {
+                {-1, -1, 0.0f, 1, 1, 1, 1},
+                { 3, -1, 0.0f, 1, 1, 1, 1},
+                {-1,  3, 0.0f, 1, 1, 1, 1},
+            };
+            bufferData(GL_ARRAY_BUFFER, (GLsizeiptr)sizeof(full_screen),
+                       full_screen, 0x88E4);
+            clearColor(0, 0, 0, 1);
+            clear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT |
+                  GL_STENCIL_BUFFER_BIT);
+            drawArrays(GL_TRIANGLES, 0, 3);
+
+            /* Binding the default target orders the producing command first.
+               The next draw samples the same resident Metal depth texture. */
+            bindFramebuffer(GL_FRAMEBUFFER, 0);
+            bindTexture(GL_TEXTURE_2D, depth);
+            viewport(0, 0, 512, 512);
+            disable(GL_DEPTH_TEST);
+            GLuint vs_depth = createShader(GL_VERTEX_SHADER);
+            shaderSource(vs_depth, 1, &VS, 0);
+            compileShader(vs_depth);
+            GLuint fs_depth = createShader(GL_FRAGMENT_SHADER);
+            shaderSource(fs_depth, 1, &FS_DEPTH_TEXTURE, 0);
+            compileShader(fs_depth);
+            GLuint program_depth = createProgram();
+            attachShader(program_depth, vs_depth);
+            attachShader(program_depth, fs_depth);
+            linkProgram(program_depth);
+            useProgram(program_depth);
+            clearColor(0, 0, 0, 1);
+            clear(GL_COLOR_BUFFER_BIT);
+            drawArrays(GL_TRIANGLES, 0, 3);
+            finish();
+            readPixels(256, 256, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+            CHECK(px_match(px, 128, 0, 0, 255),
+                  "shader reads GL z=0 as 0.5 from native Metal depth storage "
+                  "(r=%d g=%d b=%d)", px[0], px[1], px[2]);
+
+            /* The same resident image now feeds a comparison sampler. The
+               LEQUAL reference 0.25 passes against the stored depth 0.5. */
+            bindTexture(GL_TEXTURE_2D, depth);
+            texParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE,
+                          GL_COMPARE_REF_TO_TEXTURE);
+            texParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_FUNC, GL_LEQUAL);
+            GLuint fs_shadow = createShader(GL_FRAGMENT_SHADER);
+            shaderSource(fs_shadow, 1, &FS_DEPTH_SHADOW, 0);
+            compileShader(fs_shadow);
+            GLuint program_shadow = createProgram();
+            attachShader(program_shadow, vs_depth);
+            attachShader(program_shadow, fs_shadow);
+            linkProgram(program_shadow);
+            useProgram(program_shadow);
+            clearColor(0, 0, 0, 1);
+            clear(GL_COLOR_BUFFER_BIT);
+            drawArrays(GL_TRIANGLES, 0, 3);
+            finish();
+            readPixels(256, 256, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+            CHECK(px_match(px, 255, 0, 0, 255),
+                  "sampler2DShadow compares through a cached Metal compare "
+                  "sampler (r=%d g=%d b=%d)", px[0], px[1], px[2]);
+
+            deleteFramebuffers(1, &fbo);
+            deleteTextures(1, &color);
+            deleteTextures(1, &depth);
+        }
     }
 
     dlclose(h);

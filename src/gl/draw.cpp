@@ -10,6 +10,8 @@
 #include <cstring>
 #include <utility>
 
+#include <util/log.h>
+
 namespace {
 namespace sh = mithril::shader;
 float HalfToFloat(uint16_t h) {
@@ -45,6 +47,52 @@ uint32_t AttribTypeSize(GLenum type) {
         case GL_DOUBLE: return 8;
         default: return 0;
     }
+}
+
+bool IsSignedIntegerAttrib(GLenum type) {
+    return type == GL_BYTE || type == GL_SHORT || type == GL_INT;
+}
+
+bool NativeVertexAttr(const AttribData& source, GLuint location,
+                      v::VertexAttr* output) {
+    if (!output || source.size < 1 || source.size > 4) return false;
+    v::VertexScalarType type;
+    bool normalized = false;
+    if (source.integer) {
+        switch (source.type) {
+            case GL_BYTE: type = v::VertexScalarType::Sint8; break;
+            case GL_UNSIGNED_BYTE: type = v::VertexScalarType::Uint8; break;
+            case GL_SHORT: type = v::VertexScalarType::Sint16; break;
+            case GL_UNSIGNED_SHORT: type = v::VertexScalarType::Uint16; break;
+            case GL_INT: type = v::VertexScalarType::Sint32; break;
+            case GL_UNSIGNED_INT: type = v::VertexScalarType::Uint32; break;
+            default: return false;
+        }
+    } else if (source.type == GL_FLOAT) {
+        type = v::VertexScalarType::Float32;
+    } else if (source.type == GL_HALF_FLOAT) {
+        type = v::VertexScalarType::Float16;
+    } else if (source.normalized &&
+               (source.type == GL_BYTE || source.type == GL_UNSIGNED_BYTE ||
+                source.type == GL_SHORT || source.type == GL_UNSIGNED_SHORT)) {
+        normalized = true;
+        switch (source.type) {
+            case GL_BYTE: type = v::VertexScalarType::Sint8; break;
+            case GL_UNSIGNED_BYTE: type = v::VertexScalarType::Uint8; break;
+            case GL_SHORT: type = v::VertexScalarType::Sint16; break;
+            default: type = v::VertexScalarType::Uint16; break;
+        }
+    } else {
+        // Metal has no normalized 32-bit integer vertex format, and plain
+        // glVertexAttribPointer integer inputs require conversion to float.
+        return false;
+    }
+    output->location = location;
+    output->components = static_cast<uint32_t>(source.size);
+    output->offset = static_cast<uint32_t>(source.offset);
+    output->scalar_type = type;
+    output->normalized = normalized;
+    return true;
 }
 
 // Read `count` components of `type` at `p` into float, honouring the
@@ -101,6 +149,18 @@ void FetchComponents(const uint8_t* p, GLenum type, GLboolean normalized,
     }
 }
 
+template <typename Destination, typename Source>
+void ConvertIntegerComponents(const uint8_t* bytes, uint8_t* output,
+                              GLuint count) {
+    for (GLuint i = 0; i < count; ++i) {
+        Source source{};
+        std::memcpy(&source, bytes + i * sizeof(Source), sizeof(Source));
+        const Destination value = static_cast<Destination>(source);
+        std::memcpy(output + i * sizeof(Destination), &value,
+                    sizeof(Destination));
+    }
+}
+
 } // namespace
 
 extern "C" {
@@ -114,22 +174,25 @@ int GLModeToTopology(GLenum mode) {
         case GL_TRIANGLES: return 0;
         case GL_TRIANGLE_STRIP: return 1;
         case GL_TRIANGLE_FAN: return 2;
+        case GL_LINES: return 3;
+        case GL_LINE_STRIP: return 4;
         default: return -1;
     }
 }
 
-uint64_t CreateVProgram(sh::Program* prog) {
-    auto it = g_vk_programs.find(prog->id);
-    if (it != g_vk_programs.end()) return it->second;
+uint64_t CreateBackendProgram(sh::Program* prog) {
+    auto it = g_backend_programs.find(prog->id);
+    if (it != g_backend_programs.end()) return it->second;
     uint64_t handle = v::CreateProgram(prog->vertex_spirv, prog->fragment_spirv);
-    if (handle) g_vk_programs.emplace(prog->id, handle);
+    if (handle) g_backend_programs.emplace(prog->id, handle);
     return handle;
 }
 
 std::unordered_map<std::string, std::vector<float>> ComposeUniforms(
     sh::Program* prog) {
     std::unordered_map<std::string, std::vector<float>> uniforms;
-    for (const auto& u : prog->uniforms) uniforms[u.name] = u.value;
+    for (const auto& u : prog->uniforms)
+        if (u.location >= 0) uniforms[u.name] = u.value;
     return uniforms;
 }
 
@@ -183,13 +246,10 @@ v::PipelineState BuildPipelineState() {
 }
 
 // Fetch `size` components of attribute `a` for source buffer row `row`.
-// Applies buffer lookup, stride, type size, normalization, half/double
-// conversion, or the generic constant when the array is disabled/unbound.
+// Applies buffer lookup, stride, type size, normalization, and half/double
+// conversion for an enabled vertex array.
 bool FetchAttribRow(const AttribData& a, GLint row, GLfloat* out) {
-    if (!a.is_pointer || a.buffer == 0) {
-        for (GLuint i = 0; i < (GLuint)a.size; ++i) out[i] = a.constant[i];
-        return true;
-    }
+    if (!a.is_pointer || a.buffer == 0) return false;
     if (row < 0) return false;
     auto bit = g_buffers.find(a.buffer);
     if (bit == g_buffers.end()) return false;
@@ -202,8 +262,100 @@ bool FetchAttribRow(const AttribData& a, GLint row, GLfloat* out) {
     return true;
 }
 
-// Core draw: resolve the current VAO into float32 streams and hand them to
-// the Vulkan backend. `idx` holds raw indices (glDrawElements path); when
+bool PackIntegerAttribRow(const AttribData& a, GLint row, uint8_t* output) {
+    if (!a.is_pointer || !a.buffer || row < 0 || a.offset < 0) return false;
+    auto buffer = g_buffers.find(a.buffer);
+    if (buffer == g_buffers.end()) return false;
+    const uint32_t type_size = AttribTypeSize(a.type);
+    const GLsizei stride = a.stride ? a.stride : a.size * type_size;
+    const uint64_t source_offset = static_cast<uint64_t>(a.offset) +
+                                   static_cast<uint64_t>(row) * stride;
+    const uint64_t source_bytes = static_cast<uint64_t>(a.size) * type_size;
+    if (source_offset > buffer->second.data.size() ||
+        source_bytes > buffer->second.data.size() - source_offset)
+        return false;
+    const uint8_t* bytes = buffer->second.data.data() +
+                           static_cast<size_t>(source_offset);
+    switch (a.type) {
+        case GL_BYTE:
+            ConvertIntegerComponents<int32_t, int8_t>(
+                bytes, output, static_cast<GLuint>(a.size)); return true;
+        case GL_UNSIGNED_BYTE:
+            ConvertIntegerComponents<uint32_t, uint8_t>(
+                bytes, output, static_cast<GLuint>(a.size)); return true;
+        case GL_SHORT:
+            ConvertIntegerComponents<int32_t, int16_t>(
+                bytes, output, static_cast<GLuint>(a.size)); return true;
+        case GL_UNSIGNED_SHORT:
+            ConvertIntegerComponents<uint32_t, uint16_t>(
+                bytes, output, static_cast<GLuint>(a.size)); return true;
+        case GL_INT:
+            ConvertIntegerComponents<int32_t, int32_t>(
+                bytes, output, static_cast<GLuint>(a.size)); return true;
+        case GL_UNSIGNED_INT:
+            ConvertIntegerComponents<uint32_t, uint32_t>(
+                bytes, output, static_cast<GLuint>(a.size)); return true;
+        default: return false;
+    }
+}
+
+bool PackTransientAttribRow(const AttribData& source,
+                            const v::VertexAttr& destination,
+                            GLint row, uint8_t* output) {
+    if (source.integer) return PackIntegerAttribRow(source, row, output);
+    float components[4]{};
+    if (!FetchAttribRow(source, row, components)) return false;
+    std::memcpy(output, components,
+                destination.components * sizeof(float));
+    return true;
+}
+
+v::VertexScalarType ConstantScalarType(const sh::VertexInput& input) {
+    switch (input.scalar) {
+        case sh::VertexInputScalar::Float32:
+            return v::VertexScalarType::Float32;
+        case sh::VertexInputScalar::Sint32:
+            return v::VertexScalarType::Sint32;
+        case sh::VertexInputScalar::Uint32:
+            return v::VertexScalarType::Uint32;
+        default:
+            return v::VertexScalarType::Float32;
+    }
+}
+
+bool PackConstantAttrib(const CurrentAttribData& source,
+                        const sh::VertexInput& input, uint8_t* output) {
+    if (input.components < 1 || input.components > 4 ||
+        input.scalar == sh::VertexInputScalar::Unsupported)
+        return false;
+    for (uint32_t component = 0; component < input.components; ++component) {
+        switch (input.scalar) {
+            case sh::VertexInputScalar::Float32: {
+                float value = source.constant[component];
+                std::memcpy(output + component * sizeof(value), &value,
+                            sizeof(value));
+                break;
+            }
+            case sh::VertexInputScalar::Sint32: {
+                int32_t value = source.constant_sint[component];
+                std::memcpy(output + component * sizeof(value), &value,
+                            sizeof(value));
+                break;
+            }
+            case sh::VertexInputScalar::Uint32: {
+                uint32_t value = source.constant_uint[component];
+                std::memcpy(output + component * sizeof(value), &value,
+                            sizeof(value));
+                break;
+            }
+            default: return false;
+        }
+    }
+    return true;
+}
+
+// Core draw: resolve the current VAO into typed streams and hand them to the
+// selected backend. `idx` holds raw indices (glDrawElements path); when
 // empty, `first`/`count` describe a glDrawArrays-style range and `base_vertex`
 // is ignored.
 void DrawCommon(GLenum mode, const std::vector<uint32_t>& idx, GLint first,
@@ -219,7 +371,7 @@ void DrawCommon(GLenum mode, const std::vector<uint32_t>& idx, GLint first,
     if (!v::EnsureInit()) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
     // Replay texture uploads that happened before the backend came up.
     if (!g_dirty_textures.empty()) FlushDirtyTextureUploads();
-    if (!CreateVProgram(prog)) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
+    if (!CreateBackendProgram(prog)) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
 
     const VAOData& vao = g_vaos[g_bound_vao];
 
@@ -230,7 +382,15 @@ void DrawCommon(GLenum mode, const std::vector<uint32_t>& idx, GLint first,
         if (!a.enabled) continue;
         (a.divisor ? instance_slots : vertex_slots).push_back(slot);
     }
-    if (vertex_slots.empty() && instance_slots.empty()) return;
+    std::vector<sh::VertexInput> constant_inputs;
+    for (const sh::VertexInput& input : prog->vertex_inputs) {
+        if (input.location >= kMaxAttribs) {
+            PUSH_ERROR(GL_INVALID_OPERATION);
+            return;
+        }
+        if (!vao.attribs[input.location].enabled)
+            constant_inputs.push_back(input);
+    }
 
     // Rows referenced by each payload record: glDrawArrays maps payload row
     // i to buffer row (first + i); glDrawElements maps payload row i to
@@ -242,43 +402,103 @@ void DrawCommon(GLenum mode, const std::vector<uint32_t>& idx, GLint first,
         v_count = count;
     } else {
         uint32_t m = 0;
-        for (uint32_t i : idx) m = std::max(m, i);
+        bool has_vertex = false;
+        for (uint32_t i : idx) {
+            if (i == UINT32_MAX) continue;
+            m = std::max(m, i);
+            has_vertex = true;
+        }
+        if (!has_vertex) return;
         v_count = (GLsizei)(m + 1);
     }
 
     v::VertexStream vstream;
     if (!vertex_slots.empty()) {
-        uint32_t off = 0;
+        // Preserve a representable raw interleaved VBO as authoritative
+        // source when every per-vertex attribute shares its layout. This
+        // covers Minecraft-like float + normalized colour + integer metadata
+        // records without a CPU repack on every draw.
+        bool resident = row_base >= 0;
+        GLuint resident_buffer = vao.attribs[vertex_slots.front()].buffer;
+        GLsizei resident_stride = vao.attribs[vertex_slots.front()].stride;
+        auto bit = g_buffers.find(resident_buffer);
+        resident = resident && resident_buffer != 0 && resident_stride > 0 &&
+                   bit != g_buffers.end() && bit->second.defined;
+        std::vector<v::VertexAttr> native_attrs;
         for (GLuint slot : vertex_slots) {
-            v::VertexAttr va;
-            va.location = slot;
-            va.components = (uint32_t)vao.attribs[slot].size;
-            va.offset = off;
-            off += (uint32_t)vao.attribs[slot].size * 4;
-            vstream.attrs.push_back(va);
+            const AttribData& a = vao.attribs[slot];
+            v::VertexAttr native;
+            resident = resident && a.buffer == resident_buffer &&
+                       a.stride == resident_stride && a.offset >= 0 &&
+                       NativeVertexAttr(a, slot, &native) &&
+                       (uint64_t)a.offset +
+                           (uint64_t)a.size * AttribTypeSize(a.type) <=
+                           (uint64_t)resident_stride;
+            native_attrs.push_back(native);
         }
-        vstream.stride = off;
-        std::vector<float> verts((size_t)v_count * off / 4);
-        for (GLsizei i = 0; i < v_count; ++i) {
-            size_t rec = (size_t)i * off / 4;
-            for (size_t k = 0; k < vertex_slots.size(); ++k) {
-                const AttribData& a = vao.attribs[vertex_slots[k]];
-                float comps[4];
-                if (!FetchAttribRow(a, row_base + i, comps)) {
-                    PUSH_ERROR(GL_INVALID_OPERATION);
-                    return;
+        const uint64_t start = (uint64_t)std::max(row_base, 0) *
+                               (uint64_t)std::max(resident_stride, 0);
+        const uint64_t end = start + (uint64_t)v_count *
+                             (uint64_t)std::max(resident_stride, 0);
+        resident = resident && end >= start &&
+                   end <= (uint64_t)bit->second.data.size();
+
+        if (resident) {
+            vstream.attrs = std::move(native_attrs);
+            vstream.stride = (uint32_t)resident_stride;
+            vstream.source_data = bit->second.data.data();
+            vstream.source_size = bit->second.data.size();
+            vstream.source_lifetime_id = bit->second.lifetime_id;
+            vstream.source_content_version = bit->second.content_version;
+            vstream.binding_offset = start;
+            vstream.record_count = (uint32_t)v_count;
+        } else {
+            uint32_t off = 0;
+            for (GLuint slot : vertex_slots) {
+                v::VertexAttr va;
+                va.location = slot;
+                va.components = (uint32_t)vao.attribs[slot].size;
+                va.offset = off;
+                va.scalar_type = vao.attribs[slot].integer
+                    ? (IsSignedIntegerAttrib(vao.attribs[slot].type)
+                        ? v::VertexScalarType::Sint32
+                        : v::VertexScalarType::Uint32)
+                    : v::VertexScalarType::Float32;
+                off += va.components * v::VertexScalarBytes(va.scalar_type);
+                vstream.attrs.push_back(va);
+            }
+            vstream.stride = off;
+            vstream.data.resize((size_t)v_count * off);
+            for (GLsizei i = 0; i < v_count; ++i) {
+                size_t rec = (size_t)i * off;
+                for (size_t k = 0; k < vertex_slots.size(); ++k) {
+                    const AttribData& a = vao.attribs[vertex_slots[k]];
+                    uint8_t* destination = vstream.data.data() + rec +
+                                           vstream.attrs[k].offset;
+                    if (!PackTransientAttribRow(
+                            a, vstream.attrs[k], row_base + i, destination)) {
+                        PUSH_ERROR(GL_INVALID_OPERATION);
+                        return;
+                    }
                 }
-                size_t dst = rec + vstream.attrs[k].offset / 4;
-                for (uint32_t c = 0; c < (uint32_t)a.size; ++c)
-                    verts[dst + c] = comps[c];
             }
         }
-        vstream.data = std::move(verts);
+    }
+    if (vertex_slots.empty()) {
+        // Backends use the vertex stream record count to issue the draw even
+        // when the shader obtains position from gl_VertexID/current values.
+        // A tiny dummy record avoids inventing backend-specific draw-count
+        // side channels and is only used when no enabled per-vertex array
+        // exists.
+        vstream.stride = sizeof(uint32_t);
+        vstream.record_count = static_cast<uint32_t>(v_count);
+        vstream.data.resize(static_cast<size_t>(v_count) * vstream.stride);
     }
 
     v::VertexStream istream;
-    if (!instance_slots.empty()) {
-        GLuint divisor = vao.attribs[instance_slots.front()].divisor;
+    if (!instance_slots.empty() || !constant_inputs.empty()) {
+        const GLuint divisor = instance_slots.empty()
+            ? 1 : vao.attribs[instance_slots.front()].divisor;
         for (GLuint slot : instance_slots) {
             if (vao.attribs[slot].divisor != divisor) {
                 PUSH_ERROR(GL_INVALID_OPERATION);  // mixed divisors
@@ -287,59 +507,165 @@ void DrawCommon(GLenum mode, const std::vector<uint32_t>& idx, GLint first,
             v::VertexAttr va;
             va.location = slot;
             va.components = (uint32_t)vao.attribs[slot].size;
+            va.scalar_type = vao.attribs[slot].integer
+                ? (IsSignedIntegerAttrib(vao.attribs[slot].type)
+                    ? v::VertexScalarType::Sint32
+                    : v::VertexScalarType::Uint32)
+                : v::VertexScalarType::Float32;
             istream.attrs.push_back(va);
+        }
+        for (const sh::VertexInput& input : constant_inputs) {
+            v::VertexAttr attribute;
+            attribute.location = input.location;
+            attribute.components = input.components;
+            attribute.scalar_type = ConstantScalarType(input);
+            istream.attrs.push_back(attribute);
         }
         // Pack one record per instance: instance i reads attribute buffer
         // row (i / divisor), replicating values when divisor > 1 so the
-        // Vulkan per-instance rate matches the GL stepping.
+        // The backend per-instance rate then matches the GL stepping.
         uint32_t ioff = 0;
         for (auto& attr : istream.attrs) {
             attr.offset = ioff;
-            ioff += attr.components * 4;
+            ioff += attr.components * v::VertexScalarBytes(attr.scalar_type);
         }
         istream.stride = ioff;
-        std::vector<float> inst((size_t)instance_count * ioff / 4);
+        istream.data.resize((size_t)instance_count * ioff);
         for (GLsizei i = 0; i < instance_count; ++i) {
             GLint src_row = divisor ? (GLint)(i / divisor) : 0;
-            size_t rec = (size_t)i * ioff / 4;
+            size_t rec = (size_t)i * ioff;
             for (size_t k = 0; k < instance_slots.size(); ++k) {
                 const AttribData& a = vao.attribs[instance_slots[k]];
-                float comps[4];
-                if (!FetchAttribRow(a, src_row, comps)) {
+                uint8_t* destination = istream.data.data() + rec +
+                                       istream.attrs[k].offset;
+                if (!PackTransientAttribRow(
+                        a, istream.attrs[k], src_row, destination)) {
                     PUSH_ERROR(GL_INVALID_OPERATION);
                     return;
                 }
-                size_t dst = rec + istream.attrs[k].offset / 4;
-                for (uint32_t c = 0; c < (uint32_t)a.size; ++c)
-                    inst[dst + c] = comps[c];
+            }
+            for (size_t k = 0; k < constant_inputs.size(); ++k) {
+                const sh::VertexInput& input = constant_inputs[k];
+                uint8_t* destination = istream.data.data() + rec +
+                    istream.attrs[instance_slots.size() + k].offset;
+                if (!PackConstantAttrib(g_current_attribs[input.location], input,
+                                        destination)) {
+                    PUSH_ERROR(GL_INVALID_OPERATION);
+                    return;
+                }
             }
         }
-        istream.data = std::move(inst);
     }
 
     v::DrawParams dp;
-    dp.program = CreateVProgram(prog);
+    dp.program = CreateBackendProgram(prog);
     dp.vertex_stream = std::move(vstream);
     dp.instance_stream = std::move(istream);
     dp.indices = idx;  // raw u32 indices into the payload rows
+    dp.primitive_restart = std::find(idx.begin(), idx.end(), UINT32_MAX) !=
+                           idx.end();
+    dp.occlusion_query = CurrentOcclusionQueryHandle();
     dp.instance_count = (uint32_t)instance_count;
     dp.topology = (v::Topology)topo;
     dp.uniforms = ComposeUniforms(prog);
+    for (const auto& block : prog->uniform_blocks) {
+        if (block.binding >= kMaxUniformBufferBindings) {
+            PUSH_ERROR(GL_INVALID_OPERATION);
+            return;
+        }
+        const IndexedBufferBinding& indexed =
+            g_uniform_buffer_bindings[block.binding];
+        const auto buffer = g_buffers.find(indexed.buffer);
+        if (!indexed.buffer || buffer == g_buffers.end()) {
+            PUSH_ERROR(GL_INVALID_OPERATION);
+            return;
+        }
+        const uint64_t offset = static_cast<uint64_t>(indexed.offset);
+        const uint64_t available = indexed.whole_buffer
+            ? static_cast<uint64_t>(buffer->second.data.size())
+            : static_cast<uint64_t>(indexed.size);
+        if (available < static_cast<uint64_t>(block.data_size) ||
+            offset > buffer->second.data.size() ||
+            static_cast<uint64_t>(block.data_size) >
+                buffer->second.data.size() - offset) {
+            ML_LOG_ERROR("uniform block %s needs %d bytes but binding %u "
+                         "does not provide a complete range",
+                         block.name.c_str(), block.data_size, block.binding);
+            PUSH_ERROR(GL_INVALID_OPERATION);
+            return;
+        }
+        auto append_binding = [&](uint32_t internal_binding,
+                                  bool vertex_stage,
+                                  bool fragment_stage) {
+            v::UniformBufferBinding binding;
+            binding.internal_binding = internal_binding;
+            binding.vertex_stage = vertex_stage;
+            binding.fragment_stage = fragment_stage;
+            binding.source_data = buffer->second.data.data();
+            binding.source_size = buffer->second.data.size();
+            binding.source_lifetime_id = buffer->second.lifetime_id;
+            binding.source_content_version = buffer->second.content_version;
+            binding.offset = offset;
+            binding.size = available;
+            dp.uniform_buffers.push_back(binding);
+        };
+        if (block.referenced_vertex)
+            append_binding(block.vertex_internal_binding, true, false);
+        if (block.referenced_fragment)
+            append_binding(block.fragment_internal_binding, false, true);
+    }
     dp.pipeline = BuildPipelineState();
+    const s::GLState& state = s::GetState();
+    const uint32_t target_width = v::DrawTargetWidth();
+    const uint32_t target_height = v::DrawTargetHeight();
+    dp.dynamic.viewport = state.viewport.initialized
+        ? std::array<float, 4>{(float)state.viewport.x, (float)state.viewport.y,
+                              (float)state.viewport.w, (float)state.viewport.h}
+        : std::array<float, 4>{0.f, 0.f, (float)target_width,
+                              (float)target_height};
+    dp.dynamic.scissor = state.scissor.initialized
+        ? std::array<float, 4>{(float)state.scissor.x, (float)state.scissor.y,
+                              (float)state.scissor.w, (float)state.scissor.h}
+        : std::array<float, 4>{0.f, 0.f, (float)target_width,
+                              (float)target_height};
     // Resolve each sampler uniform to the texture bound at its GL unit
     // (the framebelike value glUniform1i wrote; absent -> unit 0).
-    dp.sampler_binds.clear();
+    dp.sampled_textures.clear();
     for (const auto& smp : prog->samplers) {
         GLint unit = 0;
         auto uit = prog->uniform_by_location.find(smp.location);
         if (uit != prog->uniform_by_location.end() &&
             !prog->uniforms[uit->second].value.empty())
             unit = (GLint)prog->uniforms[uit->second].value[0];
-        GLuint tex =
-            (unit >= 0 && (GLuint)unit < kMaxTexUnits) ? g_texture_units[unit] : 0;
-        dp.sampler_binds.push_back({smp.binding, tex});
+        const GLenum target = TextureTargetForSampler(smp.type);
+        GLuint tex = unit >= 0
+            ? TextureBindingForUnit(static_cast<GLuint>(unit), target) : 0;
+        if (tex) PrepareTextureForDraw(tex);
+        const auto texture = g_textures.find(tex);
+        const TexState default_texture;
+        const TexState& texture_state = texture == g_textures.end()
+            ? default_texture : texture->second;
+        const v::TexSamplerInfo sampler = ResolveSamplerInfo(
+            unit >= 0 ? static_cast<GLuint>(unit) : kMaxTexUnits,
+            texture_state);
+        const bool shader_compares_depth = SamplerUsesDepthCompare(smp.type);
+        const bool texture_is_depth = texture != g_textures.end() &&
+            texture_state.image_backend_format == v::TexelFormat::Depth32Float;
+        if ((shader_compares_depth &&
+             (!texture_is_depth ||
+              sampler.compare_mode != GL_COMPARE_REF_TO_TEXTURE)) ||
+            (!shader_compares_depth && sampler.compare_mode != GL_NONE)) {
+            // A shadow/non-shadow shader type must agree with the effective
+            // texture/sampler comparison state. Do not bind an incompatible
+            // Metal texture/sampler pair and produce driver-dependent output.
+            PUSH_ERROR(GL_INVALID_OPERATION);
+            return;
+        }
+        dp.sampled_textures.push_back({
+            smp.binding, tex, sampler});
     }
-    if (!dp.vertex_stream.data.empty()) v::Draw(dp);
+    if (dp.vertex_stream.HasStorage() && !v::Draw(dp))
+        PUSH_ERROR(GL_INVALID_OPERATION);
 }
 
 // Expand element indices from the bound GL_ELEMENT_ARRAY_BUFFER into raw
@@ -367,11 +693,24 @@ std::vector<uint32_t> LoadIndices(GLenum type, const void* indices,
     }
     const uint8_t* p = raw.data() + off;
     out.resize((size_t)count);
+    const auto& state = s::GetState();
+    const bool restart_enabled = state.caps.Test(GL_PRIMITIVE_RESTART);
     for (GLsizei i = 0; i < count; ++i) {
         GLuint v;
         if (idx_sz == 1) v = p[i];
         else if (idx_sz == 2) v = ((const uint16_t*)p)[i];
         else v = ((const uint32_t*)p)[i];
+        if (restart_enabled && v == state.primitive_restart_index) {
+            out[i] = UINT32_MAX;
+            continue;
+        }
+        // Metal reserves the largest uint32 index as its fixed native restart
+        // sentinel. A real vertex at that impossible-to-reside index cannot be
+        // represented by this slice, so reject it instead of silently restart.
+        if (v == UINT32_MAX) {
+            *err = GL_INVALID_OPERATION;
+            return {};
+        }
         if (start != end && (v < start || v > end)) {
             *err = GL_INVALID_VALUE;
             return {};
@@ -379,6 +718,48 @@ std::vector<uint32_t> LoadIndices(GLenum type, const void* indices,
         out[i] = v;
     }
     return out;
+}
+
+void ExpandLineLoop(const std::vector<uint32_t>& loop,
+                    std::vector<uint32_t>* lines) {
+    lines->clear();
+    if (loop.size() < 2) return;
+    lines->reserve(loop.size() * 2);
+    for (size_t i = 0; i + 1 < loop.size(); ++i) {
+        lines->push_back(loop[i]);
+        lines->push_back(loop[i + 1]);
+    }
+    lines->push_back(loop.back());
+    lines->push_back(loop.front());
+}
+
+void SubmitIndexSegment(GLenum mode, const std::vector<uint32_t>& segment,
+                        GLint base_vertex, GLsizei instance_count) {
+    if (mode == GL_LINE_LOOP) {
+        std::vector<uint32_t> lines;
+        ExpandLineLoop(segment, &lines);
+        if (!lines.empty())
+            DrawCommon(GL_LINES, lines, 0, static_cast<GLsizei>(lines.size()),
+                       base_vertex, instance_count);
+        return;
+    }
+    DrawCommon(mode, segment, 0, static_cast<GLsizei>(segment.size()),
+               base_vertex, instance_count);
+}
+
+void DrawArraysImpl(GLenum mode, GLint first, GLsizei count,
+                    GLsizei instance_count) {
+    if (mode != GL_LINE_LOOP) {
+        DrawCommon(mode, {}, first, count, 0, instance_count);
+        return;
+    }
+    if (count < 0 || first < 0 || instance_count < 0) {
+        PUSH_ERROR(GL_INVALID_VALUE);
+        return;
+    }
+    std::vector<uint32_t> loop(static_cast<size_t>(count));
+    for (uint32_t i = 0; i < loop.size(); ++i) loop[i] = i;
+    SubmitIndexSegment(mode, loop, first, instance_count);
 }
 
 void DrawElementsImpl(GLenum mode, GLsizei count, GLenum type,
@@ -389,18 +770,40 @@ void DrawElementsImpl(GLenum mode, GLsizei count, GLenum type,
     std::vector<uint32_t> idx = LoadIndices(type, indices, count, start, end, &err);
     if (err) { PUSH_ERROR(err); return; }
     if (idx.empty()) return;
-    DrawCommon(mode, idx, 0, count, base_vertex, instance_count);
+    const bool has_restart = std::find(idx.begin(), idx.end(), UINT32_MAX) !=
+                             idx.end();
+    const bool native_restart = mode == GL_TRIANGLE_STRIP ||
+                                mode == GL_LINE_STRIP;
+    if (has_restart && !native_restart) {
+        // Metal has no native triangle-fan primitive, and Vulkan list restart
+        // is not universally available. Split these modes at the shared
+        // semantic layer; each segment keeps the original baseVertex and
+        // instance parameters, and no restart vertex is ever fetched.
+        size_t begin = 0;
+        for (size_t i = 0; i <= idx.size(); ++i) {
+            if (i != idx.size() && idx[i] != UINT32_MAX) continue;
+            if (i > begin) {
+                std::vector<uint32_t> segment(idx.begin() + begin,
+                                              idx.begin() + i);
+                SubmitIndexSegment(mode, segment, base_vertex,
+                                   instance_count);
+            }
+            begin = i + 1;
+        }
+        return;
+    }
+    SubmitIndexSegment(mode, idx, base_vertex, instance_count);
 }
 
 } // namespace
 
 void APIENTRY glDrawArrays(GLenum mode, GLint first, GLsizei count) {
-    DrawCommon(mode, {}, first, count, 0, 1);
+    DrawArraysImpl(mode, first, count, 1);
 }
 
 void APIENTRY glDrawArraysInstanced(GLenum mode, GLint first, GLsizei count,
                                     GLsizei primcount) {
-    DrawCommon(mode, {}, first, count, 0, primcount);
+    DrawArraysImpl(mode, first, count, primcount);
 }
 
 void APIENTRY glDrawElements(GLenum mode, GLsizei count, GLenum type,
@@ -442,7 +845,7 @@ void APIENTRY glMultiDrawArrays(GLenum mode, const GLint* first,
                                 const GLsizei* count, GLsizei drawcount) {
     if (drawcount < 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
     for (GLsizei i = 0; i < drawcount; ++i)
-        DrawCommon(mode, {}, first[i], count[i], 0, 1);
+        DrawArraysImpl(mode, first[i], count[i], 1);
 }
 
 void APIENTRY glMultiDrawElements(GLenum mode, const GLsizei* count, GLenum type,
@@ -468,10 +871,23 @@ void APIENTRY glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height,
         PUSH_ERROR(GL_INVALID_OPERATION);
         return;
     }
-    if (!pixels) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
+    PixelPackDestination destination;
+    if (!ResolvePixelPackDestination(pixels, static_cast<uint32_t>(width),
+                                     static_cast<uint32_t>(height), 1,
+                                     /*three_dimensional=*/false, 4, 1,
+                                     &destination))
+        return;
+    if (!destination.provided) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
+    if (width == 0 || height == 0) return;
     if (!v::EnsureInit()) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
-    v::SubmitFlush();
-    v::ReadPixels(x, y, width, height, pixels);
+    std::vector<uint8_t> tight(static_cast<size_t>(width) * height * 4);
+    v::ReadPixels(x, y, width, height, tight.data());
+    for (GLsizei row = 0; row < height; ++row)
+        std::memcpy(destination.data + static_cast<size_t>(row) *
+                                          destination.row_stride,
+                    tight.data() + static_cast<size_t>(row) * width * 4,
+                    static_cast<size_t>(width) * 4);
+    CommitPixelPackDestination(&destination);
 }
 
 } // extern "C"

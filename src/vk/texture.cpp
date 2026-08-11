@@ -1,20 +1,24 @@
 // Mithril-Wrapper Vulkan backend -- texture upload path (M4).
 // GL textures arrive as CPU RGBA8 mip chains (UploadTexture); the engine
 // creates a device-local VkImage, uploads the levels through a staging
-// buffer in one command submission, builds a VkSampler from the GL sampler
-// state, and keeps the resident image for descriptor binding at draw time.
-// A 1x1 white fallback image (dummy tex) holds unbound texture units.
+// buffer in one command submission, and keeps the resident image for
+// descriptor binding at draw time. Sampling state is independently captured
+// by DrawParams and resolved through a bounded native sampler cache. A 1x1
+// white fallback image (dummy tex) holds unbound texture units.
 
 #include "internal.h"
 
 #include <algorithm>
 #include <cstring>
+#include <sstream>
 
 #include <util/log.h>
 
 namespace mithril::vk {
 
 namespace {
+
+constexpr size_t kMaxSamplerCacheEntries = 128;
 
 VkFilter ToVkFilter(TexFilter f) {
     return f == TexFilter::Nearest ? VK_FILTER_NEAREST : VK_FILTER_LINEAR;
@@ -27,6 +31,92 @@ VkSamplerAddressMode ToVkWrap(GLenum wrap) {
         case GL_MIRRORED_REPEAT: return VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
         default:                 return VK_SAMPLER_ADDRESS_MODE_REPEAT;
     }
+}
+
+VkSamplerMipmapMode ToVkMip(TexMipFilter filter) {
+    return filter == TexMipFilter::Linear ? VK_SAMPLER_MIPMAP_MODE_LINEAR
+                                         : VK_SAMPLER_MIPMAP_MODE_NEAREST;
+}
+
+std::string SamplerKey(const TexSamplerInfo& sampler, uint32_t levels) {
+    std::ostringstream key;
+    auto bits = [](float value) {
+        uint32_t output = 0;
+        std::memcpy(&output, &value, sizeof(output));
+        return output;
+    };
+    key << static_cast<int>(sampler.mag) << ':' << static_cast<int>(sampler.min)
+        << ':' << static_cast<int>(sampler.mip) << ':' << sampler.wrap_s << ':'
+        << sampler.wrap_t << ':' << sampler.wrap_r << ':'
+        << bits(sampler.lod_bias) << ':' << sampler.compare_mode;
+    if (sampler.mip != TexMipFilter::None)
+        key << ':' << bits(sampler.min_lod) << ':' << bits(sampler.max_lod)
+            << ':' << levels;
+    if (sampler.compare_mode != GL_NONE) key << ':' << sampler.compare_func;
+    if (sampler.wrap_s == GL_CLAMP_TO_BORDER ||
+        sampler.wrap_t == GL_CLAMP_TO_BORDER ||
+        sampler.wrap_r == GL_CLAMP_TO_BORDER)
+        for (float component : sampler.border_color) key << ':' << bits(component);
+    return key.str();
+}
+
+bool ResolveBorderColor(const TexSamplerInfo& sampler, VkBorderColor* output) {
+    const bool uses_border = sampler.wrap_s == GL_CLAMP_TO_BORDER ||
+                             sampler.wrap_t == GL_CLAMP_TO_BORDER ||
+                             sampler.wrap_r == GL_CLAMP_TO_BORDER;
+    if (!uses_border) {
+        *output = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
+        return true;
+    }
+    const auto& c = sampler.border_color;
+    if (c[0] == 0.f && c[1] == 0.f && c[2] == 0.f && c[3] == 0.f) {
+        *output = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
+        return true;
+    }
+    if (c[0] == 0.f && c[1] == 0.f && c[2] == 0.f && c[3] == 1.f) {
+        *output = VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK;
+        return true;
+    }
+    if (c[0] == 1.f && c[1] == 1.f && c[2] == 1.f && c[3] == 1.f) {
+        *output = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
+        return true;
+    }
+    ML_LOG_ERROR("vk: sampler border color is not natively representable");
+    return false;
+}
+
+VkSampler CreateSamplerState(const TexSamplerInfo& sampler, uint32_t levels) {
+    if (sampler.compare_mode != GL_NONE) {
+        ML_LOG_ERROR("vk: depth-comparison sampling needs a depth texture");
+        return VK_NULL_HANDLE;
+    }
+    const float max_available_lod = levels ? static_cast<float>(levels - 1) : 0.f;
+    const bool mipmapped = sampler.mip != TexMipFilter::None;
+    const float min_lod = mipmapped ? std::max(0.f, sampler.min_lod) : 0.f;
+    const float max_lod = mipmapped
+        ? std::min(max_available_lod, sampler.max_lod) : 0.f;
+    if (min_lod > max_lod) return VK_NULL_HANDLE;
+    VkBorderColor border_color;
+    if (!ResolveBorderColor(sampler, &border_color)) return VK_NULL_HANDLE;
+    VkSamplerCreateInfo si{};
+    si.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    si.magFilter = ToVkFilter(sampler.mag);
+    si.minFilter = ToVkFilter(sampler.min);
+    si.mipmapMode = ToVkMip(sampler.mip);
+    si.addressModeU = ToVkWrap(sampler.wrap_s);
+    si.addressModeV = ToVkWrap(sampler.wrap_t);
+    si.addressModeW = ToVkWrap(sampler.wrap_r);
+    si.mipLodBias = sampler.lod_bias;
+    si.anisotropyEnable = VK_FALSE;
+    si.maxAnisotropy = 1.0f;
+    si.compareEnable = VK_FALSE;
+    si.compareOp = VK_COMPARE_OP_ALWAYS;
+    si.minLod = sampler.mip == TexMipFilter::None ? 0.f : min_lod;
+    si.maxLod = sampler.mip == TexMipFilter::None ? 0.f : max_lod;
+    si.borderColor = border_color;
+    VkSampler result = VK_NULL_HANDLE;
+    return g.fn.CreateSampler(g.device, &si, nullptr, &result) == VK_SUCCESS
+        ? result : VK_NULL_HANDLE;
 }
 
 // One-shot staging copy: writable buffer -> image (all mip levels), then
@@ -155,19 +245,53 @@ void UploadImageData(VkImage image, const TexUpload& img) {
 
 } // namespace
 
+VkSampler ResolveSampler(const TexSamplerInfo& sampler, uint32_t levels) {
+    const std::string key = SamplerKey(sampler, levels);
+    auto cached = g.samplers.find(key);
+    if (cached != g.samplers.end()) {
+        cached->second.last_use = ++g.sampler_clock;
+        return cached->second.sampler;
+    }
+    VkSampler native = CreateSamplerState(sampler, levels);
+    if (!native) return VK_NULL_HANDLE;
+    if (g.samplers.size() >= kMaxSamplerCacheEntries) {
+        // Descriptor sets in queued reference-backend draws borrow sampler
+        // handles. Submit them before reclaiming an LRU cache entry.
+        if (!g.frame_draws.empty()) SubmitFlush();
+        auto oldest = std::min_element(
+            g.samplers.begin(), g.samplers.end(),
+            [](const auto& left, const auto& right) {
+                return left.second.last_use < right.second.last_use;
+            });
+        if (oldest != g.samplers.end()) {
+            g.fn.DestroySampler(g.device, oldest->second.sampler, nullptr);
+            g.samplers.erase(oldest);
+        }
+    }
+    SamplerCacheEntry entry;
+    entry.sampler = native;
+    entry.last_use = ++g.sampler_clock;
+    g.samplers.emplace(key, entry);
+    return native;
+}
+
 void DestroyTexObj(TexObj& t) {
-    if (t.sampler) g.fn.DestroySampler(g.device, t.sampler, nullptr);
     if (t.view) g.fn.DestroyImageView(g.device, t.view, nullptr);
     if (t.image) g.fn.DestroyImage(g.device, t.image, nullptr);
     if (t.mem) g.fn.FreeMemory(g.device, t.mem, nullptr);
     t = TexObj{};
 }
 
-void UploadTexture(uint64_t gl_id, const TexUpload& img,
-                   const TexSamplerInfo& sampler) {
+void UploadTexture(uint64_t gl_id, const TexUpload& img) {
     if (!g.initialized || img.mip.empty()) return;
+    if (img.is_buffer) {
+        ML_LOG_ERROR("vk: texture-buffer views are not supported by the "
+                     "reference backend yet");
+        return;
+    }
 
     // Replace any previous resident image for this id.
+    if (!g.frame_draws.empty()) SubmitFlush();
     auto it = g.textures.find(gl_id);
     if (it != g.textures.end())
         DestroyTexObj(it->second);
@@ -254,29 +378,11 @@ void UploadTexture(uint64_t gl_id, const TexUpload& img,
         return;
     }
 
-    VkSamplerCreateInfo si{};
-    si.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-    si.magFilter = ToVkFilter(sampler.mag);
-    si.minFilter = ToVkFilter(sampler.min);
-    si.mipmapMode = sampler.mip ? VK_SAMPLER_MIPMAP_MODE_LINEAR
-                                : VK_SAMPLER_MIPMAP_MODE_NEAREST;
-    si.addressModeU = ToVkWrap(sampler.wrap_s);
-    si.addressModeV = ToVkWrap(sampler.wrap_t);
-    si.addressModeW = ToVkWrap(sampler.wrap_r);
-    si.mipLodBias = 0.0f;
-    si.anisotropyEnable = VK_FALSE;
-    si.maxAnisotropy = 1.0f;
-    si.compareEnable = VK_FALSE;
-    si.compareOp = VK_COMPARE_OP_ALWAYS;
-    si.minLod = 0.0f;
-    si.maxLod = static_cast<float>(mips - 1);
-    si.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
-    if (g.fn.CreateSampler(g.device, &si, nullptr, &it->second.sampler) !=
-        VK_SUCCESS) {
-        ML_LOG_WARN("vk: sampler creation failed for texture %llu",
-                    (unsigned long long)gl_id);
-    }
     it->second.levels = mips;
+    it->second.width = img.width;
+    it->second.height = img.height;
+    it->second.depth = img.depth;
+    it->second.is_3d = img.is_3d;
 }
 
 void CreateDummyTexture() {
@@ -285,15 +391,11 @@ void CreateDummyTexture() {
     img.width = img.height = 1;
     img.mip.push_back(
         {255, 255, 255, 255});   // 1x1 opaque white
-    TexSamplerInfo info;
-    info.mag = TexFilter::Linear;
-    info.min = TexFilter::Linear;
-    info.wrap_s = GL_REPEAT;
-    info.wrap_t = GL_REPEAT;
-    UploadTexture(0, img, info);
+    UploadTexture(0, img);
 }
 
 void DestroyResidentTexture(uint64_t gl_id) {
+    if (!g.frame_draws.empty()) SubmitFlush();
     auto it = g.textures.find(gl_id);
     if (it != g.textures.end()) {
         DestroyTexObj(it->second);

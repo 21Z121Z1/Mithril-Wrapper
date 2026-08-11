@@ -1,4 +1,4 @@
-/* M2-VK draw smoke test: GL-driven colored triangle with pixel readback.
+/* Backend draw smoke test: GL-driven colored triangle with pixel readback.
  *
  * Exercises the full chain end to end through the exported GL entry points:
  *   glCreateShader -> glShaderSource -> glCompileShader -> glAttachShader
@@ -8,9 +8,8 @@
  *     -> glEnableVertexAttribArray/glVertexAttribPointer
  *     -> glDrawArrays -> glFinish -> glReadPixels
  *
- * Requires a Vulkan runtime (lavapipe on Linux CI/dev). When no Vulkan
- * loader is present the draw is a no-op and the pixel assertions fail,
- * which is the intended behavior for this milestone.
+ * Linux normally exercises Vulkan/lavapipe. On Apple, setting
+ * MITHRIL_BACKEND=metal exercises the native DirectMetal backend.
  *
  * Build (from project root):
  *   gcc -o tests/draw_smoke tests/draw_smoke.c -ldl
@@ -39,11 +38,16 @@
 #define GL_NO_ERROR           0
 #define GL_TRIANGLE_STRIP     0x0005
 #define GL_TRIANGLE_FAN       0x0006
+#define GL_LINES              0x0001
+#define GL_LINE_LOOP          0x0002
+#define GL_LINE_STRIP         0x0003
 #define GL_ELEMENT_ARRAY_BUFFER 0x8893
 #define GL_BUFFER_SIZE        0x8764
 #define GL_VERTEX_ATTRIB_ARRAY_SIZE   0x8623
 #define GL_VERTEX_ATTRIB_ARRAY_STRIDE 0x8624
 #define GL_READ_WRITE         0x88BA
+#define GL_PRIMITIVE_RESTART  0x8F9D
+#define GL_PRIMITIVE_RESTART_INDEX 0x8F9E
 
 typedef unsigned int GLuint;
 typedef unsigned int GLenum;
@@ -58,6 +62,11 @@ typedef unsigned int GLbitfield;
 
 typedef void (*fn_glClearColor)(float, float, float, float);
 typedef void (*fn_glClear)(GLenum);
+typedef void (*fn_glEnable)(GLenum);
+typedef void (*fn_glDisable)(GLenum);
+typedef GLboolean (*fn_glIsEnabled)(GLenum);
+typedef void (*fn_glGetIntegerv)(GLenum, GLint*);
+typedef void (*fn_glPrimitiveRestartIndex)(GLuint);
 typedef GLuint (*fn_glCreateShader)(GLenum);
 typedef void (*fn_glShaderSource)(GLuint, GLsizei, const char* const*, const GLint*);
 typedef void (*fn_glCompileShader)(GLuint);
@@ -73,7 +82,9 @@ typedef void (*fn_glGenBuffers)(GLsizei, GLuint*);
 typedef void (*fn_glBindBuffer)(GLenum, GLuint);
 typedef void (*fn_glBufferData)(GLenum, GLsizeiptr, const void*, GLenum);
 typedef void (*fn_glEnableVertexAttribArray)(GLuint);
+typedef void (*fn_glDisableVertexAttribArray)(GLuint);
 typedef void (*fn_glVertexAttribPointer)(GLuint, GLint, GLenum, GLboolean, GLsizei, const GLvoid*);
+typedef void (*fn_glVertexAttrib4f)(GLuint, float, float, float, float);
 typedef void (*fn_glDrawArrays)(GLenum, GLint, GLsizei);
 typedef void (*fn_glDrawElements)(GLenum, GLsizei, GLenum, const GLvoid*);
 typedef void (*fn_glDrawArraysInstanced)(GLenum, GLint, GLsizei, GLsizei);
@@ -87,6 +98,7 @@ typedef void (*fn_glBufferSubData)(GLenum, GLintptr, GLsizeiptr, const void*);
 typedef void (*fn_glFinish)(void);
 typedef void (*fn_glReadPixels)(GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, void*);
 typedef void (*fn_glDeleteProgram)(GLuint);
+typedef const unsigned char* (*fn_glGetString)(GLenum);
 
 static int failures = 0;
 
@@ -100,6 +112,14 @@ static int px_match(const unsigned char* got, unsigned char r, unsigned char g,
                     unsigned char b, unsigned char a) {
     return abs((int)got[0] - r) <= 3 && abs((int)got[1] - g) <= 3 &&
            abs((int)got[2] - b) <= 3 && abs((int)got[3] - a) <= 3;
+}
+
+static int patch_has(const unsigned char* pixels, int count,
+                     unsigned char r, unsigned char g, unsigned char b,
+                     unsigned char a) {
+    for (int i = 0; i < count; ++i)
+        if (px_match(pixels + i * 4, r, g, b, a)) return 1;
+    return 0;
 }
 
 static const char* VS =
@@ -122,11 +142,23 @@ static const char* FS =
     "}\n";
 
 int main(void) {
-    void* h = dlopen("./output/libmithril.so", RTLD_NOW | RTLD_GLOBAL);
+    const char* library = getenv("MITHRIL_LIBRARY");
+#if defined(__APPLE__)
+    if (!library || !*library) library = "./output/libmithril.dylib";
+#else
+    if (!library || !*library) library = "./output/libmithril.so";
+#endif
+    void* h = dlopen(library, RTLD_NOW | RTLD_GLOBAL);
     if (!h) { printf("dlopen: %s\n", dlerror()); return 2; }
 
     fn_glClearColor        clearColor        = (fn_glClearColor)dlsym(h, "glClearColor");
     fn_glClear             clear             = (fn_glClear)dlsym(h, "glClear");
+    fn_glEnable            enable            = (fn_glEnable)dlsym(h, "glEnable");
+    fn_glDisable           disable           = (fn_glDisable)dlsym(h, "glDisable");
+    fn_glIsEnabled         isEnabled         = (fn_glIsEnabled)dlsym(h, "glIsEnabled");
+    fn_glGetIntegerv       getIntegerv       = (fn_glGetIntegerv)dlsym(h, "glGetIntegerv");
+    fn_glPrimitiveRestartIndex primitiveRestartIndex =
+        (fn_glPrimitiveRestartIndex)dlsym(h, "glPrimitiveRestartIndex");
     fn_glCreateShader      createShader      = (fn_glCreateShader)dlsym(h, "glCreateShader");
     fn_glShaderSource      shaderSource      = (fn_glShaderSource)dlsym(h, "glShaderSource");
     fn_glCompileShader     compileShader     = (fn_glCompileShader)dlsym(h, "glCompileShader");
@@ -142,7 +174,9 @@ int main(void) {
     fn_glBindBuffer        bindBuffer        = (fn_glBindBuffer)dlsym(h, "glBindBuffer");
     fn_glBufferData        bufferData        = (fn_glBufferData)dlsym(h, "glBufferData");
     fn_glEnableVertexAttribArray enableAttrib = (fn_glEnableVertexAttribArray)dlsym(h, "glEnableVertexAttribArray");
+    fn_glDisableVertexAttribArray disableAttrib = (fn_glDisableVertexAttribArray)dlsym(h, "glDisableVertexAttribArray");
     fn_glVertexAttribPointer vertexAttribPtr = (fn_glVertexAttribPointer)dlsym(h, "glVertexAttribPointer");
+    fn_glVertexAttrib4f     vertexAttrib4f    = (fn_glVertexAttrib4f)dlsym(h, "glVertexAttrib4f");
     fn_glDrawArrays        drawArrays        = (fn_glDrawArrays)dlsym(h, "glDrawArrays");
     fn_glDrawElements      drawElements      = (fn_glDrawElements)dlsym(h, "glDrawElements");
     fn_glDrawArraysInstanced drawArraysInst = (fn_glDrawArraysInstanced)dlsym(h, "glDrawArraysInstanced");
@@ -156,13 +190,22 @@ int main(void) {
     fn_glFinish            finish            = (fn_glFinish)dlsym(h, "glFinish");
     fn_glReadPixels        readPixels        = (fn_glReadPixels)dlsym(h, "glReadPixels");
     fn_glDeleteProgram     deleteProgram     = (fn_glDeleteProgram)dlsym(h, "glDeleteProgram");
+    fn_glGetString         getString         = (fn_glGetString)dlsym(h, "glGetString");
 
     CHECK(clearColor && clear && createShader && shaderSource && compileShader &&
           createProgram && attachShader && linkProgram && useProgram &&
           getUniformLoc && uniform4f && genVertexArrays && bindVertexArray &&
           genBuffers && bindBuffer && bufferData && enableAttrib &&
-          vertexAttribPtr && drawArrays && finish && readPixels,
+          disableAttrib && vertexAttribPtr && vertexAttrib4f && drawArrays &&
+          finish && readPixels && enable &&
+          disable && isEnabled && getIntegerv && primitiveRestartIndex,
           "all required GL symbols resolved");
+
+    const char* expected_renderer = getenv("MITHRIL_EXPECT_RENDERER");
+    const char* renderer = getString
+        ? (const char*)getString(0x1F01 /* GL_RENDERER */) : NULL;
+    CHECK(renderer && (!expected_renderer || strstr(renderer, expected_renderer)),
+          "selected renderer is explicit (%s)", renderer ? renderer : "null");
 
     CHECK(drawElements && drawArraysInst && drawElementsInst && vertexAttribDivisor &&
           getBufferParam && getVertexAttrib && mapBufferRange && unmapBuffer,
@@ -233,6 +276,22 @@ int main(void) {
     CHECK(px_match(px, 0, 0, 255, 255),
           "tint uniform drives the pixel colour (r=%d g=%d b=%d a=%d)",
           px[0], px[1], px[2], px[3]);
+
+    /* -- disabled array uses the generic current attribute --------- */
+    disableAttrib(1);
+    /* Pointer format changes must not implicitly re-enable the array. */
+    vertexAttribPtr(1, 4, GL_FLOAT, GL_FALSE, sizeof(struct Vertex),
+                    (const GLvoid*)12);
+    vertexAttrib4f(1, 0.0f, 1.0f, 0.0f, 1.0f);
+    uniform4f(tint, 1.0f, 1.0f, 1.0f, 1.0f);
+    clear(GL_COLOR_BUFFER_BIT);
+    drawArrays(GL_TRIANGLES, 0, 3);
+    finish();
+    readPixels(256, 300, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+    CHECK(px_match(px, 0, 255, 0, 255),
+          "disabled colour array uses its current value without vertex repack "
+          "(r=%d g=%d b=%d)", px[0], px[1], px[2]);
+    enableAttrib(1);
 
     /* -- M3: object/state queries ----------------------------------------- */
     {
@@ -360,6 +419,117 @@ int main(void) {
         CHECK(px_match(px, 255, 255, 255, 255),
               "GL_TRIANGLE_STRIP renders the same triangle (r=%d g=%d b=%d)",
               px[0], px[1], px[2]);
+        bindVertexArray(vao);
+    }
+
+    /* -- GL 3.1: custom primitive restart on indexed strip ----------------- */
+    {
+        const struct Vertex restart_verts[6] = {
+            {-0.90f, -0.60f, 0, 1, 0, 0, 1},
+            {-0.20f, -0.60f, 0, 1, 0, 0, 1},
+            {-0.55f,  0.60f, 0, 1, 0, 0, 1},
+            { 0.20f, -0.60f, 0, 0, 1, 0, 1},
+            { 0.90f, -0.60f, 0, 0, 1, 0, 1},
+            { 0.55f,  0.60f, 0, 0, 1, 0, 1},
+        };
+        const GLushort restart_indices[7] = {0, 1, 2, 42, 3, 4, 5};
+        GLuint restart_vao = 0, restart_vbo = 0, restart_ibo = 0;
+        genVertexArrays(1, &restart_vao);
+        bindVertexArray(restart_vao);
+        genBuffers(1, &restart_vbo);
+        bindBuffer(GL_ARRAY_BUFFER, restart_vbo);
+        bufferData(GL_ARRAY_BUFFER, (GLsizeiptr)sizeof(restart_verts),
+                   restart_verts, 0x88E4);
+        enableAttrib(0);
+        vertexAttribPtr(0, 3, GL_FLOAT, GL_FALSE,
+                        sizeof(restart_verts[0]), 0);
+        enableAttrib(1);
+        vertexAttribPtr(1, 4, GL_FLOAT, GL_FALSE,
+                        sizeof(restart_verts[0]), (const GLvoid*)12);
+        genBuffers(1, &restart_ibo);
+        bindBuffer(GL_ELEMENT_ARRAY_BUFFER, restart_ibo);
+        bufferData(GL_ELEMENT_ARRAY_BUFFER, (GLsizeiptr)sizeof(restart_indices),
+                   restart_indices, 0x88E4);
+
+        primitiveRestartIndex(42);
+        enable(GL_PRIMITIVE_RESTART);
+        GLint queried_restart = -1;
+        getIntegerv(GL_PRIMITIVE_RESTART_INDEX, &queried_restart);
+        CHECK(queried_restart == 42 && isEnabled(GL_PRIMITIVE_RESTART),
+              "custom primitive restart state is observable (index=%d)",
+              queried_restart);
+        clear(GL_COLOR_BUFFER_BIT);
+        drawElements(GL_TRIANGLE_STRIP, 7, GL_UNSIGNED_SHORT,
+                     (const GLvoid*)0);
+        finish();
+        unsigned char left[4], right[4];
+        readPixels(115, 256, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, left);
+        readPixels(397, 256, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, right);
+        CHECK(px_match(left, 255, 0, 0, 255) &&
+                  px_match(right, 0, 255, 0, 255),
+              "custom restart becomes native Metal sentinel "
+              "(left=%d,%d,%d right=%d,%d,%d)",
+              left[0], left[1], left[2], right[0], right[1], right[2]);
+        disable(GL_PRIMITIVE_RESTART);
+        bindVertexArray(vao);
+    }
+
+    /* -- native Metal line strip + shared GL_LINE_LOOP lowering ----------- */
+    {
+        const struct Vertex line_verts[4] = {
+            {-0.80f, -0.40f, 0, 1, 0, 0, 1},
+            {-0.20f, -0.40f, 0, 1, 0, 0, 1},
+            { 0.20f,  0.40f, 0, 0, 1, 0, 1},
+            { 0.80f,  0.40f, 0, 0, 1, 0, 1},
+        };
+        const GLushort line_indices[5] = {0, 1, 42, 2, 3};
+        GLuint line_vao = 0, line_vbo = 0, line_ibo = 0;
+        genVertexArrays(1, &line_vao);
+        bindVertexArray(line_vao);
+        genBuffers(1, &line_vbo);
+        bindBuffer(GL_ARRAY_BUFFER, line_vbo);
+        bufferData(GL_ARRAY_BUFFER, (GLsizeiptr)sizeof(line_verts),
+                   line_verts, 0x88E4);
+        enableAttrib(0);
+        vertexAttribPtr(0, 3, GL_FLOAT, GL_FALSE,
+                        sizeof(line_verts[0]), 0);
+        enableAttrib(1);
+        vertexAttribPtr(1, 4, GL_FLOAT, GL_FALSE,
+                        sizeof(line_verts[0]), (const GLvoid*)12);
+        genBuffers(1, &line_ibo);
+        bindBuffer(GL_ELEMENT_ARRAY_BUFFER, line_ibo);
+        bufferData(GL_ELEMENT_ARRAY_BUFFER, (GLsizeiptr)sizeof(line_indices),
+                   line_indices, 0x88E4);
+
+        clear(GL_COLOR_BUFFER_BIT);
+        primitiveRestartIndex(42);
+        enable(GL_PRIMITIVE_RESTART);
+        drawElements(GL_LINE_STRIP, 5, GL_UNSIGNED_SHORT, (const GLvoid*)0);
+        finish();
+        unsigned char red_patch[3 * 3 * 4], green_patch[3 * 3 * 4];
+        readPixels(127, 152, 3, 3, GL_RGBA, GL_UNSIGNED_BYTE, red_patch);
+        readPixels(383, 357, 3, 3, GL_RGBA, GL_UNSIGNED_BYTE, green_patch);
+        CHECK(patch_has(red_patch, 9, 255, 0, 0, 255) &&
+                  patch_has(green_patch, 9, 0, 255, 0, 255),
+              "GL_LINE_STRIP restart produces two native Metal line segments");
+        disable(GL_PRIMITIVE_RESTART);
+
+        const struct Vertex loop_verts[4] = {
+            {-0.50f, -0.50f, 0, 0, 0, 1, 1},
+            { 0.50f, -0.50f, 0, 0, 0, 1, 1},
+            { 0.50f,  0.50f, 0, 0, 0, 1, 1},
+            {-0.50f,  0.50f, 0, 0, 0, 1, 1},
+        };
+        bindBuffer(GL_ARRAY_BUFFER, line_vbo);
+        bufferData(GL_ARRAY_BUFFER, (GLsizeiptr)sizeof(loop_verts),
+                   loop_verts, 0x88E4);
+        clear(GL_COLOR_BUFFER_BIT);
+        drawArrays(GL_LINE_LOOP, 0, 4);
+        finish();
+        unsigned char loop_patch[3 * 3 * 4];
+        readPixels(127, 255, 3, 3, GL_RGBA, GL_UNSIGNED_BYTE, loop_patch);
+        CHECK(patch_has(loop_patch, 9, 0, 0, 255, 255),
+              "GL_LINE_LOOP closes through shared line-list lowering");
         bindVertexArray(vao);
     }
 

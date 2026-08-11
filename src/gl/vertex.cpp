@@ -6,21 +6,169 @@
 #include "internal.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
+#include <limits>
 #include <utility>
 
 // Shared tables (declared extern in internal.h; the draw path reads
 // them through the header).
 std::unordered_map<GLuint, VAOData> g_vaos;
+std::array<CurrentAttribData, kMaxAttribs> g_current_attribs{};
 std::unordered_map<GLuint, BufferData> g_buffers;
 GLuint g_next_vao = 1, g_next_buffer = 1;
+uint64_t g_next_buffer_lifetime = 1;
 GLuint g_bound_vao = 0;
 GLuint g_bound_array_buffer = 0;
 GLuint g_bound_element_buffer = 0;
+GLuint g_bound_uniform_buffer = 0;
+GLuint g_bound_pixel_pack_buffer = 0;
+GLuint g_bound_pixel_unpack_buffer = 0;
+std::array<IndexedBufferBinding, kMaxUniformBufferBindings>
+    g_uniform_buffer_bindings{};
 
-// program id -> Vulkan program handle (created lazily on first draw by the
+// program id -> selected-backend program handle (created lazily on first draw by the
 // draw path; erased by the shader-lifecycle path on glDeleteProgram).
-std::unordered_map<GLuint, uint64_t> g_vk_programs;
+std::unordered_map<GLuint, uint64_t> g_backend_programs;
+
+namespace {
+
+bool AddPackProduct(uint64_t* total, uint64_t left, uint64_t right) {
+    if (left && right > std::numeric_limits<uint64_t>::max() / left)
+        return false;
+    const uint64_t product = left * right;
+    if (*total > std::numeric_limits<uint64_t>::max() - product) return false;
+    *total += product;
+    return true;
+}
+
+GLint FloatToSint(GLfloat value) {
+    const double wide = static_cast<double>(value);
+    if (std::isnan(wide)) return 0;
+    if (wide <= static_cast<double>(std::numeric_limits<GLint>::min()))
+        return std::numeric_limits<GLint>::min();
+    if (wide >= static_cast<double>(std::numeric_limits<GLint>::max()))
+        return std::numeric_limits<GLint>::max();
+    return static_cast<GLint>(value);
+}
+
+GLuint FloatToUint(GLfloat value) {
+    const double wide = static_cast<double>(value);
+    if (std::isnan(wide) || wide <= 0.0) return 0;
+    if (wide >= static_cast<double>(std::numeric_limits<GLuint>::max()))
+        return std::numeric_limits<GLuint>::max();
+    return static_cast<GLuint>(value);
+}
+
+} // namespace
+
+bool ResolvePixelPackDestination(void* pointer, uint32_t width,
+                                 uint32_t height, uint32_t images,
+                                 bool three_dimensional,
+                                 size_t bytes_per_pixel, size_t datum_bytes,
+                                 PixelPackDestination* output) {
+    if (!output || !bytes_per_pixel || !datum_bytes) return false;
+    *output = {};
+    const s::PixelStore& store = s::GetState().pixels;
+    const uint64_t row_pixels = store.pack_row_length > 0
+        ? static_cast<uint64_t>(store.pack_row_length) : width;
+    uint64_t row_bytes = 0;
+    if (!AddPackProduct(&row_bytes, row_pixels, bytes_per_pixel)) {
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return false;
+    }
+    const uint64_t alignment = static_cast<uint64_t>(store.pack_alignment);
+    if (row_bytes > std::numeric_limits<uint64_t>::max() - alignment + 1) {
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return false;
+    }
+    row_bytes = ((row_bytes + alignment - 1) / alignment) * alignment;
+    const uint64_t image_rows = three_dimensional && store.pack_image_height > 0
+        ? static_cast<uint64_t>(store.pack_image_height) : height;
+    uint64_t image_stride = 0;
+    if (!AddPackProduct(&image_stride, image_rows, row_bytes)) {
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return false;
+    }
+    uint64_t base = 0;
+    if ((three_dimensional &&
+         !AddPackProduct(&base,
+                         static_cast<uint64_t>(store.pack_skip_images),
+                         image_stride)) ||
+        !AddPackProduct(&base, static_cast<uint64_t>(store.pack_skip_rows),
+                        row_bytes) ||
+        !AddPackProduct(&base, static_cast<uint64_t>(store.pack_skip_pixels),
+                        bytes_per_pixel)) {
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return false;
+    }
+    uint64_t span = 0;
+    if (width && height && images &&
+        (!AddPackProduct(&span, images - 1, image_stride) ||
+         !AddPackProduct(&span, height - 1, row_bytes) ||
+         !AddPackProduct(&span, width, bytes_per_pixel))) {
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return false;
+    }
+
+    output->row_stride = static_cast<size_t>(row_bytes);
+    output->image_stride = static_cast<size_t>(image_stride);
+    if (g_bound_pixel_pack_buffer) {
+        const auto found = g_buffers.find(g_bound_pixel_pack_buffer);
+        const uint64_t offset = reinterpret_cast<uintptr_t>(pointer);
+        if (found == g_buffers.end() || found->second.mapped ||
+            offset % datum_bytes != 0 || offset > found->second.data.size() ||
+            base > found->second.data.size() - offset ||
+            span > found->second.data.size() - offset - base) {
+            PUSH_ERROR(GL_INVALID_OPERATION);
+            return false;
+        }
+        output->buffer = &found->second;
+        output->data = found->second.data.empty()
+            ? nullptr : found->second.data.data() + offset + base;
+        output->provided = true;
+        return true;
+    }
+    if (!pointer) return true;
+    const uintptr_t address = reinterpret_cast<uintptr_t>(pointer);
+    if (base > std::numeric_limits<uintptr_t>::max() - address) {
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return false;
+    }
+    output->data = reinterpret_cast<uint8_t*>(address + base);
+    output->provided = true;
+    return true;
+}
+
+bool ResolvePixelPackBytes(void* pointer, size_t byte_count,
+                           PixelPackDestination* output) {
+    if (!output) return false;
+    *output = {};
+    if (!g_bound_pixel_pack_buffer) {
+        output->data = static_cast<uint8_t*>(pointer);
+        output->provided = pointer != nullptr;
+        return true;
+    }
+    const auto found = g_buffers.find(g_bound_pixel_pack_buffer);
+    const uint64_t offset = reinterpret_cast<uintptr_t>(pointer);
+    if (found == g_buffers.end() || found->second.mapped ||
+        offset > found->second.data.size() ||
+        byte_count > found->second.data.size() - offset) {
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return false;
+    }
+    output->buffer = &found->second;
+    output->data = found->second.data.empty()
+        ? nullptr : found->second.data.data() + offset;
+    output->provided = true;
+    return true;
+}
+
+void CommitPixelPackDestination(PixelPackDestination* destination) {
+    if (!destination || !destination->buffer) return;
+    ++destination->buffer->content_version;
+    destination->buffer->defined = true;
+}
 
 extern "C" {
 
@@ -64,7 +212,9 @@ void APIENTRY glGenBuffers(GLsizei n, GLuint* buffers) {
     for (GLsizei i = 0; i < n; ++i) {
         while (g_buffers.count(g_next_buffer)) ++g_next_buffer;
         buffers[i] = g_next_buffer++;
-        g_buffers.emplace(buffers[i], BufferData{});
+        BufferData buffer;
+        buffer.lifetime_id = g_next_buffer_lifetime++;
+        g_buffers.emplace(buffers[i], std::move(buffer));
     }
 }
 
@@ -73,8 +223,17 @@ void APIENTRY glDeleteBuffers(GLsizei n, const GLuint* buffers) {
     for (GLsizei i = 0; i < n; ++i) {
         auto it = g_buffers.find(buffers[i]);
         if (it == g_buffers.end()) continue;
+        DetachBufferTextures(buffers[i]);
+        v::DestroyBuffer(it->second.lifetime_id);
         if (g_bound_array_buffer == buffers[i]) g_bound_array_buffer = 0;
         if (g_bound_element_buffer == buffers[i]) g_bound_element_buffer = 0;
+        if (g_bound_uniform_buffer == buffers[i]) g_bound_uniform_buffer = 0;
+        if (g_bound_pixel_pack_buffer == buffers[i])
+            g_bound_pixel_pack_buffer = 0;
+        if (g_bound_pixel_unpack_buffer == buffers[i])
+            g_bound_pixel_unpack_buffer = 0;
+        for (auto& binding : g_uniform_buffer_bindings)
+            if (binding.buffer == buffers[i]) binding = {};
         g_buffers.erase(it);
     }
 }
@@ -88,6 +247,9 @@ void APIENTRY glBindBuffer(GLenum target, GLuint buffer) {
     switch (target) {
         case GL_ARRAY_BUFFER: g_bound_array_buffer = buffer; break;
         case GL_ELEMENT_ARRAY_BUFFER: g_bound_element_buffer = buffer; break;
+        case GL_UNIFORM_BUFFER: g_bound_uniform_buffer = buffer; break;
+        case GL_PIXEL_PACK_BUFFER: g_bound_pixel_pack_buffer = buffer; break;
+        case GL_PIXEL_UNPACK_BUFFER: g_bound_pixel_unpack_buffer = buffer; break;
         default:
             PUSH_ERROR(GL_INVALID_ENUM);
             return;
@@ -100,16 +262,22 @@ void APIENTRY glBufferData(GLenum target, GLsizeiptr size, const void* data, GLe
     switch (target) {
         case GL_ARRAY_BUFFER: bound = &g_bound_array_buffer; break;
         case GL_ELEMENT_ARRAY_BUFFER: bound = &g_bound_element_buffer; break;
+        case GL_UNIFORM_BUFFER: bound = &g_bound_uniform_buffer; break;
+        case GL_PIXEL_PACK_BUFFER: bound = &g_bound_pixel_pack_buffer; break;
+        case GL_PIXEL_UNPACK_BUFFER: bound = &g_bound_pixel_unpack_buffer; break;
         default: PUSH_ERROR(GL_INVALID_ENUM); return;
     }
     if (*bound == 0) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
     if (size < 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
     auto it = g_buffers.find(*bound);
+    if (it->second.mapped) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
     if (data) {
         it->second.data.assign((const uint8_t*)data, (const uint8_t*)data + size);
     } else {
         it->second.data.assign((size_t)size, 0);
     }
+    ++it->second.content_version;
+    it->second.defined = data != nullptr;
 }
 
 void APIENTRY glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, const void* data) {
@@ -117,16 +285,26 @@ void APIENTRY glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, c
     switch (target) {
         case GL_ARRAY_BUFFER: bound = &g_bound_array_buffer; break;
         case GL_ELEMENT_ARRAY_BUFFER: bound = &g_bound_element_buffer; break;
+        case GL_UNIFORM_BUFFER: bound = &g_bound_uniform_buffer; break;
+        case GL_PIXEL_PACK_BUFFER: bound = &g_bound_pixel_pack_buffer; break;
+        case GL_PIXEL_UNPACK_BUFFER: bound = &g_bound_pixel_unpack_buffer; break;
         default: PUSH_ERROR(GL_INVALID_ENUM); return;
     }
     if (*bound == 0) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
     if (offset < 0 || size < 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
     auto it = g_buffers.find(*bound);
+    if (it->second.mapped) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
     if (offset + size > (GLintptr)it->second.data.size()) {
         PUSH_ERROR(GL_INVALID_VALUE);
         return;
     }
+    if (it->second.defined && size > 0 &&
+        std::memcmp(it->second.data.data() + offset, data,
+                    static_cast<size_t>(size)) == 0)
+        return;
     std::memcpy(it->second.data.data() + offset, data, size);
+    ++it->second.content_version;
+    it->second.defined = true;
 }
 
 // ---- buffer queries / mapping (M3) -----------------------------------------
@@ -136,12 +314,101 @@ BufferData* BoundBufferForTarget(GLenum target, GLenum* error) {
     switch (target) {
         case GL_ARRAY_BUFFER: bound = &g_bound_array_buffer; break;
         case GL_ELEMENT_ARRAY_BUFFER: bound = &g_bound_element_buffer; break;
+        case GL_UNIFORM_BUFFER: bound = &g_bound_uniform_buffer; break;
+        case GL_PIXEL_PACK_BUFFER: bound = &g_bound_pixel_pack_buffer; break;
+        case GL_PIXEL_UNPACK_BUFFER: bound = &g_bound_pixel_unpack_buffer; break;
         default: *error = GL_INVALID_ENUM; return nullptr;
     }
     if (*bound == 0) { *error = GL_INVALID_OPERATION; return nullptr; }
     auto it = g_buffers.find(*bound);
     if (it == g_buffers.end()) { *error = GL_INVALID_OPERATION; return nullptr; }
     return &it->second;
+}
+
+void APIENTRY glBindBufferBase(GLenum target, GLuint index, GLuint buffer) {
+    if (target != GL_UNIFORM_BUFFER) { PUSH_ERROR(GL_INVALID_ENUM); return; }
+    if (index >= kMaxUniformBufferBindings) {
+        PUSH_ERROR(GL_INVALID_VALUE); return;
+    }
+    if (buffer != 0 && !g_buffers.count(buffer)) {
+        PUSH_ERROR(GL_INVALID_VALUE); return;
+    }
+    g_bound_uniform_buffer = buffer;
+    IndexedBufferBinding binding;
+    binding.buffer = buffer;
+    binding.whole_buffer = buffer != 0;
+    g_uniform_buffer_bindings[index] = binding;
+}
+
+void APIENTRY glBindBufferRange(GLenum target, GLuint index, GLuint buffer,
+                                GLintptr offset, GLsizeiptr size) {
+    if (target != GL_UNIFORM_BUFFER) { PUSH_ERROR(GL_INVALID_ENUM); return; }
+    if (index >= kMaxUniformBufferBindings) {
+        PUSH_ERROR(GL_INVALID_VALUE); return;
+    }
+    if (buffer == 0) {
+        g_bound_uniform_buffer = 0;
+        g_uniform_buffer_bindings[index] = {};
+        return;
+    }
+    const auto found = g_buffers.find(buffer);
+    if (found == g_buffers.end()) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+    if (offset < 0 || size <= 0 ||
+        offset % kUniformBufferOffsetAlignment != 0) {
+        PUSH_ERROR(GL_INVALID_VALUE); return;
+    }
+    const uint64_t begin = static_cast<uint64_t>(offset);
+    const uint64_t length = static_cast<uint64_t>(size);
+    if (begin > found->second.data.size() ||
+        length > found->second.data.size() - begin) {
+        PUSH_ERROR(GL_INVALID_VALUE); return;
+    }
+    g_bound_uniform_buffer = buffer;
+    g_uniform_buffer_bindings[index] = {buffer, offset, size, false};
+}
+
+void APIENTRY glGetIntegeri_v(GLenum target, GLuint index, GLint* data) {
+    if (!data) return;
+    if (index >= kMaxUniformBufferBindings) {
+        PUSH_ERROR(GL_INVALID_VALUE); return;
+    }
+    const IndexedBufferBinding& binding = g_uniform_buffer_bindings[index];
+    switch (target) {
+        case GL_UNIFORM_BUFFER_BINDING:
+            *data = static_cast<GLint>(binding.buffer); return;
+        case GL_UNIFORM_BUFFER_START:
+            *data = static_cast<GLint>(binding.offset); return;
+        case GL_UNIFORM_BUFFER_SIZE: {
+            const auto found = g_buffers.find(binding.buffer);
+            *data = binding.whole_buffer && found != g_buffers.end()
+                ? static_cast<GLint>(found->second.data.size())
+                : static_cast<GLint>(binding.size);
+            return;
+        }
+        default: PUSH_ERROR(GL_INVALID_ENUM); return;
+    }
+}
+
+void APIENTRY glGetInteger64i_v(GLenum target, GLuint index, GLint64* data) {
+    if (!data) return;
+    if (index >= kMaxUniformBufferBindings) {
+        PUSH_ERROR(GL_INVALID_VALUE); return;
+    }
+    const IndexedBufferBinding& binding = g_uniform_buffer_bindings[index];
+    switch (target) {
+        case GL_UNIFORM_BUFFER_BINDING:
+            *data = static_cast<GLint64>(binding.buffer); return;
+        case GL_UNIFORM_BUFFER_START:
+            *data = static_cast<GLint64>(binding.offset); return;
+        case GL_UNIFORM_BUFFER_SIZE: {
+            const auto found = g_buffers.find(binding.buffer);
+            *data = binding.whole_buffer && found != g_buffers.end()
+                ? static_cast<GLint64>(found->second.data.size())
+                : static_cast<GLint64>(binding.size);
+            return;
+        }
+        default: PUSH_ERROR(GL_INVALID_ENUM); return;
+    }
 }
 
 void APIENTRY glCopyBufferSubData(GLenum readtarget, GLenum writetarget,
@@ -159,8 +426,14 @@ void APIENTRY glCopyBufferSubData(GLenum readtarget, GLenum writetarget,
         PUSH_ERROR(GL_INVALID_VALUE);
         return;
     }
+    if (src->mapped || dst->mapped) {
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return;
+    }
     std::memmove(dst->data.data() + writeoffset, src->data.data() + readoffset,
                  size);
+    ++dst->content_version;
+    dst->defined = true;
 }
 
 void APIENTRY glGetBufferParameteriv(GLenum target, GLenum pname, GLint* params) {
@@ -171,7 +444,7 @@ void APIENTRY glGetBufferParameteriv(GLenum target, GLenum pname, GLint* params)
         case GL_BUFFER_SIZE: *params = (GLint)b->data.size(); break;
         case GL_BUFFER_USAGE: *params = GL_STATIC_DRAW; break;
         case GL_BUFFER_ACCESS: *params = GL_WRITE_ONLY; break;
-        case GL_BUFFER_MAPPED: *params = GL_FALSE; break;
+        case GL_BUFFER_MAPPED: *params = b->mapped ? GL_TRUE : GL_FALSE; break;
         default: PUSH_ERROR(GL_INVALID_ENUM);
     }
 }
@@ -194,7 +467,7 @@ void APIENTRY glGetBufferPointerv(GLenum target, GLenum pname, void** params) {
     GLenum err = GL_NO_ERROR;
     BufferData* b = BoundBufferForTarget(target, &err);
     if (err) { PUSH_ERROR(err); return; }
-    *params = b->data.data();
+    *params = b->mapped ? b->data.data() + b->map_offset : nullptr;
 }
 
 void APIENTRY glGetBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size,
@@ -217,31 +490,59 @@ void* APIENTRY glMapBuffer(GLenum target, GLenum access) {
     GLenum err = GL_NO_ERROR;
     BufferData* b = BoundBufferForTarget(target, &err);
     if (err) { PUSH_ERROR(err); return nullptr; }
+    if (b->mapped) { PUSH_ERROR(GL_INVALID_OPERATION); return nullptr; }
     if (b->data.empty()) { PUSH_ERROR(GL_OUT_OF_MEMORY); return nullptr; }
+    b->mapped = true;
+    b->map_offset = 0;
+    b->map_writable = access != GL_READ_ONLY;
+    if (b->map_writable) {
+        ++b->content_version;
+        b->defined = true;
+    }
     return b->data.data();
 }
 
 void* APIENTRY glMapBufferRange(GLenum target, GLintptr offset, GLsizeiptr length,
                                 GLbitfield access) {
-    (void)access;
     if (offset < 0 || length < 0) { PUSH_ERROR(GL_INVALID_VALUE); return nullptr; }
     GLenum err = GL_NO_ERROR;
     BufferData* b = BoundBufferForTarget(target, &err);
     if (err) { PUSH_ERROR(err); return nullptr; }
+    if (b->mapped) { PUSH_ERROR(GL_INVALID_OPERATION); return nullptr; }
     if (offset + length > (GLintptr)b->data.size()) { PUSH_ERROR(GL_INVALID_VALUE); return nullptr; }
+    b->mapped = true;
+    b->map_offset = static_cast<size_t>(offset);
+    b->map_writable = access != GL_MAP_READ_BIT;
+    if (b->map_writable) {
+        ++b->content_version;
+        b->defined = true;
+    }
     return b->data.data() + offset;
 }
 
 GLboolean APIENTRY glUnmapBuffer(GLenum target) {
     GLenum err = GL_NO_ERROR;
-    BoundBufferForTarget(target, &err);
+    BufferData* b = BoundBufferForTarget(target, &err);
     if (err) { PUSH_ERROR(err); return GL_FALSE; }
+    if (!b->mapped) { PUSH_ERROR(GL_INVALID_OPERATION); return GL_FALSE; }
+    b->mapped = false;
+    b->map_writable = false;
+    b->map_offset = 0;
     return GL_TRUE;  // host-coherent staging: nothing to flush
 }
 
 void APIENTRY glFlushMappedBufferRange(GLenum target, GLintptr offset,
                                        GLsizeiptr length) {
-    (void)target; (void)offset; (void)length;
+    GLenum err = GL_NO_ERROR;
+    BufferData* b = BoundBufferForTarget(target, &err);
+    if (err) { PUSH_ERROR(err); return; }
+    if (offset < 0 || length < 0 ||
+        offset + length > (GLintptr)b->data.size()) {
+        PUSH_ERROR(GL_INVALID_VALUE);
+        return;
+    }
+    ++b->content_version;
+    b->defined = true;
 }
 
 void APIENTRY glEnableVertexAttribArray(GLuint index) {
@@ -267,7 +568,6 @@ void APIENTRY glVertexAttribPointer(GLuint index, GLint size, GLenum type,
     }
     if (stride < 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
     AttribData& a = g_vaos[g_bound_vao].attribs[index];
-    a.enabled = true;
     a.size = size;
     a.type = type;
     a.normalized = normalized;
@@ -275,6 +575,7 @@ void APIENTRY glVertexAttribPointer(GLuint index, GLint size, GLenum type,
     a.offset = (GLsizeiptr)pointer;
     a.buffer = g_bound_array_buffer;
     a.is_pointer = true;
+    a.integer = false;
 }
 
 void APIENTRY glVertexAttribIPointer(GLuint index, GLint size, GLenum type,
@@ -288,7 +589,6 @@ void APIENTRY glVertexAttribIPointer(GLuint index, GLint size, GLenum type,
     }
     if (stride < 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
     AttribData& a = g_vaos[g_bound_vao].attribs[index];
-    a.enabled = true;
     a.size = size;
     a.type = type;
     a.normalized = GL_FALSE;
@@ -296,6 +596,7 @@ void APIENTRY glVertexAttribIPointer(GLuint index, GLint size, GLenum type,
     a.offset = (GLsizeiptr)pointer;
     a.buffer = g_bound_array_buffer;
     a.is_pointer = true;
+    a.integer = true;
 }
 
 void APIENTRY glVertexAttribDivisor(GLuint index, GLuint divisor) {
@@ -306,13 +607,46 @@ void APIENTRY glVertexAttribDivisor(GLuint index, GLuint divisor) {
 // ---- generic (constant) vertex attributes -----------------------------------
 
 // Constant values apply when the array is *disabled*; setting them must not
-// change the enable bit (GL 4.46).
+// change the enable bit or the array pointer/format state (GL 4.46).
 void SetConstantAttrib(GLuint index, const GLfloat* v, GLsizei n) {
     if (index >= kMaxAttribs || n < 1 || n > 4) { PUSH_ERROR(GL_INVALID_VALUE); return; }
-    AttribData& a = g_vaos[g_bound_vao].attribs[index];
-    a.is_pointer = false;
-    for (GLsizei i = 0; i < n; ++i) a.constant[i] = v[i];
-    for (GLsizei i = n; i < 4; ++i) a.constant[i] = i == 3 ? 1.0f : 0.0f;
+    CurrentAttribData& a = g_current_attribs[index];
+    for (GLsizei i = 0; i < 4; ++i) {
+        const GLfloat value = i < n ? v[i] : (i == 3 ? 1.0f : 0.0f);
+        a.constant[i] = value;
+        a.constant_sint[i] = FloatToSint(value);
+        a.constant_uint[i] = FloatToUint(value);
+    }
+}
+
+void SetConstantAttribI(GLuint index, const GLint* values, GLsizei count) {
+    if (index >= kMaxAttribs || count < 1 || count > 4) {
+        PUSH_ERROR(GL_INVALID_VALUE);
+        return;
+    }
+    CurrentAttribData& attribute = g_current_attribs[index];
+    for (GLsizei component = 0; component < 4; ++component) {
+        const GLint value = component < count
+            ? values[component] : (component == 3 ? 1 : 0);
+        attribute.constant_sint[component] = value;
+        attribute.constant_uint[component] = static_cast<GLuint>(value);
+        attribute.constant[component] = static_cast<GLfloat>(value);
+    }
+}
+
+void SetConstantAttribUI(GLuint index, const GLuint* values, GLsizei count) {
+    if (index >= kMaxAttribs || count < 1 || count > 4) {
+        PUSH_ERROR(GL_INVALID_VALUE);
+        return;
+    }
+    CurrentAttribData& attribute = g_current_attribs[index];
+    for (GLsizei component = 0; component < 4; ++component) {
+        const GLuint value = component < count
+            ? values[component] : (component == 3 ? 1u : 0u);
+        attribute.constant_uint[component] = value;
+        attribute.constant_sint[component] = static_cast<GLint>(value);
+        attribute.constant[component] = static_cast<GLfloat>(value);
+    }
 }
 
 void APIENTRY glVertexAttrib1f(GLuint index, GLfloat x) {
@@ -367,16 +701,72 @@ void APIENTRY glVertexAttrib4uiv(GLuint index, const GLuint* v) { GLfloat f[4]; 
 void APIENTRY glVertexAttrib4bv(GLuint index, const GLbyte* v) { GLfloat f[4]; for (int i=0;i<4;++i) f[i]=(GLfloat)v[i]; SetConstantAttrib(index, f, 4); }
 void APIENTRY glVertexAttrib4ubv(GLuint index, const GLubyte* v) { GLfloat f[4]; for (int i=0;i<4;++i) f[i]=(GLfloat)v[i]; SetConstantAttrib(index, f, 4); }
 void APIENTRY glVertexAttrib4usv(GLuint index, const GLushort* v) { GLfloat f[4]; for (int i=0;i<4;++i) f[i]=(GLfloat)v[i]; SetConstantAttrib(index, f, 4); }
-void APIENTRY glVertexAttrib4Nbv(GLuint index, const GLbyte* v) { GLfloat f[4]; for (int i=0;i<4;++i) f[i]=(GLfloat)v[i]/127.0f; SetConstantAttrib(index, f, 4); }
-void APIENTRY glVertexAttrib4Nsv(GLuint index, const GLshort* v) { GLfloat f[4]; for (int i=0;i<4;++i) f[i]=(GLfloat)v[i]/32767.0f; SetConstantAttrib(index, f, 4); }
-void APIENTRY glVertexAttrib4Niv(GLuint index, const GLint* v) { GLfloat f[4]; for (int i=0;i<4;++i) f[i]=(GLfloat)v[i]/2147483647.0f; SetConstantAttrib(index, f, 4); }
+void APIENTRY glVertexAttrib4Nbv(GLuint index, const GLbyte* v) { GLfloat f[4]; for (int i=0;i<4;++i) f[i]=std::max(-1.0f, (GLfloat)v[i]/127.0f); SetConstantAttrib(index, f, 4); }
+void APIENTRY glVertexAttrib4Nsv(GLuint index, const GLshort* v) { GLfloat f[4]; for (int i=0;i<4;++i) f[i]=std::max(-1.0f, (GLfloat)v[i]/32767.0f); SetConstantAttrib(index, f, 4); }
+void APIENTRY glVertexAttrib4Niv(GLuint index, const GLint* v) { GLfloat f[4]; for (int i=0;i<4;++i) f[i]=std::max(-1.0f, (GLfloat)v[i]/2147483647.0f); SetConstantAttrib(index, f, 4); }
 void APIENTRY glVertexAttrib4Nubv(GLuint index, const GLubyte* v) { GLfloat f[4]; for (int i=0;i<4;++i) f[i]=(GLfloat)v[i]/255.0f; SetConstantAttrib(index, f, 4); }
 void APIENTRY glVertexAttrib4Nusv(GLuint index, const GLushort* v) { GLfloat f[4]; for (int i=0;i<4;++i) f[i]=(GLfloat)v[i]/65535.0f; SetConstantAttrib(index, f, 4); }
 void APIENTRY glVertexAttrib4Nuiv(GLuint index, const GLuint* v) { GLfloat f[4]; for (int i=0;i<4;++i) f[i]=(GLfloat)v[i]/4294967295.0f; SetConstantAttrib(index, f, 4); }
 
+void APIENTRY glVertexAttribI1i(GLuint index, GLint x) {
+    const GLint values[1] = {x}; SetConstantAttribI(index, values, 1); }
+void APIENTRY glVertexAttribI2i(GLuint index, GLint x, GLint y) {
+    const GLint values[2] = {x, y}; SetConstantAttribI(index, values, 2); }
+void APIENTRY glVertexAttribI3i(GLuint index, GLint x, GLint y, GLint z) {
+    const GLint values[3] = {x, y, z}; SetConstantAttribI(index, values, 3); }
+void APIENTRY glVertexAttribI4i(GLuint index, GLint x, GLint y, GLint z, GLint w) {
+    const GLint values[4] = {x, y, z, w}; SetConstantAttribI(index, values, 4); }
+void APIENTRY glVertexAttribI1iv(GLuint index, const GLint* values) {
+    SetConstantAttribI(index, values, 1); }
+void APIENTRY glVertexAttribI2iv(GLuint index, const GLint* values) {
+    SetConstantAttribI(index, values, 2); }
+void APIENTRY glVertexAttribI3iv(GLuint index, const GLint* values) {
+    SetConstantAttribI(index, values, 3); }
+void APIENTRY glVertexAttribI4iv(GLuint index, const GLint* values) {
+    SetConstantAttribI(index, values, 4); }
+
+void APIENTRY glVertexAttribI1ui(GLuint index, GLuint x) {
+    const GLuint values[1] = {x}; SetConstantAttribUI(index, values, 1); }
+void APIENTRY glVertexAttribI2ui(GLuint index, GLuint x, GLuint y) {
+    const GLuint values[2] = {x, y}; SetConstantAttribUI(index, values, 2); }
+void APIENTRY glVertexAttribI3ui(GLuint index, GLuint x, GLuint y, GLuint z) {
+    const GLuint values[3] = {x, y, z}; SetConstantAttribUI(index, values, 3); }
+void APIENTRY glVertexAttribI4ui(GLuint index, GLuint x, GLuint y, GLuint z,
+                                 GLuint w) {
+    const GLuint values[4] = {x, y, z, w}; SetConstantAttribUI(index, values, 4); }
+void APIENTRY glVertexAttribI1uiv(GLuint index, const GLuint* values) {
+    SetConstantAttribUI(index, values, 1); }
+void APIENTRY glVertexAttribI2uiv(GLuint index, const GLuint* values) {
+    SetConstantAttribUI(index, values, 2); }
+void APIENTRY glVertexAttribI3uiv(GLuint index, const GLuint* values) {
+    SetConstantAttribUI(index, values, 3); }
+void APIENTRY glVertexAttribI4uiv(GLuint index, const GLuint* values) {
+    SetConstantAttribUI(index, values, 4); }
+
+void APIENTRY glVertexAttribI4bv(GLuint index, const GLbyte* values) {
+    GLint converted[4];
+    for (int i = 0; i < 4; ++i) converted[i] = values[i];
+    SetConstantAttribI(index, converted, 4);
+}
+void APIENTRY glVertexAttribI4sv(GLuint index, const GLshort* values) {
+    GLint converted[4];
+    for (int i = 0; i < 4; ++i) converted[i] = values[i];
+    SetConstantAttribI(index, converted, 4);
+}
+void APIENTRY glVertexAttribI4ubv(GLuint index, const GLubyte* values) {
+    GLuint converted[4];
+    for (int i = 0; i < 4; ++i) converted[i] = values[i];
+    SetConstantAttribUI(index, converted, 4);
+}
+void APIENTRY glVertexAttribI4usv(GLuint index, const GLushort* values) {
+    GLuint converted[4];
+    for (int i = 0; i < 4; ++i) converted[i] = values[i];
+    SetConstantAttribUI(index, converted, 4);
+}
+
 // ---- attribute queries ------------------------------------------------------
 
-void GetConstantAttrib(const AttribData& a, GLfloat* out) {
+void GetConstantAttrib(const CurrentAttribData& a, GLfloat* out) {
     out[0] = a.constant[0]; out[1] = a.constant[1];
     out[2] = a.constant[2]; out[3] = a.constant[3];
 }
@@ -389,38 +779,56 @@ void APIENTRY glGetVertexAttribfv(GLuint index, GLenum pname, GLfloat* params) {
         case GL_VERTEX_ATTRIB_ARRAY_STRIDE: params[0] = (GLfloat)a.stride; break;
         case GL_VERTEX_ATTRIB_ARRAY_TYPE: params[0] = (GLfloat)a.type; break;
         case GL_VERTEX_ATTRIB_ARRAY_NORMALIZED: params[0] = a.normalized ? 1.f : 0.f; break;
-        default: {
-            const GLfloat* v = a.constant.data();
-            for (int i = 0; i < 4; ++i) params[i] = v[i];
-        }
+        case GL_VERTEX_ATTRIB_ARRAY_INTEGER: params[0] = a.integer ? 1.f : 0.f; break;
+        case GL_CURRENT_VERTEX_ATTRIB:
+            GetConstantAttrib(g_current_attribs[index], params); break;
+        default: PUSH_ERROR(GL_INVALID_ENUM);
     }
 }
 void APIENTRY glGetVertexAttribdv(GLuint index, GLenum pname, GLdouble* params) {
     GLfloat f[4]; glGetVertexAttribfv(index, pname, f);
     int n = (pname == GL_VERTEX_ATTRIB_ARRAY_ENABLED || pname == GL_VERTEX_ATTRIB_ARRAY_SIZE ||
              pname == GL_VERTEX_ATTRIB_ARRAY_STRIDE || pname == GL_VERTEX_ATTRIB_ARRAY_TYPE ||
-             pname == GL_VERTEX_ATTRIB_ARRAY_NORMALIZED) ? 1 : 4;
+             pname == GL_VERTEX_ATTRIB_ARRAY_NORMALIZED ||
+             pname == GL_VERTEX_ATTRIB_ARRAY_INTEGER) ? 1 : 4;
     for (int i = 0; i < n; ++i) params[i] = (GLdouble)f[i];
 }
 void APIENTRY glGetVertexAttribiv(GLuint index, GLenum pname, GLint* params) {
     GLfloat f[4]; glGetVertexAttribfv(index, pname, f);
     int n = (pname == GL_VERTEX_ATTRIB_ARRAY_ENABLED || pname == GL_VERTEX_ATTRIB_ARRAY_SIZE ||
              pname == GL_VERTEX_ATTRIB_ARRAY_STRIDE || pname == GL_VERTEX_ATTRIB_ARRAY_TYPE ||
-             pname == GL_VERTEX_ATTRIB_ARRAY_NORMALIZED) ? 1 : 4;
+             pname == GL_VERTEX_ATTRIB_ARRAY_NORMALIZED ||
+             pname == GL_VERTEX_ATTRIB_ARRAY_INTEGER) ? 1 : 4;
     for (int i = 0; i < n; ++i) params[i] = (GLint)f[i];
 }
 void APIENTRY glGetVertexAttribIiv(GLuint index, GLenum pname, GLint* params) {
+    if (index >= kMaxAttribs) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+    if (pname == GL_CURRENT_VERTEX_ATTRIB) {
+        const CurrentAttribData& attribute = g_current_attribs[index];
+        for (int component = 0; component < 4; ++component)
+            params[component] = attribute.constant_sint[component];
+        return;
+    }
     GLfloat f[4]; glGetVertexAttribfv(index, pname, f);
     int n = (pname == GL_VERTEX_ATTRIB_ARRAY_ENABLED || pname == GL_VERTEX_ATTRIB_ARRAY_SIZE ||
              pname == GL_VERTEX_ATTRIB_ARRAY_STRIDE || pname == GL_VERTEX_ATTRIB_ARRAY_TYPE ||
-             pname == GL_VERTEX_ATTRIB_ARRAY_NORMALIZED) ? 1 : 4;
+             pname == GL_VERTEX_ATTRIB_ARRAY_NORMALIZED ||
+             pname == GL_VERTEX_ATTRIB_ARRAY_INTEGER) ? 1 : 4;
     for (int i = 0; i < n; ++i) params[i] = (GLint)f[i];
 }
 void APIENTRY glGetVertexAttribIuiv(GLuint index, GLenum pname, GLuint* params) {
+    if (index >= kMaxAttribs) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+    if (pname == GL_CURRENT_VERTEX_ATTRIB) {
+        const CurrentAttribData& attribute = g_current_attribs[index];
+        for (int component = 0; component < 4; ++component)
+            params[component] = attribute.constant_uint[component];
+        return;
+    }
     GLfloat f[4]; glGetVertexAttribfv(index, pname, f);
     int n = (pname == GL_VERTEX_ATTRIB_ARRAY_ENABLED || pname == GL_VERTEX_ATTRIB_ARRAY_SIZE ||
              pname == GL_VERTEX_ATTRIB_ARRAY_STRIDE || pname == GL_VERTEX_ATTRIB_ARRAY_TYPE ||
-             pname == GL_VERTEX_ATTRIB_ARRAY_NORMALIZED) ? 1 : 4;
+             pname == GL_VERTEX_ATTRIB_ARRAY_NORMALIZED ||
+             pname == GL_VERTEX_ATTRIB_ARRAY_INTEGER) ? 1 : 4;
     for (int i = 0; i < n; ++i) params[i] = (GLuint)f[i];
 }
 void APIENTRY glGetVertexAttribPointerv(GLuint index, GLenum pname, void** pointer) {

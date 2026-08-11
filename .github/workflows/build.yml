@@ -2,7 +2,9 @@ name: build-mithril
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
+      - 'feature/**'
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -21,6 +23,9 @@ jobs:
 
       - name: Build
         run: cmake --build build -j$(sysctl -n hw.ncpu)
+
+      - name: Compile DirectMetal FBO regression smoke
+        run: clang -std=c11 -Wall -Wextra -Werror -fsyntax-only tests/directmetal_fbo_smoke.c
 
       - name: Locate dylib
         id: locate
@@ -65,6 +70,87 @@ jobs:
         with:
           name: libmithril-macos-arm64
           path: ${{ steps.locate.outputs.path }}
+          if-no-files-found: error
+
+  # ---- iOS device: prove a real iphoneos/arm64 Amethyst renderer artifact --
+  build-ios:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Configure (iPhoneOS arm64 Release)
+        run: |
+          cmake -S . -B build-ios \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OSX_SYSROOT=iphoneos \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 \
+            -DMITHRIL_IOS=ON
+
+      - name: Build iPhoneOS dylib
+        run: cmake --build build-ios -j$(sysctl -n hw.ncpu)
+
+      - name: Verify iPhoneOS Mach-O contract
+        id: locate_ios
+        run: |
+          DYLIB=output/libmithril.dylib
+          [ -f "$DYLIB" ] || (echo "iOS dylib not found in output/" && exit 1)
+          echo "path=$DYLIB" >> "$GITHUB_OUTPUT"
+          file "$DYLIB"
+          lipo -info "$DYLIB"
+          file "$DYLIB" | grep -q 'Mach-O 64-bit dynamically linked shared library arm64'
+          lipo -info "$DYLIB" | grep -q 'arm64'
+
+          echo '--- build version ---'
+          vtool -show-build "$DYLIB"
+          vtool -show-build "$DYLIB" | grep -q 'platform IOS'
+
+          echo '--- install name ---'
+          otool -D "$DYLIB"
+          otool -D "$DYLIB" | tail -n +2 | grep -qx '@rpath/libmithril.dylib'
+
+      - name: Verify Amethyst EGL + desktop GL exports
+        run: |
+          DYLIB="${{ steps.locate_ios.outputs.path }}"
+          NM_OUT=$(nm -gU "$DYLIB")
+          missing=0
+          for sym in eglBindAPI eglChooseConfig eglCreateContext eglCreateWindowSurface \
+                     eglDestroyContext eglDestroySurface eglGetConfigAttrib \
+                     eglGetCurrentContext eglGetCurrentSurface eglGetDisplay eglGetError \
+                     eglGetPlatformDisplay eglInitialize eglMakeCurrent eglReleaseThread \
+                     eglSwapBuffers eglSwapInterval eglTerminate; do
+            if echo "$NM_OUT" | grep -qE " T _?${sym}$"; then
+              echo "ok  $sym"
+            else
+              echo "MISS $sym"
+              missing=1
+            fi
+          done
+          [ "$missing" -eq 0 ]
+          GL_COUNT=$(echo "$NM_OUT" | grep -cE ' T _?gl[A-Z0-9]')
+          echo "gl* defined exports: $GL_COUNT"
+          [ "$GL_COUNT" -ge 342 ]
+
+      - name: Verify Metal dependencies
+        run: |
+          DYLIB="${{ steps.locate_ios.outputs.path }}"
+          otool -L "$DYLIB"
+          otool -L "$DYLIB" | grep -q '/System/Library/Frameworks/Metal.framework/Metal'
+          otool -L "$DYLIB" | grep -q '/System/Library/Frameworks/QuartzCore.framework/QuartzCore'
+
+      - name: Ad-hoc codesign artifact
+        run: |
+          codesign --force --sign - "${{ steps.locate_ios.outputs.path }}"
+          codesign --verify --verbose=2 "${{ steps.locate_ios.outputs.path }}"
+
+      - name: Upload iPhoneOS dylib
+        uses: actions/upload-artifact@v4
+        with:
+          name: libmithril-iphoneos-arm64
+          path: ${{ steps.locate_ios.outputs.path }}
           if-no-files-found: error
 
   # ---- Linux: run the contract + state machine smoke tests ----------------
@@ -118,9 +204,9 @@ jobs:
 
       - name: Run GL->Vulkan draw smoke (lavapipe)
         run: |
-          output=$(./tests/draw_smoke)
-          echo "$output"
-          echo "$output" | grep -q "DRAW SMOKE ALL PASSED"
+          set -o pipefail
+          ./tests/draw_smoke 2>&1 | tee /tmp/draw-smoke.log
+          grep -q "DRAW SMOKE ALL PASSED" /tmp/draw-smoke.log
 
       - name: Run GL->Vulkan texture smoke (lavapipe)
         run: |

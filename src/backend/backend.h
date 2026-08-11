@@ -1,52 +1,59 @@
-// Vulkan implementation of the backend-neutral renderer contract.
+// Backend selection and the backend-neutral renderer contract.
 
 #pragma once
 
-#include <backend/types.h>
+#include "types.h"
 
-namespace mithril::vk {
+namespace mithril::backend {
 
-using backend::DrawParams;
-using backend::ClearParams;
-using backend::FboAttach;
-using backend::FboSpec;
-using backend::PipelineState;
-using backend::TexFilter;
-using backend::TexMipFilter;
-using backend::TexSamplerInfo;
-using backend::TexUpload;
-using backend::Topology;
-using backend::VertexAttr;
-using backend::VertexStream;
+enum class Kind { Vulkan, DirectMetal, Unavailable };
 
-inline constexpr uint32_t kMaxUnits = backend::kMaxTextureUnits;
+Kind ActiveKind();
+const char* RendererName();
 
-void UploadTexture(uint64_t gl_id, const TexUpload& img);
-void DestroyResidentTexture(uint64_t gl_id);
-void DestroyBuffer(uint64_t lifetime_id);
 bool EnsureInit();
 bool IsInitialized();
 bool SetTargetSize(uint32_t w, uint32_t h);
+bool SetNativeWindow(void* native_window);
+bool SwapBuffers();
 uint32_t TargetWidth();
 uint32_t TargetHeight();
 uint32_t MaxFramebufferSamples();
+uint32_t MaxColorTextureSamples();
+bool SupportsDepthTextures();
 bool Clear(const ClearParams& params);
+
 uint64_t CreateProgram(const std::vector<uint32_t>& vs,
                        const std::vector<uint32_t>& fs);
 void DestroyProgram(uint64_t program);
-void Draw(const DrawParams& params);
-void SubmitFlush();
+bool Draw(const DrawParams& params);
+
+// wait_for_completion=false is the glFlush/present path. A backend may keep
+// work in flight. glFinish/readback pass true and establish CPU visibility.
+void SubmitFlush(bool wait_for_completion);
 void ReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, void* out);
+
+// Execution fences are backend objects, while GLsync name validation and GL
+// parameter semantics remain in the frontend. Creating a fence orders all GL
+// work issued before it; it does not imply a CPU wait.
 uint64_t CreateFence();
 void DestroyFence(uint64_t fence);
-backend::SyncWaitResult ClientWaitFence(uint64_t fence, uint64_t timeout_ns);
+SyncWaitResult ClientWaitFence(uint64_t fence, uint64_t timeout_ns);
 bool FenceSignaled(uint64_t fence);
 bool ServerWaitFence(uint64_t fence);
+
+// Occlusion query objects keep GL name/target semantics in the frontend.
+// Each BeginQuery generation gets a backend handle so reusing a GL name never
+// aliases results that are still in flight.
 uint64_t CreateOcclusionQuery(bool boolean_result);
 void EndOcclusionQuery(uint64_t query);
 void DestroyOcclusionQuery(uint64_t query);
 bool OcclusionQueryAvailable(uint64_t query);
 bool GetOcclusionQueryResult(uint64_t query, uint64_t* result);
+
+void UploadTexture(uint64_t gl_id, const TexUpload& img);
+void DestroyResidentTexture(uint64_t gl_id);
+void DestroyBuffer(uint64_t lifetime_id);
 void CreateRenderbuffer(uint64_t rbo_id, GLenum internalformat,
                         uint32_t width, uint32_t height, uint32_t samples);
 void DestroyRenderbuffer(uint64_t rbo_id);
@@ -62,4 +69,4 @@ void BlitFramebuffer(uint64_t src_fbo, uint64_t dst_fbo,
                      GLint dstX0, GLint dstY0, GLint dstX1, GLint dstY1,
                      GLbitfield mask, GLenum filter);
 
-} // namespace mithril::vk
+} // namespace mithril::backend

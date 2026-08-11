@@ -1,6 +1,6 @@
 // Mithril-Wrapper GL layer -- S5 framebuffer object / renderbuffer bridge.
 // Owns the GL object tables for framebuffers and renderbuffers, and forwards
-// attachment changes into the Vulkan engine (mapping texture + renderbuffer
+// attachment changes into the selected backend (mapping texture + renderbuffer
 // attachments onto resident Vk images). Draw, clear and readback already
 // target the bound framebuffer in the backend, so this TU keeps the bindings
 // in sync and answers the object/status queries.
@@ -11,7 +11,7 @@
 #include <cstring>
 
 namespace s = mithril::state;
-namespace v = mithril::vk;
+namespace v = mithril::backend;
 
 // GL renderbuffer object: format + size as set by glRenderbufferStorage, plus
 // a mirror of the produced specs for renderbuffer-size FBO checks.
@@ -61,15 +61,42 @@ static FbState* FboGet(GLuint id) {
     return it == g_framebuffers.end() ? nullptr : &it->second;
 }
 
-// Size of a single attachment at the resolved size; empty attachments (or
-// textures without an image) report failure so the FBO counts as incomplete.
+static bool TextureSubresourceValid(const Attach& attachment) {
+    if (!attachment.present || !attachment.is_texture ||
+        attachment.level < 0 || attachment.layer < 0)
+        return false;
+    auto found = g_textures.find(attachment.tex_id);
+    if (found == g_textures.end()) return false;
+    const TexState& texture = found->second;
+    if (!texture.has_image || texture.width == 0 || texture.height == 0 ||
+        texture.target == GL_TEXTURE_BUFFER)
+        return false;
+    if (texture.target == GL_TEXTURE_2D_MULTISAMPLE)
+        return attachment.level == 0 && attachment.layer == 0;
+    if (static_cast<size_t>(attachment.level) >= texture.mip.size()) return false;
+    switch (texture.target) {
+        case GL_TEXTURE_CUBE_MAP:
+            return attachment.layer < 6;
+        case GL_TEXTURE_3D: {
+            const uint32_t depth = std::max<uint32_t>(
+                1, texture.depth >> static_cast<uint32_t>(attachment.level));
+            return static_cast<uint32_t>(attachment.layer) < depth;
+        }
+        case GL_TEXTURE_1D_ARRAY:
+        case GL_TEXTURE_2D_ARRAY:
+            return static_cast<uint32_t>(attachment.layer) < texture.depth;
+        default:
+            return attachment.layer == 0;
+    }
+}
+
+// Size of a single selected attachment image. Invalid mip/slice/depth-plane
+// selections fail completeness instead of silently falling back to level 0.
 static bool AttachDimensions(const Attach& a, GLsizei* w, GLsizei* h) {
     if (!a.present) return false;
     if (a.is_texture) {
-        auto it = g_textures.find(a.tex_id);
-        if (it == g_textures.end()) return false;
-        const TexState& t = it->second;
-        if (t.width == 0 || t.height == 0) return false;
+        if (!TextureSubresourceValid(a)) return false;
+        const TexState& t = g_textures.at(a.tex_id);
         *w = std::max<GLsizei>(1, (GLsizei)t.width >> a.level);
         *h = std::max<GLsizei>(1, (GLsizei)t.height >> a.level);
     } else {
@@ -81,21 +108,56 @@ static bool AttachDimensions(const Attach& a, GLsizei* w, GLsizei* h) {
     return true;
 }
 
-// Push the current attachments into the Vulkan engine (idempotent unless the
-// FBO changed); marks `complete` for glCheckFramebufferStatus. A GL FBO must
-// have at least one colour attachment to be renderable (the backend has a
-// color target), so colour-less FBOs stay incomplete.
+static bool AttachSampleCount(const Attach& attachment, GLsizei* samples) {
+    if (!attachment.present || !samples) return false;
+    if (attachment.is_texture) {
+        if (!TextureSubresourceValid(attachment)) return false;
+        const TexState& texture = g_textures.at(attachment.tex_id);
+        *samples = static_cast<GLsizei>(texture.samples);
+        return true;
+    }
+    auto renderbuffer = g_renderbuffers.find(attachment.rbo_id);
+    if (renderbuffer == g_renderbuffers.end() || !renderbuffer->second.defined)
+        return false;
+    *samples = std::max<GLsizei>(renderbuffer->second.samples, 1);
+    return true;
+}
+
+static bool IsDepthRenderbufferFormat(GLenum format) {
+    return format == GL_DEPTH_COMPONENT || format == GL_DEPTH_COMPONENT16 ||
+           format == GL_DEPTH_COMPONENT24 || format == GL_DEPTH_COMPONENT32F ||
+           format == GL_DEPTH_STENCIL || format == GL_DEPTH24_STENCIL8 ||
+           format == GL_DEPTH32F_STENCIL8;
+}
+
+static bool AttachIsDepth(const Attach& attachment, bool* is_depth) {
+    if (!attachment.present || !is_depth) return false;
+    if (attachment.is_texture) {
+        if (!TextureSubresourceValid(attachment)) return false;
+        *is_depth = g_textures.at(attachment.tex_id).image_backend_format ==
+                    v::TexelFormat::Depth32Float;
+        return true;
+    }
+    auto renderbuffer = g_renderbuffers.find(attachment.rbo_id);
+    if (renderbuffer == g_renderbuffers.end() || !renderbuffer->second.defined)
+        return false;
+    *is_depth = IsDepthRenderbufferFormat(renderbuffer->second.internalformat);
+    return true;
+}
+
+// Push the current attachments into the selected backend and cache the GL
+// completeness decision. Depth-only FBOs are valid when draw/read selectors
+// are GL_NONE; dimensions and sample counts come from the first live image.
 static void PushVkFramebuffer(GLuint id);
 
 static bool FillAttach(const Attach& a, v::FboAttach* out) {
     if (!a.present) return false;
     if (a.is_texture) {
-        auto it = g_textures.find(a.tex_id);
-        if (it == g_textures.end() || it->second.width == 0) return false;
+        if (!TextureSubresourceValid(a)) return false;
         out->is_texture = true;
         out->tex_id = a.tex_id;
-        out->level = (uint32_t)std::max<GLint>(0, a.level);
-        out->layer = (uint32_t)std::max<GLint>(0, a.layer);
+        out->level = static_cast<uint32_t>(a.level);
+        out->layer = static_cast<uint32_t>(a.layer);
     } else {
         auto rit = g_renderbuffers.find(a.rbo_id);
         if (rit == g_renderbuffers.end() || !rit->second.defined) return false;
@@ -104,45 +166,99 @@ static bool FillAttach(const Attach& a, v::FboAttach* out) {
     return true;
 }
 
+static bool ColorBufferHasAttachment(const FbState& framebuffer, GLenum buffer) {
+    if (buffer == GL_NONE) return true;
+    if (buffer < GL_COLOR_ATTACHMENT0 ||
+        buffer >= GL_COLOR_ATTACHMENT0 + (GLenum)8)
+        return false;
+    const int index = static_cast<int>(buffer - GL_COLOR_ATTACHMENT0);
+    return index < framebuffer.n_color && framebuffer.color[index].present;
+}
+
 static void PushVkFramebuffer(GLuint id) {
     FbState* f = FboGet(id);
     if (!f || !f->dirty) return;
 
     v::FboSpec spec;
-    GLsizei cw = 0, ch = 0;
-    bool col_ok = false;
-    for (int i = 0; i < f->n_color; ++i) {
-        v::FboAttach ca;
-        if (FillAttach(f->color[i], &ca)) {
-            spec.color.push_back(ca);
-            col_ok = true;
-        } else {
-            v::FboAttach empty;
-            spec.color.push_back(empty);
+    GLsizei fw = 0, fh = 0, framebuffer_samples = 0;
+    bool have_attachment = false;
+    bool attachments_match = true;
+
+    auto merge_attachment = [&](const Attach& attachment,
+                                bool expect_depth) -> bool {
+        GLsizei width = 0, height = 0, samples = 0;
+        bool is_depth = false;
+        if (!AttachDimensions(attachment, &width, &height) ||
+            !AttachSampleCount(attachment, &samples) ||
+            !AttachIsDepth(attachment, &is_depth) ||
+            is_depth != expect_depth)
+            return false;
+        if (!have_attachment) {
+            fw = width;
+            fh = height;
+            framebuffer_samples = samples;
+            have_attachment = true;
+            return true;
         }
-        if (i == 0) AttachDimensions(f->color[i], &cw, &ch);
+        return width == fw && height == fh && samples == framebuffer_samples;
+    };
+
+    for (int i = 0; i < f->n_color; ++i) {
+        v::FboAttach color;
+        if (!f->color[i].present) {
+            spec.color.push_back(color);
+            continue;
+        }
+        if (!FillAttach(f->color[i], &color) ||
+            !merge_attachment(f->color[i], false))
+            attachments_match = false;
+        spec.color.push_back(color);
     }
-    if (col_ok && f->has_depth && f->depth.present) {
-        GLsizei dw = 0, dh = 0;
-        if (AttachDimensions(f->depth, &dw, &dh) && dw == cw && dh == ch) {
+
+    if (f->has_depth && f->depth.present) {
+        if (FillAttach(f->depth, &spec.depth) &&
+            merge_attachment(f->depth, true)) {
             spec.has_depth = true;
-            FillAttach(f->depth, &spec.depth);
+        } else {
+            attachments_match = false;
         }
     }
 
     spec.read_buf = f->read_buf;
-    for (int i = 0; i < f->n_draw; ++i) spec.draw_bufs.push_back(f->draw_bufs[i]);
+    bool selectors_valid = ColorBufferHasAttachment(*f, f->read_buf);
+    for (int i = 0; i < f->n_draw; ++i) {
+        spec.draw_bufs.push_back(f->draw_bufs[i]);
+        selectors_valid = selectors_valid &&
+                          ColorBufferHasAttachment(*f, f->draw_bufs[i]);
+    }
 
-    if (col_ok) {
-        spec.width = cw;
-        spec.height = ch;
+    const bool complete = have_attachment && attachments_match && selectors_valid;
+    if (complete) {
+        spec.width = fw;
+        spec.height = fh;
     }
 
     v::SetFramebuffer(id, spec);
-    f->complete = col_ok;
-    f->width = cw;
-    f->height = ch;
+    f->complete = complete;
+    f->width = have_attachment ? fw : 0;
+    f->height = have_attachment ? fh : 0;
     f->dirty = false;
+}
+
+void NotifyTextureStorageChanged(GLuint texture) {
+    for (auto& entry : g_framebuffers) {
+        FbState& framebuffer = entry.second;
+        bool references_texture = framebuffer.has_depth &&
+            framebuffer.depth.present && framebuffer.depth.is_texture &&
+            framebuffer.depth.tex_id == texture;
+        for (const Attach& color : framebuffer.color)
+            references_texture = references_texture ||
+                (color.present && color.is_texture && color.tex_id == texture);
+        if (references_texture) framebuffer.dirty = true;
+    }
+    if (g_bound_draw_fbo) PushVkFramebuffer(g_bound_draw_fbo);
+    if (g_bound_read_fbo && g_bound_read_fbo != g_bound_draw_fbo)
+        PushVkFramebuffer(g_bound_read_fbo);
 }
 
 // The framebuffer an attachment call targets (GL_FRAMEBUFFER / DRAW uses the
@@ -438,14 +554,24 @@ void APIENTRY glFramebufferTexture2D(GLenum target, GLenum attachment,
     }
     if (level < 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
     GLint layer = 0;
+    GLenum object_target = textarget;
     if (textarget >= GL_TEXTURE_CUBE_MAP_POSITIVE_X &&
         textarget <= GL_TEXTURE_CUBE_MAP_NEGATIVE_Z) {
         layer = textarget - (GLint)GL_TEXTURE_CUBE_MAP_POSITIVE_X;
+        object_target = GL_TEXTURE_CUBE_MAP;
         textarget = GL_TEXTURE_2D;
     }
-    if (texture && textarget != GL_TEXTURE_2D) {
+    if (texture && textarget != GL_TEXTURE_2D &&
+        textarget != GL_TEXTURE_2D_MULTISAMPLE) {
         PUSH_ERROR(GL_INVALID_ENUM);
         return;
+    }
+    if (texture) {
+        auto object = g_textures.find(texture);
+        if (object == g_textures.end() || object->second.target != object_target) {
+            PUSH_ERROR(GL_INVALID_OPERATION);
+            return;
+        }
     }
     GLuint fbo = AttachmentFbo(target);
     if (texture && !fbo) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
@@ -461,6 +587,16 @@ void APIENTRY glFramebufferTextureLayer(GLenum target, GLenum attachment,
         return;
     }
     if (level < 0 || layer < 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+    if (texture) {
+        auto object = g_textures.find(texture);
+        if (object == g_textures.end() ||
+            (object->second.target != GL_TEXTURE_3D &&
+             object->second.target != GL_TEXTURE_1D_ARRAY &&
+             object->second.target != GL_TEXTURE_2D_ARRAY)) {
+            PUSH_ERROR(GL_INVALID_OPERATION);
+            return;
+        }
+    }
     GLuint fbo = AttachmentFbo(target);
     if (texture && !fbo) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
     AttachTexture(attachment, fbo, texture, level, layer);
@@ -468,7 +604,27 @@ void APIENTRY glFramebufferTextureLayer(GLenum target, GLenum attachment,
 
 void APIENTRY glFramebufferTexture(GLenum target, GLenum attachment,
                                    GLuint texture, GLint level) {
+    if (target != GL_FRAMEBUFFER && target != GL_DRAW_FRAMEBUFFER &&
+        target != GL_READ_FRAMEBUFFER) {
+        PUSH_ERROR(GL_INVALID_ENUM);
+        return;
+    }
     if (level < 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+    if (texture) {
+        auto object = g_textures.find(texture);
+        if (object == g_textures.end()) {
+            PUSH_ERROR(GL_INVALID_OPERATION);
+            return;
+        }
+        // Whole-level layered rendering is a separate milestone. Reject it
+        // instead of silently treating an array/cube/3D texture as layer zero.
+        if (object->second.IsCube() || object->second.Is3D() ||
+            object->second.target == GL_TEXTURE_1D_ARRAY ||
+            object->second.target == GL_TEXTURE_2D_ARRAY) {
+            PUSH_ERROR(GL_INVALID_OPERATION);
+            return;
+        }
+    }
     GLuint fbo = AttachmentFbo(target);
     if (texture && !fbo) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
     AttachTexture(attachment, fbo, texture, level, 0);
@@ -484,8 +640,20 @@ void APIENTRY glFramebufferTexture1D(GLenum target, GLenum attachment,
 void APIENTRY glFramebufferTexture3D(GLenum target, GLenum attachment,
                                      GLenum textarget, GLuint texture,
                                      GLint level, GLint zoffset) {
+    if (target != GL_FRAMEBUFFER && target != GL_DRAW_FRAMEBUFFER &&
+        target != GL_READ_FRAMEBUFFER) {
+        PUSH_ERROR(GL_INVALID_ENUM);
+        return;
+    }
     if (textarget != GL_TEXTURE_3D) { PUSH_ERROR(GL_INVALID_ENUM); return; }
-    if (zoffset < 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+    if (level < 0 || zoffset < 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+    if (texture) {
+        auto object = g_textures.find(texture);
+        if (object == g_textures.end() || object->second.target != GL_TEXTURE_3D) {
+            PUSH_ERROR(GL_INVALID_OPERATION);
+            return;
+        }
+    }
     GLuint fbo = AttachmentFbo(target);
     if (texture && !fbo) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
     AttachTexture(attachment, fbo, texture, level, zoffset);
@@ -507,7 +675,7 @@ void APIENTRY glFramebufferRenderbuffer(GLenum target, GLenum attachment,
         PUSH_ERROR(GL_INVALID_OPERATION);
         return;
     }
-int ci = ColorAttachIndex(attachment);
+    int ci = ColorAttachIndex(attachment);
     if (ci < -1) {
         PUSH_ERROR(GL_INVALID_ENUM);
         return;
@@ -592,7 +760,7 @@ void APIENTRY glBlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1,
     }
     if (srcX0 == srcX1 || srcY0 == srcY1 || dstX0 == dstX1 || dstY0 == dstY1)
         return;   // zero-area blit is a no-op
-    v::SubmitFlush();
+    v::SubmitFlush(true);
     v::BlitFramebuffer(g_bound_read_fbo, g_bound_draw_fbo,
                        srcX0, srcY0, srcX1, srcY1, dstX0, dstY0, dstX1, dstY1,
                        mask, filter);

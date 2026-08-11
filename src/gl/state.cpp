@@ -22,6 +22,7 @@ static bool CapValid(GLenum cap) {
         case GL_RASTERIZER_DISCARD:
         case GL_PROGRAM_POINT_SIZE:
         case GL_LOGIC_OP_MODE:
+        case GL_PRIMITIVE_RESTART:
             return true;
         default:
             return false;
@@ -36,6 +37,34 @@ static void SetCap(GLenum cap, bool on) {
         return;
     }
     st.caps.bits[idx] = on;
+}
+
+static bool SubmitClear(v::ClearParams clear) {
+    if (!v::EnsureInit()) {
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return false;
+    }
+    // A clear may be the first GPU operation in a context. Texture storage
+    // created before lazy backend initialization must be resident before an
+    // attached FBO can be resolved, just as DrawCommon already guarantees.
+    if (!g_dirty_textures.empty()) FlushDirtyTextureUploads();
+    auto& st = s::GetState();
+    clear.scissor_test = st.caps.Test(GL_SCISSOR_TEST);
+    if (st.scissor.initialized) {
+        clear.scissor = {st.scissor.x, st.scissor.y,
+                         st.scissor.w, st.scissor.h};
+    } else {
+        clear.scissor = {0, 0, static_cast<int32_t>(v::DrawTargetWidth()),
+                         static_cast<int32_t>(v::DrawTargetHeight())};
+    }
+    clear.color_write = st.color_wmask;
+    clear.depth_write = st.depth.mask;
+    clear.stencil_write_mask = st.stencil_front.write_mask;
+    if (!v::Clear(clear)) {
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return false;
+    }
+    return true;
 }
 
 // --- capabilities -----------------------------------------------------------
@@ -74,38 +103,43 @@ GLboolean APIENTRY glIsEnabledi(GLenum cap, GLuint index) {
 
 // ---- noise cancellers -------------------------------------------------------
 
-void APIENTRY glFinish() { v::SubmitFlush(); }
-void APIENTRY glFlush() { v::SubmitFlush(); }
+void APIENTRY glFinish() { v::SubmitFlush(true); }
+void APIENTRY glFlush() { v::SubmitFlush(false); }
+
+void APIENTRY glPrimitiveRestartIndex(GLuint index) {
+    s::GetState().primitive_restart_index = index;
+}
 
 // ---- viewport / scissor ----------------------------------------------------
 
 void APIENTRY glViewport(GLint x, GLint y, GLsizei width, GLsizei height) {
+    if (width < 0 || height < 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
     auto& st = s::GetState();
     st.viewport.x = x; st.viewport.y = y;
     st.viewport.w = width; st.viewport.h = height;
-    if (v::IsInitialized())
-        v::SetViewport((float)x, (float)y, (float)width, (float)height);
+    st.viewport.initialized = true;
 }
 
 void APIENTRY glScissor(GLint x, GLint y, GLsizei width, GLsizei height) {
+    if (width < 0 || height < 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
     auto& st = s::GetState();
     st.scissor.x = x; st.scissor.y = y;
     st.scissor.w = width; st.scissor.h = height;
-    if (v::IsInitialized())
-        v::SetScissor((float)x, (float)y, (float)width, (float)height);
+    st.scissor.initialized = true;
 }
 
 // ---- clear state -----------------------------------------------------------
 
 void APIENTRY glClearColor(GLfloat r, GLfloat g, GLfloat b, GLfloat a) {
     auto& st = s::GetState();
-    st.clear_color[0] = r; st.clear_color[1] = g;
-    st.clear_color[2] = b; st.clear_color[3] = a;
-    if (v::IsInitialized())
-        v::SetClearColor(r, g, b, a);
+    auto clamp = [](GLfloat value) { return std::max(0.f, std::min(1.f, value)); };
+    st.clear_color[0] = clamp(r); st.clear_color[1] = clamp(g);
+    st.clear_color[2] = clamp(b); st.clear_color[3] = clamp(a);
 }
 
-void APIENTRY glClearDepth(GLdouble depth) { s::GetState().clear_depth = depth; }
+void APIENTRY glClearDepth(GLdouble depth) {
+    s::GetState().clear_depth = std::max(0.0, std::min(1.0, depth));
+}
 
 void APIENTRY glClearStencil(GLint sval) { s::GetState().clear_stencil = sval; }
 
@@ -113,13 +147,90 @@ void APIENTRY glClear(GLbitfield mask) {
     const GLbitfield valid = GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT;
     if (mask & ~valid) { PUSH_ERROR(GL_INVALID_VALUE); return; }
     if (!mask) return;
-    v::EnsureInit();
     auto& st = s::GetState();
-    v::SetClearColor(st.clear_color[0], st.clear_color[1], st.clear_color[2],
-                     st.clear_color[3]);
-    v::SetClearDepth(st.clear_depth);
-    v::SetClearStencil(st.clear_stencil);
-    v::SetClearMask(mask);
+    v::ClearParams clear;
+    clear.mask = mask;
+    clear.color = {st.clear_color[0], st.clear_color[1],
+                   st.clear_color[2], st.clear_color[3]};
+    clear.depth = st.clear_depth;
+    clear.stencil = static_cast<uint32_t>(st.clear_stencil);
+    (void)SubmitClear(clear);
+}
+
+void APIENTRY glClearBufferfv(GLenum buffer, GLint drawbuffer,
+                              const GLfloat* value) {
+    if (!value) return;
+    v::ClearParams clear;
+    switch (buffer) {
+        case GL_COLOR:
+            if (drawbuffer < 0 || drawbuffer >= 8) {
+                PUSH_ERROR(GL_INVALID_VALUE);
+                return;
+            }
+            clear.mask = GL_COLOR_BUFFER_BIT;
+            clear.color_drawbuffer = drawbuffer;
+            std::copy(value, value + 4, clear.color.begin());
+            break;
+        case GL_DEPTH:
+            if (drawbuffer != 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+            clear.mask = GL_DEPTH_BUFFER_BIT;
+            clear.depth = std::clamp<double>(value[0], 0.0, 1.0);
+            break;
+        default: PUSH_ERROR(GL_INVALID_ENUM); return;
+    }
+    (void)SubmitClear(clear);
+}
+
+void APIENTRY glClearBufferiv(GLenum buffer, GLint drawbuffer,
+                              const GLint* value) {
+    if (!value) return;
+    v::ClearParams clear;
+    switch (buffer) {
+        case GL_COLOR:
+            if (drawbuffer < 0 || drawbuffer >= 8) {
+                PUSH_ERROR(GL_INVALID_VALUE);
+                return;
+            }
+            clear.mask = GL_COLOR_BUFFER_BIT;
+            clear.color_drawbuffer = drawbuffer;
+            for (size_t i = 0; i < 4; ++i)
+                clear.color[i] = static_cast<float>(value[i]);
+            break;
+        case GL_STENCIL:
+            if (drawbuffer != 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+            clear.mask = GL_STENCIL_BUFFER_BIT;
+            clear.stencil = static_cast<uint32_t>(value[0]);
+            break;
+        default: PUSH_ERROR(GL_INVALID_ENUM); return;
+    }
+    (void)SubmitClear(clear);
+}
+
+void APIENTRY glClearBufferuiv(GLenum buffer, GLint drawbuffer,
+                               const GLuint* value) {
+    if (!value) return;
+    if (buffer != GL_COLOR) { PUSH_ERROR(GL_INVALID_ENUM); return; }
+    if (drawbuffer < 0 || drawbuffer >= 8) {
+        PUSH_ERROR(GL_INVALID_VALUE);
+        return;
+    }
+    v::ClearParams clear;
+    clear.mask = GL_COLOR_BUFFER_BIT;
+    clear.color_drawbuffer = drawbuffer;
+    for (size_t i = 0; i < 4; ++i)
+        clear.color[i] = static_cast<float>(value[i]);
+    (void)SubmitClear(clear);
+}
+
+void APIENTRY glClearBufferfi(GLenum buffer, GLint drawbuffer,
+                              GLfloat depth, GLint stencil) {
+    if (buffer != GL_DEPTH_STENCIL) { PUSH_ERROR(GL_INVALID_ENUM); return; }
+    if (drawbuffer != 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+    v::ClearParams clear;
+    clear.mask = GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT;
+    clear.depth = std::clamp<double>(depth, 0.0, 1.0);
+    clear.stencil = static_cast<uint32_t>(stencil);
+    (void)SubmitClear(clear);
 }
 
 // ---- face / polygon --------------------------------------------------------
@@ -342,8 +453,30 @@ void APIENTRY glPixelStorei(GLenum pname, GLint param) {
             if (pname == GL_PACK_ALIGNMENT) st.pixels.pack_alignment = param;
             else st.pixels.unpack_alignment = param;
             break;
-        case GL_PACK_ROW_LENGTH:  st.pixels.pack_row_length = param; break;
-        case GL_UNPACK_ROW_LENGTH: st.pixels.unpack_row_length = param; break;
+        case GL_PACK_ROW_LENGTH:
+        case GL_UNPACK_ROW_LENGTH:
+        case GL_PACK_SKIP_PIXELS:
+        case GL_UNPACK_SKIP_PIXELS:
+        case GL_PACK_SKIP_ROWS:
+        case GL_UNPACK_SKIP_ROWS:
+        case GL_PACK_IMAGE_HEIGHT:
+        case GL_UNPACK_IMAGE_HEIGHT:
+        case GL_PACK_SKIP_IMAGES:
+        case GL_UNPACK_SKIP_IMAGES:
+            if (param < 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+            switch (pname) {
+                case GL_PACK_ROW_LENGTH: st.pixels.pack_row_length = param; break;
+                case GL_UNPACK_ROW_LENGTH: st.pixels.unpack_row_length = param; break;
+                case GL_PACK_SKIP_PIXELS: st.pixels.pack_skip_pixels = param; break;
+                case GL_UNPACK_SKIP_PIXELS: st.pixels.unpack_skip_pixels = param; break;
+                case GL_PACK_SKIP_ROWS: st.pixels.pack_skip_rows = param; break;
+                case GL_UNPACK_SKIP_ROWS: st.pixels.unpack_skip_rows = param; break;
+                case GL_PACK_IMAGE_HEIGHT: st.pixels.pack_image_height = param; break;
+                case GL_UNPACK_IMAGE_HEIGHT: st.pixels.unpack_image_height = param; break;
+                case GL_PACK_SKIP_IMAGES: st.pixels.pack_skip_images = param; break;
+                case GL_UNPACK_SKIP_IMAGES: st.pixels.unpack_skip_images = param; break;
+            }
+            break;
         default:
             PUSH_ERROR(GL_INVALID_ENUM);
     }
@@ -364,7 +497,7 @@ GLenum APIENTRY glGetError() { return s::GetState().errors.Pop(); }
 const GLubyte* APIENTRY glGetString(GLenum name) {
     switch (name) {
         case GL_VENDOR:   return reinterpret_cast<const GLubyte*>("Mithril-Wrapper");
-        case GL_RENDERER: return reinterpret_cast<const GLubyte*>("Vulkan on Metal (MoltenVK)");
+        case GL_RENDERER: return reinterpret_cast<const GLubyte*>(v::RendererName());
         case GL_VERSION:  return reinterpret_cast<const GLubyte*>("3.3 Core Profile Mithril");
         case GL_SHADING_LANGUAGE_VERSION:
                           return reinterpret_cast<const GLubyte*>("3.30 Mithril");
@@ -398,6 +531,7 @@ void APIENTRY glGetBooleanv(GLenum pname, GLboolean* data) {
         case GL_SAMPLE_COVERAGE: *data = st.caps.Test(GL_SAMPLE_COVERAGE) ? GL_TRUE : GL_FALSE; break;
         case GL_POLYGON_OFFSET_FILL: *data = st.caps.Test(GL_POLYGON_OFFSET_FILL) ? GL_TRUE : GL_FALSE; break;
         case GL_LOGIC_OP_MODE:       *data = st.caps.Test(GL_LOGIC_OP_MODE) ? GL_TRUE : GL_FALSE; break;
+        case GL_PRIMITIVE_RESTART:    *data = st.caps.Test(GL_PRIMITIVE_RESTART) ? GL_TRUE : GL_FALSE; break;
         case GL_DEPTH_WRITEMASK: *data = st.depth.mask; break;
         default: PUSH_ERROR(GL_INVALID_ENUM);
     }
@@ -425,6 +559,50 @@ void APIENTRY glGetIntegerv(GLenum pname, GLint* data) {
         case GL_MAX_3D_TEXTURE_SIZE: *data = 2048; break;
         case GL_MAX_CUBE_MAP_TEXTURE_SIZE: *data = 16384; break;
         case GL_MAX_ARRAY_TEXTURE_LAYERS: *data = 2048; break;
+        case GL_MAX_VERTEX_ATTRIBS: *data = kMaxAttribs; break;
+        case GL_MAX_DRAW_BUFFERS: *data = 8; break;
+        case GL_MAX_COLOR_ATTACHMENTS: *data = 8; break;
+        case GL_MAX_SAMPLES:
+            *data = static_cast<GLint>(v::MaxFramebufferSamples()); break;
+        case GL_MAX_COLOR_TEXTURE_SAMPLES:
+            *data = static_cast<GLint>(v::MaxColorTextureSamples()); break;
+        case GL_MAX_DEPTH_TEXTURE_SAMPLES:
+        case GL_MAX_INTEGER_SAMPLES: *data = 0; break;
+        case GL_TEXTURE_BINDING_2D_MULTISAMPLE: {
+            const GLuint unit = static_cast<GLuint>(
+                st.active_texture - GL_TEXTURE0);
+            *data = static_cast<GLint>(
+                TextureBindingForUnit(unit, GL_TEXTURE_2D_MULTISAMPLE));
+            break;
+        }
+        case GL_MAX_DUAL_SOURCE_DRAW_BUFFERS: *data = 0; break;
+        case GL_MAX_VERTEX_UNIFORM_BLOCKS: *data = 12; break;
+        case GL_MAX_FRAGMENT_UNIFORM_BLOCKS: *data = 12; break;
+        case GL_MAX_GEOMETRY_UNIFORM_BLOCKS: *data = 0; break;
+        case GL_MAX_COMBINED_UNIFORM_BLOCKS: *data = 24; break;
+        case GL_MAX_UNIFORM_BUFFER_BINDINGS:
+            *data = static_cast<GLint>(kMaxUniformBufferBindings); break;
+        case GL_MAX_UNIFORM_BLOCK_SIZE: *data = 65536; break;
+        case GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT:
+            *data = static_cast<GLint>(kUniformBufferOffsetAlignment); break;
+        case GL_UNIFORM_BUFFER_BINDING:
+            *data = static_cast<GLint>(g_bound_uniform_buffer); break;
+        case GL_PIXEL_PACK_BUFFER_BINDING:
+            *data = static_cast<GLint>(g_bound_pixel_pack_buffer); break;
+        case GL_PIXEL_UNPACK_BUFFER_BINDING:
+            *data = static_cast<GLint>(g_bound_pixel_unpack_buffer); break;
+        case GL_PACK_ALIGNMENT: *data = st.pixels.pack_alignment; break;
+        case GL_UNPACK_ALIGNMENT: *data = st.pixels.unpack_alignment; break;
+        case GL_PACK_ROW_LENGTH: *data = st.pixels.pack_row_length; break;
+        case GL_UNPACK_ROW_LENGTH: *data = st.pixels.unpack_row_length; break;
+        case GL_PACK_SKIP_PIXELS: *data = st.pixels.pack_skip_pixels; break;
+        case GL_UNPACK_SKIP_PIXELS: *data = st.pixels.unpack_skip_pixels; break;
+        case GL_PACK_SKIP_ROWS: *data = st.pixels.pack_skip_rows; break;
+        case GL_UNPACK_SKIP_ROWS: *data = st.pixels.unpack_skip_rows; break;
+        case GL_PACK_IMAGE_HEIGHT: *data = st.pixels.pack_image_height; break;
+        case GL_UNPACK_IMAGE_HEIGHT: *data = st.pixels.unpack_image_height; break;
+        case GL_PACK_SKIP_IMAGES: *data = st.pixels.pack_skip_images; break;
+        case GL_UNPACK_SKIP_IMAGES: *data = st.pixels.unpack_skip_images; break;
         case GL_MAX_VIEWPORT_DIMS:
             data[0] = 16384; data[1] = 16384; break;
         case GL_VIEWPORT:
@@ -440,6 +618,10 @@ void APIENTRY glGetIntegerv(GLenum pname, GLint* data) {
         case GL_MINOR_VERSION: *data = 3; break;
         case GL_CONTEXT_PROFILE_MASK: *data = GL_CONTEXT_CORE_PROFILE_BIT; break;
         case GL_SAMPLE_MASK: *data = st.sample_masks[0] ? 1 : 0; break;
+        case GL_PRIMITIVE_RESTART:
+            *data = st.caps.Test(GL_PRIMITIVE_RESTART) ? 1 : 0; break;
+        case GL_PRIMITIVE_RESTART_INDEX:
+            *data = static_cast<GLint>(st.primitive_restart_index); break;
         default: PUSH_ERROR(GL_INVALID_ENUM);
     }
 }

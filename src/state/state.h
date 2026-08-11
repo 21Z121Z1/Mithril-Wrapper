@@ -37,8 +37,16 @@ struct CapSet {
     }
 };
 
-struct ViewportState { GLint x = 0, y = 0; GLsizei w = 0, h = 0; };
-struct ScissorState  { GLint x = 0, y = 0; GLsizei w = 0, h = 0; };
+struct ViewportState {
+    GLint x = 0, y = 0;
+    GLsizei w = 0, h = 0;
+    bool initialized = false;
+};
+struct ScissorState {
+    GLint x = 0, y = 0;
+    GLsizei w = 0, h = 0;
+    bool initialized = false;
+};
 
 struct DepthState {
     GLenum func = GL_LESS;
@@ -81,6 +89,8 @@ struct PixelStore {
     GLint unpack_skip_pixels = 0, pack_skip_pixels = 0;
     GLint unpack_skip_rows = 0, pack_skip_rows = 0;
     GLint unpack_image_height = 0, pack_image_height = 0;
+    GLint unpack_skip_images = 0;
+    GLint pack_skip_images = 0;
 };
 
 struct GLState {
@@ -110,6 +120,7 @@ struct GLState {
     ErrorQueue errors;
     GLenum active_texture = GL_TEXTURE0;
     GLuint current_program = 0;   // set by glUseProgram; uniform setters target it
+    GLuint primitive_restart_index = 0;
 };
 
 // The global context instance.

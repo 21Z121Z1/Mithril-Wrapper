@@ -102,6 +102,7 @@ struct FnTable {
     ML_FN(CmdEndRenderPass);
     ML_FN(CmdClearColorImage);
     ML_FN(CmdClearDepthStencilImage);
+    ML_FN(CmdClearAttachments);
     ML_FN(CmdPipelineBarrier);
     ML_FN(CmdCopyImageToBuffer);
     ML_FN(CmdCopyImage);
@@ -142,8 +143,16 @@ struct TexObj {
     VkImage image = VK_NULL_HANDLE;
     VkDeviceMemory mem = VK_NULL_HANDLE;
     VkImageView view = VK_NULL_HANDLE;
-    VkSampler sampler = VK_NULL_HANDLE;
     uint32_t levels = 1;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    uint32_t depth = 1;
+    bool is_3d = false;
+};
+
+struct SamplerCacheEntry {
+    VkSampler sampler = VK_NULL_HANDLE;
+    uint64_t last_use = 0;
 };
 
 // S5: renderbuffer object (glRenderbufferStorage). Backed by a device-local
@@ -213,7 +222,10 @@ struct DrawOp {
     VkDeviceMemory index_mem = VK_NULL_HANDLE;
     uint32_t vertex_count = 0;
     uint32_t index_count = 0;
+    bool primitive_restart = false;
     uint32_t instance_count = 1;
+    VkDeviceSize vertex_offset = 0;
+    VkDeviceSize instance_offset = 0;
     uint32_t topology = 0;         // Topology index
     uint32_t v_stride = 0;         // per-vertex record bytes
     uint32_t i_stride = 0;         // per-instance record bytes
@@ -227,6 +239,9 @@ struct DrawOp {
     std::vector<std::pair<uint32_t, VkDescriptorImageInfo>> tex_binds;
     // M5: pipeline-affecting state captured at draw-record time.
     PipelineState pipe;
+    // Dynamic raster state is also captured at draw-record time; command
+    // encoding may happen after the frontend changes it again.
+    backend::DynamicState dynamic;
     // S5: render pass signature for the target this draw records into
     // (empty => default framebuffer). Included in the pipeline cache key and
     // the VkGraphicsPipelineCreateInfo.renderPass. `color_count`/`samples`
@@ -286,6 +301,8 @@ struct Engine {
     // M4 textures: gl texture id -> resident GPU image.
     std::unordered_map<uint64_t, TexObj> textures;
     TexObj dummy_tex;             // 1x1 white fallback for unbound units
+    std::unordered_map<std::string, SamplerCacheEntry> samplers;
+    uint64_t sampler_clock = 0;
 
     VkBuffer ubo = VK_NULL_HANDLE;
     VkDeviceMemory ubo_mem = VK_NULL_HANDLE;
@@ -301,12 +318,7 @@ struct Engine {
     bool initialized = false;
     bool frame_dirty = false;
     bool pending_clear = false;
-    GLbitfield clear_mask = 0;
-    float clear_r = 0, clear_g = 0, clear_b = 0, clear_a = 0;
-    double clear_depth = 1.0;
-    int clear_stencil = 0;
-    float vp_x = 0, vp_y = 0, vp_w = 512, vp_h = 512;
-    float sc_x = 0, sc_y = 0, sc_w = 512, sc_h = 512;
+    ClearParams clear;
     std::vector<DrawOp> frame_draws;
 };
 
@@ -361,6 +373,7 @@ VkImage FboDepthImage(const FboObj& f);
 // ---- texture helpers (defined in texture.cpp) ----------------------------
 
 TexObj* GetTexObj(uint64_t gl_id);
+VkSampler ResolveSampler(const TexSamplerInfo& sampler, uint32_t levels);
 
 // ---- pipeline helpers (defined in pipeline.cpp) --------------------------
 
