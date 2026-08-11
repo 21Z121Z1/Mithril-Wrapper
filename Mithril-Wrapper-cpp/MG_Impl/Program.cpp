@@ -286,6 +286,12 @@ void glLinkProgram(GLuint program) {
     // 对照 MobileGL DirectVulkan.cpp:171-244 AddBufferVariablesRecursive.
     p->uboBackingStore.clear();
     p->uboSizes.clear();
+    // App-block routing state is rebuilt from this reflection pass, so drop
+    // any stale values from a previous link (block indices can shift between
+    // links; uniformBlockBindings is re-set by the app after relink).
+    p->blockIndexForDescriptor.clear();
+    p->blockInfos.clear();
+    p->uniformBlockBindings.clear();
     try {
         std::vector<mithril::vk::DescriptorBinding> bindings;
         if (!p->vertexSpirv.empty()) {
@@ -332,6 +338,35 @@ void glLinkProgram(GLuint program) {
                     u.size = 1;
                     p->uniforms[m.name] = u;
                     p->uniformByLocation[u.location] = m.name;
+                }
+                // FIX (root cause AL): route APPLICATION-declared blocks to the
+                // backend's appBlock path. DescriptorSet.cpp build_ubo_plans
+                // decides appBlock by looking up blockIndexForDescriptor; if it
+                // is empty every block is misclassified as synthetic and read
+                // from uboBackingStore (zeros) -> black screen.
+                //
+                // NOT every UBO is an app block though — only the ones the
+                // application binds via glBindBufferBase/glUniformBlockBinding.
+                // Mithril's own synthetic blocks must stay out:
+                //   - mithril_GlobalBlock (the aggregated default-uniform block)
+                //     is fed from the transient arena (UniformArena), never from
+                //     a GL buffer; marking it appBlock would read zeros.
+                //   - a per-loose-uniform UBO whose name matches a uniform is
+                //     synthesized by glslang and read from the backing store.
+                // Both are identified by name; app block names come from the
+                // app's own GLSL and are never mithril_-prefixed nor match a
+                // uniform.
+                const bool synthGlobal = (db.name == "mithril_GlobalBlock");
+                const bool synthLoose  = (p->uniforms.count(db.name) != 0);
+                if (!synthGlobal && !synthLoose) {
+                    p->blockIndexForDescriptor[(GLuint)db.binding] = blockIndex;
+                    if (p->blockInfos.size() <= blockIndex) {
+                        p->blockInfos.resize(blockIndex + 1);
+                    }
+                    mithril::UniformBlockInfo& info = p->blockInfos[blockIndex];
+                    info.name = db.name;
+                    info.dataSize = db.bufferSize ? (uint32_t)db.bufferSize : 0;
+                    info.bindingPoint = blockIndex;  // GL default: binding == index
                 }
                 ++blockIndex;
             } else if (db.type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
