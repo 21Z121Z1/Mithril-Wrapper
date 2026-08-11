@@ -84,6 +84,8 @@ glIsFramebuffer           glIsRenderbuffer          glReadBuffer              gl
 
 ## S6 同步/Query/Sampler — 36
 
+> DirectMetal `glProvokingVertex` 已实现默认 LAST、FIRST/LAST 状态查询与错误语义；仅当 linked program 反射到 `flat` fragment input 时，frontend 才按 [Khronos provoking-vertex primitive 表](https://registry.khronos.org/OpenGL/extensions/ARB/ARB_provoking_vertex.txt)将 triangle/line/strip/fan（含 restart 分段）降为保持 winding 的 first-provoking list，并由真实 Metal 像素测试覆盖。
+
 ```
 glBeginConditionalRender  glBeginQuery              glBindSampler             glClientWaitSync          glDeleteQueries           glDeleteSamplers        
 glDeleteSync              glEndConditionalRender    glEndQuery                glFenceSync               glGenQueries              glGenSamplers           

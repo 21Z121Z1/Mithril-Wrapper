@@ -372,6 +372,7 @@ bool ReflectProgram(Program& prog, std::string& error) {
     prog.vertex_inputs.clear();
     prog.frag_data_locations.clear();
     prog.frag_data_indices.clear();
+    prog.uses_flat_fragment_inputs = false;
     prog.samplers.clear();
     prog.uniform_blocks.clear();
     prog.uniform_block_by_name.clear();
@@ -517,6 +518,20 @@ bool ReflectProgram(Program& prog, std::string& error) {
             for (auto& resource : resources.separate_samplers) add_sampler(resource);
 
             for (auto& resource : resources.stage_inputs) {
+                if (!vertex_stage) {
+                    bool flat = compiler.has_decoration(
+                        resource.id, spv::DecorationFlat);
+                    const auto& interface_type = compiler.get_type(
+                        resource.base_type_id);
+                    for (uint32_t member = 0;
+                         !flat && member < interface_type.member_types.size();
+                         ++member) {
+                        flat = compiler.has_member_decoration(
+                            resource.base_type_id, member,
+                            spv::DecorationFlat);
+                    }
+                    prog.uses_flat_fragment_inputs |= flat;
+                }
                 if (!vertex_stage ||
                     !compiler.has_decoration(resource.id,
                                              spv::DecorationLocation))

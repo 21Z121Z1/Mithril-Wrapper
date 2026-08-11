@@ -48,10 +48,6 @@ extern "C" {
     mithril::GlStubCalled("glPointParameteriv");
   }
 
-  void APIENTRY glProvokingVertex(GLenum mode) {
-    mithril::GlStubCalled("glProvokingVertex");
-  }
-
   void APIENTRY glTexImage3DMultisample(GLenum target, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height, GLsizei depth, GLboolean fixedsamplelocations) {
     mithril::GlStubCalled("glTexImage3DMultisample");
   }

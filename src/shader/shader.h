@@ -119,6 +119,7 @@ struct Program {
     std::unordered_map<std::string, GLint> frag_data_locations;
     std::unordered_map<std::string, GLint> frag_data_indices;
     std::unordered_map<std::string, GLuint> requested_frag_data_locations;
+    bool uses_flat_fragment_inputs = false;
     std::vector<VertexInput> vertex_inputs;
     std::vector<SamplerRef> samplers;      // M4: active sampler uniforms
     std::vector<UniformBlock> uniform_blocks;

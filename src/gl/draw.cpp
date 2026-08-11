@@ -355,6 +355,98 @@ bool PackConstantAttrib(const CurrentAttribData& source,
     return true;
 }
 
+// Metal and core Vulkan select the first assembled vertex for flat inputs.
+// OpenGL's selectable convention is normalized here, after primitive restart
+// segmentation but before either backend sees the draw. Cyclic triangle
+// rotations preserve winding while putting the GL provoking vertex first.
+bool LowerFlatPrimitives(GLenum convention, v::DrawParams* draw) {
+    if (!draw) return false;
+    std::vector<uint32_t> source = std::move(draw->indices);
+    if (source.empty()) {
+        const uint32_t count = draw->vertex_stream.record_count
+            ? draw->vertex_stream.record_count
+            : static_cast<uint32_t>(
+                  draw->vertex_stream.data.size() /
+                  std::max<uint32_t>(draw->vertex_stream.stride, 1));
+        source.resize(count);
+        for (uint32_t i = 0; i < count; ++i) source[i] = i;
+    }
+
+    std::vector<uint32_t> lowered;
+    auto triangle = [&](uint32_t a, uint32_t b, uint32_t c,
+                        uint32_t provoking) {
+        if (provoking == b) {
+            lowered.insert(lowered.end(), {b, c, a});
+        } else if (provoking == c) {
+            lowered.insert(lowered.end(), {c, a, b});
+        } else {
+            lowered.insert(lowered.end(), {a, b, c});
+        }
+    };
+    auto line = [&](uint32_t a, uint32_t b, uint32_t provoking) {
+        if (provoking == b)
+            lowered.insert(lowered.end(), {b, a});
+        else
+            lowered.insert(lowered.end(), {a, b});
+    };
+    auto emit_segment = [&](size_t begin, size_t end) {
+        const bool first = convention == GL_FIRST_VERTEX_CONVENTION;
+        switch (draw->topology) {
+            case v::Topology::Triangles:
+                for (size_t i = begin; i + 2 < end; i += 3)
+                    triangle(source[i], source[i + 1], source[i + 2],
+                             first ? source[i] : source[i + 2]);
+                break;
+            case v::Topology::TriangleStrip:
+                for (size_t i = begin; i + 2 < end; ++i) {
+                    const size_t parity = (i - begin) % 2;
+                    const uint32_t a = source[i + parity];
+                    const uint32_t b = source[i + 1 - parity];
+                    const uint32_t c = source[i + 2];
+                    triangle(a, b, c, first ? source[i] : c);
+                }
+                break;
+            case v::Topology::TriangleFan:
+                for (size_t i = begin + 1; i + 1 < end; ++i)
+                    triangle(source[begin], source[i], source[i + 1],
+                             first ? source[i] : source[i + 1]);
+                break;
+            case v::Topology::Lines:
+                for (size_t i = begin; i + 1 < end; i += 2)
+                    line(source[i], source[i + 1],
+                         first ? source[i] : source[i + 1]);
+                break;
+            case v::Topology::LineStrip:
+                for (size_t i = begin; i + 1 < end; ++i)
+                    line(source[i], source[i + 1],
+                         first ? source[i] : source[i + 1]);
+                break;
+        }
+    };
+
+    size_t begin = 0;
+    for (size_t i = 0; i <= source.size(); ++i) {
+        if (i != source.size() && source[i] != UINT32_MAX) continue;
+        emit_segment(begin, i);
+        begin = i + 1;
+    }
+    if (lowered.empty()) return false;
+    draw->indices = std::move(lowered);
+    draw->primitive_restart = false;
+    switch (draw->topology) {
+        case v::Topology::Triangles:
+        case v::Topology::TriangleStrip:
+        case v::Topology::TriangleFan:
+            draw->topology = v::Topology::Triangles;
+            break;
+        case v::Topology::Lines:
+        case v::Topology::LineStrip:
+            draw->topology = v::Topology::Lines;
+            break;
+    }
+    return true;
+}
+
 // Core draw: resolve the current VAO into typed streams and hand them to the
 // selected backend. `idx` holds raw indices (glDrawElements path); when
 // empty, `first`/`count` describe a glDrawArrays-style range and `base_vertex`
@@ -679,6 +771,9 @@ void DrawCommon(GLenum mode, const std::vector<uint32_t>& idx, GLint first,
                     smp.fragment_binding, tex, sampler, false, true});
         }
     }
+    if (prog->uses_flat_fragment_inputs &&
+        !LowerFlatPrimitives(state.provoking_vertex, &dp))
+        return;
     if (dp.vertex_stream.HasStorage() && !v::Draw(dp))
         PUSH_ERROR(GL_INVALID_OPERATION);
 }

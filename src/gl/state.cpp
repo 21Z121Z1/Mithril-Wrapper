@@ -110,6 +110,15 @@ void APIENTRY glPrimitiveRestartIndex(GLuint index) {
     s::GetState().primitive_restart_index = index;
 }
 
+void APIENTRY glProvokingVertex(GLenum mode) {
+    if (mode != GL_FIRST_VERTEX_CONVENTION &&
+        mode != GL_LAST_VERTEX_CONVENTION) {
+        PUSH_ERROR(GL_INVALID_ENUM);
+        return;
+    }
+    s::GetState().provoking_vertex = mode;
+}
+
 // ---- viewport / scissor ----------------------------------------------------
 
 void APIENTRY glViewport(GLint x, GLint y, GLsizei width, GLsizei height) {
@@ -532,6 +541,8 @@ void APIENTRY glGetBooleanv(GLenum pname, GLboolean* data) {
         case GL_POLYGON_OFFSET_FILL: *data = st.caps.Test(GL_POLYGON_OFFSET_FILL) ? GL_TRUE : GL_FALSE; break;
         case GL_LOGIC_OP_MODE:       *data = st.caps.Test(GL_LOGIC_OP_MODE) ? GL_TRUE : GL_FALSE; break;
         case GL_PRIMITIVE_RESTART:    *data = st.caps.Test(GL_PRIMITIVE_RESTART) ? GL_TRUE : GL_FALSE; break;
+        case GL_PROVOKING_VERTEX:
+            *data = st.provoking_vertex ? GL_TRUE : GL_FALSE; break;
         case GL_DEPTH_WRITEMASK: *data = st.depth.mask; break;
         default: PUSH_ERROR(GL_INVALID_ENUM);
     }
@@ -543,6 +554,8 @@ void APIENTRY glGetFloatv(GLenum pname, GLfloat* data) {
     switch (pname) {
         case GL_LINE_WIDTH:  *data = st.line_width; break;
         case GL_POINT_SIZE:  *data = st.point_size; break;
+        case GL_PROVOKING_VERTEX:
+            *data = static_cast<GLfloat>(st.provoking_vertex); break;
         case GL_VIEWPORT:
             data[0] = (GLfloat)st.viewport.x; data[1] = (GLfloat)st.viewport.y;
             data[2] = (GLfloat)st.viewport.w; data[3] = (GLfloat)st.viewport.h;
@@ -622,6 +635,8 @@ void APIENTRY glGetIntegerv(GLenum pname, GLint* data) {
             *data = st.caps.Test(GL_PRIMITIVE_RESTART) ? 1 : 0; break;
         case GL_PRIMITIVE_RESTART_INDEX:
             *data = static_cast<GLint>(st.primitive_restart_index); break;
+        case GL_PROVOKING_VERTEX:
+            *data = static_cast<GLint>(st.provoking_vertex); break;
         default: PUSH_ERROR(GL_INVALID_ENUM);
     }
 }
@@ -639,6 +654,8 @@ void APIENTRY glGetDoublev(GLenum pname, GLdouble* data) {
     switch (pname) {
         case GL_DEPTH_RANGE: data[0] = st.depth.range[0]; data[1] = st.depth.range[1]; break;
         case GL_DEPTH_CLEAR_VALUE: *data = st.clear_depth; break;
+        case GL_PROVOKING_VERTEX:
+            *data = static_cast<GLdouble>(st.provoking_vertex); break;
         case GL_COLOR_CLEAR_VALUE:
             data[0] = st.clear_color[0]; data[1] = st.clear_color[1];
             data[2] = st.clear_color[2]; data[3] = st.clear_color[3];
