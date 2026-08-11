@@ -64,6 +64,7 @@ typedef void      (*attachShader_fn)(GLuint, GLuint);
 typedef void      (*linkProgram_fn)(GLuint);
 typedef void      (*getProgramiv_fn)(GLuint, GLenum, GLint*);
 typedef void      (*deleteShader_fn)(GLuint);
+typedef void      (*deleteProgram_fn)(GLuint);
 typedef void      (*useProgram_fn)(GLuint);
 typedef void      (*viewport_fn)(GLint, GLint, GLsizei, GLsizei);
 typedef void      (*clearColor_fn)(GLfloat, GLfloat, GLfloat, GLfloat);
@@ -77,6 +78,8 @@ typedef void      (*getIntegerv_fn)(GLenum, GLint*);
 typedef const GLubyte* (*getString_fn)(GLenum);
 /* ---- 扩展测试（采样 + mipmap + 动态 UBO + 多帧 glFinish）所需 ---- */
 typedef void      (*texParameteri_fn)(GLenum, GLenum, GLint);
+typedef void      (*texStorage2D_fn)(GLenum, GLsizei, GLenum, GLsizei, GLsizei, GLsizei);
+typedef void      (*texSubImage2D_fn)(GLenum, GLint, GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, const void*);
 typedef void      (*generateMipmap_fn)(GLenum);
 typedef void      (*activeTexture_fn)(GLenum);
 typedef void      (*bindBufferBase_fn)(GLenum, GLuint, GLuint);
@@ -148,6 +151,7 @@ int main(int argc, char** argv) {
     linkProgram_fn        linkProgram        = NULL;
     getProgramiv_fn       getProgramiv       = NULL;
     deleteShader_fn       deleteShader       = NULL;
+    deleteProgram_fn      deleteProgram      = NULL;
     useProgram_fn         useProgram         = NULL;
     viewport_fn           viewport           = NULL;
     clearColor_fn         clearColor         = NULL;
@@ -159,6 +163,8 @@ int main(int argc, char** argv) {
     getIntegerv_fn        getIntegerv        = NULL;
     getString_fn          getString          = NULL;
     texParameteri_fn      texParameteri      = NULL;
+    texStorage2D_fn       texStorage2D       = NULL;
+    texSubImage2D_fn      texSubImage2D      = NULL;
     generateMipmap_fn     generateMipmap     = NULL;
     activeTexture_fn      activeTexture      = NULL;
     bindBufferBase_fn     bindBufferBase     = NULL;
@@ -191,6 +197,7 @@ int main(int argc, char** argv) {
     RESOLVE(linkProgram, "glLinkProgram");
     RESOLVE(getProgramiv, "glGetProgramiv");
     RESOLVE(deleteShader, "glDeleteShader");
+    RESOLVE(deleteProgram, "glDeleteProgram");
     RESOLVE(useProgram, "glUseProgram");
     RESOLVE(viewport, "glViewport");
     RESOLVE(clearColor, "glClearColor");
@@ -202,6 +209,8 @@ int main(int argc, char** argv) {
     RESOLVE(getIntegerv, "glGetIntegerv");
     RESOLVE(getString, "glGetString");
     RESOLVE(texParameteri, "glTexParameteri");
+    RESOLVE(texStorage2D, "glTexStorage2D");
+    RESOLVE(texSubImage2D, "glTexSubImage2D");
     RESOLVE(generateMipmap, "glGenerateMipmap");
     RESOLVE(activeTexture, "glActiveTexture");
     RESOLVE(bindBufferBase, "glBindBufferBase");
@@ -368,6 +377,76 @@ int main(int argc, char** argv) {
         texParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
         generateMipmap(GL_TEXTURE_2D);
         CHECK(getError() == GL_NO_ERROR, "texture upload + mipmap generation leaves no error");
+
+        /* ---- 4a.5) 判别 F：glTexStorage2D 完整 mip 链 → 「非重建」mipmap 分支 -----
+         * 4a 用 glTexImage2D(level0) → tex.levels=1<fullLevels，走 generate_mipmaps
+         * 的【重建】分支（已由 CI 覆盖）。但真机 atlas 用 glTexStorage2D 分配完整
+         * mip 链（tex.levels==fullLevels），generateMipmap 走【非重建】分支——该分支
+         * 此前未在 CI 覆盖，且漏了「one-shot blit 前 flush 主 command buffer 同步
+         * pending upload」的修复（与重建分支同源 bug）：
+         *   texSubImage2D(level0) 记录到主 buffer 未提交 → glGenerateMipmap 用
+         *   one-shot 读 level0 → 读到未初始化数据 → mip 全 garbage → 采样越界 page
+         *   fault（正是真机主菜单 atlas 纯红 + kIOGPUCommandBufferCallbackErrorPageFault）。
+         * 本用例精确命中该路径：glTexStorage2D(levels=2) + texSubImage2D(level0) +
+         * generateMipmap → 采样读回应为白。修复后（safe_device_wait_idle）读回白，
+         * 否则黑/崩。 */
+        {
+            GLuint stTex = 0;
+            genTextures(1, &stTex);
+            bindTexture(GL_TEXTURE_2D, stTex);
+            texStorage2D(GL_TEXTURE_2D, 2, GL_RGBA8, 2, 2, 0);  /* 完整 2 级 mip 链 */
+            CHECK(getError() == GL_NO_ERROR, "disc-F texStorage2D allocated full 2-level chain");
+            const GLubyte stwhite[16] = { 255,255,255,255, 255,255,255,255,
+                                          255,255,255,255, 255,255,255,255 };
+            /* level0 经主 command buffer 上传（未 flush），随即 generateMipmap 走
+             * 非重建分支——正是要验证的同步点。 */
+            texSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 2, 2, GL_RGBA, GL_UNSIGNED_BYTE, stwhite);
+            texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+            texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            texParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+            texParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+            generateMipmap(GL_TEXTURE_2D);
+            CHECK(getError() == GL_NO_ERROR, "disc-F storage mipmap generation leaves no error");
+
+            /* 采样读回：用已有的 attrib0 全屏三角形 vao/vbo，配独立 vs+fs（vs 只读
+             * attrib0，fs 采样 unit0 上的 stTex）。修复后 level0（白）经非重建分支
+             * 正确生成 level1 → 全屏采样应为白；若缺失 safe_device_wait_idle，level0
+             * 仍是未初始化内存 → 读回 garbage/黑。 */
+            GLuint fvs = createShader(GL_VERTEX_SHADER);
+            shaderSource(fvs, 1, &(const char*){
+                "#version 330 core\n"
+                "layout(location = 0) in vec2 aPos;\n"
+                "void main() { gl_Position = vec4(aPos, 0.0, 1.0); }\n" }, NULL);
+            compileShader(fvs);
+            GLuint ffs = createShader(GL_FRAGMENT_SHADER);
+            shaderSource(ffs, 1, &(const char*){
+                "#version 330 core\n"
+                "uniform sampler2D uTex;\n"
+                "out vec4 fragColor;\n"
+                "void main() { fragColor = texture(uTex, vec2(0.5, 0.5)); }\n" }, NULL);
+            compileShader(ffs);
+            GLuint fprog = createProgram();
+            attachShader(fprog, fvs);
+            attachShader(fprog, ffs);
+            linkProgram(fprog);
+            deleteShader(fvs);
+            deleteShader(ffs);
+            useProgram(fprog);
+            activeTexture(GL_TEXTURE0);
+            bindTexture(GL_TEXTURE_2D, stTex);
+            bindVertexArray(vao);
+            drawArrays(GL_TRIANGLES, 0, 3);
+            finish();
+            unsigned char stpx[4] = {0,0,0,0};
+            readPixels(R / 2, C / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, stpx);
+            CHECK(getError() == GL_NO_ERROR,
+                  "disc-F storage-chain sampling readback leaves no error");
+            CHECK(stpx[0] > 200 && stpx[1] > 200 && stpx[2] > 200 && stpx[3] > 128,
+                  "disc-F non-rebuild mipmap branch samples WHITE from texStorage2D "
+                  "chain (r=%d g=%d b=%d a=%d) — cross-buffer sync OK", stpx[0], stpx[1], stpx[2], stpx[3]);
+            deleteProgram(fprog);
+            /* stTex 走 defer_destroy（后端持有跨帧存活），此处不手动删除 */
+        }
 
         /* ---- 4b) 动态 UBO（每帧改写，触发 orphan-rename）--------------- */
         GLuint ubo = 0;

@@ -206,15 +206,15 @@ jobs:
                      glDisable glIsEnabled glEnablei glDisablei glIsEnabledi \
                      glClearColor glClear glDepthMask glColorMask glBlendFunc \
                      glCullFace glFrontFace glDepthFunc glFinish glFlush \
-                     glGenTextures glTexImage2D glTexParameteri \
-                     glGenerateMipmap glDrawArrays glDrawElements \
+                     glGenTextures glTexImage2D glTexStorage2D glTexSubImage2D \
+                     glTexParameteri glGenerateMipmap glDrawArrays glDrawElements \
                      glGenFramebuffers glBindFramebuffer glFramebufferTexture2D \
                      glCheckFramebufferStatus glGenVertexArrays glBindVertexArray \
                      glGenBuffers glBindBuffer glBufferData \
                      glVertexAttribPointer glEnableVertexAttribArray \
                      glCreateShader glShaderSource glCompileShader glGetShaderiv \
                      glCreateProgram glAttachShader glLinkProgram glGetProgramiv \
-                     glDeleteShader glUseProgram glReadPixels \
+                     glDeleteShader glDeleteProgram glUseProgram glReadPixels \
                      glActiveTexture glBindBufferBase glGetUniformLocation \
                      glGetUniformBlockIndex glUniformBlockBinding \
                      glUniform1i glUniform4f; do

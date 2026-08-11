@@ -109,6 +109,25 @@ void generate_mipmaps(GLuint name) {
         while (m > 1) { fullLevels++; m >>= 1; }
     }
 
+    // FIX (真机主菜单 page fault 诊断 - 盲点: 用户在主菜单纯红状态下仍能点进世界,
+    // 说明 fault 前的 draw 在持续, 但 GPU 在某次 atlas/字体/cubemap 采样时读无效地址):
+    // 真机日志从未出现 REBUILD WARN —— 说明 atlas 走的是「非重建」分支
+    // (tex.levels >= fullLevels, 即 MC 用 glTexStorage2D 分配了完整 mip 链)。
+    // 该分支从未被 CI 覆盖 (render_smoke 的 mipmap 用例都用 2x2, tex.levels=1 走重建)。
+    // 这里在入口打印每次 generateMipmap 调用 + 分支选择, 让真机日志一锤定音:
+    //   走哪条分支 (rebuild vs cascade)、tex.levels vs fullLevels、当前布局。
+    {
+        static int genMipLog = 0;
+        if (genMipLog <= 12 || genMipLog % 50 == 0) {
+            const char* br = (tex.levels < fullLevels) ? "REBUILD" : "CASCADE";
+            MITHRIL_LOG_WARN("vk", "generate_mipmaps tex=%u %dx%d "
+                              "levels=%d fullLevels=%d curLayout=%d → %s",
+                              name, tex.width, tex.height, (int)tex.levels,
+                              fullLevels, (int)tex.currentLayout, br);
+        }
+        genMipLog++;
+    }
+
     // FIX (Root Cause - 单层 image 被 mipmap 采样器越界采样 → page fault):
     // Minecraft 先 glTexImage2D(level=0) 上传 atlas 的 base level（Texture.cpp:145
     // 只把 t->levels 推到 level+1，故此时 tex.levels == 1，VkImage 只有 1 层 mip），
@@ -401,6 +420,23 @@ void generate_mipmaps(GLuint name) {
 
     if (tex.levels <= 1) return;
 
+    // FIX (真机主菜单 page fault - 盲点根因 - CRITICAL cross-command-buffer 同步):
+    // 这条「非重建」分支 (atlas 用 glTexStorage2D/逐级上传使 tex.levels==fullLevels
+    // 时走这里) 与上方的重建分支有**完全同源**的同步缺陷，但此前只在重建分支
+    // (line ~209) 加了 safe_device_wait_idle，这里漏了！
+    //
+    // 时序：MC 上传 atlas 用 glTexSubImage2D/glTexImage2D，这些 upload 记录到
+    // 「主 command buffer」(stage_and_copy_image → b->commandBuffer)，只在 draw /
+    // glFinish 时提交。随后 MC 立即 glGenerateMipmap 走本分支，用独立的 one-shot
+    // command buffer 去 vkCmdBlitImage 读 old level0。若 one-shot 先于主 command
+    // buffer 提交执行，level0 在 GPU 上还【未初始化】→ blit 生成的所有 mip 层都是
+    // garbage → 采样器(mipmap filter)读取 level 1..N 的无效地址 →
+    // kIOGPUCommandBufferCallbackErrorPageFault。
+    //
+    // 修复：与重建分支一致，在 begin_one_shot 前先 safe_device_wait_idle()——
+    // 提交并等待主 command buffer (含 pending upload) 完成，再重新 begin。保证
+    // level0 数据 GPU 可见后 one-shot 才执行，同 queue 顺序提交亦无竞态。
+    safe_device_wait_idle();
     OneShotCtx c;
     if (!begin_one_shot(c)) {
         // FIX (日志刷屏): 限流 — deviceLost 时每张纹理的 mipmap 生成都会失败
