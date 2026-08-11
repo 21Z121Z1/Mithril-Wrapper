@@ -478,6 +478,16 @@ void generate_mipmaps(GLuint name) {
 
 int read_pixels(int x, int y, int w, int h, GLenum format, GLenum type, void* out_pixels) {
     Backend* b = backend();
+    // DIAG-CRITICAL: hard stderr print (bypasses MITHRIL_LOG level/tag filtering)
+    // to prove whether read_pixels is even entered and what the early-return
+    // guards see. If this does NOT appear in CI while the caller got all-zero,
+    // the GL entry (glReadPixels) is not reaching this backend function.
+    ::fprintf(stderr, "[read_pixels-ENTER] x=%d y=%d w=%d h=%d fmt=%u type=%u "
+              "b=%p initialized=%d g_state=%p\n",
+              x, y, w, h, (unsigned)format, (unsigned)type,
+              (void*)b, b ? (int)b->initialized : -1,
+              (void*)g_state);
+    ::fflush(stderr);
     if (!b->initialized || !out_pixels || w <= 0 || h <= 0) return 0;
 
     // Source: the current colour attachment installed on g_state. This covers
@@ -521,10 +531,11 @@ int read_pixels(int x, int y, int w, int h, GLenum format, GLenum type, void* ou
     // as the source image before doing anything, so a black readback can be
     // attributed to src_image vs layout vs staging vs the copy itself.
     {
-        MITHRIL_LOG_WARN("vk", "read_pixels DIAG: currentDrawFBO=%u src_tex_id=%u "
-                          "src_image=%p src_fmt=%d w=%d h=%d",
-                          g_state->currentDrawFBO, src_tex_id,
-                          (void*)src_image, (int)src_fmt, w, h);
+        ::fprintf(stderr, "[read_pixels-DIAG1] currentDrawFBO=%u src_tex_id=%u "
+                  "src_image=%p src_fmt=%d w=%d h=%d\n",
+                  g_state->currentDrawFBO, src_tex_id,
+                  (void*)src_image, (int)src_fmt, w, h);
+        ::fflush(stderr);
     }
     if (src_image == VK_NULL_HANDLE) return 0;
 
@@ -579,10 +590,11 @@ int read_pixels(int x, int y, int w, int h, GLenum format, GLenum type, void* ou
                 if (tit2 != tbl2.end()) trackedLayout = tit2->second.currentLayout;
             }
         }
-        MITHRIL_LOG_WARN("vk", "read_pixels DIAG: src_layout=%d trackedLayout=%d "
-                          "(layoutTex=%u) staging_fmt=%d",
-                          (int)src_layout, (int)trackedLayout, layoutTex,
-                          (int)((src_fmt != VK_FORMAT_UNDEFINED) ? src_fmt : VK_FORMAT_R8G8B8A8_UNORM));
+        ::fprintf(stderr, "[read_pixels-DIAG2] src_layout=%d trackedLayout=%d "
+                  "(layoutTex=%u) staging_fmt=%d\n",
+                  (int)src_layout, (int)trackedLayout, layoutTex,
+                  (int)((src_fmt != VK_FORMAT_UNDEFINED) ? src_fmt : VK_FORMAT_R8G8B8A8_UNORM));
+        ::fflush(stderr);
     }
 
     // Pick a host-visible staging buffer format. We always copy as RGBA8 on
@@ -706,13 +718,14 @@ int read_pixels(int x, int y, int w, int h, GLenum format, GLenum type, void* ou
     {
         const unsigned char* dbg = (const unsigned char*)out_pixels;
         size_t dbgN = (size_t)w * h * dst_bpp;
-        MITHRIL_LOG_WARN("vk", "read_pixels DIAG: first pixel bytes [%u,%u,%u,%u] "
-                          "staging_size=%zu dst_bpp=%d src_bpp=%d",
-                          dbgN >= 1 ? dbg[0] : 0,
-                          dbgN >= 2 ? dbg[1] : 0,
-                          dbgN >= 3 ? dbg[2] : 0,
-                          dbgN >= 4 ? dbg[3] : 0,
-                          (size_t)staging_size, dst_bpp, src_bpp);
+        ::fprintf(stderr, "[read_pixels-DIAG3] first pixel bytes [%u,%u,%u,%u] "
+                  "staging_size=%zu dst_bpp=%d src_bpp=%d staging_mapped=%p\n",
+                  dbgN >= 1 ? dbg[0] : 0,
+                  dbgN >= 2 ? dbg[1] : 0,
+                  dbgN >= 3 ? dbg[2] : 0,
+                  dbgN >= 4 ? dbg[3] : 0,
+                  (size_t)staging_size, dst_bpp, src_bpp, mapped);
+        ::fflush(stderr);
     }
 
     vkUnmapMemory(b->device, staging.memory);
