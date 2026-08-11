@@ -186,6 +186,38 @@ jobs:
           # contains MoltenVK-linked code by checking for an indirect symbol.
           otool -L "$DYLIB" | head -20
 
+      - name: Compile-check + contract-check GL smoke test (tests/gl_smoke.c)
+        run: |
+          # 参照 Uniaball/Mithril-Wrapper 的 test 集成：测试文件必须始终可编译，
+          # 且其断言的 GL 符号必须存在于 dylib 导出表（否则 dlopen 冒烟会失败）。
+          DYLIB="${{ steps.locate.outputs.path }}"
+          # 1) 语法校验（用项目自带 GL/EGL 头，-fsyntax-only，不依赖构建产物）
+          clang -std=c11 -fsyntax-only -Wall -Wextra \
+            -IMithril-Wrapper-cpp/include tests/gl_smoke.c
+          echo "syntax OK"
+          # 2) 契约断言：测试 dlopen 依赖的 GL 符号必须在导出表中
+          NM_OUT=$(nm -gU "$DYLIB")
+          missing=0
+          for sym in glGetIntegerv glGetFloatv glGetBooleanv glGetString \
+                     glGetStringi glGetError glViewport glScissor glEnable \
+                     glDisable glIsEnabled glEnablei glDisablei glIsEnabledi \
+                     glClearColor glClear glDepthMask glColorMask glBlendFunc \
+                     glCullFace glFrontFace glDepthFunc glFinish glFlush \
+                     glGenTextures glTexImage2D glTexParameteri \
+                     glGenerateMipmap glDrawArrays glDrawElements; do
+            if echo "$NM_OUT" | grep -qE " [Tt] _?${sym}$"; then
+              echo "ok   $sym"
+            else
+              echo "MISS $sym"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "::error::gl_smoke test requires GL symbols missing from export table"
+            exit 1
+          fi
+          echo "gl_smoke contract: all symbols exported"
+
       - name: Ad-hoc codesign
         run: |
           codesign -s - "${{ steps.locate.outputs.path }}" || echo "codesign skipped (best-effort)"
@@ -204,3 +236,52 @@ jobs:
           name: Mithril-Wrapper-build-tree
           path: build
           if-no-files-found: warn
+
+  # macOS 原生构建 + dlopen 冒烟。iOS dylib 无法在 macOS 进程里 dlopen，但
+  # macOS 与 iOS 共用同一套 if(APPLE) 源（SurfaceMetal.mm / SwapchainMetal.mm /
+  # DirectVulkan 后端），因此 macOS 原生构建能真实链接 MoltenVK，并允许我们用
+  # dlopen 加载 libmithril.dylib 跑 GL 状态机冒烟（tests/gl_smoke.c）。这参照
+  # Uniaball/Mithril-Wrapper 的 test-macos-metal job：Homebrew MoltenVK +
+  # Vulkan loader，编译 smoke 测试，断言 "ALL PASSED"。gl_smoke 只断言纯状态机
+  # （不依赖 Metal surface 渲染），即使 swapchain 未拉起也能稳定通过。
+  test-macos-smoke:
+    runs-on: macos-latest
+    needs: build-ios
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Vulkan loader + MoltenVK (Homebrew)
+        run: |
+          brew install vulkan-loader molten-vk
+          echo "brew prefix: $(brew --prefix)"
+          ls -l "$(brew --prefix)/lib/libMoltenVK.dylib" 2>/dev/null || \
+            ls -l "$(brew --prefix)/opt/molten-vk/lib/libMoltenVK.dylib"
+
+      - name: Configure (macOS native, Release)
+        run: |
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_FLAGS="-Wno-error" \
+            -DCMAKE_CXX_FLAGS="-Wno-error"
+
+      - name: Build libmithril.dylib (macOS native)
+        run: |
+          cmake --build build --config Release --target mithril -j$(sysctl -n hw.ncpu)
+          DYLIB=$(find build -name 'libmithril.dylib' -type f | head -1)
+          [ -n "$DYLIB" ] || (echo "::error::libmithril.dylib not found" && exit 1)
+          echo "Built: $DYLIB"
+          file "$DYLIB"
+
+      - name: Run GL state-machine smoke (dlopen libmithril.dylib)
+        run: |
+          DYLIB=$(find build -name 'libmithril.dylib' -type f | head -1)
+          export DYLD_LIBRARY_PATH="$(brew --prefix)/lib"
+          clang -std=c11 -O0 -Wall -Wextra \
+            -IMithril-Wrapper-cpp/include \
+            -o tests/gl_smoke tests/gl_smoke.c -ldl
+          output=$(./tests/gl_smoke "$DYLIB")
+          echo "$output"
+          echo "$output" | grep -q "GL SMOKE ALL PASSED"
