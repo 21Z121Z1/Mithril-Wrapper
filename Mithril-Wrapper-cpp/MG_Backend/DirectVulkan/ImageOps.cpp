@@ -177,6 +177,19 @@ void generate_mipmaps(GLuint name) {
         }
 
         if (newImage != VK_NULL_HANDLE && newMem != VK_NULL_HANDLE) {
+            // FIX (真机 page fault 诊断): 限流打印每次 mipmap 重建的纹理信息，
+            // 便于在 MITHRIL_DEBUG 未开启（真机默认 Warning）时也能定位是哪张
+            // atlas 触发 GPU address fault。
+            {
+                static int rebuildLogCount = 0;
+                if (rebuildLogCount <= 5 || rebuildLogCount % 50 == 0) {
+                    MITHRIL_LOG_WARN("vk", "generate_mipmaps REBUILD tex=%u %dx%d "
+                                     "levels=%d->%d fmt=%d",
+                                     name, tex.width, tex.height, (int)tex.levels,
+                                     fullLevels, (int)fmt);
+                }
+                rebuildLogCount++;
+            }
             // FIX (重建纹理采样黑屏 - CRITICAL cross-command-buffer 同步):
             // old image 的 level0 数据通常由 glTexImage2D 记录到「主 command
             // buffer」（backend_texture_upload → b->commandBuffer），并只在
@@ -195,7 +208,9 @@ void generate_mipmaps(GLuint name) {
             // 才执行，同 queue 顺序提交亦无竞态。
             safe_device_wait_idle();
             OneShotCtx c;
+            bool rebuildOk = false;
             if (begin_one_shot(c)) {
+                rebuildOk = true;
                 const VkImageLayout oldLayout = tex.currentLayout;
                 const VkPipelineStageFlags oldStage =
                     (oldLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) ? VK_PIPELINE_STAGE_TRANSFER_BIT
@@ -325,35 +340,56 @@ void generate_mipmaps(GLuint name) {
                                      0, nullptr, 0, nullptr, 1, &toShader);
 
                 end_one_shot(c);
+            } else {
+                // FIX (真机 page fault): 若 one-shot 命令记录/提交失败，newImage
+                // 从未被写入任何数据（也未 transition 布局）。旧代码仍无条件把
+                // tex.image 替换成这个未初始化 image + 创建新 view → GPU 采样它
+                // 读到无效/未初始化地址 → kIOGPUCommandBufferCallbackErrorPageFault。
+                // 修复：失败时保留旧的（有效的单层）image，仅销毁 newImage，绝
+                // 不把未初始化的资源接入采样链。
+                if (newImage != VK_NULL_HANDLE) vkDestroyImage(b->device, newImage, nullptr);
+                if (newMem != VK_NULL_HANDLE) vkFreeMemory(b->device, newMem, nullptr);
+                newImage = VK_NULL_HANDLE;
+                newMem = VK_NULL_HANDLE;
+                rebuildOk = false;
+                static int rebuildFailLog = 0;
+                if (rebuildFailLog <= 3) {
+                    MITHRIL_LOG_WARN("vk", "generate_mipmaps REBUILD FAILED tex=%u "
+                                     "%dx%d — keeping old single-level image",
+                                     name, tex.width, tex.height);
+                }
+                rebuildFailLog++;
             }
 
-            // 重建新 view（fullLevels 层）。
-            VkImageView newView = VK_NULL_HANDLE;
-            VkImageViewCreateInfo vci{};
-            vci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-            vci.image = newImage;
-            vci.viewType = (tex.target == GL_TEXTURE_3D) ? VK_IMAGE_VIEW_TYPE_3D
-                         : (isCube ? VK_IMAGE_VIEW_TYPE_CUBE : VK_IMAGE_VIEW_TYPE_2D);
-            vci.format = fmt;
-            vci.subresourceRange.aspectMask = aspect;
-            vci.subresourceRange.baseMipLevel = 0;
-            vci.subresourceRange.levelCount = (uint32_t)fullLevels;
-            vci.subresourceRange.baseArrayLayer = 0;
-            vci.subresourceRange.layerCount = arrayLayers;
-            vci.components = { VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
-                               VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY };
-            if (vkCreateImageView(b->device, &vci, nullptr, &newView) != VK_SUCCESS) {
-                newView = VK_NULL_HANDLE;
+            if (rebuildOk) {
+                // 重建新 view（fullLevels 层）。
+                VkImageView newView = VK_NULL_HANDLE;
+                VkImageViewCreateInfo vci{};
+                vci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+                vci.image = newImage;
+                vci.viewType = (tex.target == GL_TEXTURE_3D) ? VK_IMAGE_VIEW_TYPE_3D
+                             : (isCube ? VK_IMAGE_VIEW_TYPE_CUBE : VK_IMAGE_VIEW_TYPE_2D);
+                vci.format = fmt;
+                vci.subresourceRange.aspectMask = aspect;
+                vci.subresourceRange.baseMipLevel = 0;
+                vci.subresourceRange.levelCount = (uint32_t)fullLevels;
+                vci.subresourceRange.baseArrayLayer = 0;
+                vci.subresourceRange.layerCount = arrayLayers;
+                vci.components = { VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
+                                   VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY };
+                if (vkCreateImageView(b->device, &vci, nullptr, &newView) != VK_SUCCESS) {
+                    newView = VK_NULL_HANDLE;
+                }
+                // 旧资源延迟释放（含 invalidate descriptor memo，防止 stale view 复用）。
+                defer_destroy_texture_entry(tex);
+                // 写入新资源。
+                tex.image = newImage;
+                tex.memory = newMem;
+                tex.view  = newView;
+                tex.levels = fullLevels;
+                tex.memorySize = newMemSize;  // 记录新 image 的 VRAM 大小，供将来延迟释放时正确回收计数
+                tex.currentLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
             }
-            // 旧资源延迟释放（含 invalidate descriptor memo，防止 stale view 复用）。
-            defer_destroy_texture_entry(tex);
-            // 写入新资源。
-            tex.image = newImage;
-            tex.memory = newMem;
-            tex.view  = newView;
-            tex.levels = fullLevels;
-            tex.memorySize = newMemSize;  // 记录新 image 的 VRAM 大小，供将来延迟释放时正确回收计数
-            tex.currentLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         } else {
             if (newImage != VK_NULL_HANDLE) vkDestroyImage(b->device, newImage, nullptr);
             if (newMem != VK_NULL_HANDLE) vkFreeMemory(b->device, newMem, nullptr);
