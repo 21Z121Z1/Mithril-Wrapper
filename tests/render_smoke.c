@@ -403,8 +403,8 @@ int main(int argc, char** argv) {
         GLint texLinkOk = 0;
         getProgramiv(texProg, GL_LINK_STATUS, &texLinkOk);
         CHECK(texLinkOk == GL_TRUE, "sampled program linked (GL_LINK_STATUS=%d)", texLinkOk);
-        deleteShader(texVs);
-        deleteShader(texFs);
+        /* texVs 在后续隔离子测试 4e/4f 复用，故此处不 deleteShader(texVs)。
+         * texFs 也不再单独 delete——shader 会在进程退出时统一回收，避免误删。 */
 
         /* 查询 UBO 块索引 + 采样器 uniform location */
         GLuint blockIdx = getUniformBlockIndex(texProg, "DynColor");
@@ -442,7 +442,91 @@ int main(int argc, char** argv) {
         enableAttrib(1);
         CHECK(getError() == GL_NO_ERROR, "sampled VAO/VBO (pos+uv) setup leaves no error");
 
-        /* ---- 4e) 多帧动态 UBO + glFinish 稳定性 ------------------------- */
+        /* ---- 4e) 隔离诊断 A：仅 UBO（无贴图）----------------------------
+         * fragColor = tint，纯色三角形验证动态 UBO 的 bufferData→descriptor
+         * 链路。若此读回随 tint 变红，则 UBO 路径正确，黑屏出在贴图采样。 */
+        {
+            const char* uboFsSrc = "#version 330 core\n"
+                                   "out vec4 fragColor;\n"
+                                   "layout(std140) uniform DynColor { vec4 tint; };\n"
+                                   "void main(){ fragColor = tint; }\n";
+            GLuint uboFs = createShader(GL_FRAGMENT_SHADER);
+            shaderSource(uboFs, 1, &uboFsSrc, NULL);
+            compileShader(uboFs);
+            GLint uboFsOk = 0;
+            getShaderiv(uboFs, GL_COMPILE_STATUS, &uboFsOk);
+            CHECK(uboFsOk == GL_TRUE, "UBO-only fragment shader compiled");
+            GLuint uboProg = createProgram();
+            attachShader(uboProg, texVs);   /* 复用 4c 的顶点着色器（已 delete，重新 attach 需新建） */
+            attachShader(uboProg, uboFs);
+            linkProgram(uboProg);
+            GLint uboLinkOk = 0;
+            getProgramiv(uboProg, GL_LINK_STATUS, &uboLinkOk);
+            CHECK(uboLinkOk == GL_TRUE, "UBO-only program linked (GL_LINK_STATUS=%d)", uboLinkOk);
+            deleteShader(uboFs);
+            GLuint uboBlk = getUniformBlockIndex(uboProg, "DynColor");
+            uniformBlockBinding(uboProg, uboBlk, 1);
+            useProgram(uboProg);
+            bindBufferBase(GL_UNIFORM_BUFFER, 1, ubo);   /* 复用 4b 的 UBO */
+            bindVertexArray(texVao);                      /* 复用 4d 的 pos+uv VAO */
+            GLfloat uTint[4] = { 0.5f, 0.0f, 0.0f, 1.0f };
+            bindBuffer(GL_UNIFORM_BUFFER, ubo);
+            bufferData(GL_UNIFORM_BUFFER, sizeof(uTint), uTint, GL_DYNAMIC_DRAW);
+            clearColor(0.0f, 0.0f, 0.0f, 0.0f);
+            clear(GL_COLOR_BUFFER_BIT);
+            drawArrays(GL_TRIANGLES, 0, 3);
+            finish();
+            unsigned char ubopx[4] = {0,0,0,0};
+            readPixels(R / 2, C / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, ubopx);
+            /* tint=(0.5,0,0,1) → 期望 r≈128±15, g,b≈0, a=255 */
+            CHECK(ubopx[0] >= 110 && ubopx[0] <= 145 &&
+                  ubopx[1] < 20 && ubopx[2] < 20 && ubopx[3] > 128,
+                  "UBO-only path: tint=(0.5,0,0,1) readback=(%d,%d,%d,%d)",
+                  ubopx[0], ubopx[1], ubopx[2], ubopx[3]);
+        }
+
+        /* ---- 4f) 隔离诊断 B：仅贴图采样（无 UBO tint，乘白色常量）--------
+         * fragColor = texture(uTex, vUV) * vec4(1)，全白 2x2 纹理 → 读回应全白。
+         * 若此读回为白，则贴图采样链路正确，黑屏出在 UBO。 */
+        {
+            const char* texOnlyFs = "#version 330 core\n"
+                                    "in vec2 vUV;\n"
+                                    "out vec4 fragColor;\n"
+                                    "uniform sampler2D uTex;\n"
+                                    "void main(){ fragColor = texture(uTex, vUV); }\n";
+            GLuint toFs = createShader(GL_FRAGMENT_SHADER);
+            shaderSource(toFs, 1, &texOnlyFs, NULL);
+            compileShader(toFs);
+            GLint toFsOk = 0;
+            getShaderiv(toFs, GL_COMPILE_STATUS, &toFsOk);
+            CHECK(toFsOk == GL_TRUE, "texture-only fragment shader compiled");
+            GLuint toProg = createProgram();
+            attachShader(toProg, texVs);
+            attachShader(toProg, toFs);
+            linkProgram(toProg);
+            GLint toLinkOk = 0;
+            getProgramiv(toProg, GL_LINK_STATUS, &toLinkOk);
+            CHECK(toLinkOk == GL_TRUE, "texture-only program linked (GL_LINK_STATUS=%d)", toLinkOk);
+            deleteShader(toFs);
+            GLint toLoc = getUniformLocation(toProg, "uTex");
+            useProgram(toProg);
+            activeTexture(GL_TEXTURE0);
+            bindTexture(GL_TEXTURE_2D, sampTex);
+            if (toLoc >= 0) uniform1i(toLoc, 0);
+            bindVertexArray(texVao);
+            clearColor(0.0f, 0.0f, 0.0f, 0.0f);
+            clear(GL_COLOR_BUFFER_BIT);
+            drawArrays(GL_TRIANGLES, 0, 3);
+            finish();
+            unsigned char topx[4] = {0,0,0,0};
+            readPixels(R / 2, C / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, topx);
+            /* 全白纹理 → 期望 r,g,b≥200, a=255 */
+            CHECK(topx[0] >= 200 && topx[1] >= 200 && topx[2] >= 200 && topx[3] > 128,
+                  "texture-only path: white 2x2 sampled readback=(%d,%d,%d,%d)",
+                  topx[0], topx[1], topx[2], topx[3]);
+        }
+
+        /* ---- 4g) 多帧动态 UBO + 贴图 + glFinish 稳定性 ------------------- */
         /* 每帧：改写 UBO（orphan-rename + descriptor memo 失效）→ draw →
          * glFinish(vkQueueSubmit) → readback。连续 N 帧验证：
          *   - 每帧读回颜色随 UBO tint 变化而变（动态 uniform 真正生效）；
@@ -450,6 +534,15 @@ int main(int argc, char** argv) {
          *   - 全程无 GPU page fault / draw 丢弃（读回非黑即证明 draw 未被丢）。 */
         const int NFRAMES = 8;
         int stableFrames = 0;
+        /* 前面 4e/4f 换了 bound program/texture，这里恢复 texProg + 采样器 +
+         * UBO 的完整绑定状态后再进入多帧循环。 */
+        useProgram(texProg);
+        uniformBlockBinding(texProg, blockIdx, 1);
+        bindBufferBase(GL_UNIFORM_BUFFER, 1, ubo);
+        activeTexture(GL_TEXTURE0);
+        bindTexture(GL_TEXTURE_2D, sampTex);
+        if (texLoc >= 0) uniform1i(texLoc, 0);
+        bindVertexArray(texVao);
         for (int f = 0; f < NFRAMES; ++f) {
             /* 动态改写 UBO：第 f 帧 tint = (f 递增的 R, 0, 0, 1) */
             GLfloat tint[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
