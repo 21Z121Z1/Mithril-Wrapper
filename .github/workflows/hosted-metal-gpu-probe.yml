@@ -127,10 +127,9 @@ jobs:
           lipo -info "$artifact" | grep -q arm64
           otool -L "$artifact" | grep -q '/System/Library/Frameworks/Metal.framework/'
 
-  ios-simulator-directmetal-runtime:
-    name: iOS Simulator DirectMetal host-GPU runtime candidate
+  ios-simulator-directmetal-runtime-required:
+    name: iOS Simulator DirectMetal host-GPU runtime required
     runs-on: macos-26
-    continue-on-error: true
     env:
       MTL_DEBUG_LAYER: '0'
       MTL_SHADER_VALIDATION: '0'
