@@ -1,0 +1,39 @@
+name: Cleanup merged CI branches
+
+on:
+  push:
+    branches:
+      - feature/direct-metal
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify and delete merged experiment branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          branch='ci/hosted-metal-gpu-probe-direct-metal-20260810'
+          expected='59b1df267e90ce944a043d25c34522a727a32450'
+          git fetch origin "+refs/heads/${branch}:refs/remotes/origin/${branch}"
+          actual="$(git rev-parse "refs/remotes/origin/${branch}")"
+          test "$actual" = "$expected"
+          git merge-base --is-ancestor "$expected" HEAD
+          git push origin --delete "$branch"
+
+      - name: Remove one-shot cleanup workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm .github/workflows/cleanup-merged-ci-branches.yml
+          git commit -m 'ci: remove one-shot branch cleanup'
+          git push origin HEAD:feature/direct-metal
