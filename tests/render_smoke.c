@@ -644,6 +644,53 @@ int main(int argc, char** argv) {
                   sp[0], sp[1], sp[2], sp[3]);
         }
 
+        /* ---- 4j) 判别 E：无 mipmap 单级纹理采样 -------------------------
+         * 隔离「基础 upload+采样」 vs 「generateMipmap 重建」两个环节。用一张
+         * 单独的单级白色纹理（不 generateMipmap，min filter=GL_LINEAR），配
+         * attrib0Vs + 常量 UV 采样。
+         *   - 若白 → 基础 upload+采样正常，黑屏出在 generateMipmap 重建链；
+         *   - 若黑 → 基础 upload/采样链路本身有问题（与 mipmap 无关）。 */
+        {
+            GLuint singleTex = 0;
+            genTextures(1, &singleTex);
+            activeTexture(GL_TEXTURE0);
+            bindTexture(GL_TEXTURE_2D, singleTex);
+            const GLubyte swhite[16] = { 255,255,255,255, 255,255,255,255,
+                                         255,255,255,255, 255,255,255,255 };
+            texImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, swhite);
+            texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR); /* 非 mipmap */
+            texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            texParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+            texParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+            const char* eFs = "#version 330 core\n"
+                              "out vec4 fragColor;\n"
+                              "uniform sampler2D uTex;\n"
+                              "void main(){ fragColor = texture(uTex, vec2(0.5, 0.5)); }\n";
+            GLuint eFsObj = createShader(GL_FRAGMENT_SHADER);
+            shaderSource(eFsObj, 1, &eFs, NULL);
+            compileShader(eFsObj);
+            GLuint eProg = createProgram();
+            attachShader(eProg, attrib0Vs);
+            attachShader(eProg, eFsObj);
+            linkProgram(eProg);
+            deleteShader(eFsObj);
+            GLint eLoc = getUniformLocation(eProg, "uTex");
+            useProgram(eProg);
+            activeTexture(GL_TEXTURE0);
+            bindTexture(GL_TEXTURE_2D, singleTex);
+            if (eLoc >= 0) uniform1i(eLoc, 0);
+            bindVertexArray(texVao);
+            clearColor(0.0f, 0.0f, 0.0f, 0.0f);
+            clear(GL_COLOR_BUFFER_BIT);
+            drawArrays(GL_TRIANGLES, 0, 3);
+            finish();
+            unsigned char ep[4] = {0,0,0,0};
+            readPixels(R / 2, C / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, ep);
+            CHECK(ep[0] > 200 && ep[1] > 200 && ep[2] > 200 && ep[3] > 128,
+                  "disc-E single-level (no mipmap) sampler: white readback=(%d,%d,%d,%d)",
+                  ep[0], ep[1], ep[2], ep[3]);
+        }
+
         /* ---- 4g) 多帧动态 UBO + 贴图 + glFinish 稳定性 ------------------- */
         /* 每帧：改写 UBO（orphan-rename + descriptor memo 失效）→ draw →
          * glFinish(vkQueueSubmit) → readback。连续 N 帧验证：
