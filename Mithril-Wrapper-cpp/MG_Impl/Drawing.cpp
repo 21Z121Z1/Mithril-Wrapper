@@ -787,6 +787,65 @@ void glMultiDrawElementsIndirect(GLenum mode, GLenum type, const void* indirect,
 }
 
 /* =========================================================================
+ * GL 4.6 ARB_indirect_parameters — glMultiDraw*IndirectCount
+ *
+ * 与上面的 Indirect 变体唯一的差别：draw 数量（drawcount）不是由 CPU 传入，
+ * 而是由 GPU 从 GL_DRAW_INDIRECT_BUFFER 的 `drawcount` 偏移处读取一个
+ * uint32，并 clamp 到 maxdrawcount。Sodium 的 chunk 渲染正是用 compute
+ * shader 在 GPU 端写好 indirect 命令 + 计数，再一次性提交 —— CPU 完全
+ * 不知道最终 draw 数，因此绝不能 fallback 到 CPU 读回（会读到 stale 计数）。
+ *
+ * Vulkan 侧对应 vkCmdDrawIndirectCount / vkCmdDrawIndexedIndirectCount
+ * （Vulkan 1.2 core `drawIndirectCount` 特性，MoltenVK 1.2.x 报告支持）。
+ * backend_*_count 内部已检查 b->drawIndirectCountSupported；若不支持则静默
+ * 跳过（保持与"旧 no-op"一致的行为），并在日志中提示 —— 比把 stale 计数
+ * 交给 CPU 循环渲染更正确。
+ * ========================================================================= */
+void glMultiDrawArraysIndirectCount(GLenum mode, const void* indirect,
+                                    GLintptr drawcount, GLint maxdrawcount,
+                                    GLsizei stride) {
+    MITHRIL_ENSURE_INIT();
+    if (maxdrawcount <= 0) return;
+    GLuint buf_name = g_state->bufferBindings[(int)mithril::BufferTarget::DrawIndirect].name;
+    VkBuffer indirect_buf = backend_get_buffer(buf_name);
+    if (indirect_buf == VK_NULL_HANDLE) return;
+    // GL 规范：drawcount 是 GL_DRAW_INDIRECT_BUFFER 内的字节偏移，存储一个
+    // uint32 的 draw 数量。Vulkan 的 count 参数正是 (buffer, offset)。
+    VkBuffer count_buf = indirect_buf;
+    VkDeviceSize count_off = (VkDeviceSize)drawcount;
+    if (!prepare_draw(mode)) return;
+    int s = stride ? stride : 16;  // sizeof(VkDrawIndirectCommand)
+    backend_draw_indirect_count((int)mode, indirect_buf,
+                                (VkDeviceSize)(intptr_t)indirect,
+                                count_buf, count_off, maxdrawcount, s);
+    end_draw();
+}
+
+void glMultiDrawElementsIndirectCount(GLenum mode, GLenum type,
+                                      const void* indirect, GLintptr drawcount,
+                                      GLint maxdrawcount, GLsizei stride) {
+    MITHRIL_ENSURE_INIT();
+    if (maxdrawcount <= 0) return;
+    GLuint buf_name = g_state->bufferBindings[(int)mithril::BufferTarget::DrawIndirect].name;
+    VkBuffer indirect_buf = backend_get_buffer(buf_name);
+    if (indirect_buf == VK_NULL_HANDLE) return;
+    mithril::VertexArray* vao = mithril::state_get_vao(g_state->currentVAO);
+    GLuint ib_name = vao ? vao->elementArrayBuffer : 0;
+    VkBuffer ib = backend_get_buffer(ib_name);
+    if (ib == VK_NULL_HANDLE) return;
+    // 同 Arrays 变体：count 在 GL_DRAW_INDIRECT_BUFFER 的 drawcount 偏移处。
+    VkBuffer count_buf = indirect_buf;
+    VkDeviceSize count_off = (VkDeviceSize)drawcount;
+    if (!prepare_draw(mode)) return;
+    int s = stride ? stride : 20;  // sizeof(VkDrawIndexedIndirectCommand)
+    backend_draw_indexed_indirect_count((int)mode, index_type_to_int(type),
+                                        ib, 0,
+                                        indirect_buf, (VkDeviceSize)(intptr_t)indirect,
+                                        count_buf, count_off, maxdrawcount, s);
+    end_draw();
+}
+
+/* =========================================================================
  * Compute dispatch (GL 4.3 ARB_compute_shader)
  *
  * backend_dispatch_compute 已就绪：结束活动 render pass（Vulkan 禁止

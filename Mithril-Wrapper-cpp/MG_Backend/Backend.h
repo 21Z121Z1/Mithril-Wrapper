@@ -261,6 +261,27 @@ void backend_draw_indexed_indirect(int primitive, int index_type,
                                    VkDeviceSize indirect_offset,
                                    int draw_count, int stride);
 
+/*
+ * GL 4.6 ARB_indirect_parameters — glMultiDraw*IndirectCount.
+ *
+ * The draw COUNT is read by the GPU from `count_buffer` at `count_offset`
+ * (a GLintptr offset into GL_DRAW_INDIRECT_BUFFER), clamped to
+ * max_drawcount. Requires vkCmdDrawIndirectCount /
+ * vkCmdDrawIndexedIndirectCount (Vulkan 1.2 core `drawIndirectCount`).
+ * Callers must verify b->drawIndirectCountSupported first; when it is
+ * unsupported they should fall back to a CPU readback (Sodium only uses
+ * this on GL 4.6-capable devices, and MoltenVK 1.2.x reports it).
+ */
+void backend_draw_indirect_count(int primitive, VkBuffer indirect_buffer,
+                                 VkDeviceSize indirect_offset,
+                                 VkBuffer count_buffer, VkDeviceSize count_offset,
+                                 int max_drawcount, int stride);
+void backend_draw_indexed_indirect_count(int primitive, int index_type,
+                                         VkBuffer index_buffer, VkDeviceSize index_offset,
+                                         VkBuffer indirect_buffer, VkDeviceSize indirect_offset,
+                                         VkBuffer count_buffer, VkDeviceSize count_offset,
+                                         int max_drawcount, int stride);
+
 /* ---- Buffers ---- */
 VkBuffer backend_get_or_create_buffer(GLuint name, const void* data, size_t size);
 /* GL_ARB_buffer_storage — immutable storage, optionally persistently & coherently

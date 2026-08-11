@@ -1297,23 +1297,20 @@ void glGetQueryBufferObjectuiv(GLuint id, GLuint buffer, GLenum pname,
  * GL 4.6
  * ==================================================================== */
 
-/* 117. glMultiDrawArraysIndirectCount - No-op (rare; fallback to
- * glMultiDrawArraysIndirect would require parsing the drawcount buffer). */
+/* 117. glMultiDrawArraysIndirectCount - GL 4.6 ARB_indirect_parameters.
+ * Implemented in Drawing.cpp (needs prepare_draw/end_draw/index_type_to_int,
+ * which are file-static there). Declared here so GL46_Compat.cpp remains a
+ * complete GL 4.6 surface; the real GPU-side vkCmdDrawIndirectCount path and
+ * a CPU-readback fallback live in Drawing.cpp. */
 void glMultiDrawArraysIndirectCount(GLenum mode, const void* indirect,
                                     GLintptr drawcount, GLint maxdrawcount,
-                                    GLsizei stride) {
-    MITHRIL_ENSURE_INIT();
-    (void)mode; (void)indirect; (void)drawcount; (void)maxdrawcount; (void)stride;
-}
+                                    GLsizei stride);
 
-/* 118. glMultiDrawElementsIndirectCount - No-op. */
+/* 118. glMultiDrawElementsIndirectCount - GL 4.6 ARB_indirect_parameters.
+ * See 117. Implemented in Drawing.cpp. */
 void glMultiDrawElementsIndirectCount(GLenum mode, GLenum type,
                                       const void* indirect, GLintptr drawcount,
-                                      GLint maxdrawcount, GLsizei stride) {
-    MITHRIL_ENSURE_INIT();
-    (void)mode; (void)type; (void)indirect; (void)drawcount;
-    (void)maxdrawcount; (void)stride;
-}
+                                      GLint maxdrawcount, GLsizei stride);
 
 /* ====================================================================
  * GL 4.5 Robustness

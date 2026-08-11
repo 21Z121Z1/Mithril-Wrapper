@@ -1116,6 +1116,12 @@ bool init_device() {
     enabled.shaderStorageImageWriteWithoutFormat = supported.shaderStorageImageWriteWithoutFormat;
     enabled.drawIndirectFirstInstance     = supported.drawIndirectFirstInstance;
     enabled.multiDrawIndirect             = supported.multiDrawIndirect;
+    // GL 4.6 ARB_indirect_parameters — vkCmdDrawIndirectCount /
+    // vkCmdDrawIndexedIndirectCount (Vulkan 1.2 core). Sodium's chunk render
+    // issues glMultiDrawElementsIndirectCount; without this feature the
+    // *_count backend records a call the device rejects, so the fallback is
+    // required when unsupported. MoltenVK 1.2.x reports drawIndirectCount.
+    enabled.drawIndirectCount             = supported.drawIndirectCount;
     enabled.samplerAnisotropy             = supported.samplerAnisotropy;
     enabled.depthBounds                   = supported.depthBounds;
     enabled.occlusionQueryPrecise         = supported.occlusionQueryPrecise;
@@ -1130,6 +1136,7 @@ bool init_device() {
     // Remember whether one vkCmdDrawIndirect may issue drawCount > 1; the
     // indirect draw path falls back to a loop when it may not.
     b->multiDrawIndirectSupported = supported.multiDrawIndirect == VK_TRUE;
+    b->drawIndirectCountSupported = supported.drawIndirectCount == VK_TRUE;
     b->sampleRateShadingSupported = supported.sampleRateShading == VK_TRUE;
 
     VkDeviceCreateInfo devCI{};

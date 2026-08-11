@@ -223,6 +223,13 @@ struct Backend {
      * which is correct but slower. */
     bool             multiDrawIndirectSupported = false;
 
+    /* drawIndirectCount core feature (Vulkan 1.2) — enables
+     * vkCmdDrawIndirectCount / vkCmdDrawIndexedIndirectCount, the backend of
+     * GL 4.6 ARB_indirect_parameters (glMultiDraw*IndirectCount). Sodium's
+     * chunk render issues these; when unsupported we must fall back rather
+     * than record a vkCmd*Count call the device cannot execute. */
+    bool             drawIndirectCountSupported = false;
+
     /* sampleRateShading core feature — required before a pipeline may set
      * sampleShadingEnable (GL 4.0 ARB_sample_shading). */
     bool             sampleRateShadingSupported = false;

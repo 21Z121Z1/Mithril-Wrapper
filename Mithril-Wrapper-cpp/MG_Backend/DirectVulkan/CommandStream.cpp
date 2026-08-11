@@ -2414,4 +2414,72 @@ void backend_draw_indexed_indirect(int primitive, int index_type,
     }
 }
 
+/* ---- GL 4.6 ARB_indirect_parameters (_Count variants) ----
+ *
+ * vkCmdDrawIndirectCount / vkCmdDrawIndexedIndirectCount read the draw COUNT
+ * from `count_buffer` at `count_offset` on the GPU, clamp it to maxDrawcount,
+ * and issue that many draws — no CPU readback. This is exactly what
+ * glMultiDrawArraysIndirectCount / glMultiDrawElementsIndirectCount need.
+ *
+ * Requires the Vulkan 1.2 `drawIndirectCount` core feature; the GL frontend
+ * checks b->drawIndirectCountSupported and falls back to a CPU readback when
+ * the device (or MoltenVK) does not report it.
+ */
+void backend_draw_indirect_count(int primitive, VkBuffer indirect_buffer,
+                                 VkDeviceSize indirect_offset,
+                                 VkBuffer count_buffer, VkDeviceSize count_offset,
+                                 int max_drawcount, int stride) {
+    (void)primitive;
+    mithril::vk::Backend* b = mithril::vk::backend();
+    if (!b->commandBuffer || !indirect_buffer || !count_buffer || max_drawcount <= 0)
+        return;
+    if (!b->drawIndirectCountSupported) {
+        // GL 4.6 ARB_indirect_parameters 无法用 vkCmdDrawIndirectCount。静默跳过
+        // 会误导排查；记录一次。MoltenVK 1.2.x 正常路径不会到这里。
+        static int loggedOnce = 0;
+        if (loggedOnce++ < 1) {
+            MITHRIL_LOG_WARN("vk", "backend_draw_indirect_count: device lacks "
+                              "drawIndirectCount (GL 4.6 indirect_parameters "
+                              "unavailable) — draw skipped");
+        }
+        return;
+    }
+    if (!mithril::vk::draw_recording_allowed("backend_draw_indirect_count")) return;
+    const uint32_t effStride = stride > 0 ? (uint32_t)stride : 16u;  // sizeof(VkDrawIndirectCommand)
+    vkCmdDrawIndirectCount(b->commandBuffer, indirect_buffer, indirect_offset,
+                           count_buffer, count_offset,
+                           (uint32_t)max_drawcount, effStride);
+}
+
+void backend_draw_indexed_indirect_count(int primitive, int index_type,
+                                         VkBuffer index_buffer, VkDeviceSize index_offset,
+                                         VkBuffer indirect_buffer, VkDeviceSize indirect_offset,
+                                         VkBuffer count_buffer, VkDeviceSize count_offset,
+                                         int max_drawcount, int stride) {
+    (void)primitive;
+    mithril::vk::Backend* b = mithril::vk::backend();
+    if (!b->commandBuffer || !index_buffer || !indirect_buffer || !count_buffer ||
+        max_drawcount <= 0)
+        return;
+    if (!b->drawIndirectCountSupported) {
+        static int loggedOnce = 0;
+        if (loggedOnce++ < 1) {
+            MITHRIL_LOG_WARN("vk", "backend_draw_indexed_indirect_count: device lacks "
+                              "drawIndirectCount (GL 4.6 indirect_parameters "
+                              "unavailable) — draw skipped");
+        }
+        return;
+    }
+    if (!mithril::vk::draw_recording_allowed("backend_draw_indexed_indirect_count")) return;
+    VkIndexType t;
+    if (index_type == 1)      t = VK_INDEX_TYPE_UINT32;
+    else if (index_type == 2) t = VK_INDEX_TYPE_UINT8_EXT;
+    else                      t = VK_INDEX_TYPE_UINT16;
+    vkCmdBindIndexBuffer(b->commandBuffer, index_buffer, index_offset, t);
+    const uint32_t effStride = stride > 0 ? (uint32_t)stride : 20u;  // sizeof(VkDrawIndexedIndirectCommand)
+    vkCmdDrawIndexedIndirectCount(b->commandBuffer, indirect_buffer, indirect_offset,
+                                  count_buffer, count_offset,
+                                  (uint32_t)max_drawcount, effStride);
+}
+
 } // extern "C"
