@@ -1861,7 +1861,7 @@ VkSampler backend_get_or_create_sampler(GLuint name, GLint min_filter, GLint mag
         // mip 链，见 ImageOps.cpp，保证视觉上有正确 mipmap。）
         int actualLevels = 1;
         {
-            auto& tex_tbl = texture_table();
+            auto& tex_tbl = mithril::vk::texture_table();
             auto tit = tex_tbl.find(name);
             if (tit != tex_tbl.end()) actualLevels = tit->second.levels;
         }
