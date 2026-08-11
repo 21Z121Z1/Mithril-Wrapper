@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - ci/hosted-metal-gpu-probe-direct-metal-20260810
+      - feature/direct-metal
 
 concurrency:
   group: directmetal-hosted-${{ github.ref }}
