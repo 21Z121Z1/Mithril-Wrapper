@@ -11,6 +11,7 @@
 #include "../../MG_Impl/Log.h"
 
 #include <cstring>
+#include <algorithm>
 #include <unordered_set>
 #include <vector>
 
@@ -1845,7 +1846,26 @@ VkSampler backend_get_or_create_sampler(GLuint name, GLint min_filter, GLint mag
         sci.maxLod = 0.0f;
     } else {
         sci.minLod = 0.0f;
-        sci.maxLod = 12.0f;
+        // FIX (Root Cause - 单层 image 被多层采样越界 → page fault):
+        // 旧实现无条件 maxLod=12。Minecraft 先 glTexImage2D(level=0) 上传 atlas
+        // 的 base level（此时 VkImage 只有 1 层 mip），再 glGenerateMipmap()。
+        // 若 mip 链尚未生成，image 只有 1 层而采样器 maxLod=12 请求 level 1..11，
+        // MoltenVK/Metal 读未分配/未初始化的 mip 层地址 → kIOGPUCommandBuffer
+        // CallbackErrorPageFault（GPU 执行期崩溃，完全静默，与线上「atlas 创建后
+        // 第一帧渲染纯红 + page fault」吻合）。
+        // 修复：把 maxLod clamp 到该纹理当前实际拥有的 mip 层数 - 1。即使 image
+        // 暂时只有 1 层（glGenerateMipmap 尚未执行），采样器也只采 level 0，
+        // 绝不越界；一旦 mip 链生成（tex.levels 更新），下次按参数重新取采样器时
+        // 会拿到正确的 maxLod。这从采样侧彻底消除越界 page fault，是直接止血。
+        // （配套：generate_mipmaps 会在 glGenerateMipmap 时把 image 重建为完整
+        // mip 链，见 ImageOps.cpp，保证视觉上有正确 mipmap。）
+        int actualLevels = 1;
+        {
+            auto& tex_tbl = texture_table();
+            auto tit = tex_tbl.find(name);
+            if (tit != tex_tbl.end()) actualLevels = tit->second.levels;
+        }
+        sci.maxLod = (float)std::max(0, actualLevels - 1);
     }
     sci.unnormalizedCoordinates = VK_FALSE;
 

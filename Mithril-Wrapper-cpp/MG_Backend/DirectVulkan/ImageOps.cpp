@@ -99,7 +99,250 @@ void generate_mipmaps(GLuint name) {
     auto it = tbl.find(name);
     if (it == tbl.end()) return;
     TextureEntry& tex = it->second;
-    if (tex.image == VK_NULL_HANDLE || tex.levels <= 1) return;
+    if (tex.image == VK_NULL_HANDLE) return;
+
+    // 该纹理尺寸需要的完整 mip 链层数 (floor(log2(max(w,h)))+1)。
+    int fullLevels = 1;
+    {
+        int m = tex.width > tex.height ? tex.width : tex.height;
+        if (m < 1) m = 1;
+        while (m > 1) { fullLevels++; m >>= 1; }
+    }
+
+    // FIX (Root Cause - 单层 image 被 mipmap 采样器越界采样 → page fault):
+    // Minecraft 先 glTexImage2D(level=0) 上传 atlas 的 base level（Texture.cpp:145
+    // 只把 t->levels 推到 level+1，故此时 tex.levels == 1，VkImage 只有 1 层 mip），
+    // 再 glGenerateMipmap() 请求完整 mip 链。旧实现因 tex.levels<=1 直接 return，
+    // VkImage 永远只有 1 层，而 blocks/terrain 等 atlas 的采样器是 mipmap filter
+    // （minLod=0, maxLod 依 image 层数 clamp）。若 image 无 mip 数据，MoltenVK/Metal
+    // 采样 level 1..11 会读未分配/未初始化的 mip 层地址 → kIOGPUCommandBuffer
+    // CallbackErrorPageFault（GPU 执行期崩溃，完全静默，与线上「atlas 创建后第一帧
+    // 渲染纯红 + page fault」吻合）。
+    // 参照 MobileGL SyncTexture (VkTextureManager.cpp:1325)：检测到
+    // mipLevels < ComputeFullMipLevelCount(extent) 时重建 image 为完整 mip 链。
+    //
+    // 实现：当当前 VkImage 层数不足完整链时，创建 fullLevels 层的新 image，在
+    // one-shot 命令缓冲里把旧 image level 0 复制到新 image level 0，再对新 image
+    // 逐级 vkCmdBlitImage 生成 mip。完成后替换 tex 的 image/view/memory，旧资源
+    // 延迟释放（disposalQueue），并让本函数自包含地完成，不再走下方只针对已有多层
+    // image 的 cascade。
+    if (tex.levels < fullLevels) {
+        const VkFormat fmt = tex.format;
+        const VkImageAspectFlags aspect = aspect_for_format(fmt);
+        const VkImageType imgType = (tex.target == GL_TEXTURE_3D) ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D;
+        const uint32_t arrayLayers = (imgType == VK_IMAGE_TYPE_3D) ? 1
+                                   : (tex.target == GL_TEXTURE_CUBE_MAP ? 6 : 1);
+        const bool isCube = (tex.target == GL_TEXTURE_CUBE_MAP);
+
+        VkFormatProperties fp{};
+        vkGetPhysicalDeviceFormatProperties(b->physicalDevice, fmt, &fp);
+        const VkFormatFeatureFlags feats = fp.optimalTilingFeatures;
+
+        VkImageCreateInfo ici{};
+        ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        ici.imageType = imgType;
+        ici.format = fmt;
+        ici.extent = { (uint32_t)tex.width, (uint32_t)tex.height,
+                       (uint32_t)(imgType == VK_IMAGE_TYPE_3D ? tex.depth : 1) };
+        ici.mipLevels = (uint32_t)fullLevels;
+        ici.arrayLayers = arrayLayers;
+        ici.samples = VK_SAMPLE_COUNT_1_BIT;
+        ici.tiling = VK_IMAGE_TILING_OPTIMAL;
+        ici.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+        if (feats & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) ici.usage |= VK_IMAGE_USAGE_SAMPLED_BIT;
+        if (feats & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) ici.usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+        if (feats & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) ici.usage |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+        if (feats & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) ici.usage |= VK_IMAGE_USAGE_STORAGE_BIT;
+
+        VkImage newImage = VK_NULL_HANDLE;
+        VkDeviceMemory newMem = VK_NULL_HANDLE;
+        VkDeviceSize newMemSize = 0;
+        if (vkCreateImage(b->device, &ici, nullptr, &newImage) == VK_SUCCESS) {
+            VkMemoryRequirements req{};
+            vkGetImageMemoryRequirements(b->device, newImage, &req);
+            uint32_t mt = find_memory_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+            if (mt == 0xFFFFFFFFu)
+                mt = find_memory_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
+            VkMemoryAllocateInfo ai{};
+            ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+            ai.allocationSize = req.size;
+            ai.memoryTypeIndex = mt;
+            if (try_allocate_memory_with_gc(b->device, &ai, nullptr, &newMem) == VK_SUCCESS) {
+                vkBindImageMemory(b->device, newImage, newMem, 0);
+                newMemSize = req.size;
+            } else {
+                vkDestroyImage(b->device, newImage, nullptr);
+                newImage = VK_NULL_HANDLE;
+            }
+        }
+
+        if (newImage != VK_NULL_HANDLE && newMem != VK_NULL_HANDLE) {
+            OneShotCtx c;
+            if (begin_one_shot(c)) {
+                const VkImageLayout oldLayout = tex.currentLayout;
+                const VkPipelineStageFlags oldStage =
+                    (oldLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) ? VK_PIPELINE_STAGE_TRANSFER_BIT
+                    : VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+                const VkAccessFlags oldAccess =
+                    (oldLayout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) ? VK_ACCESS_TRANSFER_WRITE_BIT
+                    : VK_ACCESS_SHADER_READ_BIT;
+
+                // old level0 -> TRANSFER_SRC_OPTIMAL
+                VkImageMemoryBarrier oldSrc{};
+                oldSrc.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                oldSrc.srcAccessMask = oldAccess;
+                oldSrc.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+                oldSrc.oldLayout = oldLayout;
+                oldSrc.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+                oldSrc.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                oldSrc.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                oldSrc.image = tex.image;
+                oldSrc.subresourceRange = { aspect, 0, 1, 0, 1 };
+                vkCmdPipelineBarrier(c.cmd, oldStage, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+                                     0, nullptr, 0, nullptr, 1, &oldSrc);
+
+                // new level0 -> TRANSFER_DST_OPTIMAL
+                VkImageMemoryBarrier newDst{};
+                newDst.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                newDst.srcAccessMask = 0;
+                newDst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                newDst.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+                newDst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+                newDst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                newDst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                newDst.image = newImage;
+                newDst.subresourceRange = { aspect, 0, 1, 0, 1 };
+                vkCmdPipelineBarrier(c.cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                     VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+                                     0, nullptr, 0, nullptr, 1, &newDst);
+
+                // copy old level0 -> new level0
+                VkImageCopy copy{};
+                copy.srcSubresource = { aspect, 0, 0, 1 };
+                copy.dstSubresource = { aspect, 0, 0, 1 };
+                copy.srcOffset = { 0, 0, 0 };
+                copy.dstOffset = { 0, 0, 0 };
+                copy.extent = { (uint32_t)tex.width, (uint32_t)tex.height,
+                                (uint32_t)(imgType == VK_IMAGE_TYPE_3D ? tex.depth : 1) };
+                vkCmdCopyImage(c.cmd, tex.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                               newImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+
+                // new level0 -> TRANSFER_SRC_OPTIMAL for cascade
+                VkImageMemoryBarrier n0{};
+                n0.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                n0.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                n0.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+                n0.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+                n0.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+                n0.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                n0.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                n0.image = newImage;
+                n0.subresourceRange = { aspect, 0, 1, 0, 1 };
+                vkCmdPipelineBarrier(c.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                     VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+                                     0, nullptr, 0, nullptr, 1, &n0);
+
+                // cascade: for each level L>=1, blit L-1 -> L, transition L to SRC.
+                for (int L = 1; L < fullLevels; ++L) {
+                    int32_t w = tex.width  >> L; if (w < 1) w = 1;
+                    int32_t h = tex.height >> L; if (h < 1) h = 1;
+                    VkImageMemoryBarrier toDst{};
+                    toDst.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                    toDst.srcAccessMask = 0;
+                    toDst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                    toDst.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+                    toDst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+                    toDst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                    toDst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                    toDst.image = newImage;
+                    toDst.subresourceRange = { aspect, (uint32_t)L, 1, 0, 1 };
+                    vkCmdPipelineBarrier(c.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+                                         0, nullptr, 0, nullptr, 1, &toDst);
+
+                    VkImageBlit blit{};
+                    blit.srcSubresource = { aspect, (uint32_t)(L - 1), 0, 1 };
+                    blit.dstSubresource = { aspect, (uint32_t)L, 0, 1 };
+                    blit.srcOffsets[0] = { 0, 0, 0 };
+                    blit.srcOffsets[1] = { (tex.width >> (L - 1)) > 0 ? (tex.width >> (L - 1)) : 1,
+                                           (tex.height >> (L - 1)) > 0 ? (tex.height >> (L - 1)) : 1, 1 };
+                    blit.dstOffsets[0] = { 0, 0, 0 };
+                    blit.dstOffsets[1] = { w, h, 1 };
+                    VkFilter filt = (aspect == VK_IMAGE_ASPECT_COLOR_BIT) ? VK_FILTER_LINEAR
+                                                                          : VK_FILTER_NEAREST;
+                    vkCmdBlitImage(c.cmd, newImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                   newImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, filt);
+
+                    VkImageMemoryBarrier toSrc{};
+                    toSrc.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                    toSrc.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                    toSrc.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+                    toSrc.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+                    toSrc.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+                    toSrc.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                    toSrc.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                    toSrc.image = newImage;
+                    toSrc.subresourceRange = { aspect, (uint32_t)L, 1, 0, 1 };
+                    vkCmdPipelineBarrier(c.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+                                         0, nullptr, 0, nullptr, 1, &toSrc);
+                }
+
+                // all levels -> SHADER_READ_ONLY_OPTIMAL
+                VkImageMemoryBarrier toShader{};
+                toShader.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                toShader.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+                toShader.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+                toShader.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+                toShader.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                toShader.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                toShader.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                toShader.image = newImage;
+                toShader.subresourceRange = { aspect, 0, (uint32_t)fullLevels, 0, 1 };
+                vkCmdPipelineBarrier(c.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                     VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
+                                     0, nullptr, 0, nullptr, 1, &toShader);
+
+                end_one_shot(c);
+            }
+
+            // 重建新 view（fullLevels 层）。
+            VkImageView newView = VK_NULL_HANDLE;
+            VkImageViewCreateInfo vci{};
+            vci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+            vci.image = newImage;
+            vci.viewType = (tex.target == GL_TEXTURE_3D) ? VK_IMAGE_VIEW_TYPE_3D
+                         : (isCube ? VK_IMAGE_VIEW_TYPE_CUBE : VK_IMAGE_VIEW_TYPE_2D);
+            vci.format = fmt;
+            vci.subresourceRange.aspectMask = aspect;
+            vci.subresourceRange.baseMipLevel = 0;
+            vci.subresourceRange.levelCount = (uint32_t)fullLevels;
+            vci.subresourceRange.baseArrayLayer = 0;
+            vci.subresourceRange.layerCount = arrayLayers;
+            vci.components = { VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
+                               VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY };
+            if (vkCreateImageView(b->device, &vci, nullptr, &newView) != VK_SUCCESS) {
+                newView = VK_NULL_HANDLE;
+            }
+            // 旧资源延迟释放（含 invalidate descriptor memo，防止 stale view 复用）。
+            defer_destroy_texture_entry(tex);
+            // 写入新资源。
+            tex.image = newImage;
+            tex.memory = newMem;
+            tex.view  = newView;
+            tex.levels = fullLevels;
+            tex.memorySize = newMemSize;  // 记录新 image 的 VRAM 大小，供将来延迟释放时正确回收计数
+            tex.currentLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        } else {
+            if (newImage != VK_NULL_HANDLE) vkDestroyImage(b->device, newImage, nullptr);
+            if (newMem != VK_NULL_HANDLE) vkFreeMemory(b->device, newMem, nullptr);
+        }
+        if (tex.image == VK_NULL_HANDLE) return;
+        // 重建分支已生成完整 mip 链，自包含完成。
+        return;
+    }
+
+    if (tex.levels <= 1) return;
 
     OneShotCtx c;
     if (!begin_one_shot(c)) {
