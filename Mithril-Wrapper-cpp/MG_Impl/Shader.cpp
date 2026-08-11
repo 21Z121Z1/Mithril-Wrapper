@@ -928,7 +928,31 @@ bool glsl_to_spirv(GLenum gl_stage, const std::string& src,
                 glslang::TShader shader3(stage);
                 const char* s3 = source_relaxed.c_str();
                 shader3.setStrings(&s3, 1);
-                shader3.setEnvInput(glslang::EShSourceGlsl, stage, glslang::EShClientOpenGL, glsl_version);
+                // ROOT-CAUSE FIX (minimal blast radius): the input dialect MUST be
+                // EShClientVulkan for setEnvInputVulkanRulesRelaxed() to have any
+                // effect. glslang::TranslateEnvironment (ShaderLang.cpp) only copies
+                // environment->input.vulkanRulesRelaxed into spvVersion.vulkanRelaxed
+                // when the input dialect is EShClientVulkan:
+                //
+                //   case EShClientVulkan: spvVersion.vulkanRelaxed = env->input.vulkanRulesRelaxed; break;
+                //   case EShClientOpenGL: spvVersion.openGl = ...; // vulkanRelaxed NOT set -> stays false
+                //
+                // With EShClientOpenGL (the value previously passed here) the flag is
+                // silently dropped, so every `spvVersion.vulkan > 0 &&
+                // spvVersion.vulkanRelaxed` branch in glslang was dead code and this
+                // "relaxed" fallback was a no-op. Shaders that genuinely need relaxed
+                // Vulkan rules (e.g. layout(packed)/layout(shared) UBOs, direct
+                // gl_VertexID/gl_InstanceID use, GL-legacy builtins) then failed all
+                // three fallback paths -> linked=false -> prepare_draw skipped the draw
+                // -> black screen with audio, i.e. the reported "大量着色器编译报错".
+                //
+                // The output client stays EShClientOpenGL (as MobileGL's CompileForOpenGL
+                // path does, ShaderCompiler.cpp:193-195) and gl_VertexID/gl_InstanceID
+                // have already been renamed to gl_VertexIndex/gl_InstanceIndex by
+                // rewrite_desktop_builtins(), so the relaxed mode's 1-based GL semantics
+                // do not apply and Vulkan (0-based) semantics are kept. This is the same
+                // contract Shader.cpp documents for the strict path.
+                shader3.setEnvInput(glslang::EShSourceGlsl, stage, glslang::EShClientVulkan, glsl_version);
                 shader3.setEnvClient(glslang::EShClientOpenGL, glslang::EShTargetOpenGL_450);
                 shader3.setEnvTarget(glslang::EShTargetSpv, glslang::EShTargetSpv_1_5);
                 shader3.setEnvInputVulkanRulesRelaxed();  // key: accept GL legacy constructs
