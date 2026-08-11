@@ -207,6 +207,25 @@ int main(int argc, char** argv) {
     clear(GL_COLOR_BUFFER_BIT);
     CHECK(getError() == GL_NO_ERROR, "clear on offscreen FBO leaves no error");
 
+    /* ---- 控制组诊断：clear 到已知非零颜色并读回，隔离 readback/clear 路径 ----
+     * 若此读回返回 (25,51,76,255)（=0.1/0.2/0.3*255），说明 glClear+glReadPixels
+     * 整条 GPU 写读路径正常，后续 draw 读回全黑就指向 draw 本身；若此读回也是全 0，
+     * 说明 clear/readback 或离屏渲染目标本身有问题。 */
+    clearColor(0.1f, 0.2f, 0.3f, 1.0f);
+    clear(GL_COLOR_BUFFER_BIT);
+    finish();  /* 提交 clear 的 command buffer，确保 GPU 执行完毕 */
+    unsigned char ctrl[4] = {0,0,0,0};
+    readPixels(R / 2, C / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, ctrl);
+    CHECK(ctrl[0] == 25 && ctrl[1] == 51 && ctrl[2] == 76 && ctrl[3] == 255,
+          "CONTROL clear-to-(0.1,0.2,0.3,1.0) readback=(%d,%d,%d,%d) — clear+readback path %s",
+          ctrl[0], ctrl[1], ctrl[2], ctrl[3],
+          (ctrl[0]==25&&ctrl[1]==51&&ctrl[2]==76&&ctrl[3]==255) ? "OK" : "BROKEN");
+    /* 恢复黑色背景再继续 draw 测试 */
+    clearColor(0.0f, 0.0f, 0.0f, 0.0f);
+    clear(GL_COLOR_BUFFER_BIT);
+    finish();
+    CHECK(getError() == GL_NO_ERROR, "control clear/readback leaves no error");
+
     /* ---- shader 编译 + program 链接（glslang -> SPIR-V -> pipeline）-------- */
     const char* vsSrc = "#version 330 core\n"
                         "layout(location=0) in vec2 aPos;\n"
