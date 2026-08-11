@@ -177,6 +177,23 @@ void generate_mipmaps(GLuint name) {
         }
 
         if (newImage != VK_NULL_HANDLE && newMem != VK_NULL_HANDLE) {
+            // FIX (重建纹理采样黑屏 - CRITICAL cross-command-buffer 同步):
+            // old image 的 level0 数据通常由 glTexImage2D 记录到「主 command
+            // buffer」（backend_texture_upload → b->commandBuffer），并只在
+            // draw / glFinish 时才提交。而下面重建分支用独立的 one-shot command
+            // buffer 去 vkCmdCopyImage 读 old level0。若 one-shot 先于主 command
+            // buffer 提交执行，old image 的 level0 在 GPU 上还【未初始化】，
+            // copy 读到全 0 → 重建后的 mipmap 纹理 level0 即黑 → 采样黑屏。
+            //   对照：render_smoke 判别 E（单级无 mipmap 纹理）直接 draw 后才
+            // readPixels，upload 已被主 command buffer 提交，故采样白；判别
+            // 4a 的 sampTex 在 texImage2D 后立即 generateMipmap，主 command
+            // buffer 未提交，one-shot copy 读未初始化数据 → 采样黑。这正是
+            // 根因。
+            // 修复：在开始 one-shot copy 前先 safe_device_wait_idle() —— 它会
+            // 提交并等待主 command buffer（含 pending upload）完成，再重新
+            // begin 以便后续录制。这保证 old level0 数据 GPU 可见后 one-shot
+            // 才执行，同 queue 顺序提交亦无竞态。
+            safe_device_wait_idle();
             OneShotCtx c;
             if (begin_one_shot(c)) {
                 const VkImageLayout oldLayout = tex.currentLayout;
