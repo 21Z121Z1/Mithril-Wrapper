@@ -1805,12 +1805,34 @@ VkSampler backend_get_or_create_sampler(GLuint name, GLint min_filter, GLint mag
     mix((uint64_t)(uint32_t)wrap_t);
     mix((uint64_t)(uint32_t)wrap_r);
     mix(borderWhite ? 1ull : 0ull);
+    // FIX (GPU page fault root cause — sampler maxLod stale across rebuild):
+    // 采样器缓存 key 必须纳入该纹理当前实际拥有的 mip 层数。mipmap filter 的
+    // maxLod 在采样器创建时被 clamp 到 tex.levels-1（见下）。若 levels 不参与
+    // key，一旦纹理被 generate_mipmaps 重建 / glTexImage2D 重规范为不同的
+    // mip 层数，旧采样器仍按旧 levels 缓存，新采样请求会命中过时的 maxLod：
+    //   场景A: 先按 levels=1 缓存 maxLod=0，后重建为 11 层 → 永远只采 level0，
+    //          图集糊成低清（不崩但质量崩）。
+    //   场景B(致命): 先按 levels=11 缓存 maxLod=10，后重规范为 1 层，新 image/
+    //          view 只有 1 个 mip，采样器却请求 level 1..10 → A11/MoltenVK 读
+    //          未分配的 mip 层地址 → kIOGPUCommandBufferCallbackErrorPageFault，
+    //          静默 GPU 崩溃（与线上「atlas 创建后第一帧纯红 + page fault」吻合）。
+    // 修复：把 tex.levels 混入 pkey，levels 变化 → 自动 miss → 重建正确 maxLod
+    // 的采样器；旧采样器留在 entry.byParams 中由 defer_destroy_sampler_entry 按
+    // 需回收。这与 generate_mipmaps 重建后 tex.levels 更新严格同步，从根本上
+    // 消除「采样器 maxLod 与 image view 层数不一致」这一整类越界崩溃。
+    int keyLevels = 1;
+    {
+        auto& tex_tbl = mithril::vk::texture_table();
+        auto tit = tex_tbl.find(name);
+        if (tit != tex_tbl.end()) keyLevels = std::max(1, (int)tit->second.levels);
+    }
+    mix((uint64_t)(uint32_t)keyLevels);
 
     auto& tbl = mithril::vk::sampler_table();
     mithril::vk::SamplerEntry& entry = tbl[name];
     entry.name = name;
-    // 先查本参数缓存的采样器；命中直接返回。按参数缓存保证同一纹理名的
-    // 不同 filter/wrap 各持有一份采样器，互不干扰（旧实现只按纹理名缓存
+    // 先查本参数缓存 + 当前 levels 的采样器；命中直接返回。按参数缓存保证同一
+    // 纹理名的不同 filter/wrap 各持有一份采样器，互不干扰（旧实现只按纹理名缓存
     // 首个参数，正是纯红/GPU page fault 的根因）。
     auto pit = entry.byParams.find(pkey);
     if (pit != entry.byParams.end() && pit->second != VK_NULL_HANDLE) return pit->second;
