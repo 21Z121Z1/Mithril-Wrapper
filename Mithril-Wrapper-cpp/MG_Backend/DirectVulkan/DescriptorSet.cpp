@@ -582,14 +582,17 @@ void bind_program_descriptors(GLuint program, VkPipelineBindPoint bindPoint) {
     if (it == tbl.end()) return;
     ProgramResources& pr = it->second;
     int slot = b->currentFrame;
-    if (!pr.layoutsBuilt || pr.pipelineLayout == VK_NULL_HANDLE ||
-        pr.descriptorPools[slot] == VK_NULL_HANDLE) {
-        // Program not ready (layouts not built / no layout / no pool). Bail: the
-        // descriptors_bound() guard in backend_draw_* will drop the draw, which is
-        // safer than recording it with an unbound descriptor set (red + possible
-        // GPU page fault).
-        return;
-    }
+    // Empty-bindings programs FIRST: a program with no reflected descriptors
+    // (no UBO, no sampler — e.g. a trivial `#version 330 core` shader that only
+    // positions vertices and outputs a constant color) uses the process-wide
+    // empty pipeline layout, so pr.pipelineLayout and pr.descriptorPools[] stay
+    // VK_NULL_HANDLE (ensure_program_layouts returns early for empty bindings).
+    // Those NULLs are NOT a "not ready" state — they are the normal, correct
+    // state for such a program. If we let the layout/pool guard below run
+    // first, it would wrongly treat this program as unready and bail without
+    // calling set_descriptors_bound(true), leaving descriptorsBound=false so
+    // backend_draw_* drops every draw for this program -> nothing rasterizes
+    // (silent black framebuffer, no GL error). Handle it here instead.
     if (pr.bindings.empty()) {
         // No descriptor bindings reflected for this program -> its pipeline uses
         // the process-wide empty layout (zero descriptor sets). No
@@ -597,6 +600,14 @@ void bind_program_descriptors(GLuint program, VkPipelineBindPoint bindPoint) {
         // nothing bound. Mark the descriptor requirement as satisfied so the
         // descriptors_bound() guard does not wrongly drop these draws.
         mithril::vk::set_descriptors_bound(true);
+        return;
+    }
+    if (!pr.layoutsBuilt || pr.pipelineLayout == VK_NULL_HANDLE ||
+        pr.descriptorPools[slot] == VK_NULL_HANDLE) {
+        // Program not ready (layouts not built / no layout / no pool). Bail: the
+        // descriptors_bound() guard in backend_draw_* will drop the draw, which is
+        // safer than recording it with an unbound descriptor set (red + possible
+        // GPU page fault).
         return;
     }
 
