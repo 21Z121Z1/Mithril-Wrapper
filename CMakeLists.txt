@@ -316,13 +316,22 @@ if(APPLE)
     # framework bundle. Patch the load reference so libmithril.dylib looks
     # for "@rpath/libMoltenVK.dylib" instead — which is where Amethyst
     # places it at runtime.
-    add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
-        COMMAND install_name_tool -change
-            "@rpath/MoltenVK.framework/MoltenVK"
-            "@rpath/libMoltenVK.dylib"
-            "$<TARGET_FILE:${PROJECT_NAME}>"
-        COMMENT "Patching MoltenVK load path: @rpath/MoltenVK.framework/MoltenVK → @rpath/libMoltenVK.dylib"
-    )
+    #
+    # Only relevant on iOS: the iOS MoltenVK ships as a .framework bundle with
+    # that install name. A native macOS build (test-macos-smoke) links the
+    # Homebrew libMoltenVK.dylib, whose load reference is already the real
+    # dylib path — patching it to @rpath/libMoltenVK.dylib would break dyld
+    # resolution. install_name_tool -change would silently no-op (old string
+    # absent) but we keep the guard explicit so macOS keeps the true path.
+    if(IOS)
+        add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+            COMMAND install_name_tool -change
+                "@rpath/MoltenVK.framework/MoltenVK"
+                "@rpath/libMoltenVK.dylib"
+                "$<TARGET_FILE:${PROJECT_NAME}>"
+            COMMENT "Patching MoltenVK load path: @rpath/MoltenVK.framework/MoltenVK → @rpath/libMoltenVK.dylib"
+        )
+    endif()
     target_compile_definitions(${PROJECT_NAME} PRIVATE MITHRIL_VULKAN=1)
 else()
     target_link_libraries(${PROJECT_NAME} PRIVATE ${CMAKE_DL_LIBS})

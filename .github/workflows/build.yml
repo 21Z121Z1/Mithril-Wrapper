@@ -279,9 +279,18 @@ jobs:
         run: |
           DYLIB=$(find build -name 'libmithril.dylib' -type f | head -1)
           export DYLD_LIBRARY_PATH="$(brew --prefix)/lib"
+          echo "=== DYLIB: $DYLIB ==="
+          file "$DYLIB"
+          echo "=== otool -L (load deps) ==="
+          otool -L "$DYLIB" || true
+          echo "=== build gl_smoke ==="
           clang -std=c11 -O0 -Wall -Wextra \
             -IMithril-Wrapper-cpp/include \
             -o tests/gl_smoke tests/gl_smoke.c -ldl
-          output=$(./tests/gl_smoke "$DYLIB")
-          echo "$output"
-          echo "$output" | grep -q "GL SMOKE ALL PASSED"
+          echo "=== run gl_smoke ==="
+          set +e
+          ./tests/gl_smoke "$DYLIB"
+          rc=$?
+          set -e
+          echo "=== gl_smoke exit: $rc ==="
+          [ "$rc" -eq 0 ]
