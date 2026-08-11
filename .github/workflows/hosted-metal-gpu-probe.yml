@@ -174,11 +174,14 @@ jobs:
         run: |
           set -euo pipefail
           sdk="$(xcrun --sdk iphonesimulator --show-sdk-path)"
+          target_flags=(-target arm64-apple-ios16.0-simulator -isysroot "$sdk")
           for test_name in draw_smoke directmetal_fbo_smoke; do
-            xcrun --sdk iphonesimulator clang \
-              -target arm64-apple-ios16.0-simulator -isysroot "$sdk" \
-              -std=c11 -Wall -Wextra "tests/${test_name}.c" \
-              -o "$RUNNER_TEMP/${test_name}"
+            xcrun --sdk iphonesimulator clang "${target_flags[@]}" \
+              -std=c11 -Wall -Wextra -Dmain=mithril_smoke_main \
+              -c "tests/${test_name}.c" -o "$RUNNER_TEMP/${test_name}.o"
+            xcrun --sdk iphonesimulator clang "${target_flags[@]}" \
+              -std=c11 -Wall -Wextra .github/ci/SimulatorSmokeSentinel.c \
+              "$RUNNER_TEMP/${test_name}.o" -o "$RUNNER_TEMP/${test_name}"
           done
 
       - name: Package, install and launch DirectMetal smokes as Simulator apps
@@ -211,16 +214,40 @@ jobs:
             codesign --force --sign - --timestamp=none "$app/libmithril.dylib"
             codesign --force --sign - --timestamp=none "$app"
             xcrun simctl install "$udid" "$app"
+
+            local container sentinel output rc actual
+            container="$(xcrun simctl get_app_container "$udid" "$bundle" data)"
+            sentinel="$container/tmp/mithril-ci-result.txt"
+            rm -f "$sentinel"
+
             set +e
             output="$(SIMCTL_CHILD_MITHRIL_LIBRARY='@executable_path/libmithril.dylib' \
               SIMCTL_CHILD_MITHRIL_BACKEND=metal \
               SIMCTL_CHILD_MITHRIL_EXPECT_RENDERER='Mithril DirectMetal' \
+              SIMCTL_CHILD_MITHRIL_SIMULATOR_SUCCESS_MARKER="$expected" \
               xcrun simctl launch --console "$udid" "$bundle" 2>&1)"
             rc=$?
             set -e
             printf '%s\n' "$output"
             test "$rc" -eq 0
-            grep -Fq "$expected" <<<"$output"
+
+            for _ in $(seq 1 30); do
+              if [[ -f "$sentinel" ]]; then break; fi
+              sleep 1
+            done
+            if [[ ! -f "$sentinel" ]]; then
+              echo "::error::${test_name} exited without writing the Simulator success sentinel"
+              xcrun simctl spawn "$udid" log show --style compact --last 2m \
+                --predicate "process == '${test_name}'" || true
+              return 1
+            fi
+
+            actual="$(tr -d '\r\n' < "$sentinel")"
+            if [[ "$actual" != "$expected" ]]; then
+              echo "::error::${test_name} sentinel mismatch: expected '${expected}', got '${actual}'"
+              return 1
+            fi
+            echo "${test_name}: verified sandbox sentinel '${actual}'"
           }
           run_app draw_smoke com.mithril.ci.draw 'DRAW SMOKE ALL PASSED'
           run_app directmetal_fbo_smoke com.mithril.ci.fbo 'directmetal_fbo_smoke: PASS'
