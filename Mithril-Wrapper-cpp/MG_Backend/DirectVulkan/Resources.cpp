@@ -1213,23 +1213,42 @@ void backend_buffer_upload(GLuint name, GLintptr offset, const void* data, size_
         // 此路径在世界加载（Sodium 批量上传区块网格 + VRAM 压力下 staging 分配
         // 失败）时恰好触发，且无任何日志告警 —— 与线上症状完全吻合。
         //
-        // 修复：buffer 可能在飞且 staging 失败时，【禁止原地写入】。跳过本次
-        // 上传（丢弃该 range 的更新，带限流告警）。一次被丢弃的区块网格上传
-        // 最多导致某个 chunk 短暂缺失/闪烁，远比整个 GPU 设备 page fault 崩溃
-        // 好得多；下一帧 GL 重绘时会重新上传。绝不覆写 GPU 在飞的内存。
+        // 修复：buffer 可能在飞且 staging 失败时，【不静默丢弃】。静默丢弃会让
+        // GPU 继续读旧/未初始化的顶点数据 —— 对于 chunk 网格 / 全屏 quad 这类
+        // 关键缓冲，缺数据可能让 GPU 在 vkQueueSubmit 执行期间引用无效内容，
+        // 直接 kIOGPUCommandBufferCallbackErrorPageFault。参照 MobileGL
+        // OnSubData / OnFlushMappedRange 的 busy 分支：staging 失败时强制
+        // vkDeviceWaitIdle（让本 buffer 之前所有提交都完成、脱离在飞），再
+        // 安全原地写入 —— 数据必达 GPU，且绝不覆写仍在飞的字节。
         if (!mithril::vk::stage_buffer_range_copy(it->second,
                                                   (VkDeviceSize)offset, data,
                                                   (VkDeviceSize)size)) {
+            // FIX (staging 失败回退 - MobileGL OnSubData busy 分支):
+            // 先强制同步：safe_device_wait_idle 提交当前录制的命令缓冲并等待
+            // 全部完成，刷新 completedSerial 水位线，使本 buffer 不再在飞。
+            // 与 Device.cpp 1498 注释的坑不同：这里【不 drain disposal queue】，
+            // 只等 idle，因此不会释放被描述符引用的资源，无 UAF。代价是本次
+            // mid-frame 同步（罕见：仅当 staging arena 溢出且临时 staging 分配
+            // 在显存压力下 OOM），对性能影响可忽略。
+            mithril::vk::safe_device_wait_idle();
+            if (!mithril::vk::buffer_maybe_inflight(it->second)) {
+                // 已脱离在飞：安全原地写入，数据必达 GPU。
+                void* dst = nullptr;
+                vkMapMemory(b->device, it->second.memory, (VkDeviceSize)offset,
+                            (VkDeviceSize)size, 0, &dst);
+                if (dst) { std::memcpy(dst, data, (size_t)size); vkUnmapMemory(b->device, it->second.memory); }
+                mithril::vk::stamp_buffer_write(it->second);
+                return;
+            }
+            // 极端兜底（idle 后仍异常在飞）：丢弃并告警，绝不原地覆写。
             static int uploadDropCount = 0;
             uploadDropCount++;
             if (uploadDropCount <= 5 || uploadDropCount % 200 == 0) {
                 MITHRIL_LOG_WARN("vk", "backend_buffer_upload: buffer %u (offset %lld, "
-                                  "%zu bytes) may be in flight and staging FAILED — "
-                                  "DROPPING upload instead of unsafe in-place write "
-                                  "(drop #%d)",
+                                  "%zu bytes) still in flight after safe_device_wait_idle "
+                                  "and staging FAILED — DROPPING upload (drop #%d)",
                                   name, (long long)offset, size, uploadDropCount);
             }
-            // 不 stamp：本次更新未真正写入 GPU buffer，水位线保持原样。
             return;
         }
         mithril::vk::stamp_buffer_write(it->second);
