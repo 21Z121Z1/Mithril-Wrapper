@@ -185,7 +185,7 @@ jobs:
           set -euo pipefail
           sdk="$(xcrun --sdk iphonesimulator --show-sdk-path)"
           target_flags=(-target arm64-apple-ios16.0-simulator -isysroot "$sdk")
-          for test_name in draw_smoke provoking_vertex_smoke packed_vertex_attrib_smoke directmetal_fbo_smoke stencil_persistence_smoke; do
+          for test_name in draw_smoke provoking_vertex_smoke packed_vertex_attrib_smoke fbo_smoke directmetal_fbo_smoke stencil_persistence_smoke; do
             xcrun --sdk iphonesimulator clang "${target_flags[@]}" \
               -std=c11 -Wall -Wextra -Dmain=mithril_smoke_main \
               -c "tests/${test_name}.c" -o "$RUNNER_TEMP/${test_name}.o"
@@ -262,6 +262,7 @@ jobs:
           run_app draw_smoke com.mithril.ci.draw 'DRAW SMOKE ALL PASSED'
           run_app provoking_vertex_smoke com.mithril.ci.provoking 'provoking_vertex_smoke: PASS'
           run_app packed_vertex_attrib_smoke com.mithril.ci.packedattrib 'packed_vertex_attrib_smoke: PASS'
+          run_app fbo_smoke com.mithril.ci.fbofull 'FBO SMOKE ALL PASSED'
           run_app directmetal_fbo_smoke com.mithril.ci.fbo 'directmetal_fbo_smoke: PASS'
           run_app stencil_persistence_smoke com.mithril.ci.stencil 'stencil_persistence_smoke: PASS'
 

@@ -70,18 +70,21 @@ bool EncodePresentationPixelCapture(id<CAMetalDrawable> drawable,
 
     id<MTLTexture> texture = drawable.texture;
     id<MTLTexture> reference = g_presentation_capture.reference;
+    auto& engine = GetEngine();
     if (!texture || texture.framebufferOnly || !reference ||
+        !engine.color ||
         g_presentation_capture.x >= texture.width ||
         g_presentation_capture.y >= texture.height ||
         g_presentation_capture.x >= reference.width ||
-        g_presentation_capture.y >= reference.height) {
+        g_presentation_capture.y >= reference.height ||
+        g_presentation_capture.x >= engine.color.width ||
+        g_presentation_capture.y >= engine.color.height) {
         g_presentation_capture.reference = nil;
         g_presentation_capture.readback = nil;
         g_presentation_capture.command = nil;
         return false;
     }
 
-    auto& engine = GetEngine();
     id<MTLBuffer> readback = [engine.device
         newBufferWithLength:768 options:MTLResourceStorageModeShared];
     id<MTLBlitCommandEncoder> blit = [command blitCommandEncoder];
@@ -114,7 +117,9 @@ bool EncodePresentationPixelCapture(id<CAMetalDrawable> drawable,
               sourceSlice:0
               sourceLevel:0
              sourceOrigin:MTLOriginMake(g_presentation_capture.x,
-                                        g_presentation_capture.y, 0)
+                                        engine.color.height - 1 -
+                                            g_presentation_capture.y,
+                                        0)
                sourceSize:MTLSizeMake(1, 1, 1)
                  toBuffer:readback
         destinationOffset:512
@@ -160,10 +165,14 @@ bool EncodeFullscreenPresentation(id<MTLCommandBuffer> command,
         }
         const uint32_t row_pixels =
             static_cast<uint32_t>(source_row_bytes / 4);
+        const uint32_t source_height = static_cast<uint32_t>(target.height);
         [encoder setFragmentBuffer:source_buffer offset:0 atIndex:0];
         [encoder setFragmentBytes:&row_pixels
                            length:sizeof(row_pixels)
                           atIndex:1];
+        [encoder setFragmentBytes:&source_height
+                           length:sizeof(source_height)
+                          atIndex:2];
     }
     [encoder drawPrimitives:MTLPrimitiveTypeTriangle
                 vertexStart:0
@@ -242,14 +251,18 @@ bool EnsurePresentPipeline() {
         @"    constexpr sampler nearest_pixel(coord::pixel,\n"
         @"                                    address::clamp_to_edge,\n"
         @"                                    filter::nearest);\n"
-        @"    return source.sample(nearest_pixel, position.xy);\n"
+        @"    float2 source_position = float2(\n"
+        @"        position.x, float(source.get_height()) - position.y);\n"
+        @"    return source.sample(nearest_pixel, source_position);\n"
         @"}\n"
         @"\n"
         @"fragment float4 mithril_present_buffer(\n"
         @"    float4 position [[position]],\n"
         @"    const device uchar4* source [[buffer(0)]],\n"
-        @"    constant uint& row_pixels [[buffer(1)]]) {\n"
+        @"    constant uint& row_pixels [[buffer(1)]],\n"
+        @"    constant uint& source_height [[buffer(2)]]) {\n"
         @"    uint2 pixel = uint2(position.xy);\n"
+        @"    pixel.y = source_height - 1 - pixel.y;\n"
         @"    return float4(source[pixel.y * row_pixels + pixel.x]) / 255.0;\n"
         @"}\n"
         @"\n"

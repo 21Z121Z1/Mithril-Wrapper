@@ -38,6 +38,7 @@
 #define EGL_HEIGHT 0x3056
 #define EGL_DRAW 0x3059
 #define GL_COLOR_BUFFER_BIT 0x00004000
+#define GL_SCISSOR_TEST 0x0C11
 #define GL_NO_ERROR 0
 
 typedef void* (*fn_eglGetDisplay)(intptr_t);
@@ -61,6 +62,9 @@ typedef int (*fn_eglTerminate)(void*);
 typedef int (*fn_eglGetError)(void);
 typedef void (*fn_glClearColor)(float, float, float, float);
 typedef void (*fn_glClear)(unsigned int);
+typedef void (*fn_glEnable)(unsigned int);
+typedef void (*fn_glDisable)(unsigned int);
+typedef void (*fn_glScissor)(int, int, int, int);
 typedef void (*fn_glFinish)(void);
 typedef unsigned int (*fn_glGetError)(void);
 typedef bool (*fn_mithrilTestArmNextPresentedPixel)(uint32_t, uint32_t);
@@ -138,6 +142,9 @@ int main(void) {
         LOAD(fn_eglGetError, eglGetError);
         LOAD(fn_glClearColor, glClearColor);
         LOAD(fn_glClear, glClear);
+        LOAD(fn_glEnable, glEnable);
+        LOAD(fn_glDisable, glDisable);
+        LOAD(fn_glScissor, glScissor);
         LOAD(fn_glFinish, glFinish);
         LOAD(fn_glGetError, glGetError);
         LOAD(fn_mithrilTestArmNextPresentedPixel,
@@ -152,7 +159,8 @@ int main(void) {
                   eglGetCurrentContext && eglGetCurrentSurface &&
                   eglQuerySurface && eglSwapBuffers && eglDestroySurface &&
                   eglDestroyContext && eglReleaseThread && eglTerminate &&
-                  eglGetError && glClearColor && glClear && glFinish &&
+                  eglGetError && glClearColor && glClear && glEnable &&
+                  glDisable && glScissor && glFinish &&
                   glGetError && mithrilTestArmNextPresentedPixel &&
                   mithrilTestReadPresentedPixels,
               "Amethyst EGL/GL symbol contract resolves");
@@ -331,6 +339,77 @@ int main(void) {
               height);
         CHECK(glGetError() == GL_NO_ERROR && eglGetError() == EGL_SUCCESS,
               "resized present completes without GL/EGL errors");
+
+        /* The DirectMetal default framebuffer is stored in GL row order
+         * (row zero is bottom); only the CAMetalLayer presentation seam may
+         * convert it to Apple's top-origin drawable order.  Use asymmetric
+         * halves so a global or missing Y flip cannot pass as a solid clear. */
+        glEnable(GL_SCISSOR_TEST);
+        glScissor(0, 0, 56, 48);
+        glClearColor(1.f, 0.f, 0.f, 1.f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glScissor(0, 48, 56, 48);
+        glClearColor(0.f, 0.f, 1.f, 1.f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glDisable(GL_SCISSOR_TEST);
+
+        CHECK(mithrilTestArmNextPresentedPixel(28, 8),
+              "top-oriented drawable capture is armed");
+        CHECK(eglSwapBuffers(display, surface) == EGL_TRUE,
+              "asymmetric default framebuffer presents");
+        glFinish();
+        memset(presented, 0, sizeof(presented));
+        memset(reference, 0, sizeof(reference));
+        memset(source, 0, sizeof(source));
+        captured = mithrilTestReadPresentedPixels(presented, reference, source);
+        CHECK(captured && PixelMatches(source, 0, 0, 255, 255),
+              "drawable top maps to the GL top blue source row "
+              "(%u,%u,%u,%u)", source[0], source[1], source[2], source[3]);
+        reference_matches =
+            captured && PixelMatches(reference, 255, 0, 0, 255);
+        CHECK(reference_matches,
+              "presentation reference places blue at the drawable top "
+              "(%u,%u,%u,%u)", reference[0], reference[1], reference[2],
+              reference[3]);
+        drawable_matches =
+            captured && PixelMatches(presented, 255, 0, 0, 255);
+        paravirtual_unreadable =
+            reference_matches && PixelIsZero(presented) &&
+            strstr(layer.device.name.UTF8String, "Paravirtual") != nullptr;
+        CHECK(drawable_matches || paravirtual_unreadable,
+              "physical drawable top is blue or Paravirtual readback is "
+              "explicitly unavailable (%u,%u,%u,%u)", presented[0],
+              presented[1], presented[2], presented[3]);
+
+        CHECK(mithrilTestArmNextPresentedPixel(28, 87),
+              "bottom-oriented drawable capture is armed");
+        CHECK(eglSwapBuffers(display, surface) == EGL_TRUE,
+              "unchanged asymmetric framebuffer re-presents");
+        glFinish();
+        memset(presented, 0, sizeof(presented));
+        memset(reference, 0, sizeof(reference));
+        memset(source, 0, sizeof(source));
+        captured = mithrilTestReadPresentedPixels(presented, reference, source);
+        CHECK(captured && PixelMatches(source, 255, 0, 0, 255),
+              "drawable bottom maps to the GL bottom red source row "
+              "(%u,%u,%u,%u)", source[0], source[1], source[2], source[3]);
+        reference_matches =
+            captured && PixelMatches(reference, 0, 0, 255, 255);
+        CHECK(reference_matches,
+              "presentation reference places red at the drawable bottom "
+              "(%u,%u,%u,%u)", reference[0], reference[1], reference[2],
+              reference[3]);
+        drawable_matches =
+            captured && PixelMatches(presented, 0, 0, 255, 255);
+        paravirtual_unreadable =
+            reference_matches && PixelIsZero(presented) &&
+            strstr(layer.device.name.UTF8String, "Paravirtual") != nullptr;
+        CHECK(drawable_matches || paravirtual_unreadable,
+              "physical drawable bottom is red or Paravirtual readback is "
+              "explicitly unavailable (%u,%u,%u,%u)", presented[0],
+              presented[1], presented[2], presented[3]);
+        CHECK(glGetError() == GL_NO_ERROR && eglGetError() == EGL_SUCCESS,
+              "asymmetric presentation leaves GL/EGL error state clean");
 
         CHECK(eglMakeCurrent(display, nullptr, nullptr, nullptr) == EGL_TRUE,
               "context is released from the thread");

@@ -314,10 +314,14 @@ int main(void) {
           "LAST triangle fan selects i+2 (%u,%u,%u,%u)",
           fan_pixel[0], fan_pixel[1], fan_pixel[2], fan_pixel[3]);
 
+    /* y=17/64 maps to the centre of framebuffer row 40 in a 64px viewport.
+     * Avoid putting the one-pixel Metal line exactly on a pixel boundary;
+     * this test discriminates provoking color, not implementation-defined
+     * tie-breaking between adjacent line-fragment diamonds. */
     const float line_vertices[] = {
-        -0.9f, 0.25f, 1.f, 0.f, 0.f,
-         0.0f, 0.25f, 0.f, 1.f, 0.f,
-         0.9f, 0.25f, 0.f, 0.f, 1.f,
+        -0.9f, 0.265625f, 1.f, 0.f, 0.f,
+         0.0f, 0.265625f, 0.f, 1.f, 0.f,
+         0.9f, 0.265625f, 0.f, 0.f, 1.f,
     };
     bufferData(GL_ARRAY_BUFFER, sizeof(line_vertices), line_vertices,
                GL_STATIC_DRAW);

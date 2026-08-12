@@ -902,6 +902,13 @@ bool TranslateStage(const std::vector<uint32_t>& words,
 
         auto common_options = compiler.get_common_options();
         common_options.vertex.fixup_clipspace = true;
+        // Store every GL framebuffer in GL row order: texture row zero is the
+        // framebuffer's bottom row.  Metal raster targets are top-origin, so
+        // flip only the generated vertex position; texture coordinates and
+        // fragment outputs remain untouched.  The CAMetalLayer presentation
+        // seam converts this GL storage order back to display row order.
+        common_options.vertex.flip_vert_y =
+            expected_model == spv::ExecutionModelVertex;
         compiler.set_common_options(common_options);
 
         const std::string source = compiler.compile();
@@ -1450,23 +1457,23 @@ void ApplyDynamicState(id<MTLRenderCommandEncoder> encoder,
                        const backend::DynamicState& dynamic,
                        NSUInteger target_width, NSUInteger target_height) {
     const double vx = std::clamp<double>(dynamic.viewport[0], 0, target_width);
-    const double vy_bottom = std::clamp<double>(dynamic.viewport[1], 0, target_height);
+    const double vy = std::clamp<double>(dynamic.viewport[1], 0, target_height);
     const double vw = std::clamp<double>(dynamic.viewport[2], 0, target_width - vx);
-    const double vh = std::clamp<double>(dynamic.viewport[3], 0, target_height - vy_bottom);
-    MTLViewport viewport{vx, target_height - (vy_bottom + vh), vw, vh, 0.0, 1.0};
+    const double vh = std::clamp<double>(dynamic.viewport[3], 0, target_height - vy);
+    MTLViewport viewport{vx, vy, vw, vh, 0.0, 1.0};
     [encoder setViewport:viewport];
 
     MTLScissorRect scissor{0, 0, target_width, target_height};
     if (state.scissor_test) {
         const NSUInteger sx = std::clamp<NSInteger>((NSInteger)dynamic.scissor[0], 0,
                                                      (NSInteger)target_width);
-        const NSUInteger sy_bottom = std::clamp<NSInteger>((NSInteger)dynamic.scissor[1], 0,
-                                                            (NSInteger)target_height);
+        const NSUInteger sy = std::clamp<NSInteger>((NSInteger)dynamic.scissor[1], 0,
+                                                     (NSInteger)target_height);
         const NSUInteger sw = std::min<NSUInteger>((NSUInteger)std::max(0.f, dynamic.scissor[2]),
                                                     target_width - sx);
         const NSUInteger sh = std::min<NSUInteger>((NSUInteger)std::max(0.f, dynamic.scissor[3]),
-                                                    target_height - sy_bottom);
-        scissor = {sx, target_height - (sy_bottom + sh), sw, sh};
+                                                    target_height - sy);
+        scissor = {sx, sy, sw, sh};
     }
     [encoder setScissorRect:scissor];
 
@@ -1477,7 +1484,7 @@ void ApplyDynamicState(id<MTLRenderCommandEncoder> encoder,
     }
     [encoder setCullMode:cull];
     [encoder setFrontFacingWinding:state.front_face == GL_CCW
-        ? MTLWindingCounterClockwise : MTLWindingClockwise];
+        ? MTLWindingClockwise : MTLWindingCounterClockwise];
     [encoder setTriangleFillMode:state.polygon_mode == GL_LINE
         ? MTLTriangleFillModeLines : MTLTriangleFillModeFill];
     [encoder setDepthBias:state.poly_offset_units
@@ -1681,7 +1688,7 @@ bool EncodeClear(id<MTLRenderCommandEncoder> encoder,
             0, target.height);
         if (x1 <= x0 || y1 <= y0) return true;
         scissor = {static_cast<NSUInteger>(x0),
-                   target.height - static_cast<NSUInteger>(y1),
+                   static_cast<NSUInteger>(y0),
                    static_cast<NSUInteger>(x1 - x0),
                    static_cast<NSUInteger>(y1 - y0)};
     }
@@ -2633,7 +2640,7 @@ void ReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, void* output) {
         for (GLsizei row = 0; row < height; ++row) {
             const GLint gl_y = y + row;
             if (gl_y < 0 || gl_y >= (GLint)read_target.height) continue;
-            const GLint src_y = (GLint)read_target.height - 1 - gl_y;
+            const GLint src_y = gl_y;
             const GLint left = std::max<GLint>(x, 0);
             const GLint right = std::min<GLint>(x + width, (GLint)read_target.width);
             if (left >= right) continue;
@@ -2842,9 +2849,9 @@ void BlitFramebuffer(uint64_t src_id, uint64_t dst_id,
     id<MTLCommandBuffer> command = [engine.queue commandBuffer];
     id<MTLBlitCommandEncoder> blit = [command blitCommandEncoder];
     const NSUInteger source_x = std::min(sx0, sx1);
-    const NSUInteger source_y = source.height - std::max(sy0, sy1);
+    const NSUInteger source_y = std::min(sy0, sy1);
     const NSUInteger destination_x = std::min(dx0, dx1);
-    const NSUInteger destination_y = destination.height - std::max(dy0, dy1);
+    const NSUInteger destination_y = std::min(dy0, dy1);
     const AttachmentSelection& source_selection =
         source.color_selections[source_index];
     const AttachmentSelection& destination_selection =

@@ -5,14 +5,14 @@ not considered supported merely because it is exported. Update this document
 from source plus executable evidence whenever a capability changes.
 
 Snapshot: 2026-08-12, based on
-`codex/autonomous-direct-metal-next@3f46ed7` plus the packed-current-attribute
+`codex/autonomous-direct-metal-next@684ae7a` plus the framebuffer-orientation
 work that follows that base.
 
 Reference heads inspected for this snapshot:
 
 - `origin/feature/direct-metal@ca05c06` and
   `origin/feature/direct-metal-ios-amethyst@0a3c678`;
-- `uniaball/main@49c7e65`;
+- `uniaball/main@e04f5a4`;
 - `herbrine/main@ddc9c3d`,
   `herbrine/implement-gl33-core-renderer@9778de1`, `herbrine/fix@36b6913`,
   and the remaining drawable/black-screen experiment branches;
@@ -34,7 +34,7 @@ Reference heads inspected for this snapshot:
 | API family | DirectMetal status | Current execution evidence | Remaining semantic boundary / highest-value gap |
 | --- | --- | --- | --- |
 | EGL config/context/window surface | partial | `contract_smoke`, `amethyst_egl_smoke` | macOS `CAMetalLayer` presentation is covered through captured drawable pixels. Real iPhoneOS lifecycle, multiple contexts/surfaces, background/resume, and current Amethyst main integration are untested. |
-| Default framebuffer size/present | partial | `amethyst_egl_smoke` source/reference/drawable capture on direct and buffer-backed paths | `eglSwapBuffers` appends RGBA-to-BGRA presentation to the pending GL frame command buffer, submits without an implicit CPU wait, and synchronizes non-square `drawableSize` changes before drawable acquisition. A one-time, current-size byte probe selects direct render-target sampling when exact; if and only if direct fails while texture→private buffer→fragment `uchar4` passes, the backend reuses one 256-byte-row-aligned compatibility buffer. Both failures reject surface creation. Physical Apple GPU runs require source, reference, and real drawable bytes; Apple Paravirtual may skip only unreadable all-zero drawable bytes after source/reference pass. Logical size vs UIKit scale, visible WindowServer/real-device presentation, pre-flushed-frame persistence, nil drawable recovery, and surface replacement remain untested. |
+| Default framebuffer size/present | partial | `amethyst_egl_smoke` asymmetric source/reference/drawable capture on direct and buffer-backed paths | `eglSwapBuffers` appends RGBA-to-BGRA presentation to the pending GL frame command buffer, submits without an implicit CPU wait, and synchronizes non-square `drawableSize` changes before drawable acquisition. All GL targets keep row zero as the GL bottom; only the CAMetalLayer seam converts that storage to Apple's top-origin display order. Top-blue/bottom-red pixels now verify both ends after resize. A one-time, current-size byte probe selects direct render-target sampling when exact; if and only if direct fails while texture→private buffer→fragment `uchar4` passes, the backend reuses one 256-byte-row-aligned compatibility buffer. Both failures reject surface creation. Physical Apple GPU runs require source, reference, and real drawable bytes; Apple Paravirtual may skip only unreadable all-zero drawable bytes after source/reference pass. Logical size vs UIKit scale, visible WindowServer/real-device presentation, pre-flushed-frame persistence, nil drawable recovery, and surface replacement remain untested. |
 | Clear/viewport/scissor | exact for tested color/depth/stencil and masks; partial overall | `state_smoke`, `fbo_smoke`, `directmetal_fbo_smoke`, `query_smoke` | Conditional draw, `glClear`, and `glClearBuffer*` now consume real occlusion results. Per-draw-buffer indexed state and every integer clear format remain incomplete. |
 | Depth/stencil/blend/cull/polygon | partial | `fbo_smoke`, `stencil_persistence_smoke` pixel assertions | Basic depth, stencil, blend, cull, front-face and line polygon mode execute. Default and packed offscreen depth/stencil targets preserve stencil across completed Metal command buffers. Blend enum validation, independent indexed blend/masks, point polygon mode, and several uncommon factors are incomplete or rejected. |
 | Multisample/sample/raster state | partial / silent-risk | MSAA FBO and `sampler2DMS` cases in `fbo_smoke` | `glGetMultisamplefv` is a stub. Sample coverage/mask, alpha-to-coverage, rasterizer discard, dithering, logic op, program point size and line/point width are shadowed but are not all materialized by DirectMetal. Do not count state getters as execution support. |
@@ -47,8 +47,8 @@ Reference heads inspected for this snapshot:
 | 2D textures, mipmaps, pixel store | partial | `texture_smoke`, `sampler_smoke`, PBO cases | Common RGBA8 uploads, subimages, mips and pack/unpack offsets execute. The legal GL format/type matrix, compressed native formats, immutable storage extensions, and 3D mip-chain sampling are incomplete. |
 | Sampler objects / multiple samplers | exact for tested GL 3.3 state | `sampler_smoke`, `sampler_array_smoke` plus binding diagnostics | Separate sampler lifetime, wrap/filter/compare, cross-stage use, fixed arrays and deletion-after-draw execute. Arbitrary/integer border color and nonzero LOD bias fail closed. |
 | Buffer textures | partial | `buffer_texture_smoke` | Typed `RGBA8/R8I/R8UI/R32I/R32UI/R32F` execute with buffer versioning. Other legal texel formats fail closed. |
-| FBO / MRT / MSAA / subresources | partial | `fbo_smoke`, `directmetal_fbo_smoke`, `stencil_persistence_smoke` | Color/depth/renderbuffer FBOs, MRT, 4x resolve, mip selection, 2D-array slice, 3D depth-plane readback and packed depth/stencil persistence execute. Scaled/filtered, depth/stencil and multisample blits plus multisample array/depth textures are unsupported. |
-| Readback | partial | draw/texture/FBO smokes | RGBA8 framebuffer readback and selected PBO layouts execute. The complete GL format/type conversion matrix and depth/stencil readback are incomplete. |
+| FBO / MRT / MSAA / subresources | partial | `fbo_smoke`, `directmetal_fbo_smoke`, `stencil_persistence_smoke` | Color/depth/renderbuffer FBOs, MRT, 4x resolve, mip selection, 2D-array slice, 3D depth-plane readback and packed depth/stencil persistence execute. An asymmetric draw proves framebuffer row 4/27 equals texture `texelFetch` row 4/27, and asymmetric FBO→FBO/default blits retain bottom/top identity. Scaled/filtered, depth/stencil and multisample blits plus multisample array/depth textures are unsupported. |
+| Readback | partial | draw/texture/FBO smokes | RGBA8 default and offscreen framebuffer readback use the same GL row order and selected PBO layouts execute. The complete GL format/type conversion matrix and depth/stencil readback are incomplete. |
 | GLsync | exact for current single-context queue contract | `sync_smoke` | Fence submission, finite/infinite client wait, server wait and deletion lifetime execute without an unconditional CPU drain. Cross-context sharing is unclaimed. |
 | Occlusion query | exact for one active occlusion target | `query_smoke` | Samples-passed/any-samples-passed, reuse, availability, multi-command-buffer aggregation and deletion lifetime execute. Simultaneous overlap of both occlusion target classes fails closed. |
 | Conditional render | exact for completed occlusion results | `query_smoke` real Metal pixel assertions | WAIT/BY_REGION_WAIT block for the result; NO_WAIT modes execute while unavailable and use a completed result when observable. Draw, `glClear`, and `glClearBuffer*` are gated. |
@@ -95,11 +95,19 @@ fail-closed path; it must not be marked supported by symbol count.
   failure. DirectMetal keeps its GL default target RGBA and uses a BGRA render
   pipeline rather than adopting Vulkan target retargeting; the drawable pixel
   test guards that conversion. Surface interruption/recovery remains queued.
+- Uniaball `e04f5a4` adds first-query physical sizing, D32S8 consistency and
+  viewport Y conversion after an iPhone X black/top-left render. DirectMetal
+  already initializes from `CAMetalLayer.drawableSize` and uses native
+  `Depth32Float_Stencil8`; its missing requirement was asymmetric row identity.
+  DirectMetal now keeps every GL target in bottom-origin GL storage order and
+  converts only at CAMetalLayer presentation, with draw/read/texel/blit and
+  top/bottom drawable pixels as permanent guards.
 - Herbrine's black/red-screen history identifies permanent test targets:
   drawable size, default-vs-offscreen Y orientation, render area bounds,
   attachment replacement, sampler binding and presentation lifetime. Existing
-  macOS smokes cover sampler binding, drawable resize and uniform-color
-  presentation; asymmetric orientation and lifecycle interruption remain open.
+  macOS smokes cover sampler binding, drawable resize, asymmetric
+  default/offscreen orientation and presentation. Lifecycle interruption
+  remains open.
 - Amethyst main currently creates a `CAMetalLayer` and forwards that layer to
   EGL, but its main branch does not expose Mithril as a selectable renderer.
   The `Amethyst-iOS-MyRemastered` branch is integration reference evidence,
