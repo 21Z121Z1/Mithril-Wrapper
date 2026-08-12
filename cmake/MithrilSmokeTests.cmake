@@ -1,31 +1,16 @@
 # Native smoke-test registration shared by local CTest and CI.
 #
-# Keep the renderer tests pointed at the artifact produced by this build. The
-# repository-level output/ directory remains the default deliverable location
-# for compatibility with existing scripts, while build/output contains stable
-# aliases used only by tests. This prevents CTest from accidentally dlopening a
-# stale artifact left by another build directory or platform lane.
+# Tests always dlopen a build-local alias that points at the exact target from
+# this configure. This prevents a stale repository-level output artifact from
+# satisfying a DirectMetal regression lane.
 
 if(NOT BUILD_TESTING OR MITHRIL_IOS)
     return()
 endif()
 
-set(_mithril_test_runtime_dir "${CMAKE_CURRENT_BINARY_DIR}/output")
+set(_mithril_test_runtime_dir "${CMAKE_CURRENT_BINARY_DIR}/runtime")
 set(_mithril_test_binary_dir "${CMAKE_CURRENT_BINARY_DIR}/tests")
 file(MAKE_DIRECTORY "${_mithril_test_runtime_dir}" "${_mithril_test_binary_dir}")
-
-add_custom_command(TARGET mithril POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E rm -f
-        "${_mithril_test_runtime_dir}/libmithril.dylib"
-        "${_mithril_test_runtime_dir}/libmithril.so"
-    COMMAND ${CMAKE_COMMAND} -E create_symlink
-        "$<TARGET_FILE:mithril>"
-        "${_mithril_test_runtime_dir}/libmithril.dylib"
-    COMMAND ${CMAKE_COMMAND} -E create_symlink
-        "$<TARGET_FILE:mithril>"
-        "${_mithril_test_runtime_dir}/libmithril.so"
-    COMMENT "Preparing build-local Mithril runtime aliases for CTest"
-    VERBATIM)
 
 set(_mithril_vulkan_smokes
     contract_smoke
@@ -65,19 +50,38 @@ set(_mithril_directmetal_smokes
     fbo_smoke
     directmetal_fbo_smoke)
 
-if(APPLE)
+if(APPLE AND TARGET mithril_direct)
+    set(_mithril_runtime_target mithril_direct)
+    set(_mithril_runtime_name "libmithril.dylib")
     set(_mithril_enabled_smokes ${_mithril_directmetal_smokes})
     set(_mithril_smoke_labels "directmetal;smoke")
     set(_mithril_smoke_environment
-        "MITHRIL_BACKEND=metal;MITHRIL_EXPECT_RENDERER=Mithril DirectMetal;MITHRIL_LIBRARY=./output/libmithril.dylib")
-elseif(UNIX)
+        "MITHRIL_BACKEND=metal;MITHRIL_EXPECT_RENDERER=Mithril DirectMetal;MITHRIL_LIBRARY=./runtime/libmithril.dylib")
+elseif(TARGET mithril_legacy)
+    set(_mithril_runtime_target mithril_legacy)
+    if(APPLE)
+        set(_mithril_runtime_name "libmithril-vulkan.dylib")
+        set(_mithril_library_env "./runtime/libmithril-vulkan.dylib")
+    else()
+        set(_mithril_runtime_name "libmithril.so")
+        set(_mithril_library_env "./runtime/libmithril.so")
+    endif()
     set(_mithril_enabled_smokes ${_mithril_vulkan_smokes})
     set(_mithril_smoke_labels "vulkan;smoke")
     set(_mithril_smoke_environment
-        "MITHRIL_BACKEND=vulkan;MITHRIL_LIBRARY=./output/libmithril.so")
+        "MITHRIL_BACKEND=vulkan;MITHRIL_LIBRARY=${_mithril_library_env}")
 else()
-    set(_mithril_enabled_smokes)
+    return()
 endif()
+
+add_custom_command(TARGET ${_mithril_runtime_target} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E rm -f
+        "${_mithril_test_runtime_dir}/${_mithril_runtime_name}"
+    COMMAND ${CMAKE_COMMAND} -E create_symlink
+        "$<TARGET_FILE:${_mithril_runtime_target}>"
+        "${_mithril_test_runtime_dir}/${_mithril_runtime_name}"
+    COMMENT "Preparing build-local Mithril runtime alias for CTest"
+    VERBATIM)
 
 foreach(_smoke IN LISTS _mithril_enabled_smokes)
     set(_target "mithril_test_${_smoke}")
@@ -95,7 +99,7 @@ foreach(_smoke IN LISTS _mithril_enabled_smokes)
         _smoke STREQUAL "uniform_array_smoke"))
         target_link_libraries(${_target} PRIVATE m)
     endif()
-    add_dependencies(${_target} mithril)
+    add_dependencies(${_target} ${_mithril_runtime_target})
 
     add_test(NAME "${_smoke}" COMMAND "$<TARGET_FILE:${_target}>")
     set_tests_properties("${_smoke}" PROPERTIES
@@ -105,6 +109,9 @@ foreach(_smoke IN LISTS _mithril_enabled_smokes)
         TIMEOUT 120)
 endforeach()
 
+unset(_mithril_runtime_target)
+unset(_mithril_runtime_name)
+unset(_mithril_library_env)
 unset(_mithril_enabled_smokes)
 unset(_mithril_directmetal_smokes)
 unset(_mithril_vulkan_smokes)

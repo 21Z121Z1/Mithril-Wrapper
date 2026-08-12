@@ -1,6 +1,8 @@
 #include "backend.h"
 
+#if !defined(MITHRIL_DIRECT_ONLY)
 #include <vk/engine.h>
+#endif
 
 #include <util/log.h>
 
@@ -17,6 +19,19 @@ namespace {
 
 Kind ResolveKind() {
     const char* requested = std::getenv("MITHRIL_BACKEND");
+
+#if defined(MITHRIL_DIRECT_ONLY)
+    if (requested && *requested && std::strcmp(requested, "metal") != 0) {
+        ML_LOG_ERROR("backend: '%s' requested from a DirectMetal-only build", requested);
+        return Kind::Unavailable;
+    }
+#if defined(MITHRIL_HAS_DIRECT_METAL)
+    return Kind::DirectMetal;
+#else
+    ML_LOG_ERROR("backend: DirectMetal-only build has no Metal backend");
+    return Kind::Unavailable;
+#endif
+#else
     if (requested && std::strcmp(requested, "vulkan") == 0) return Kind::Vulkan;
     if (requested && std::strcmp(requested, "metal") == 0) {
 #if defined(MITHRIL_HAS_DIRECT_METAL)
@@ -34,6 +49,7 @@ Kind ResolveKind() {
     return Kind::DirectMetal;
 #else
     return Kind::Vulkan;
+#endif
 #endif
 }
 
@@ -128,7 +144,9 @@ bool PackUniformValue(const UniformMemberLayout& layout,
 
 bool EnsureInit() {
     switch (SelectedKind()) {
+#if !defined(MITHRIL_DIRECT_ONLY)
         case Kind::Vulkan: return vk::EnsureInit();
+#endif
 #if defined(MITHRIL_HAS_DIRECT_METAL)
         case Kind::DirectMetal: return metal::EnsureInit();
 #endif
@@ -138,7 +156,9 @@ bool EnsureInit() {
 
 bool IsInitialized() {
     switch (SelectedKind()) {
+#if !defined(MITHRIL_DIRECT_ONLY)
         case Kind::Vulkan: return vk::IsInitialized();
+#endif
 #if defined(MITHRIL_HAS_DIRECT_METAL)
         case Kind::DirectMetal: return metal::IsInitialized();
 #endif
@@ -146,24 +166,13 @@ bool IsInitialized() {
     }
 }
 
-#define DISPATCH_RET(fn, fallback, ...)                                      \
-    do {                                                                      \
-        switch (SelectedKind()) {                                             \
-            case Kind::Vulkan: return vk::fn(__VA_ARGS__);                    \
-            /* DirectMetal arm is supplied only in Apple builds. */           \
-            MITHRIL_METAL_RET_CASE(fn, __VA_ARGS__)                           \
-            default: return fallback;                                         \
-        }                                                                     \
-    } while (false)
-
-#define DISPATCH_VOID(fn, ...)                                                \
-    do {                                                                      \
-        switch (SelectedKind()) {                                             \
-            case Kind::Vulkan: vk::fn(__VA_ARGS__); return;                   \
-            MITHRIL_METAL_VOID_CASE(fn, __VA_ARGS__)                          \
-            default: return;                                                  \
-        }                                                                     \
-    } while (false)
+#if !defined(MITHRIL_DIRECT_ONLY)
+#define MITHRIL_VULKAN_RET_CASE(fn, ...) case Kind::Vulkan: return vk::fn(__VA_ARGS__);
+#define MITHRIL_VULKAN_VOID_CASE(fn, ...) case Kind::Vulkan: vk::fn(__VA_ARGS__); return;
+#else
+#define MITHRIL_VULKAN_RET_CASE(fn, ...)
+#define MITHRIL_VULKAN_VOID_CASE(fn, ...)
+#endif
 
 #if defined(MITHRIL_HAS_DIRECT_METAL)
 #define MITHRIL_METAL_RET_CASE(fn, ...) case Kind::DirectMetal: return metal::fn(__VA_ARGS__);
@@ -172,6 +181,24 @@ bool IsInitialized() {
 #define MITHRIL_METAL_RET_CASE(fn, ...)
 #define MITHRIL_METAL_VOID_CASE(fn, ...)
 #endif
+
+#define DISPATCH_RET(fn, fallback, ...)                                      \
+    do {                                                                      \
+        switch (SelectedKind()) {                                             \
+            MITHRIL_VULKAN_RET_CASE(fn, __VA_ARGS__)                          \
+            MITHRIL_METAL_RET_CASE(fn, __VA_ARGS__)                           \
+            default: return fallback;                                         \
+        }                                                                     \
+    } while (false)
+
+#define DISPATCH_VOID(fn, ...)                                                \
+    do {                                                                      \
+        switch (SelectedKind()) {                                             \
+            MITHRIL_VULKAN_VOID_CASE(fn, __VA_ARGS__)                         \
+            MITHRIL_METAL_VOID_CASE(fn, __VA_ARGS__)                          \
+            default: return;                                                  \
+        }                                                                     \
+    } while (false)
 
 bool SetTargetSize(uint32_t w, uint32_t h) { DISPATCH_RET(SetTargetSize, false, w, h); }
 bool SetNativeWindow(void* native_window) {
@@ -184,7 +211,9 @@ bool SetNativeWindow(void* native_window) {
 }
 bool SwapBuffers() {
     switch (SelectedKind()) {
+#if !defined(MITHRIL_DIRECT_ONLY)
         case Kind::Vulkan: vk::SubmitFlush(); return true;
+#endif
 #if defined(MITHRIL_HAS_DIRECT_METAL)
         case Kind::DirectMetal: return metal::Present();
 #endif
@@ -195,7 +224,9 @@ uint32_t TargetWidth() { DISPATCH_RET(TargetWidth, 0); }
 uint32_t TargetHeight() { DISPATCH_RET(TargetHeight, 0); }
 uint32_t MaxFramebufferSamples() {
     switch (SelectedKind()) {
+#if !defined(MITHRIL_DIRECT_ONLY)
         case Kind::Vulkan: return vk::MaxFramebufferSamples();
+#endif
 #if defined(MITHRIL_HAS_DIRECT_METAL)
         case Kind::DirectMetal: return metal::MaxColorTextureSamples();
 #endif
@@ -204,9 +235,11 @@ uint32_t MaxFramebufferSamples() {
 }
 uint32_t MaxColorTextureSamples() {
     switch (SelectedKind()) {
+#if !defined(MITHRIL_DIRECT_ONLY)
         // Multisample texture storage has not been migrated to the Vulkan
         // reference path. Keep the per-context capability boundary honest.
         case Kind::Vulkan: return 0;
+#endif
 #if defined(MITHRIL_HAS_DIRECT_METAL)
         case Kind::DirectMetal: return metal::MaxColorTextureSamples();
 #endif
@@ -215,10 +248,12 @@ uint32_t MaxColorTextureSamples() {
 }
 bool SupportsDepthTextures() {
     switch (SelectedKind()) {
+#if !defined(MITHRIL_DIRECT_ONLY)
         // The Vulkan reference texture path still creates only RGBA8 images.
         // Reject depth texture storage at the frontend boundary instead of
         // constructing an image that cannot be attached or sampled correctly.
         case Kind::Vulkan: return false;
+#endif
 #if defined(MITHRIL_HAS_DIRECT_METAL)
         case Kind::DirectMetal: return metal::SupportsDepthTextures();
 #endif
@@ -233,7 +268,9 @@ void DestroyProgram(uint64_t program) { DISPATCH_VOID(DestroyProgram, program); 
 
 bool Draw(const DrawParams& params) {
     switch (SelectedKind()) {
+#if !defined(MITHRIL_DIRECT_ONLY)
         case Kind::Vulkan: vk::Draw(params); return true;
+#endif
 #if defined(MITHRIL_HAS_DIRECT_METAL)
         case Kind::DirectMetal: return metal::Draw(params);
 #endif
@@ -243,10 +280,12 @@ bool Draw(const DrawParams& params) {
 
 void SubmitFlush(bool wait_for_completion) {
     switch (SelectedKind()) {
+#if !defined(MITHRIL_DIRECT_ONLY)
         case Kind::Vulkan:
             (void)wait_for_completion;
             vk::SubmitFlush();
             return;
+#endif
 #if defined(MITHRIL_HAS_DIRECT_METAL)
         case Kind::DirectMetal:
             metal::SubmitFlush(wait_for_completion);
@@ -286,10 +325,12 @@ bool GetOcclusionQueryResult(uint64_t query, uint64_t* result) {
 
 void ReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, void* out) {
     switch (SelectedKind()) {
+#if !defined(MITHRIL_DIRECT_ONLY)
         case Kind::Vulkan:
             vk::SubmitFlush();
             vk::ReadPixels(x, y, width, height, out);
             return;
+#endif
 #if defined(MITHRIL_HAS_DIRECT_METAL)
         case Kind::DirectMetal:
             metal::ReadPixels(x, y, width, height, out);
@@ -324,6 +365,8 @@ void BlitFramebuffer(uint64_t src, uint64_t dst,
 
 #undef DISPATCH_RET
 #undef DISPATCH_VOID
+#undef MITHRIL_VULKAN_RET_CASE
+#undef MITHRIL_VULKAN_VOID_CASE
 #undef MITHRIL_METAL_RET_CASE
 #undef MITHRIL_METAL_VOID_CASE
 
