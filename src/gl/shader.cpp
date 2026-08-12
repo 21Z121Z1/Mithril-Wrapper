@@ -882,6 +882,7 @@ bool ResolveUniformWrite(GLenum setter_type, GLint location, GLsizei count,
     return *effective_count > 0;
 }
 
+extern "C++" {
 template <typename T>
 void StoreBooleanScalars(sh::Uniform* uniform, size_t scalar_offset,
                          const T* values, size_t scalars,
@@ -899,6 +900,7 @@ void StoreBooleanScalars(sh::Uniform* uniform, size_t scalar_offset,
                     &normalized, sizeof(normalized));
     }
 }
+} // extern "C++"
 
 // Store `count` elements of `comps` components each into uniform `location`.
 // Array element locations resolve back to one reflected object so partial
