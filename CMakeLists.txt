@@ -145,9 +145,16 @@ if(APPLE AND MITHRIL_BUILD_DIRECT)
         LIBRARY_OUTPUT_DIRECTORY "${MITHRIL_OUTPUT_DIRECTORY}"
         RUNTIME_OUTPUT_DIRECTORY "${MITHRIL_OUTPUT_DIRECTORY}")
 
+    # Both macOS and iPhoneOS ship the same narrow C ABI. The target-level
+    # visibility override below is needed on ios-cmake to make our entry-point
+    # objects exportable; the ld64 whitelist then removes C++/third-party
+    # internals from the final Mach-O dynamic symbol table.
+    target_link_options(mithril_direct PRIVATE
+        "LINKER:-exported_symbols_list,${CMAKE_CURRENT_SOURCE_DIR}/scripts/exported_symbols.txt")
+    set_property(TARGET mithril_direct APPEND PROPERTY
+        LINK_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/scripts/exported_symbols.txt)
+
     if(MITHRIL_IOS)
-        # ios-cmake defaults to -fvisibility=hidden. Mithril is dlopen/dlsym'd
-        # by Amethyst/LWJGL, so the public EGL/desktop-GL ABI must stay visible.
         target_compile_options(mithril_direct PRIVATE -fvisibility=default)
         set_target_properties(mithril_direct PROPERTIES
             C_VISIBILITY_PRESET default
@@ -160,11 +167,6 @@ if(APPLE AND MITHRIL_BUILD_DIRECT)
         set_target_properties(mithril_direct PROPERTIES
             INSTALL_NAME_DIR "@rpath"
             BUILD_WITH_INSTALL_NAME_DIR ON)
-    else()
-        target_link_options(mithril_direct PRIVATE
-            "LINKER:-exported_symbols_list,${CMAKE_CURRENT_SOURCE_DIR}/scripts/exported_symbols.txt")
-        set_property(TARGET mithril_direct APPEND PROPERTY
-            LINK_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/scripts/exported_symbols.txt)
     endif()
 
     get_target_property(_mithril_direct_sources mithril_direct SOURCES)

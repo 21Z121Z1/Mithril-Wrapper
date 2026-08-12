@@ -28,6 +28,11 @@ if grep -Eqi ' _vk[A-Z]|moltenvk|directvulkan' <<<"$SYMS"; then
   echo 'forbidden Vulkan/MoltenVK symbol in DirectMetal artifact' >&2
   exit 1
 fi
+if grep -Eq ' __Z' <<<"$SYMS"; then
+  echo 'internal C++ ABI leaked from DirectMetal shipping artifact' >&2
+  grep -E ' __Z' <<<"$SYMS" | head -20 >&2
+  exit 1
+fi
 UNDEF=$(nm -u "$DYLIB" || true)
 if grep -Eqi ' _vk[A-Z]|moltenvk|directvulkan' <<<"$UNDEF"; then
   echo 'forbidden unresolved Vulkan/MoltenVK symbol in DirectMetal artifact' >&2
