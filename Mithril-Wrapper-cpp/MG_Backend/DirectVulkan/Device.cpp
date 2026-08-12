@@ -657,6 +657,14 @@ bool init_device() {
     setenv("MVK_CONFIG_RESUME_LOST_DEVICE", "1", 1);
     setenv("MVK_CONFIG_SHADER_CONVERSION_FLIP_VERTEX_Y", "0", 1);
     setenv("MVK_CONFIG_SUBMIT_COMMAND_BUFFERS_PER_QUEUE", "2", 1);
+    // MVK_CONFIG_FAST_MATH_ENABLED=1: MoltenVK 用 fast-math 编译 MSL。
+    // 真机 GPU Address Fault（kIOGPUCommandBufferCallbackErrorPageFault）
+    // 在 A11 + iOS 16 上偶发于特定 shader 模式（如带 mip bias 的采样、
+    // NaN 传播路径）；fast-math 改变除法/超越函数/比较的 MSL 生成，
+    // 是规避驱动层 shader 编译 bug 的常用手段（MoltenVK 社区对
+    // kIOGPUCommandBufferCallbackErrorPageFault 的标准 workaround）。
+    // 对 MC 渲染无可见副作用（MC shader 均为常规 float 运算）。
+    setenv("MVK_CONFIG_FAST_MATH_ENABLED", "1", 1);
     // MVK_CONFIG_LOG_LEVEL=3 (Debug): 让 MoltenVK 输出 GPU fault 的详细
     // 上下文（fault 地址、涉及的 MTLCommandBuffer/资源）——日志里目前只有
     // 错误码 kIOGPUCommandBufferCallbackErrorPageFault，无 fault 地址。
