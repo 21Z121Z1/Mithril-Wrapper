@@ -657,6 +657,12 @@ bool init_device() {
     setenv("MVK_CONFIG_RESUME_LOST_DEVICE", "1", 1);
     setenv("MVK_CONFIG_SHADER_CONVERSION_FLIP_VERTEX_Y", "0", 1);
     setenv("MVK_CONFIG_SUBMIT_COMMAND_BUFFERS_PER_QUEUE", "2", 1);
+    // MVK_CONFIG_LOG_LEVEL=3 (Debug): 让 MoltenVK 输出 GPU fault 的详细
+    // 上下文（fault 地址、涉及的 MTLCommandBuffer/资源）——日志里目前只有
+    // 错误码 kIOGPUCommandBufferCallbackErrorPageFault，无 fault 地址。
+    // Debug 级别能看到 MoltenVK 内部对 GPU Address Fault 的地址转储，
+    // 是定位"哪个 GPU 资源被无效访问"的唯一手段。4=Info 会太吵。
+    setenv("MVK_CONFIG_LOG_LEVEL", "3", 1);
     // MVK_CONFIG_VK_SEMAPHORE_SUPPORT_STYLE=1 (根因 E，深度参考 MoltenVK):
     //   强制使用 Metal 信号量（真实 GPU 侧同步）。Mithril 的同步设计完全
     //   依赖 Vulkan semaphore（imageAvailable: acquire→render；renderFinished:
