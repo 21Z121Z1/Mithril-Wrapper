@@ -523,6 +523,9 @@ void glDrawArraysInstancedBaseInstance(GLenum mode, GLint first, GLsizei count,
 void glDrawElements(GLenum mode, GLsizei count, GLenum type, const void* indices) {
     MITHRIL_ENSURE_INIT();
     trace_draw("elements", (int)mode, 0, (int)count, 1);
+    // GPU fault 诊断：索引类型（0=USHORT 1=UINT 2=UBYTE）——UINT8 依赖
+    // VK_EXT_index_type_uint8，若扩展未启用则 vkCmdBindIndexBuffer 非法。
+    LOG_RESOURCE("draw index_type=%d type=0x%x", index_type_to_int(type), (unsigned)type);
     if (!validate_draw_call(mode, count)) return;
     if (!prepare_draw(mode)) return;  // root cause AI — see glDrawArrays
     // If a VBO is bound for GL_ELEMENT_ARRAY_BUFFER, indices is an offset into it.

@@ -305,11 +305,23 @@ struct DefaultTexture {
     VkSampler  sampler = VK_NULL_HANDLE;
 };
 
+// GPU fault 诊断（限流）：default 1x1 纹理创建失败的每一步。
+static void log_default_tex_fail(const char* why) {
+    static int failLog = 0;
+    if (failLog <= 3 || failLog % 20 == 0) {
+        MITHRIL_LOG_ERROR("vk", "default_texture CREATION FAILED at: %s — "
+                          "sampler fallback will bind NULL view -> GPU page fault",
+                          why);
+    }
+    failLog++;
+    LOG_RESOURCE("default-tex FAIL %s", why);
+}
+
 DefaultTexture& default_texture() {
     static DefaultTexture dt;
     if (dt.view != VK_NULL_HANDLE && dt.sampler != VK_NULL_HANDLE) return dt;
     Backend* b = backend();
-    if (!b->device) return dt;
+    if (!b->device) { log_default_tex_fail("no-device"); return dt; }
 
     // 1x1 R8G8B8A8_UNORM, opaque black (0,0,0,1).
     VkImageCreateInfo ici{};
@@ -324,7 +336,10 @@ DefaultTexture& default_texture() {
     ici.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     ici.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     ici.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    if (vkCreateImage(b->device, &ici, nullptr, &dt.image) != VK_SUCCESS) return dt;
+    if (vkCreateImage(b->device, &ici, nullptr, &dt.image) != VK_SUCCESS) {
+        log_default_tex_fail("vkCreateImage");
+        return dt;
+    }
 
     VkMemoryRequirements req{};
     vkGetImageMemoryRequirements(b->device, dt.image, &req);
@@ -333,7 +348,11 @@ DefaultTexture& default_texture() {
     for (uint32_t i = 0; i < 32; ++i) {
         if ((req.memoryTypeBits >> i) & 1) { mt = i; break; }
     }
-    if (mt == 0xFFFFFFFFu) { vkDestroyImage(b->device, dt.image, nullptr); dt.image = VK_NULL_HANDLE; return dt; }
+    if (mt == 0xFFFFFFFFu) {
+        vkDestroyImage(b->device, dt.image, nullptr); dt.image = VK_NULL_HANDLE;
+        log_default_tex_fail("no-memory-type");
+        return dt;
+    }
 
     VkMemoryAllocateInfo ai{};
     ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
@@ -975,6 +994,21 @@ void bind_program_descriptors(GLuint program, VkPipelineBindPoint bindPoint) {
                     samp = dt.sampler;
                     LOG_RESOURCE("sampler FALLBACK-to-default prog=%u binding=%u unit=%d tex=0 (no texture bound)",
                                  (unsigned)program, db.binding, unit);
+                } else {
+                    // GPU fault 根因候选：default 纹理无效（创建失败）→
+                    // descriptor 将绑定 NULL view → MoltenVK 采样空地址 →
+                    // kIOGPUCommandBufferCallbackErrorPageFault。绝不静默。
+                    static int nullViewLog = 0;
+                    if (nullViewLog <= 5 || nullViewLog % 50 == 0) {
+                        MITHRIL_LOG_ERROR("vk", "sampler binding prog=%u binding=%u "
+                                          "unit=%d: texture %u has NO valid view AND "
+                                          "default texture is NULL — descriptor will "
+                                          "bind NULL view (GPU page fault risk)",
+                                          (unsigned)program, db.binding, unit, tex_id);
+                    }
+                    nullViewLog++;
+                    LOG_RESOURCE("sampler NULL-VIEW prog=%u binding=%u unit=%d tex=%u",
+                                 (unsigned)program, db.binding, unit, tex_id);
                 }
             }
             // DEBUG (sampler black-screen triage): log how each sampler binding
