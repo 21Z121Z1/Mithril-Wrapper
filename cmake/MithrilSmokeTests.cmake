@@ -33,6 +33,7 @@ set(_mithril_vulkan_smokes
     shader_smoke
     draw_smoke
     texture_smoke
+    uniform_array_smoke
     fbo_smoke
     3d_smoke
     render3d_smoke)
@@ -44,6 +45,7 @@ set(_mithril_directmetal_smokes
     texture_smoke
     sampler_smoke
     matrix_uniform_smoke
+    uniform_array_smoke
     provoking_vertex_smoke
     buffer_texture_smoke
     typed_vertex_smoke
@@ -79,7 +81,10 @@ foreach(_smoke IN LISTS _mithril_enabled_smokes)
     if(CMAKE_DL_LIBS)
         target_link_libraries(${_target} PRIVATE ${CMAKE_DL_LIBS})
     endif()
-    if(UNIX AND NOT APPLE AND (_smoke STREQUAL "3d_smoke" OR _smoke STREQUAL "render3d_smoke"))
+    if(UNIX AND NOT APPLE AND
+       (_smoke STREQUAL "3d_smoke" OR
+        _smoke STREQUAL "render3d_smoke" OR
+        _smoke STREQUAL "uniform_array_smoke"))
         target_link_libraries(${_target} PRIVATE m)
     endif()
     add_dependencies(${_target} mithril)

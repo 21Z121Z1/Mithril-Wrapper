@@ -44,7 +44,7 @@ jobs:
         run: |
           set -euo pipefail
           ctest --test-dir build-ctest-metal -N -L directmetal | tee "$RUNNER_TEMP/directmetal-tests.txt"
-          grep -Eq 'Total Tests: 16$' "$RUNNER_TEMP/directmetal-tests.txt"
+          grep -Eq 'Total Tests: 17$' "$RUNNER_TEMP/directmetal-tests.txt"
 
       - name: Run DirectMetal semantic suite
         shell: bash
@@ -87,7 +87,7 @@ jobs:
         run: |
           set -euo pipefail
           ctest --test-dir build-ctest-vulkan -N -L vulkan | tee "$RUNNER_TEMP/vulkan-tests.txt"
-          grep -Eq 'Total Tests: 8$' "$RUNNER_TEMP/vulkan-tests.txt"
+          grep -Eq 'Total Tests: 9$' "$RUNNER_TEMP/vulkan-tests.txt"
 
       - name: Run Vulkan semantic suite
         shell: bash
