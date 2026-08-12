@@ -62,7 +62,7 @@ bool EncodePresentationPixelCapture(id<CAMetalDrawable> drawable,
 
     auto& engine = GetEngine();
     id<MTLBuffer> readback = [engine.device
-        newBufferWithLength:512 options:MTLResourceStorageModeShared];
+        newBufferWithLength:768 options:MTLResourceStorageModeShared];
     id<MTLBlitCommandEncoder> blit = [command blitCommandEncoder];
     if (!readback || !blit) {
         g_presentation_capture.readback = nil;
@@ -89,6 +89,16 @@ bool EncodePresentationPixelCapture(id<CAMetalDrawable> drawable,
         destinationOffset:256
    destinationBytesPerRow:256
  destinationBytesPerImage:256];
+    [blit copyFromTexture:engine.color
+              sourceSlice:0
+              sourceLevel:0
+             sourceOrigin:MTLOriginMake(g_presentation_capture.x,
+                                        g_presentation_capture.y, 0)
+               sourceSize:MTLSizeMake(1, 1, 1)
+                 toBuffer:readback
+        destinationOffset:512
+   destinationBytesPerRow:256
+ destinationBytesPerImage:256];
     [blit endEncoding];
     g_presentation_capture.readback = readback;
     g_presentation_capture.command = command;
@@ -111,8 +121,8 @@ bool EncodePresentationRender(id<MTLCommandBuffer> command,
     if (!encoder) return false;
     encoder.label = label;
     [encoder setRenderPipelineState:g_present_pipeline];
-    // Define the presentation raster bounds explicitly. Apple Paravirtual can
-    // otherwise accept and complete this encoder while producing no fragments.
+    // Keep the standalone presentation pass independent of inherited/default
+    // raster state, including after a non-square drawable replacement.
     [encoder setViewport:MTLViewport{0.0, 0.0,
                                      static_cast<double>(target.width),
                                      static_cast<double>(target.height),
@@ -332,8 +342,10 @@ bool mithrilTestArmNextPresentedPixel(uint32_t x, uint32_t y) {
 
 extern "C" __attribute__((visibility("default")))
 bool mithrilTestReadPresentedPixels(uint8_t drawable_pixel[4],
-                                    uint8_t reference_pixel[4]) {
-    if (!drawable_pixel || !reference_pixel || g_presentation_capture.armed ||
+                                    uint8_t reference_pixel[4],
+                                    uint8_t source_pixel[4]) {
+    if (!drawable_pixel || !reference_pixel || !source_pixel ||
+        g_presentation_capture.armed ||
         !g_presentation_capture.readback ||
         !g_presentation_capture.command)
         return false;
@@ -345,6 +357,10 @@ bool mithrilTestReadPresentedPixels(uint8_t drawable_pixel[4],
     std::memcpy(reference_pixel,
                 static_cast<uint8_t*>(g_presentation_capture.readback.contents) +
                     256,
+                4);
+    std::memcpy(source_pixel,
+                static_cast<uint8_t*>(g_presentation_capture.readback.contents) +
+                    512,
                 4);
     g_presentation_capture.reference = nil;
     g_presentation_capture.readback = nil;

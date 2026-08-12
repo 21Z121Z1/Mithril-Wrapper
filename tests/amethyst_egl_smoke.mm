@@ -65,6 +65,7 @@ typedef void (*fn_glFinish)(void);
 typedef unsigned int (*fn_glGetError)(void);
 typedef bool (*fn_mithrilTestArmNextPresentedPixel)(uint32_t, uint32_t);
 typedef bool (*fn_mithrilTestReadPresentedPixels)(unsigned char[4],
+                                                   unsigned char[4],
                                                    unsigned char[4]);
 
 static int failures = 0;
@@ -93,12 +94,13 @@ static int failures = 0;
 }
 @end
 
-static bool BgraMatches(const unsigned char pixel[4], unsigned char b,
-                        unsigned char g, unsigned char r, unsigned char a) {
-    return abs((int)pixel[0] - b) <= 2 &&
-           abs((int)pixel[1] - g) <= 2 &&
-           abs((int)pixel[2] - r) <= 2 &&
-           abs((int)pixel[3] - a) <= 2;
+static bool PixelMatches(const unsigned char pixel[4], unsigned char c0,
+                         unsigned char c1, unsigned char c2,
+                         unsigned char c3) {
+    return abs((int)pixel[0] - c0) <= 2 &&
+           abs((int)pixel[1] - c1) <= 2 &&
+           abs((int)pixel[2] - c2) <= 2 &&
+           abs((int)pixel[3] - c3) <= 2;
 }
 
 static bool PixelIsZero(const unsigned char pixel[4]) {
@@ -254,19 +256,23 @@ int main(void) {
         glFinish();
         unsigned char presented[4] = {0};
         unsigned char reference[4] = {0};
+        unsigned char source[4] = {0};
         CHECK(layer.capturedDrawable.texture.width == 80 &&
                   layer.capturedDrawable.texture.height == 48,
               "first presented drawable has the physical 80x48 extent");
         bool captured =
-            mithrilTestReadPresentedPixels(presented, reference);
+            mithrilTestReadPresentedPixels(presented, reference, source);
+        CHECK(captured && PixelMatches(source, 32, 64, 128, 255),
+              "pending clear reaches the default RGBA source texture "
+              "(%u,%u,%u,%u)", source[0], source[1], source[2], source[3]);
         bool reference_matches =
-            captured && BgraMatches(reference, 128, 64, 32, 255);
+            captured && PixelMatches(reference, 128, 64, 32, 255);
         CHECK(reference_matches,
               "pending clear reaches the same-pipeline BGRA reference without glFlush "
               "(%u,%u,%u,%u)", reference[0], reference[1], reference[2],
               reference[3]);
         bool drawable_matches =
-            captured && BgraMatches(presented, 128, 64, 32, 255);
+            captured && PixelMatches(presented, 128, 64, 32, 255);
         bool paravirtual_unreadable =
             reference_matches && PixelIsZero(presented) &&
             strstr(layer.device.name.UTF8String, "Paravirtual") != nullptr;
@@ -291,18 +297,22 @@ int main(void) {
         glFinish();
         memset(presented, 0, sizeof(presented));
         memset(reference, 0, sizeof(reference));
+        memset(source, 0, sizeof(source));
         CHECK(layer.capturedDrawable.texture.width == 56 &&
                   layer.capturedDrawable.texture.height == 96,
               "resized presented drawable has the physical 56x96 extent");
-        captured = mithrilTestReadPresentedPixels(presented, reference);
+        captured = mithrilTestReadPresentedPixels(presented, reference, source);
+        CHECK(captured && PixelMatches(source, 128, 64, 32, 255),
+              "resized clear reaches the replacement default RGBA source "
+              "(%u,%u,%u,%u)", source[0], source[1], source[2], source[3]);
         reference_matches =
-            captured && BgraMatches(reference, 32, 64, 128, 255);
+            captured && PixelMatches(reference, 32, 64, 128, 255);
         CHECK(reference_matches,
               "resized clear reaches the same-pipeline BGRA reference "
               "(%u,%u,%u,%u)", reference[0], reference[1], reference[2],
               reference[3]);
         drawable_matches =
-            captured && BgraMatches(presented, 32, 64, 128, 255);
+            captured && PixelMatches(presented, 32, 64, 128, 255);
         paravirtual_unreadable =
             reference_matches && PixelIsZero(presented) &&
             strstr(layer.device.name.UTF8String, "Paravirtual") != nullptr;
