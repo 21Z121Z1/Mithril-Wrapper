@@ -18,6 +18,7 @@
 #include "Device.h"
 #include "Resources.h"
 #include "../../MG_Impl/Log.h"
+#include "LogRing.h"   // device lost 时 dump 资源操作环形日志
 
 #include <algorithm>
 #include <cstring>
@@ -404,6 +405,9 @@ VkImageView swapchain_acquire_color(Swapchain* sc) {
                                   "swapchain for rebuild",
                                   (int)r, (unsigned)idx, acquireFailCount);
             }
+            // GPU fault 检测点：MoltenVK 的 fault 是异步的，vkQueueSubmit 返回
+            // VK_SUCCESS，第一个报错的调用往往是这里 —— dump 资源操作环形日志。
+            mithril::vk::log_ring().dump("vkAcquireNextImageKHR failed");
             // Fatal acquire errors: VK_ERROR_OUT_OF_DEVICE_MEMORY (-4),
             // VK_ERROR_SURFACE_LOST_KHR (-7), VK_ERROR_DEVICE_LOST (-4).
             // Mark the swapchain dead so EGL rebuilds it; otherwise the next
@@ -499,6 +503,7 @@ void swapchain_present_and_acquire(Swapchain* sc) {
             // 真正的设备丢失：设置 deviceLost，让 EGL 恢复路径处理
             sc->needsRebuild = true;
             b->deviceLost = true;
+            mithril::vk::log_ring().dump("vkQueuePresentKHR DEVICE_LOST");
             static int presentDeviceLostCount = 0;
             presentDeviceLostCount++;
             if (presentDeviceLostCount <= 3 || presentDeviceLostCount % 100 == 0) {
@@ -512,6 +517,7 @@ void swapchain_present_and_acquire(Swapchain* sc) {
             // 不再设置 deviceLost。标记 swapchain 重建 + 触发 OOM GC，
             // 跳过当前帧继续渲染。
             sc->needsRebuild = true;
+            mithril::vk::log_ring().dump("vkQueuePresentKHR failed");
             static int presentFailCount = 0;
             presentFailCount++;
             if (presentFailCount <= 3 || presentFailCount % 100 == 0) {

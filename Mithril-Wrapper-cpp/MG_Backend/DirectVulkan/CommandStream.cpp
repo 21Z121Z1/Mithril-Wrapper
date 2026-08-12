@@ -525,6 +525,9 @@ bool ensure_command_buffer_recording() {
                                   "fail #%d) — possible device lost",
                                   b->currentFrame, (int)wr, waitFailCount);
             }
+            // GPU fault 检测点：fault 是异步的，vkQueueSubmit 返回成功，
+            // 第一个报错常在 fence wait —— dump 资源操作环形日志。
+            mithril::vk::log_ring().dump("vkWaitForFences failed");
             b->deviceLost = true;
             return false;
         }

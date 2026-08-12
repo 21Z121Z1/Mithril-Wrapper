@@ -48,6 +48,7 @@
 
 #include "includes.h"
 #include "Framebuffer.h"
+#include "../MG_Backend/DirectVulkan/LogRing.h"  // draw 路径打点（GPU fault 诊断）
 
 #include <algorithm>
 #include <cstring>
@@ -439,6 +440,17 @@ static bool validate_draw_call(GLenum mode, GLsizei count) {
     return true;
 }
 
+// GPU fault 诊断：记录最近 draw 的上下文（program + 绑定的纹理对象）。
+// fault 时 LogRing dump 显示「fault 前最后一次 draw」，配合 program 的
+// shader 与纹理对象，定位「采样了已释放 view」的具体 draw。
+static void trace_draw(const char* kind, int mode, int first, int count, int inst) {
+    LOG_RESOURCE("draw %s prog=%u mode=%d first=%d count=%d inst=%d fbo=%u tex0=%u tex1=%u",
+                 kind, (unsigned)g_state->currentProgram, mode, first, count, inst,
+                 (unsigned)g_state->currentDrawFBO,
+                 (unsigned)g_state->imageTextureUnits[0],
+                 (unsigned)g_state->imageTextureUnits[1]);
+}
+
 void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
     MITHRIL_ENSURE_INIT();
     if (!validate_draw_call(mode, count)) return;
@@ -447,6 +459,7 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
     // outside a render-pass instance and crash inside MoltenVK. Bail out
     // without calling end_draw(): there is no pass to end.
     if (!prepare_draw(mode)) return;
+    trace_draw("arrays", (int)mode, (int)first, (int)count, 1);
     backend_draw_arrays((int)mode, (int)first, (int)count);
     end_draw();
 }
@@ -454,6 +467,7 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
 void glDrawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLsizei primcount) {
     MITHRIL_ENSURE_INIT();
     if (!prepare_draw(mode)) return;  // root cause AI — see glDrawArrays
+    trace_draw("arrays_inst", (int)mode, (int)first, (int)count, (int)primcount);
     backend_draw_arrays_instanced((int)mode, (int)first, (int)count, (int)primcount);
     end_draw();
 }
@@ -469,6 +483,7 @@ void glDrawArraysInstancedBaseInstance(GLenum mode, GLint first, GLsizei count,
     // the early-out path too, otherwise it leaks into the next draw (which
     // expects firstInstance == 0) and misaddresses its instance data.
     if (!prepare_draw(mode)) { g_state->currentBaseInstance = 0; return; }
+    trace_draw("arrays_baseinst", (int)mode, (int)first, (int)count, (int)primcount);
     backend_draw_arrays_instanced((int)mode, (int)first, (int)count, (int)primcount);
     g_state->currentBaseInstance = 0;
     end_draw();
