@@ -139,6 +139,96 @@ size_t UniformComponentCount(GLenum type) {
             return 1;
     }
 }
+
+bool IsBooleanUniformType(GLenum type) {
+    switch (type) {
+        case GL_BOOL:
+        case GL_BOOL_VEC2:
+        case GL_BOOL_VEC3:
+        case GL_BOOL_VEC4:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool IsSamplerUniformType(GLenum type) {
+    switch (type) {
+        case GL_SAMPLER_1D:
+        case GL_SAMPLER_2D:
+        case GL_SAMPLER_3D:
+        case GL_SAMPLER_CUBE:
+        case GL_SAMPLER_1D_SHADOW:
+        case GL_SAMPLER_2D_SHADOW:
+        case GL_SAMPLER_1D_ARRAY:
+        case GL_SAMPLER_2D_ARRAY:
+        case GL_SAMPLER_1D_ARRAY_SHADOW:
+        case GL_SAMPLER_2D_ARRAY_SHADOW:
+        case GL_SAMPLER_2D_MULTISAMPLE:
+        case GL_SAMPLER_2D_MULTISAMPLE_ARRAY:
+        case GL_SAMPLER_CUBE_SHADOW:
+        case GL_SAMPLER_BUFFER:
+        case GL_SAMPLER_2D_RECT:
+        case GL_SAMPLER_2D_RECT_SHADOW:
+        case GL_SAMPLER_CUBE_MAP_ARRAY:
+        case GL_SAMPLER_CUBE_MAP_ARRAY_SHADOW:
+        case GL_INT_SAMPLER_1D:
+        case GL_INT_SAMPLER_2D:
+        case GL_INT_SAMPLER_3D:
+        case GL_INT_SAMPLER_CUBE:
+        case GL_INT_SAMPLER_1D_ARRAY:
+        case GL_INT_SAMPLER_2D_ARRAY:
+        case GL_INT_SAMPLER_2D_MULTISAMPLE:
+        case GL_INT_SAMPLER_2D_MULTISAMPLE_ARRAY:
+        case GL_INT_SAMPLER_BUFFER:
+        case GL_INT_SAMPLER_2D_RECT:
+        case GL_INT_SAMPLER_CUBE_MAP_ARRAY:
+        case GL_UNSIGNED_INT_SAMPLER_1D:
+        case GL_UNSIGNED_INT_SAMPLER_2D:
+        case GL_UNSIGNED_INT_SAMPLER_3D:
+        case GL_UNSIGNED_INT_SAMPLER_CUBE:
+        case GL_UNSIGNED_INT_SAMPLER_1D_ARRAY:
+        case GL_UNSIGNED_INT_SAMPLER_2D_ARRAY:
+        case GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE:
+        case GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE_ARRAY:
+        case GL_UNSIGNED_INT_SAMPLER_BUFFER:
+        case GL_UNSIGNED_INT_SAMPLER_2D_RECT:
+        case GL_UNSIGNED_INT_SAMPLER_CUBE_MAP_ARRAY:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool IsScalarVectorSetterType(GLenum type) {
+    switch (type) {
+        case GL_FLOAT:
+        case GL_FLOAT_VEC2:
+        case GL_FLOAT_VEC3:
+        case GL_FLOAT_VEC4:
+        case GL_INT:
+        case GL_INT_VEC2:
+        case GL_INT_VEC3:
+        case GL_INT_VEC4:
+        case GL_UNSIGNED_INT:
+        case GL_UNSIGNED_INT_VEC2:
+        case GL_UNSIGNED_INT_VEC3:
+        case GL_UNSIGNED_INT_VEC4:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool UniformSetterMatches(GLenum uniform_type, GLenum setter_type) {
+    if (IsBooleanUniformType(uniform_type)) {
+        return IsScalarVectorSetterType(setter_type) &&
+               UniformComponentCount(uniform_type) ==
+                   UniformComponentCount(setter_type);
+    }
+    if (IsSamplerUniformType(uniform_type)) return setter_type == GL_INT;
+    return uniform_type == setter_type;
+}
 } // namespace
 
 GLuint APIENTRY glCreateShader(GLenum type) {
@@ -753,9 +843,9 @@ sh::Program* CurrentProgramForUniform() {
     return id ? sh::GetProgram(id) : nullptr;
 }
 
-bool ResolveUniformWrite(GLint location, GLsizei count, int comps,
-                         sh::Uniform** uniform, size_t* scalar_offset,
-                         GLsizei* effective_count) {
+bool ResolveUniformWrite(GLenum setter_type, GLint location, GLsizei count,
+                         int comps, sh::Uniform** uniform,
+                         size_t* scalar_offset, GLsizei* effective_count) {
     if (count < 0) {
         PUSH_ERROR(GL_INVALID_VALUE);
         return false;
@@ -776,6 +866,11 @@ bool ResolveUniformWrite(GLint location, GLsizei count, int comps,
         PUSH_ERROR(GL_INVALID_OPERATION);
         return false;
     }
+    if (!UniformSetterMatches(resolved->type, setter_type) ||
+        UniformComponentCount(resolved->type) != static_cast<size_t>(comps)) {
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return false;
+    }
     if (count > 1 && resolved->size <= 1) {
         PUSH_ERROR(GL_INVALID_OPERATION);
         return false;
@@ -787,23 +882,44 @@ bool ResolveUniformWrite(GLint location, GLsizei count, int comps,
     return *effective_count > 0;
 }
 
+template <typename T>
+void StoreBooleanScalars(sh::Uniform* uniform, size_t scalar_offset,
+                         const T* values, size_t scalars,
+                         size_t total_scalars) {
+    if (uniform->value.size() < total_scalars)
+        uniform->value.resize(total_scalars, 0.0f);
+    const size_t total_bytes = total_scalars * sizeof(GLuint);
+    if (uniform->raw_value.size() < total_bytes)
+        uniform->raw_value.resize(total_bytes, 0);
+    for (size_t i = 0; i < scalars; ++i) {
+        const GLuint normalized = values[i] == static_cast<T>(0) ? 0u : 1u;
+        uniform->value[scalar_offset + i] = static_cast<float>(normalized);
+        std::memcpy(uniform->raw_value.data() +
+                        (scalar_offset + i) * sizeof(normalized),
+                    &normalized, sizeof(normalized));
+    }
+}
+
 // Store `count` elements of `comps` components each into uniform `location`.
 // Array element locations resolve back to one reflected object so partial
 // writes preserve the other elements and backend snapshots remain complete.
 void StoreUniform(GLenum type, GLint location, const GLfloat* v, GLsizei count,
                   int comps) {
-    (void)type;
     if (!v && count > 0) return;
     sh::Uniform* uniform = nullptr;
     size_t scalar_offset = 0;
     GLsizei effective_count = 0;
-    if (!ResolveUniformWrite(location, count, comps, &uniform, &scalar_offset,
-                             &effective_count))
+    if (!ResolveUniformWrite(type, location, count, comps, &uniform,
+                             &scalar_offset, &effective_count))
         return;
     const size_t total_scalars = static_cast<size_t>(uniform->size) * comps;
+    const size_t scalars = static_cast<size_t>(effective_count) * comps;
+    if (IsBooleanUniformType(uniform->type)) {
+        StoreBooleanScalars(uniform, scalar_offset, v, scalars, total_scalars);
+        return;
+    }
     if (uniform->value.size() < total_scalars)
         uniform->value.resize(total_scalars, 0.0f);
-    const size_t scalars = static_cast<size_t>(effective_count) * comps;
     std::copy(v, v + scalars, uniform->value.begin() + scalar_offset);
     const size_t total_bytes = total_scalars * sizeof(*v);
     if (uniform->raw_value.size() < total_bytes)
@@ -814,18 +930,21 @@ void StoreUniform(GLenum type, GLint location, const GLfloat* v, GLsizei count,
 
 void StoreUniformInt(GLenum type, GLint location, const GLint* v,
                      GLsizei count, int comps) {
-    (void)type;
     if (!v && count > 0) return;
     sh::Uniform* uniform = nullptr;
     size_t scalar_offset = 0;
     GLsizei effective_count = 0;
-    if (!ResolveUniformWrite(location, count, comps, &uniform, &scalar_offset,
-                             &effective_count))
+    if (!ResolveUniformWrite(type, location, count, comps, &uniform,
+                             &scalar_offset, &effective_count))
         return;
     const size_t total_scalars = static_cast<size_t>(uniform->size) * comps;
+    const size_t scalars = static_cast<size_t>(effective_count) * comps;
+    if (IsBooleanUniformType(uniform->type)) {
+        StoreBooleanScalars(uniform, scalar_offset, v, scalars, total_scalars);
+        return;
+    }
     if (uniform->value.size() < total_scalars)
         uniform->value.resize(total_scalars, 0.0f);
-    const size_t scalars = static_cast<size_t>(effective_count) * comps;
     for (size_t i = 0; i < scalars; ++i)
         uniform->value[scalar_offset + i] = static_cast<float>(v[i]);
     const size_t total_bytes = total_scalars * sizeof(*v);
@@ -837,18 +956,21 @@ void StoreUniformInt(GLenum type, GLint location, const GLint* v,
 
 void StoreUniformUInt(GLenum type, GLint location, const GLuint* v,
                       GLsizei count, int comps) {
-    (void)type;
     if (!v && count > 0) return;
     sh::Uniform* uniform = nullptr;
     size_t scalar_offset = 0;
     GLsizei effective_count = 0;
-    if (!ResolveUniformWrite(location, count, comps, &uniform, &scalar_offset,
-                             &effective_count))
+    if (!ResolveUniformWrite(type, location, count, comps, &uniform,
+                             &scalar_offset, &effective_count))
         return;
     const size_t total_scalars = static_cast<size_t>(uniform->size) * comps;
+    const size_t scalars = static_cast<size_t>(effective_count) * comps;
+    if (IsBooleanUniformType(uniform->type)) {
+        StoreBooleanScalars(uniform, scalar_offset, v, scalars, total_scalars);
+        return;
+    }
     if (uniform->value.size() < total_scalars)
         uniform->value.resize(total_scalars, 0.0f);
-    const size_t scalars = static_cast<size_t>(effective_count) * comps;
     for (size_t i = 0; i < scalars; ++i)
         uniform->value[scalar_offset + i] = static_cast<float>(v[i]);
     const size_t total_bytes = total_scalars * sizeof(*v);
