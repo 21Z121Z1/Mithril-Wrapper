@@ -463,11 +463,21 @@ static bool validate_draw_call(GLenum mode, GLsizei count) {
 // fault 时 LogRing dump 显示「fault 前最后一次 draw」，配合 program 的
 // shader 与纹理对象，定位「采样了已释放 view」的具体 draw。
 static void trace_draw(const char* kind, int mode, int first, int count, int inst) {
-    LOG_RESOURCE("draw %s prog=%u mode=%d first=%d count=%d inst=%d fbo=%u tex0=%u tex1=%u",
+    // GPU fault 诊断：记录 draw 上下文 —— program、FBO、绑定的纹理对象、
+    // 以及 ELEMENT_ARRAY_BUFFER（索引缓冲）。fault 帧 prog=1/fbo=0/count=6
+    // 全屏 quad 的索引缓冲有效性是关键线索。
+    GLuint ib = 0;
+    mithril::VertexArray* vao = mithril::state_get_vao(g_state->currentVAO);
+    if (vao) ib = vao->elementArrayBuffer;
+    LOG_RESOURCE("draw %s prog=%u mode=%d first=%d count=%d inst=%d fbo=%u "
+                 "tex0=%u tex1=%u tex2=%u tex3=%u ib=%u vao=%u",
                  kind, (unsigned)g_state->currentProgram, mode, first, count, inst,
                  (unsigned)g_state->currentDrawFBO,
                  (unsigned)g_state->imageTextureUnits[0],
-                 (unsigned)g_state->imageTextureUnits[1]);
+                 (unsigned)g_state->imageTextureUnits[1],
+                 (unsigned)g_state->imageTextureUnits[2],
+                 (unsigned)g_state->imageTextureUnits[3],
+                 (unsigned)ib, (unsigned)g_state->currentVAO);
 }
 
 void glDrawArrays(GLenum mode, GLint first, GLsizei count) {

@@ -247,6 +247,28 @@ void glLinkProgram(GLuint program) {
     p->linked = true;
     p->infoLog.clear();
 
+    // GPU fault 诊断：link 成功时记录 program 身份（shader 源首行摘要），
+    // 便于 LogRing dump 里的 prog=N 对应到具体 MC shader（fault 帧是
+    // prog=1 + fbo=0 + count=6 全屏 quad —— 需要知道它是什么 shader）。
+    {
+        static int linkLog = 0;
+        if (linkLog <= 20 || linkLog % 50 == 0) {
+            std::string src_peek;
+            for (GLuint sid : p->attachedShaders) {
+                mithril::Shader* sh = mithril::state_get_shader(sid);
+                if (sh && !sh->source.empty()) {
+                    if (!src_peek.empty()) src_peek += " | ";
+                    size_t nl = sh->source.find('\n');
+                    src_peek += sh->type == GL_VERTEX_SHADER ? "VS:" : "FS:";
+                    src_peek += sh->source.substr(0, nl == std::string::npos ? 60 : nl < 60 ? nl : 60);
+                }
+            }
+            MITHRIL_LOG_WARN("program", "LINKED program=%u shaders=[%s]",
+                             program, src_peek.c_str());
+        }
+        linkLog++;
+    }
+
     // ---- Uniform reflection (CRITICAL for black screen) ----
     // Reflect SPIR-V to discover UBOs and their members, then populate
     // p->uniforms / p->uniformByLocation / p->uniformBlocks / p->uboBackingStore.
