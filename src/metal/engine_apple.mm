@@ -30,6 +30,7 @@ namespace mithril::metal {
 namespace {
 
 id<MTLRenderPipelineState> g_present_pipeline = nil;
+id<MTLRenderPipelineState> g_present_constant_pipeline = nil;
 id<MTLLibrary> g_present_library = nil;
 
 enum class PresentationTransferMode {
@@ -118,11 +119,12 @@ bool EncodePresentationPixelCapture(id<CAMetalDrawable> drawable,
 }
 #endif
 
-bool EncodePresentationRender(id<MTLCommandBuffer> command,
-                              id<MTLTexture> target,
-                              id<MTLTexture> source,
-                              NSString* label) {
-    if (!command || !target || !source) return false;
+bool EncodeFullscreenPresentation(id<MTLCommandBuffer> command,
+                                  id<MTLTexture> target,
+                                  id<MTLRenderPipelineState> pipeline,
+                                  id<MTLTexture> source,
+                                  NSString* label) {
+    if (!command || !target || !pipeline) return false;
     MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
     pass.colorAttachments[0].texture = target;
     pass.colorAttachments[0].loadAction = MTLLoadActionDontCare;
@@ -132,7 +134,7 @@ bool EncodePresentationRender(id<MTLCommandBuffer> command,
         [command renderCommandEncoderWithDescriptor:pass];
     if (!encoder) return false;
     encoder.label = label;
-    [encoder setRenderPipelineState:g_present_pipeline];
+    [encoder setRenderPipelineState:pipeline];
     // Keep the standalone presentation pass independent of inherited/default
     // raster state, including after a non-square drawable replacement.
     [encoder setViewport:MTLViewport{0.0, 0.0,
@@ -140,12 +142,20 @@ bool EncodePresentationRender(id<MTLCommandBuffer> command,
                                      static_cast<double>(target.height),
                                      0.0, 1.0}];
     [encoder setScissorRect:MTLScissorRect{0, 0, target.width, target.height}];
-    [encoder setFragmentTexture:source atIndex:0];
+    if (source) [encoder setFragmentTexture:source atIndex:0];
     [encoder drawPrimitives:MTLPrimitiveTypeTriangle
                 vertexStart:0
                 vertexCount:3];
     [encoder endEncoding];
     return true;
+}
+
+bool EncodePresentationRender(id<MTLCommandBuffer> command,
+                              id<MTLTexture> target,
+                              id<MTLTexture> source,
+                              NSString* label) {
+    return EncodeFullscreenPresentation(command, target, g_present_pipeline,
+                                        source, label);
 }
 
 #if defined(MITHRIL_PRESENTATION_TEST_HOOKS)
@@ -195,6 +205,10 @@ bool EnsurePresentPipeline() {
         @"                                    address::clamp_to_edge,\n"
         @"                                    filter::nearest);\n"
         @"    return source.sample(nearest_pixel, position.xy);\n"
+        @"}\n"
+        @"\n"
+        @"fragment float4 mithril_present_constant() {\n"
+        @"    return float4(0.125, 0.25, 0.5, 1.0);\n"
         @"}\n";
 
     NSError* library_error = nil;
@@ -211,7 +225,9 @@ bool EnsurePresentPipeline() {
         [g_present_library newFunctionWithName:@"mithril_present_vertex"];
     id<MTLFunction> fragment =
         [g_present_library newFunctionWithName:@"mithril_present_fragment"];
-    if (!vertex || !fragment) {
+    id<MTLFunction> constant_fragment =
+        [g_present_library newFunctionWithName:@"mithril_present_constant"];
+    if (!vertex || !fragment || !constant_fragment) {
         ML_LOG_ERROR("metal: drawable presentation shader entry point missing");
         g_present_library = nil;
         return false;
@@ -234,6 +250,21 @@ bool EnsurePresentPipeline() {
         g_present_library = nil;
         return false;
     }
+
+    descriptor.label = @"Mithril constant presentation probe pipeline";
+    descriptor.fragmentFunction = constant_fragment;
+    pipeline_error = nil;
+    g_present_constant_pipeline =
+        [engine.device newRenderPipelineStateWithDescriptor:descriptor
+                                                     error:&pipeline_error];
+    if (!g_present_constant_pipeline) {
+        ML_LOG_ERROR("metal: failed to create constant presentation probe "
+                     "pipeline: %s",
+                     pipeline_error.localizedDescription.UTF8String ?: "unknown error");
+        g_present_pipeline = nil;
+        g_present_library = nil;
+        return false;
+    }
     return true;
 }
 
@@ -244,6 +275,86 @@ bool PresentationProbePixelMatches(const uint8_t pixel[4]) {
         if (delta < -2 || delta > 2) return false;
     }
     return true;
+}
+
+bool CompletePresentationProbe(id<MTLCommandBuffer> command,
+                               id<MTLTexture> target,
+                               uint8_t pixel[4]) {
+    if (!command || !target || !pixel) return false;
+    id<MTLBuffer> readback = [target.device
+        newBufferWithLength:256 options:MTLResourceStorageModeShared];
+    id<MTLBlitCommandEncoder> capture = [command blitCommandEncoder];
+    if (!readback || !capture) return false;
+    [capture copyFromTexture:target
+                 sourceSlice:0
+                 sourceLevel:0
+                sourceOrigin:MTLOriginMake(target.width / 2,
+                                           target.height / 2, 0)
+                  sourceSize:MTLSizeMake(1, 1, 1)
+                    toBuffer:readback
+           destinationOffset:0
+      destinationBytesPerRow:256
+    destinationBytesPerImage:256];
+    [capture endEncoding];
+
+    [command commit];
+    [command waitUntilCompleted];
+    if (command.status != MTLCommandBufferStatusCompleted) {
+        ML_LOG_ERROR("metal: presentation capability probe failed: %s",
+                     command.error.localizedDescription.UTF8String ?: "unknown error");
+        return false;
+    }
+    std::memcpy(pixel, readback.contents, 4);
+    return true;
+}
+
+id<MTLTexture> CreatePresentationProbeTarget() {
+    auto& engine = GetEngine();
+    if (!engine.width || !engine.height) return nil;
+    MTLTextureDescriptor* descriptor = [MTLTextureDescriptor
+        texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                                     width:engine.width
+                                    height:engine.height
+                                 mipmapped:NO];
+    descriptor.storageMode = MTLStorageModePrivate;
+    descriptor.usage = MTLTextureUsageRenderTarget;
+    return [engine.device newTextureWithDescriptor:descriptor];
+}
+
+bool RunBgraClearProbe(uint8_t pixel[4]) {
+    auto& engine = GetEngine();
+    id<MTLTexture> target = CreatePresentationProbeTarget();
+    id<MTLCommandBuffer> command = [engine.queue commandBuffer];
+    if (!target || !command) return false;
+    target.label = @"Mithril BGRA clear probe target";
+    command.label = @"Mithril BGRA clear probe";
+
+    MTLRenderPassDescriptor* pass =
+        [MTLRenderPassDescriptor renderPassDescriptor];
+    pass.colorAttachments[0].texture = target;
+    pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+    pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+    pass.colorAttachments[0].clearColor =
+        MTLClearColorMake(0.125, 0.25, 0.5, 1.0);
+    id<MTLRenderCommandEncoder> encoder =
+        [command renderCommandEncoderWithDescriptor:pass];
+    if (!encoder) return false;
+    [encoder endEncoding];
+    return CompletePresentationProbe(command, target, pixel);
+}
+
+bool RunConstantPresentationProbe(uint8_t pixel[4]) {
+    auto& engine = GetEngine();
+    id<MTLTexture> target = CreatePresentationProbeTarget();
+    id<MTLCommandBuffer> command = [engine.queue commandBuffer];
+    if (!target || !command) return false;
+    target.label = @"Mithril constant presentation probe target";
+    command.label = @"Mithril constant presentation probe";
+    if (!EncodeFullscreenPresentation(
+            command, target, g_present_constant_pipeline, nil,
+            @"Mithril constant presentation probe"))
+        return false;
+    return CompletePresentationProbe(command, target, pixel);
 }
 
 bool RunPresentationTransferProbe(bool materialize, uint8_t pixel[4]) {
@@ -271,9 +382,7 @@ bool RunPresentationTransferProbe(bool materialize, uint8_t pixel[4]) {
         descriptor.usage = MTLTextureUsageShaderRead;
         copied_source = [engine.device newTextureWithDescriptor:descriptor];
     }
-    id<MTLBuffer> readback = [engine.device
-        newBufferWithLength:256 options:MTLResourceStorageModeShared];
-    if (!source || !target || (materialize && !copied_source) || !readback)
+    if (!source || !target || (materialize && !copied_source))
         return false;
     source.label = @"Mithril presentation transfer probe source";
     target.label = @"Mithril presentation transfer probe target";
@@ -319,28 +428,7 @@ bool RunPresentationTransferProbe(bool materialize, uint8_t pixel[4]) {
                                   @"Mithril presentation transfer probe"))
         return false;
 
-    id<MTLBlitCommandEncoder> capture = [command blitCommandEncoder];
-    if (!capture) return false;
-    [capture copyFromTexture:target
-                 sourceSlice:0
-                 sourceLevel:0
-                sourceOrigin:MTLOriginMake(width / 2, height / 2, 0)
-                  sourceSize:MTLSizeMake(1, 1, 1)
-                    toBuffer:readback
-           destinationOffset:0
-      destinationBytesPerRow:256
-    destinationBytesPerImage:256];
-    [capture endEncoding];
-
-    [command commit];
-    [command waitUntilCompleted];
-    if (command.status != MTLCommandBufferStatusCompleted) {
-        ML_LOG_ERROR("metal: presentation transfer probe failed: %s",
-                     command.error.localizedDescription.UTF8String ?: "unknown error");
-        return false;
-    }
-    std::memcpy(pixel, readback.contents, 4);
-    return true;
+    return CompletePresentationProbe(command, target, pixel);
 }
 
 bool EnsurePresentationTransferMode() {
@@ -362,6 +450,22 @@ bool EnsurePresentationTransferMode() {
         g_present_transfer_mode = PresentationTransferMode::Direct;
         ML_LOG_INFO("metal: presentation transfer probe selected direct texture read");
         return true;
+    }
+
+    uint8_t clear_pixel[4] = {0, 0, 0, 0};
+    const bool clear_supported = RunBgraClearProbe(clear_pixel) &&
+                                 PresentationProbePixelMatches(clear_pixel);
+    uint8_t constant_pixel[4] = {0, 0, 0, 0};
+    const bool constant_supported =
+        RunConstantPresentationProbe(constant_pixel) &&
+        PresentationProbePixelMatches(constant_pixel);
+    if (!clear_supported || !constant_supported) {
+        ML_LOG_ERROR("metal: presentation raster probe failed closed; "
+                     "BGRA clear=(%u,%u,%u,%u), constant draw=(%u,%u,%u,%u)",
+                     clear_pixel[0], clear_pixel[1], clear_pixel[2],
+                     clear_pixel[3], constant_pixel[0], constant_pixel[1],
+                     constant_pixel[2], constant_pixel[3]);
+        return false;
     }
 
     uint8_t copied_pixel[4] = {0, 0, 0, 0};
