@@ -18,6 +18,7 @@
 // records + submits + waits on a dedicated fence, then frees the buffer.
 #include "Device.h"
 #include "Resources.h"
+#include "LogRing.h"   // mipmap 资源操作打点（GPU fault dump）
 #include "../Backend.h"
 #include "../../MG_State/State.h"
 #include "../../MG_Impl/Log.h"
@@ -127,6 +128,10 @@ void generate_mipmaps(GLuint name) {
         }
         genMipLog++;
     }
+    LOG_RESOURCE("mipmap tex=%u %dx%d levels=%d fullLevels=%d -> %s",
+                 (unsigned)name, (int)tex.width, (int)tex.height,
+                 (int)tex.levels, fullLevels,
+                 (tex.levels < fullLevels) ? "REBUILD" : "CASCADE");
 
     // FIX (Root Cause - 单层 image 被 mipmap 采样器越界采样 → page fault):
     // Minecraft 先 glTexImage2D(level=0) 上传 atlas 的 base level（Texture.cpp:145

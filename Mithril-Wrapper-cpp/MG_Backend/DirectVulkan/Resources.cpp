@@ -7,6 +7,7 @@
 #include "CommandStream.h"  // ensure_command_buffer_recording
 #include "Pipeline.h"       // clear_all_pipeline_caches — OOM 时驱逐 pipeline
 #include "DescriptorSet.h"  // reset_all_descriptor_pools — OOM 时驱逐 descriptor
+#include "LogRing.h"      // 资源操作环形日志（GPU fault 时 dump）
 #include "../Backend.h"
 #include "../../MG_Impl/Log.h"
 
@@ -401,6 +402,8 @@ void defer_destroy_buffer_entry(BufferEntry& e) {
     if (!b->device) return;
     if (e.mapped) { vkUnmapMemory(b->device, e.memory); e.mapped = nullptr; }
     if (e.buffer == VK_NULL_HANDLE && e.memory == VK_NULL_HANDLE) return;
+    LOG_RESOURCE("buf defer_destroy buffer=%p size=%llu",
+                 (void*)e.buffer, (unsigned long long)e.size);
     // FIX (GPU page fault root cause): a cached descriptor set (per-program memo)
     // may still reference this buffer/view. Invalidate the memo so no stale set
     // is re-bound after the resource is destroyed.
@@ -422,6 +425,9 @@ void defer_destroy_texture_entry(TextureEntry& e) {
     if (e.view == VK_NULL_HANDLE && e.image == VK_NULL_HANDLE &&
         e.memory == VK_NULL_HANDLE && e.stagingBuffer == VK_NULL_HANDLE &&
         e.stagingMemory == VK_NULL_HANDLE) return;
+    LOG_RESOURCE("tex defer_destroy img=%p view=%p %dx%d levels=%d fmt=%d",
+                 (void*)e.image, (void*)e.view, (int)e.width, (int)e.height,
+                 (int)e.levels, (int)e.format);
     // FIX (GPU page fault root cause): a cached descriptor set (per-program memo)
     // may still reference this texture view. Invalidate the memo so no stale set
     // is re-bound after the view is destroyed.
@@ -1419,7 +1425,13 @@ VkImage backend_get_or_create_texture(GLuint name, int width, int height, int de
         it->second.levels == effective_levels) {
         return it->second.image;
     }
-    if (it != tbl.end()) mithril::vk::defer_destroy_texture_entry(it->second);
+    if (it != tbl.end()) {
+        LOG_RESOURCE("tex REBUILD name=%u %dx%d levels=%d->%d fmt=%d->%d",
+                     (unsigned)name, width, height,
+                     (int)it->second.levels, effective_levels,
+                     (int)it->second.format, (int)fmt);
+        mithril::vk::defer_destroy_texture_entry(it->second);
+    }
 
     mithril::vk::TextureEntry e;
     e.format = fmt;
@@ -1735,6 +1747,8 @@ void backend_texture_upload_compressed(GLuint name, int level, int x, int y, int
     // glCompressedTexImage2D). Partial uploads (SubImage) leave it in
     // TRANSFER_DST_OPTIMAL so subsequent uploads don't re-transition.
     if (is_full_upload) {
+        LOG_RESOURCE("tex full-upload img=%p level=%d %dx%d fmt=%d",
+                     (void*)tex.image, level, w, h, (int)tex.format);
         transition_image_layout(tex, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     }
 }

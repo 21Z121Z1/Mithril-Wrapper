@@ -25,6 +25,7 @@
 #include "Resources.h"  // texture_table() — for TextureEntry::format lookup (root cause AH)
 #include "FormatMap.h"  // sampled_layout_for_format (root cause AH)
 #include "UniformArena.h"  // transient per-frame UBO storage (see below)
+#include "LogRing.h"      // sampler 兜底打点（GPU fault 诊断）
 #include "../Backend.h"
 #include "../../MG_State/State.h"
 #include "../../MG_Impl/Log.h"
@@ -972,6 +973,8 @@ void bind_program_descriptors(GLuint program, VkPipelineBindPoint bindPoint) {
                 if (dt.view != VK_NULL_HANDLE && dt.sampler != VK_NULL_HANDLE) {
                     view = dt.view;
                     samp = dt.sampler;
+                    LOG_RESOURCE("sampler FALLBACK-to-default prog=%u binding=%u unit=%d tex=0 (no texture bound)",
+                                 (unsigned)program, db.binding, unit);
                 }
             }
             // DEBUG (sampler black-screen triage): log how each sampler binding

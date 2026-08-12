@@ -8,6 +8,7 @@
 #include "DescriptorSet.h"  // bind_program_descriptors (compute dispatch path)
 #include "Pipeline.h"       // clear_all_pipeline_caches (OOM recovery)
 #include "UniformArena.h"   // ubo_arena_rewind (per-frame transient UBO storage)
+#include "LogRing.h"       // 资源操作环形日志（GPU fault 时 dump）
 #include "../Backend.h"
 #include "../../MG_Impl/Log.h"
 #include "../../MG_State/State.h"  // g_state (for scissorTest in clear_attachments +
@@ -1582,6 +1583,9 @@ void commit_frame() {
     vkResetFences(b->device, 1, &fence);
     r = vkQueueSubmit(b->graphicsQueue, 1, &si, fence);
     if (r != VK_SUCCESS) {
+        // GPU fault / device lost 诊断：dump 最近资源操作，定位 fault 前
+        // 最后一次纹理/缓冲创建销毁、mipmap、FBO 切换。
+        mithril::vk::log_ring().dump("vkQueueSubmit failed");
         // FIX (rendering suspended 根因): 彻底重新设计 submit 失败处理。
         //
         // 原实现：连续 3 次 submit 失败 → deviceLost=true → "rendering suspended"
