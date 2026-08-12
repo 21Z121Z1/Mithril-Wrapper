@@ -16,20 +16,20 @@ BOUNDARY=$2
 echo '--- DirectMetal Mach-O dependencies ---'
 DEPS=$(otool -L "$DYLIB")
 printf '%s\n' "$DEPS"
-printf '%s\n' "$DEPS" | grep -Eq '/Metal\.framework/(Versions/[^/]+/)?Metal'
-if printf '%s\n' "$DEPS" | grep -Eqi 'vulkan|moltenvk'; then
+grep -Eq '/Metal\.framework/(Versions/[^/]+/)?Metal' <<<"$DEPS"
+if grep -Eqi 'vulkan|moltenvk' <<<"$DEPS"; then
   echo 'forbidden Vulkan/MoltenVK runtime dependency in DirectMetal artifact' >&2
   exit 1
 fi
 
 echo '--- DirectMetal exported/undefined symbol boundary ---'
 SYMS=$(nm -gU "$DYLIB")
-if printf '%s\n' "$SYMS" | grep -Eqi ' _vk[A-Z]|moltenvk|directvulkan'; then
+if grep -Eqi ' _vk[A-Z]|moltenvk|directvulkan' <<<"$SYMS"; then
   echo 'forbidden Vulkan/MoltenVK symbol in DirectMetal artifact' >&2
   exit 1
 fi
 UNDEF=$(nm -u "$DYLIB" || true)
-if printf '%s\n' "$UNDEF" | grep -Eqi ' _vk[A-Z]|moltenvk|directvulkan'; then
+if grep -Eqi ' _vk[A-Z]|moltenvk|directvulkan' <<<"$UNDEF"; then
   echo 'forbidden unresolved Vulkan/MoltenVK symbol in DirectMetal artifact' >&2
   exit 1
 fi
@@ -46,13 +46,13 @@ for symbol in eglGetDisplay eglInitialize eglChooseConfig eglCreateContext \
               glGetString glGetError glGenBuffers glBufferData glGenVertexArrays \
               glCreateShader glCompileShader glCreateProgram glLinkProgram \
               glDrawArrays glDrawElements; do
-  if ! printf '%s\n' "$SYMS" | grep -qE " _$symbol$"; then
+  if ! grep -qE " _$symbol$" <<<"$SYMS"; then
     echo "missing required shipping export: $symbol" >&2
     exit 1
   fi
 done
 
-GL_COUNT=$(printf '%s\n' "$SYMS" | grep -cE ' _gl[A-Z0-9]' || true)
+GL_COUNT=$(grep -cE ' _gl[A-Z0-9]' <<<"$SYMS" || true)
 echo "DirectMetal GL exports: $GL_COUNT"
 [[ "$GL_COUNT" -ge 342 ]] || {
   echo "DirectMetal GL export surface regressed below 342 symbols" >&2
