@@ -5,14 +5,14 @@ not considered supported merely because it is exported. Update this document
 from source plus executable evidence whenever a capability changes.
 
 Snapshot: 2026-08-12, based on
-`codex/autonomous-direct-metal-next@7c35fee` plus the conditional-render work
-that follows that base.
+`codex/autonomous-direct-metal-next@ae8c1fb` plus the captured-drawable
+presentation work that follows that base.
 
 Reference heads inspected for this snapshot:
 
 - `origin/feature/direct-metal@ca05c06` and
   `origin/feature/direct-metal-ios-amethyst@0a3c678`;
-- `uniaball/main@b16e18b`;
+- `uniaball/main@2fa0e63`;
 - `herbrine/main@ddc9c3d`,
   `herbrine/implement-gl33-core-renderer@9778de1`, `herbrine/fix@36b6913`,
   and the remaining drawable/black-screen experiment branches;
@@ -33,8 +33,8 @@ Reference heads inspected for this snapshot:
 
 | API family | DirectMetal status | Current execution evidence | Remaining semantic boundary / highest-value gap |
 | --- | --- | --- | --- |
-| EGL config/context/window surface | partial | `contract_smoke`, `amethyst_egl_smoke` | macOS `CAMetalLayer` presentation is covered. Real iPhoneOS lifecycle, multiple contexts/surfaces, background/resume, and current Amethyst main integration are untested. |
-| Default framebuffer size/present | partial | `amethyst_egl_smoke` | `drawableSize` is synchronized before submission. Logical size vs physical pixels, orientation changes, nil drawable recovery, and surface replacement need a standalone lifecycle app. |
+| EGL config/context/window surface | partial | `contract_smoke`, `amethyst_egl_smoke` | macOS `CAMetalLayer` presentation is covered through captured drawable pixels. Real iPhoneOS lifecycle, multiple contexts/surfaces, background/resume, and current Amethyst main integration are untested. |
+| Default framebuffer size/present | partial | `amethyst_egl_smoke` captured BGRA drawable pixels | `eglSwapBuffers` submits a pending clear without an explicit GL flush, converts the RGBA default target into a BGRA drawable, and synchronizes non-square `drawableSize` changes before acquiring the replacement drawable. Logical size vs physical pixels under UIKit scale, nil drawable recovery, and surface replacement still need a standalone lifecycle app. |
 | Clear/viewport/scissor | exact for tested color/depth/stencil and masks; partial overall | `state_smoke`, `fbo_smoke`, `directmetal_fbo_smoke`, `query_smoke` | Conditional draw, `glClear`, and `glClearBuffer*` now consume real occlusion results. Per-draw-buffer indexed state and every integer clear format remain incomplete. |
 | Depth/stencil/blend/cull/polygon | partial | `fbo_smoke`, `stencil_persistence_smoke` pixel assertions | Basic depth, stencil, blend, cull, front-face and line polygon mode execute. Default and packed offscreen depth/stencil targets preserve stencil across completed Metal command buffers. Blend enum validation, independent indexed blend/masks, point polygon mode, and several uncommon factors are incomplete or rejected. |
 | Multisample/sample/raster state | partial / silent-risk | MSAA FBO and `sampler2DMS` cases in `fbo_smoke` | `glGetMultisamplefv` is a stub. Sample coverage/mask, alpha-to-coverage, rasterizer discard, dithering, logic op, program point size and line/point width are shadowed but are not all materialized by DirectMetal. Do not count state getters as execution support. |
@@ -81,12 +81,16 @@ fail-closed path; it must not be marked supported by symbol count.
   materialization, not Vulkan descriptor sets. The current binding diagnostic
   ABI covers only part of this acceptance surface.
 - Uniaball's stencil-store fix exposed a cross-render-pass persistence
-  requirement. DirectMetal already uses `MTLStoreActionStore`; `fbo_smoke`
-  crosses `glFinish` boundaries, but this deserves an explicit named regression.
+  requirement. `stencil_persistence_smoke` now forces separate Metal command
+  buffers and pixel-checks both default and packed offscreen targets.
+- Uniaball's pending-frame and zero-sized-layer fixes exposed a presentation
+  acceptance gap. `amethyst_egl_smoke` now captures the real BGRA drawable and
+  checks pending clear submission plus physical-size replacement pixels.
 - Herbrine's black/red-screen history identifies permanent test targets:
   drawable size, default-vs-offscreen Y orientation, render area bounds,
   attachment replacement, sampler binding and presentation lifetime. Existing
-  macOS smokes cover sampler binding and basic presentation only.
+  macOS smokes cover sampler binding, drawable resize and uniform-color
+  presentation; asymmetric orientation and lifecycle interruption remain open.
 - Amethyst main currently creates a `CAMetalLayer` and forwards that layer to
   EGL, but its main branch does not expose Mithril as a selectable renderer.
   The `Amethyst-iOS-MyRemastered` branch is integration reference evidence,
@@ -100,7 +104,7 @@ and inverse change risk.
 
 | Candidate | Score | Closure target |
 | --- | ---: | --- |
-| Cross-command-buffer stencil persistence regression | 34/40 | Name and isolate the Uniaball-discovered failure, force separate Metal submissions, and prove stencil survives on default and offscreen targets. |
-| CAMetalLayer resize/orientation standalone regression | 33/40 | Exercise logical/physical size changes, drawable replacement, default framebuffer orientation and offscreen invariance without Minecraft. |
-| Fail-closed or implement remaining silent state/stub families | 31/40 | Remove false support, prioritizing sample/raster state and transform-feedback declarations used by real workloads. |
-| Packed vertex attribute setters | 28/40 | Decode `2_10_10_10_REV` current attributes with getter and shader pixel evidence. |
+| Separate depth/stencil FBO attachment semantics | 34/40 | Represent depth and stencil attachment selection honestly; support the common same-packed-object case and reject unsupported distinct layouts without aliasing. |
+| CAMetalLayer interruption and surface replacement | 33/40 | Exercise nil-drawable failure, detach/rebind, replacement size and recovery without relying on Minecraft logs. |
+| Packed vertex attribute setters | 32/40 | Decode legal packed current attributes with getter, error and shader-pixel evidence; remove eight generated stubs. |
+| Fail-closed remaining silent state/stub families | 31/40 | Remove false support, prioritizing sample/raster state and transform-feedback declarations used by real workloads. |

@@ -101,6 +101,7 @@ if(APPLE AND NOT MITHRIL_IOS AND BUILD_TESTING)
     set_source_files_properties(tests/amethyst_egl_smoke.mm PROPERTIES
         COMPILE_FLAGS "-fobjc-arc")
     target_link_libraries(amethyst_egl_smoke PRIVATE
+        "-framework Metal"
         "-framework Foundation"
         "-framework QuartzCore")
     target_compile_options(amethyst_egl_smoke PRIVATE

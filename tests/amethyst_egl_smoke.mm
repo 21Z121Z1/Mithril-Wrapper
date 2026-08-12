@@ -8,11 +8,13 @@
  */
 
 #import <Foundation/Foundation.h>
+#import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
 
 #include <dlfcn.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
 #define EGL_FALSE 0
 #define EGL_TRUE 1
@@ -75,6 +77,58 @@ static int failures = 0;
     } while (0)
 
 #define LOAD(type, name) type name = reinterpret_cast<type>(dlsym(handle, #name))
+
+@interface CapturingMetalLayer : CAMetalLayer
+@property(nonatomic, strong) id<CAMetalDrawable> capturedDrawable;
+@end
+
+@implementation CapturingMetalLayer
+- (id<CAMetalDrawable>)nextDrawable {
+    id<CAMetalDrawable> drawable = [super nextDrawable];
+    self.capturedDrawable = drawable;
+    return drawable;
+}
+@end
+
+static bool ReadPresentedPixel(CapturingMetalLayer* layer, NSUInteger x,
+                               NSUInteger y, unsigned char pixel[4]) {
+    id<CAMetalDrawable> drawable = layer.capturedDrawable;
+    id<MTLTexture> texture = drawable.texture;
+    if (!texture || x >= texture.width || y >= texture.height ||
+        texture.pixelFormat != MTLPixelFormatBGRA8Unorm)
+        return false;
+
+    id<MTLCommandQueue> queue = [layer.device newCommandQueue];
+    id<MTLBuffer> readback = [layer.device
+        newBufferWithLength:256 options:MTLResourceStorageModeShared];
+    id<MTLCommandBuffer> command = [queue commandBuffer];
+    id<MTLBlitCommandEncoder> blit = [command blitCommandEncoder];
+    if (!queue || !readback || !command || !blit) return false;
+
+    [blit copyFromTexture:texture
+              sourceSlice:0
+              sourceLevel:0
+             sourceOrigin:MTLOriginMake(x, y, 0)
+               sourceSize:MTLSizeMake(1, 1, 1)
+                 toBuffer:readback
+        destinationOffset:0
+   destinationBytesPerRow:256
+ destinationBytesPerImage:256];
+    [blit endEncoding];
+    [command commit];
+    [command waitUntilCompleted];
+    if (command.status != MTLCommandBufferStatusCompleted) return false;
+    memcpy(pixel, readback.contents, 4);
+    return true;
+}
+
+static bool BgraMatches(const unsigned char pixel[4], unsigned char b,
+                        unsigned char g, unsigned char r, unsigned char a) {
+    return abs((int)pixel[0] - b) <= 2 &&
+           abs((int)pixel[1] - g) <= 2 &&
+           abs((int)pixel[2] - r) <= 2 &&
+           abs((int)pixel[3] - a) <= 2;
+}
 
 int main(void) {
     @autoreleasepool {
@@ -181,12 +235,21 @@ int main(void) {
               "context retains Amethyst's requested client version (%d)",
               client_version);
 
-        CAMetalLayer* layer = [CAMetalLayer layer];
+        CapturingMetalLayer* layer = [CapturingMetalLayer layer];
         layer.drawableSize = CGSizeMake(80, 48);
         void* surface = eglCreateWindowSurface(
             display, config, (__bridge void*)layer, nullptr);
         CHECK(surface != nullptr, "real CAMetalLayer window surface is created");
         if (!surface) return failures ? failures : 1;
+        CHECK(layer.device != nil &&
+                  layer.pixelFormat == MTLPixelFormatBGRA8Unorm &&
+                  layer.framebufferOnly,
+              "DirectMetal configures a framebuffer-only BGRA8 drawable");
+
+        /* Test instrumentation only: keep the production format and render
+         * path, but allow a post-present blit so this smoke can assert actual
+         * drawable bytes instead of treating EGL_TRUE as visual evidence. */
+        layer.framebufferOnly = NO;
 
         CHECK(eglMakeCurrent(display, surface, surface, context) == EGL_TRUE,
               "Amethyst surface/context becomes current");
@@ -207,6 +270,15 @@ int main(void) {
         CHECK(eglSwapBuffers(display, surface) == EGL_TRUE,
               "DirectMetal presents the first Amethyst frame");
         glFinish();
+        unsigned char presented[4] = {0};
+        CHECK(layer.capturedDrawable.texture.width == 80 &&
+                  layer.capturedDrawable.texture.height == 48,
+              "first presented drawable has the physical 80x48 extent");
+        CHECK(ReadPresentedPixel(layer, 40, 24, presented) &&
+                  BgraMatches(presented, 128, 64, 32, 255),
+              "pending clear reaches the BGRA drawable without glFlush "
+              "(%u,%u,%u,%u)", presented[0], presented[1], presented[2],
+              presented[3]);
         CHECK(glGetError() == GL_NO_ERROR && eglGetError() == EGL_SUCCESS,
               "first present completes without GL/EGL errors");
 
@@ -216,6 +288,15 @@ int main(void) {
         CHECK(eglSwapBuffers(display, surface) == EGL_TRUE,
               "DirectMetal presents after a non-square orientation resize");
         glFinish();
+        memset(presented, 0, sizeof(presented));
+        CHECK(layer.capturedDrawable.texture.width == 56 &&
+                  layer.capturedDrawable.texture.height == 96,
+              "resized presented drawable has the physical 56x96 extent");
+        CHECK(ReadPresentedPixel(layer, 28, 48, presented) &&
+                  BgraMatches(presented, 32, 64, 128, 255),
+              "resized clear reaches the replacement BGRA drawable "
+              "(%u,%u,%u,%u)", presented[0], presented[1], presented[2],
+              presented[3]);
         CHECK(eglQuerySurface(display, surface, EGL_WIDTH, &width) == EGL_TRUE &&
                   eglQuerySurface(display, surface, EGL_HEIGHT, &height) == EGL_TRUE &&
                   width == 56 && height == 96,
