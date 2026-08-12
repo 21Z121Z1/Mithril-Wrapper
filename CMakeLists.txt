@@ -97,6 +97,11 @@ endif()
 
 include(CTest)
 if(APPLE AND NOT MITHRIL_IOS AND BUILD_TESTING)
+    # The Amethyst presentation smoke reads one pixel from the drawable in the
+    # same Metal command buffer that submits it. Post-present drawable contents
+    # are not portable across physical and paravirtual Metal implementations.
+    target_compile_definitions(mithril PRIVATE
+        MITHRIL_PRESENTATION_TEST_HOOKS=1)
     add_executable(amethyst_egl_smoke tests/amethyst_egl_smoke.mm)
     set_source_files_properties(tests/amethyst_egl_smoke.mm PROPERTIES
         COMPILE_FLAGS "-fobjc-arc")

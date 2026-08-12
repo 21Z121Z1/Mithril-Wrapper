@@ -63,6 +63,8 @@ typedef void (*fn_glClearColor)(float, float, float, float);
 typedef void (*fn_glClear)(unsigned int);
 typedef void (*fn_glFinish)(void);
 typedef unsigned int (*fn_glGetError)(void);
+typedef bool (*fn_mithrilTestArmNextPresentedPixel)(uint32_t, uint32_t);
+typedef bool (*fn_mithrilTestReadPresentedPixel)(unsigned char[4]);
 
 static int failures = 0;
 
@@ -89,38 +91,6 @@ static int failures = 0;
     return drawable;
 }
 @end
-
-static bool ReadPresentedPixel(CapturingMetalLayer* layer, NSUInteger x,
-                               NSUInteger y, unsigned char pixel[4]) {
-    id<CAMetalDrawable> drawable = layer.capturedDrawable;
-    id<MTLTexture> texture = drawable.texture;
-    if (!texture || x >= texture.width || y >= texture.height ||
-        texture.pixelFormat != MTLPixelFormatBGRA8Unorm)
-        return false;
-
-    id<MTLCommandQueue> queue = [layer.device newCommandQueue];
-    id<MTLBuffer> readback = [layer.device
-        newBufferWithLength:256 options:MTLResourceStorageModeShared];
-    id<MTLCommandBuffer> command = [queue commandBuffer];
-    id<MTLBlitCommandEncoder> blit = [command blitCommandEncoder];
-    if (!queue || !readback || !command || !blit) return false;
-
-    [blit copyFromTexture:texture
-              sourceSlice:0
-              sourceLevel:0
-             sourceOrigin:MTLOriginMake(x, y, 0)
-               sourceSize:MTLSizeMake(1, 1, 1)
-                 toBuffer:readback
-        destinationOffset:0
-   destinationBytesPerRow:256
- destinationBytesPerImage:256];
-    [blit endEncoding];
-    [command commit];
-    [command waitUntilCompleted];
-    if (command.status != MTLCommandBufferStatusCompleted) return false;
-    memcpy(pixel, readback.contents, 4);
-    return true;
-}
 
 static bool BgraMatches(const unsigned char pixel[4], unsigned char b,
                         unsigned char g, unsigned char r, unsigned char a) {
@@ -163,6 +133,10 @@ int main(void) {
         LOAD(fn_glClear, glClear);
         LOAD(fn_glFinish, glFinish);
         LOAD(fn_glGetError, glGetError);
+        LOAD(fn_mithrilTestArmNextPresentedPixel,
+             mithrilTestArmNextPresentedPixel);
+        LOAD(fn_mithrilTestReadPresentedPixel,
+             mithrilTestReadPresentedPixel);
 
         CHECK(eglGetDisplay && eglInitialize && eglChooseConfig &&
                   eglGetConfigAttrib && eglBindAPI && eglQueryAPI &&
@@ -172,7 +146,8 @@ int main(void) {
                   eglQuerySurface && eglSwapBuffers && eglDestroySurface &&
                   eglDestroyContext && eglReleaseThread && eglTerminate &&
                   eglGetError && glClearColor && glClear && glFinish &&
-                  glGetError,
+                  glGetError && mithrilTestArmNextPresentedPixel &&
+                  mithrilTestReadPresentedPixel,
               "Amethyst EGL/GL symbol contract resolves");
         if (failures) return failures;
 
@@ -267,6 +242,8 @@ int main(void) {
 
         glClearColor(0.125f, 0.25f, 0.5f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
+        CHECK(mithrilTestArmNextPresentedPixel(40, 24),
+              "first drawable pixel capture is armed");
         CHECK(eglSwapBuffers(display, surface) == EGL_TRUE,
               "DirectMetal presents the first Amethyst frame");
         glFinish();
@@ -274,9 +251,9 @@ int main(void) {
         CHECK(layer.capturedDrawable.texture.width == 80 &&
                   layer.capturedDrawable.texture.height == 48,
               "first presented drawable has the physical 80x48 extent");
-        CHECK(ReadPresentedPixel(layer, 40, 24, presented) &&
+        CHECK(mithrilTestReadPresentedPixel(presented) &&
                   BgraMatches(presented, 128, 64, 32, 255),
-              "pending clear reaches the BGRA drawable without glFlush "
+              "pending clear reaches the submitted BGRA drawable without glFlush "
               "(%u,%u,%u,%u)", presented[0], presented[1], presented[2],
               presented[3]);
         CHECK(glGetError() == GL_NO_ERROR && eglGetError() == EGL_SUCCESS,
@@ -285,6 +262,8 @@ int main(void) {
         layer.drawableSize = CGSizeMake(56, 96);
         glClearColor(0.5f, 0.25f, 0.125f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
+        CHECK(mithrilTestArmNextPresentedPixel(28, 48),
+              "replacement drawable pixel capture is armed");
         CHECK(eglSwapBuffers(display, surface) == EGL_TRUE,
               "DirectMetal presents after a non-square orientation resize");
         glFinish();
@@ -292,7 +271,7 @@ int main(void) {
         CHECK(layer.capturedDrawable.texture.width == 56 &&
                   layer.capturedDrawable.texture.height == 96,
               "resized presented drawable has the physical 56x96 extent");
-        CHECK(ReadPresentedPixel(layer, 28, 48, presented) &&
+        CHECK(mithrilTestReadPresentedPixel(presented) &&
                   BgraMatches(presented, 32, 64, 128, 255),
               "resized clear reaches the replacement BGRA drawable "
               "(%u,%u,%u,%u)", presented[0], presented[1], presented[2],

@@ -30,6 +30,57 @@ namespace {
 id<MTLRenderPipelineState> g_present_pipeline = nil;
 id<MTLLibrary> g_present_library = nil;
 
+#if defined(MITHRIL_PRESENTATION_TEST_HOOKS)
+struct PresentationPixelCapture {
+    bool armed = false;
+    NSUInteger x = 0;
+    NSUInteger y = 0;
+    id<MTLBuffer> readback = nil;
+    id<MTLCommandBuffer> command = nil;
+};
+
+PresentationPixelCapture g_presentation_capture;
+
+bool EncodePresentationPixelCapture(id<CAMetalDrawable> drawable,
+                                    id<MTLCommandBuffer> command) {
+    if (!g_presentation_capture.armed) return true;
+    g_presentation_capture.armed = false;
+
+    id<MTLTexture> texture = drawable.texture;
+    if (!texture || texture.framebufferOnly ||
+        g_presentation_capture.x >= texture.width ||
+        g_presentation_capture.y >= texture.height) {
+        g_presentation_capture.readback = nil;
+        g_presentation_capture.command = nil;
+        return false;
+    }
+
+    auto& engine = GetEngine();
+    id<MTLBuffer> readback = [engine.device
+        newBufferWithLength:256 options:MTLResourceStorageModeShared];
+    id<MTLBlitCommandEncoder> blit = [command blitCommandEncoder];
+    if (!readback || !blit) {
+        g_presentation_capture.readback = nil;
+        g_presentation_capture.command = nil;
+        return false;
+    }
+    [blit copyFromTexture:texture
+              sourceSlice:0
+              sourceLevel:0
+             sourceOrigin:MTLOriginMake(g_presentation_capture.x,
+                                        g_presentation_capture.y, 0)
+               sourceSize:MTLSizeMake(1, 1, 1)
+                 toBuffer:readback
+        destinationOffset:0
+   destinationBytesPerRow:256
+ destinationBytesPerImage:256];
+    [blit endEncoding];
+    g_presentation_capture.readback = readback;
+    g_presentation_capture.command = command;
+    return true;
+}
+#endif
+
 bool EnsurePresentPipeline() {
     if (g_present_pipeline) return true;
 
@@ -188,10 +239,48 @@ bool Present() {
                     vertexCount:3];
         [encoder endEncoding];
 
+#if defined(MITHRIL_PRESENTATION_TEST_HOOKS)
+        // Capture before present on this command buffer. A second queue reading
+        // an already-presented CAMetalDrawable can observe recycled contents.
+        if (!EncodePresentationPixelCapture(drawable, command)) {
+            ML_LOG_ERROR("metal: failed to capture presentation test pixel");
+            return false;
+        }
+#endif
+
         [command presentDrawable:drawable];
         if (!CommitCommandBuffer(command)) return false;
         return true;
     }
 }
+
+#if defined(MITHRIL_PRESENTATION_TEST_HOOKS)
+extern "C" __attribute__((visibility("default")))
+bool mithrilTestArmNextPresentedPixel(uint32_t x, uint32_t y) {
+    if (g_presentation_capture.armed) return false;
+    g_presentation_capture.x = x;
+    g_presentation_capture.y = y;
+    g_presentation_capture.readback = nil;
+    g_presentation_capture.command = nil;
+    g_presentation_capture.armed = true;
+    return true;
+}
+
+extern "C" __attribute__((visibility("default")))
+bool mithrilTestReadPresentedPixel(uint8_t pixel[4]) {
+    if (!pixel || g_presentation_capture.armed ||
+        !g_presentation_capture.readback ||
+        !g_presentation_capture.command)
+        return false;
+    [g_presentation_capture.command waitUntilCompleted];
+    if (g_presentation_capture.command.status !=
+        MTLCommandBufferStatusCompleted)
+        return false;
+    std::memcpy(pixel, g_presentation_capture.readback.contents, 4);
+    g_presentation_capture.readback = nil;
+    g_presentation_capture.command = nil;
+    return true;
+}
+#endif
 
 } // namespace mithril::metal
