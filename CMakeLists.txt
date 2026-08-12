@@ -108,11 +108,14 @@ if(APPLE AND NOT MITHRIL_IOS AND BUILD_TESTING)
     add_dependencies(amethyst_egl_smoke mithril)
     add_test(NAME amethyst_egl_smoke COMMAND amethyst_egl_smoke)
     set_tests_properties(amethyst_egl_smoke PROPERTIES
-        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
         ENVIRONMENT
-            "MITHRIL_BACKEND=metal;MITHRIL_EXPECT_RENDERER=DirectMetal;MTL_DEBUG_LAYER=1;MTL_SHADER_VALIDATION=1"
+            "MITHRIL_BACKEND=metal;MITHRIL_EXPECT_RENDERER=DirectMetal;MITHRIL_LIBRARY=./output/libmithril.dylib;MTL_DEBUG_LAYER=1;MTL_SHADER_VALIDATION=1"
+        LABELS "amethyst;presentation"
         PASS_REGULAR_EXPRESSION "AMETHYST EGL SMOKE ALL PASSED")
 endif()
+
+include(cmake/MithrilSmokeTests.cmake)
 
 set_target_properties(mithril PROPERTIES
     OUTPUT_NAME mithril
