@@ -190,11 +190,11 @@ bool EnsurePresentPipeline() {
         @"\n"
         @"fragment float4 mithril_present_fragment(\n"
         @"    float4 position [[position]],\n"
-        @"    texture2d<float, access::read> source [[texture(0)]]) {\n"
-        @"    uint2 pixel = uint2(position.xy);\n"
-        @"    pixel.x = min(pixel.x, source.get_width() - 1);\n"
-        @"    pixel.y = min(pixel.y, source.get_height() - 1);\n"
-        @"    return source.read(pixel);\n"
+        @"    texture2d<float, access::sample> source [[texture(0)]]) {\n"
+        @"    constexpr sampler nearest_pixel(coord::pixel,\n"
+        @"                                    address::clamp_to_edge,\n"
+        @"                                    filter::nearest);\n"
+        @"    return source.sample(nearest_pixel, position.xy);\n"
         @"}\n";
 
     NSError* library_error = nil;
