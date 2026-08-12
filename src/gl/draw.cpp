@@ -721,54 +721,68 @@ void DrawCommon(GLenum mode, const std::vector<uint32_t>& idx, GLint first,
                               (float)state.scissor.w, (float)state.scissor.h}
         : std::array<float, 4>{0.f, 0.f, (float)target_width,
                               (float)target_height};
-    // Resolve each sampler uniform to the texture bound at its GL unit
-    // (the framebelike value glUniform1i wrote; absent -> unit 0).
+
+    // Resolve each sampler (or each active sampler-array element) to the GL
+    // texture unit last written through glUniform1i/glUniform1iv. Shader
+    // lowering reserves consecutive descriptor binding numbers for fixed
+    // arrays; DirectMetal maps binding N to classic Metal slot N-1, so adding
+    // `element` here lands on the matching texture/sampler array element.
     dp.sampled_textures.clear();
     for (const auto& smp : prog->samplers) {
-        GLint unit = 0;
         auto uit = prog->uniform_by_location.find(smp.location);
-        if (uit != prog->uniform_by_location.end() &&
-            !prog->uniforms[uit->second].value.empty())
-            unit = (GLint)prog->uniforms[uit->second].value[0];
-        const GLenum target = TextureTargetForSampler(smp.type);
-        GLuint tex = unit >= 0
-            ? TextureBindingForUnit(static_cast<GLuint>(unit), target) : 0;
-        if (tex) PrepareTextureForDraw(tex);
-        const auto texture = g_textures.find(tex);
-        const TexState default_texture;
-        const TexState& texture_state = texture == g_textures.end()
-            ? default_texture : texture->second;
-        const v::TexSamplerInfo sampler = ResolveSamplerInfo(
-            unit >= 0 ? static_cast<GLuint>(unit) : kMaxTexUnits,
-            texture_state);
-        const bool shader_compares_depth = SamplerUsesDepthCompare(smp.type);
-        const bool texture_is_depth = texture != g_textures.end() &&
-            texture_state.image_backend_format == v::TexelFormat::Depth32Float;
-        if ((shader_compares_depth &&
-             (!texture_is_depth ||
-              sampler.compare_mode != GL_COMPARE_REF_TO_TEXTURE)) ||
-            (!shader_compares_depth && sampler.compare_mode != GL_NONE)) {
-            // A shadow/non-shadow shader type must agree with the effective
-            // texture/sampler comparison state. Do not bind an incompatible
-            // Metal texture/sampler pair and produce driver-dependent output.
-            PUSH_ERROR(GL_INVALID_OPERATION);
-            return;
-        }
-        // A sampler is one GL program uniform even when both shader stages
-        // reference it. Internal SPIR-V bindings, however, are assigned while
-        // each stage is compiled and may differ with declaration order. Keep
-        // the stage destinations explicit instead of aliasing them by name.
-        if (smp.vertex_binding != UINT32_MAX &&
-            smp.vertex_binding == smp.fragment_binding) {
-            dp.sampled_textures.push_back({
-                smp.vertex_binding, tex, sampler, true, true});
-        } else {
-            if (smp.vertex_binding != UINT32_MAX)
+        const sh::Uniform* uniform = uit == prog->uniform_by_location.end()
+            ? nullptr : &prog->uniforms[uit->second];
+        const GLint element_count = std::max<GLint>(smp.size, 1);
+        for (GLint element = 0; element < element_count; ++element) {
+            GLint unit = 0;
+            if (uniform && static_cast<size_t>(element) < uniform->value.size())
+                unit = static_cast<GLint>(uniform->value[element]);
+            const GLenum target = TextureTargetForSampler(smp.type);
+            GLuint tex = unit >= 0
+                ? TextureBindingForUnit(static_cast<GLuint>(unit), target) : 0;
+            if (tex) PrepareTextureForDraw(tex);
+            const auto texture = g_textures.find(tex);
+            const TexState default_texture;
+            const TexState& texture_state = texture == g_textures.end()
+                ? default_texture : texture->second;
+            const v::TexSamplerInfo sampler = ResolveSamplerInfo(
+                unit >= 0 ? static_cast<GLuint>(unit) : kMaxTexUnits,
+                texture_state);
+            const bool shader_compares_depth = SamplerUsesDepthCompare(smp.type);
+            const bool texture_is_depth = texture != g_textures.end() &&
+                texture_state.image_backend_format == v::TexelFormat::Depth32Float;
+            if ((shader_compares_depth &&
+                 (!texture_is_depth ||
+                  sampler.compare_mode != GL_COMPARE_REF_TO_TEXTURE)) ||
+                (!shader_compares_depth && sampler.compare_mode != GL_NONE)) {
+                // A shadow/non-shadow shader type must agree with the effective
+                // texture/sampler comparison state. Do not bind an incompatible
+                // Metal texture/sampler pair and produce driver-dependent output.
+                PUSH_ERROR(GL_INVALID_OPERATION);
+                return;
+            }
+
+            const uint32_t vertex_binding = smp.vertex_binding == UINT32_MAX
+                ? UINT32_MAX
+                : smp.vertex_binding + static_cast<uint32_t>(element);
+            const uint32_t fragment_binding = smp.fragment_binding == UINT32_MAX
+                ? UINT32_MAX
+                : smp.fragment_binding + static_cast<uint32_t>(element);
+            // A sampler is one GL program uniform even when both shader stages
+            // reference it. Internal SPIR-V base bindings may differ with stage
+            // declaration order; the fixed array element offset is identical.
+            if (vertex_binding != UINT32_MAX &&
+                vertex_binding == fragment_binding) {
                 dp.sampled_textures.push_back({
-                    smp.vertex_binding, tex, sampler, true, false});
-            if (smp.fragment_binding != UINT32_MAX)
-                dp.sampled_textures.push_back({
-                    smp.fragment_binding, tex, sampler, false, true});
+                    vertex_binding, tex, sampler, true, true});
+            } else {
+                if (vertex_binding != UINT32_MAX)
+                    dp.sampled_textures.push_back({
+                        vertex_binding, tex, sampler, true, false});
+                if (fragment_binding != UINT32_MAX)
+                    dp.sampled_textures.push_back({
+                        fragment_binding, tex, sampler, false, true});
+            }
         }
     }
     if (prog->uses_flat_fragment_inputs &&

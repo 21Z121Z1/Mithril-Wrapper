@@ -46,12 +46,14 @@ struct Uniform {
 };
 
 // A sampled-image uniform: per-stage SPIR-V bindings (assigned during shader
-// compilation, 1-based) and the shared GL texture-unit value written through
-// its program-uniform location. Declaration order can differ between stages,
-// so bindings must not be collapsed merely because the GL name is shared.
+// compilation, 1-based) and the shared GL texture-unit values written through
+// its program-uniform locations. `size` is the active fixed array length;
+// scalar samplers use 1. Declaration order can differ between stages, so
+// bindings must not be collapsed merely because the GL name is shared.
 struct SamplerRef {
     std::string name;
     GLenum type = GL_SAMPLER_2D;
+    GLint size = 1;
     uint32_t vertex_binding = UINT32_MAX;
     uint32_t fragment_binding = UINT32_MAX;
     GLint location = -1;

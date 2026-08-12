@@ -145,42 +145,65 @@ bool is_in_comment(const std::string& s, size_t off) {
     return depth > 0;
 }
 
-// Vulkan GLSL needs explicit sampler bindings; assign each sampler a fixed
-// binding in declaration order (1-based), leaving binding 0 for the folded
-// mithril_GlobalBlock UBO. The engine mirrors these bindings 1:1 when it
-// builds the descriptor set layout.
-void assign_sampler_bindings(std::string& source) {
+// Vulkan GLSL needs explicit sampler bindings. One sampler-array declaration
+// still owns one SPIR-V descriptor binding, but classic Metal consumes one
+// texture/sampler slot per fixed array element. Reserve that complete span so
+// a later sampler never aliases an earlier array's Metal resource slots.
+//
+// This OpenGL 3.3 slice accepts the normal fixed literal array form. More
+// elaborate constant-expression sizes are rejected explicitly instead of
+// relying on glslang auto-binding and silently producing overlapping slots.
+bool assign_sampler_bindings(std::string& source, std::string& error) {
     static const std::regex re(
-        R"((layout\s*\([^)]*\))?\s*uniform\s+((?:[iu]?sampler)(?:2DMSArray|2DArray|CubeArray|2DRect|1DArray|2DMS|2D|3D|Cube|1D|Buffer)(?:Shadow)?)\s+(\w+)\s*;)");
+        R"((layout\s*\([^)]*\))?\s*uniform\s+(?:(?:highp|mediump|lowp)\s+)?((?:[iu]?sampler)(?:2DMSArray|2DArray|CubeArray|2DRect|1DArray|2DMS|2D|3D|Cube|1D|Buffer)(?:Shadow)?)\s+(\w+)\s*(\[\s*([^\]]+)\s*\])?\s*;)");
+    static const std::regex literal(R"(^\s*([0-9]+)\s*$)");
     struct Edit { size_t pos; size_t len; std::string text; };
     std::vector<Edit> edits;
-    {
-        auto cur = source.cbegin(), end = source.cend();
-        std::smatch m;
-        int slot = 0;
-        while (std::regex_search(cur, end, m, re)) {
-            size_t off = m.position(0) + (cur - source.cbegin());
-            if (!is_in_comment(source, off)) {
-                ++slot;
-                if (m[1].matched) {
-                    edits.push_back({off, m[1].str().size(),
-                                     "layout(binding=" + std::to_string(slot) + ")"});
-                } else {
-                    edits.push_back({off, 0, "\nlayout(binding=" +
-                                                 std::to_string(slot) + ") "});
-                }
+    auto cur = source.cbegin(), end = source.cend();
+    std::smatch match;
+    uint32_t next_binding = 1;
+    while (std::regex_search(cur, end, match, re)) {
+        const size_t off = match.position(0) + (cur - source.cbegin());
+        cur = match.suffix().first;
+        if (is_in_comment(source, off)) continue;
+
+        uint32_t span = 1;
+        if (match[4].matched) {
+            std::smatch size_match;
+            const std::string expression = match[5].str();
+            if (!std::regex_match(expression, size_match, literal)) {
+                error = "sampler array size must be a positive integer literal: " +
+                        match[3].str();
+                return false;
             }
-            cur = m.suffix().first;
+            const unsigned long long parsed = std::stoull(size_match[1].str());
+            if (parsed == 0 || parsed > UINT32_MAX) {
+                error = "sampler array size is outside Mithril's fixed resource range: " +
+                        match[3].str();
+                return false;
+            }
+            span = static_cast<uint32_t>(parsed);
+        }
+        if (span > UINT32_MAX - next_binding + 1) {
+            error = "sampler binding range overflow";
+            return false;
+        }
+        const uint32_t binding = next_binding;
+        next_binding += span;
+        if (match[1].matched) {
+            edits.push_back({off, match[1].str().size(),
+                             "layout(binding=" + std::to_string(binding) + ")"});
+        } else {
+            edits.push_back({off, 0, "\nlayout(binding=" +
+                                         std::to_string(binding) + ") "});
         }
     }
     // Apply from the tail so earlier offsets stay valid.
     for (auto it = edits.rbegin(); it != edits.rend(); ++it) {
-        if (it->len == 0) {
-            source.insert(it->pos + it->len, it->text);
-        } else {
-            source.replace(it->pos, it->len, it->text);
-        }
+        if (it->len == 0) source.insert(it->pos, it->text);
+        else source.replace(it->pos, it->len, it->text);
     }
+    return true;
 }
 
 const std::regex& uniform_block_re() {
@@ -458,8 +481,9 @@ bool CompileStage(GLenum stage, const std::string& src,
     if (!set_internal_uniform_block_bindings(source, info) ||
         !set_internal_uniform_block_bindings(unwrapped, info))
         return false;
-    assign_sampler_bindings(source);
-    assign_sampler_bindings(unwrapped);
+    if (!assign_sampler_bindings(source, info) ||
+        !assign_sampler_bindings(unwrapped, info))
+        return false;
     // layout(binding=...) requires GLSL 420+; bump only when injected.
     if (source.find("binding=") != std::string::npos)
         bump_glsl_version(source, 450);

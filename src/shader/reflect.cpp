@@ -553,7 +553,9 @@ bool ReflectProgram(Program& prog, std::string& error) {
             auto add_sampler = [&](spirv_cross::Resource& resource) {
                 const std::string name = resource.name;
                 if (name.empty()) return;
+                const auto& resource_type = compiler.get_type(resource.type_id);
                 const GLenum sampler_type = SamplerTypeFor(compiler, resource);
+                const GLint sampler_size = ArraySize(resource_type);
                 const uint32_t binding = compiler.get_decoration(
                     resource.id, spv::DecorationBinding);
                 auto existing = std::find_if(
@@ -565,19 +567,27 @@ bool ReflectProgram(Program& prog, std::string& error) {
                     SamplerRef sampler;
                     sampler.name = name;
                     sampler.type = sampler_type;
+                    sampler.size = sampler_size;
                     if (vertex_stage) sampler.vertex_binding = binding;
                     else sampler.fragment_binding = binding;
                     prog.samplers.push_back(std::move(sampler));
                 } else {
-                    if (existing->type != sampler_type)
-                        fail("cross-stage type mismatch for sampler " + name);
+                    if (existing->type != sampler_type ||
+                        existing->size != sampler_size)
+                        fail("cross-stage type/size mismatch for sampler " + name);
                     if (vertex_stage) existing->vertex_binding = binding;
                     else existing->fragment_binding = binding;
                 }
                 Uniform uniform;
                 uniform.name = name;
                 uniform.type = sampler_type;
-                loose_uniforms.emplace(name, std::move(uniform));
+                uniform.size = sampler_size;
+                auto [uniform_it, inserted] = loose_uniforms.emplace(
+                    name, std::move(uniform));
+                if (!inserted &&
+                    (uniform_it->second.type != sampler_type ||
+                     uniform_it->second.size != sampler_size))
+                    fail("cross-stage type/size mismatch for uniform " + name);
             };
             for (auto& resource : resources.sampled_images) add_sampler(resource);
             for (auto& resource : resources.separate_images) add_sampler(resource);
