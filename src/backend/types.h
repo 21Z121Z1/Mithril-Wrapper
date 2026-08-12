@@ -150,6 +150,27 @@ struct UniformBufferBinding {
     uint64_t size = 0;
 };
 
+// Native shader reflection for one member of the synthetic loose-uniform
+// block. GL setters expose tightly packed scalar sequences, while std140/MSL
+// layouts may add a stride between array elements or matrix rows/columns.
+struct UniformMemberLayout {
+    std::string name;
+    uint32_t offset = 0;
+    uint32_t size = 0;
+    uint32_t vector_components = 1;
+    uint32_t matrix_columns = 1;
+    uint32_t array_elements = 1;
+    uint32_t array_stride = 0;
+    uint32_t matrix_stride = 0;
+    bool row_major = false;
+};
+
+// Copy one GL uniform snapshot into its reflected block layout. Values use
+// 32-bit GL scalar representations and matrices are normalized column-major.
+bool PackUniformValue(const UniformMemberLayout& layout,
+                      const std::vector<uint8_t>& value,
+                      uint8_t* block, size_t block_size);
+
 enum class TexFilter { Nearest = 0, Linear = 1 };
 enum class TexMipFilter { None = 0, Nearest = 1, Linear = 2 };
 
@@ -187,6 +208,8 @@ struct SampledTextureBinding {
     uint32_t binding = 0;
     uint64_t texture = 0;
     TexSamplerInfo sampler;
+    bool vertex_stage = false;
+    bool fragment_stage = false;
 };
 
 struct ClearParams {
@@ -219,7 +242,10 @@ struct DrawParams {
     uint64_t occlusion_query = 0;
     uint32_t instance_count = 1;
     Topology topology = Topology::Triangles;
-    std::unordered_map<std::string, std::vector<float>> uniforms;
+    // Exact bytes captured when the GL draw is issued. Integer uniforms must
+    // remain integer bit patterns; converting their values through float
+    // changes what SPIR-V/MSL reads from the synthetic uniform block.
+    std::unordered_map<std::string, std::vector<uint8_t>> uniforms;
     std::vector<UniformBufferBinding> uniform_buffers;
     std::vector<SampledTextureBinding> sampled_textures;
     PipelineState pipeline;

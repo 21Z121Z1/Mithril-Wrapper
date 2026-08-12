@@ -8,16 +8,8 @@ void GlStubCalled(const char* name);
 
 extern "C" {
 
-  void APIENTRY glBeginConditionalRender(GLuint id, GLenum mode) {
-    mithril::GlStubCalled("glBeginConditionalRender");
-  }
-
   void APIENTRY glBeginTransformFeedback(GLenum primitiveMode) {
     mithril::GlStubCalled("glBeginTransformFeedback");
-  }
-
-  void APIENTRY glEndConditionalRender(void) {
-    mithril::GlStubCalled("glEndConditionalRender");
   }
 
   void APIENTRY glEndTransformFeedback(void) {
@@ -48,48 +40,12 @@ extern "C" {
     mithril::GlStubCalled("glPointParameteriv");
   }
 
-  void APIENTRY glProvokingVertex(GLenum mode) {
-    mithril::GlStubCalled("glProvokingVertex");
-  }
-
   void APIENTRY glTexImage3DMultisample(GLenum target, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height, GLsizei depth, GLboolean fixedsamplelocations) {
     mithril::GlStubCalled("glTexImage3DMultisample");
   }
 
   void APIENTRY glTransformFeedbackVaryings(GLuint program, GLsizei count, const GLchar *const*varyings, GLenum bufferMode) {
     mithril::GlStubCalled("glTransformFeedbackVaryings");
-  }
-
-  void APIENTRY glVertexAttribP1ui(GLuint index, GLenum type, GLboolean normalized, GLuint value) {
-    mithril::GlStubCalled("glVertexAttribP1ui");
-  }
-
-  void APIENTRY glVertexAttribP1uiv(GLuint index, GLenum type, GLboolean normalized, const GLuint *value) {
-    mithril::GlStubCalled("glVertexAttribP1uiv");
-  }
-
-  void APIENTRY glVertexAttribP2ui(GLuint index, GLenum type, GLboolean normalized, GLuint value) {
-    mithril::GlStubCalled("glVertexAttribP2ui");
-  }
-
-  void APIENTRY glVertexAttribP2uiv(GLuint index, GLenum type, GLboolean normalized, const GLuint *value) {
-    mithril::GlStubCalled("glVertexAttribP2uiv");
-  }
-
-  void APIENTRY glVertexAttribP3ui(GLuint index, GLenum type, GLboolean normalized, GLuint value) {
-    mithril::GlStubCalled("glVertexAttribP3ui");
-  }
-
-  void APIENTRY glVertexAttribP3uiv(GLuint index, GLenum type, GLboolean normalized, const GLuint *value) {
-    mithril::GlStubCalled("glVertexAttribP3uiv");
-  }
-
-  void APIENTRY glVertexAttribP4ui(GLuint index, GLenum type, GLboolean normalized, GLuint value) {
-    mithril::GlStubCalled("glVertexAttribP4ui");
-  }
-
-  void APIENTRY glVertexAttribP4uiv(GLuint index, GLenum type, GLboolean normalized, const GLuint *value) {
-    mithril::GlStubCalled("glVertexAttribP4uiv");
   }
 
 } // extern "C"

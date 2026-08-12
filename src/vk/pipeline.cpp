@@ -483,7 +483,23 @@ uint64_t CreateProgram(const std::vector<uint32_t>& vs,
                     m.name = comp.get_member_name(ub.base_type_id, i);
                     m.offset = comp.get_member_decoration(
                         ub.base_type_id, i, spv::DecorationOffset);
-                    m.size = comp.get_declared_struct_member_size(t, i);
+                    m.size = static_cast<uint32_t>(
+                        comp.get_declared_struct_member_size(t, i));
+                    const auto& member_type =
+                        comp.get_type(t.member_types[i]);
+                    m.vector_components = std::max(member_type.vecsize, 1u);
+                    m.matrix_columns = std::max(member_type.columns, 1u);
+                    m.array_elements = 1;
+                    for (uint32_t dimension : member_type.array)
+                        m.array_elements *= std::max(dimension, 1u);
+                    if (!member_type.array.empty())
+                        m.array_stride = static_cast<uint32_t>(
+                            comp.type_struct_member_array_stride(t, i));
+                    if (member_type.columns > 1)
+                        m.matrix_stride = static_cast<uint32_t>(
+                            comp.type_struct_member_matrix_stride(t, i));
+                    m.row_major = comp.has_member_decoration(
+                        ub.base_type_id, i, spv::DecorationRowMajor);
                     p.members.push_back(std::move(m));
                 }
                 p.ubo_size = std::max<uint32_t>(p.ubo_size,

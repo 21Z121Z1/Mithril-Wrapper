@@ -188,11 +188,12 @@ uint64_t CreateBackendProgram(sh::Program* prog) {
     return handle;
 }
 
-std::unordered_map<std::string, std::vector<float>> ComposeUniforms(
+std::unordered_map<std::string, std::vector<uint8_t>> ComposeUniforms(
     sh::Program* prog) {
-    std::unordered_map<std::string, std::vector<float>> uniforms;
+    std::unordered_map<std::string, std::vector<uint8_t>> uniforms;
     for (const auto& u : prog->uniforms)
-        if (u.location >= 0) uniforms[u.name] = u.value;
+        if (u.location >= 0 && !u.raw_value.empty())
+            uniforms[u.name] = u.raw_value;
     return uniforms;
 }
 
@@ -350,6 +351,98 @@ bool PackConstantAttrib(const CurrentAttribData& source,
             }
             default: return false;
         }
+    }
+    return true;
+}
+
+// Metal and core Vulkan select the first assembled vertex for flat inputs.
+// OpenGL's selectable convention is normalized here, after primitive restart
+// segmentation but before either backend sees the draw. Cyclic triangle
+// rotations preserve winding while putting the GL provoking vertex first.
+bool LowerFlatPrimitives(GLenum convention, v::DrawParams* draw) {
+    if (!draw) return false;
+    std::vector<uint32_t> source = std::move(draw->indices);
+    if (source.empty()) {
+        const uint32_t count = draw->vertex_stream.record_count
+            ? draw->vertex_stream.record_count
+            : static_cast<uint32_t>(
+                  draw->vertex_stream.data.size() /
+                  std::max<uint32_t>(draw->vertex_stream.stride, 1));
+        source.resize(count);
+        for (uint32_t i = 0; i < count; ++i) source[i] = i;
+    }
+
+    std::vector<uint32_t> lowered;
+    auto triangle = [&](uint32_t a, uint32_t b, uint32_t c,
+                        uint32_t provoking) {
+        if (provoking == b) {
+            lowered.insert(lowered.end(), {b, c, a});
+        } else if (provoking == c) {
+            lowered.insert(lowered.end(), {c, a, b});
+        } else {
+            lowered.insert(lowered.end(), {a, b, c});
+        }
+    };
+    auto line = [&](uint32_t a, uint32_t b, uint32_t provoking) {
+        if (provoking == b)
+            lowered.insert(lowered.end(), {b, a});
+        else
+            lowered.insert(lowered.end(), {a, b});
+    };
+    auto emit_segment = [&](size_t begin, size_t end) {
+        const bool first = convention == GL_FIRST_VERTEX_CONVENTION;
+        switch (draw->topology) {
+            case v::Topology::Triangles:
+                for (size_t i = begin; i + 2 < end; i += 3)
+                    triangle(source[i], source[i + 1], source[i + 2],
+                             first ? source[i] : source[i + 2]);
+                break;
+            case v::Topology::TriangleStrip:
+                for (size_t i = begin; i + 2 < end; ++i) {
+                    const size_t parity = (i - begin) % 2;
+                    const uint32_t a = source[i + parity];
+                    const uint32_t b = source[i + 1 - parity];
+                    const uint32_t c = source[i + 2];
+                    triangle(a, b, c, first ? source[i] : c);
+                }
+                break;
+            case v::Topology::TriangleFan:
+                for (size_t i = begin + 1; i + 1 < end; ++i)
+                    triangle(source[begin], source[i], source[i + 1],
+                             first ? source[i] : source[i + 1]);
+                break;
+            case v::Topology::Lines:
+                for (size_t i = begin; i + 1 < end; i += 2)
+                    line(source[i], source[i + 1],
+                         first ? source[i] : source[i + 1]);
+                break;
+            case v::Topology::LineStrip:
+                for (size_t i = begin; i + 1 < end; ++i)
+                    line(source[i], source[i + 1],
+                         first ? source[i] : source[i + 1]);
+                break;
+        }
+    };
+
+    size_t begin = 0;
+    for (size_t i = 0; i <= source.size(); ++i) {
+        if (i != source.size() && source[i] != UINT32_MAX) continue;
+        emit_segment(begin, i);
+        begin = i + 1;
+    }
+    if (lowered.empty()) return false;
+    draw->indices = std::move(lowered);
+    draw->primitive_restart = false;
+    switch (draw->topology) {
+        case v::Topology::Triangles:
+        case v::Topology::TriangleStrip:
+        case v::Topology::TriangleFan:
+            draw->topology = v::Topology::Triangles;
+            break;
+        case v::Topology::Lines:
+        case v::Topology::LineStrip:
+            draw->topology = v::Topology::Lines;
+            break;
     }
     return true;
 }
@@ -628,43 +721,75 @@ void DrawCommon(GLenum mode, const std::vector<uint32_t>& idx, GLint first,
                               (float)state.scissor.w, (float)state.scissor.h}
         : std::array<float, 4>{0.f, 0.f, (float)target_width,
                               (float)target_height};
-    // Resolve each sampler uniform to the texture bound at its GL unit
-    // (the framebelike value glUniform1i wrote; absent -> unit 0).
+
+    // Resolve each sampler (or each active sampler-array element) to the GL
+    // texture unit last written through glUniform1i/glUniform1iv. Shader
+    // lowering reserves consecutive descriptor binding numbers for fixed
+    // arrays; DirectMetal maps binding N to classic Metal slot N-1, so adding
+    // `element` here lands on the matching texture/sampler array element.
     dp.sampled_textures.clear();
     for (const auto& smp : prog->samplers) {
-        GLint unit = 0;
         auto uit = prog->uniform_by_location.find(smp.location);
-        if (uit != prog->uniform_by_location.end() &&
-            !prog->uniforms[uit->second].value.empty())
-            unit = (GLint)prog->uniforms[uit->second].value[0];
-        const GLenum target = TextureTargetForSampler(smp.type);
-        GLuint tex = unit >= 0
-            ? TextureBindingForUnit(static_cast<GLuint>(unit), target) : 0;
-        if (tex) PrepareTextureForDraw(tex);
-        const auto texture = g_textures.find(tex);
-        const TexState default_texture;
-        const TexState& texture_state = texture == g_textures.end()
-            ? default_texture : texture->second;
-        const v::TexSamplerInfo sampler = ResolveSamplerInfo(
-            unit >= 0 ? static_cast<GLuint>(unit) : kMaxTexUnits,
-            texture_state);
-        const bool shader_compares_depth = SamplerUsesDepthCompare(smp.type);
-        const bool texture_is_depth = texture != g_textures.end() &&
-            texture_state.image_backend_format == v::TexelFormat::Depth32Float;
-        if ((shader_compares_depth &&
-             (!texture_is_depth ||
-              sampler.compare_mode != GL_COMPARE_REF_TO_TEXTURE)) ||
-            (!shader_compares_depth && sampler.compare_mode != GL_NONE)) {
-            // A shadow/non-shadow shader type must agree with the effective
-            // texture/sampler comparison state. Do not bind an incompatible
-            // Metal texture/sampler pair and produce driver-dependent output.
-            PUSH_ERROR(GL_INVALID_OPERATION);
-            return;
+        const sh::Uniform* uniform = uit == prog->uniform_by_location.end()
+            ? nullptr : &prog->uniforms[uit->second];
+        const GLint element_count = std::max<GLint>(smp.size, 1);
+        for (GLint element = 0; element < element_count; ++element) {
+            GLint unit = 0;
+            if (uniform && static_cast<size_t>(element) < uniform->value.size())
+                unit = static_cast<GLint>(uniform->value[element]);
+            const GLenum target = TextureTargetForSampler(smp.type);
+            GLuint tex = unit >= 0
+                ? TextureBindingForUnit(static_cast<GLuint>(unit), target) : 0;
+            if (tex) PrepareTextureForDraw(tex);
+            const auto texture = g_textures.find(tex);
+            const TexState default_texture;
+            const TexState& texture_state = texture == g_textures.end()
+                ? default_texture : texture->second;
+            const v::TexSamplerInfo sampler = ResolveSamplerInfo(
+                unit >= 0 ? static_cast<GLuint>(unit) : kMaxTexUnits,
+                texture_state);
+            const bool shader_compares_depth = SamplerUsesDepthCompare(smp.type);
+            const bool texture_is_depth = texture != g_textures.end() &&
+                texture_state.image_backend_format == v::TexelFormat::Depth32Float;
+            if ((shader_compares_depth &&
+                 (!texture_is_depth ||
+                  sampler.compare_mode != GL_COMPARE_REF_TO_TEXTURE)) ||
+                (!shader_compares_depth && sampler.compare_mode != GL_NONE)) {
+                // A shadow/non-shadow shader type must agree with the effective
+                // texture/sampler comparison state. Do not bind an incompatible
+                // Metal texture/sampler pair and produce driver-dependent output.
+                PUSH_ERROR(GL_INVALID_OPERATION);
+                return;
+            }
+
+            const uint32_t vertex_binding = smp.vertex_binding == UINT32_MAX
+                ? UINT32_MAX
+                : smp.vertex_binding + static_cast<uint32_t>(element);
+            const uint32_t fragment_binding = smp.fragment_binding == UINT32_MAX
+                ? UINT32_MAX
+                : smp.fragment_binding + static_cast<uint32_t>(element);
+            // A sampler is one GL program uniform even when both shader stages
+            // reference it. Internal SPIR-V base bindings may differ with stage
+            // declaration order; the fixed array element offset is identical.
+            if (vertex_binding != UINT32_MAX &&
+                vertex_binding == fragment_binding) {
+                dp.sampled_textures.push_back({
+                    vertex_binding, tex, sampler, true, true});
+            } else {
+                if (vertex_binding != UINT32_MAX)
+                    dp.sampled_textures.push_back({
+                        vertex_binding, tex, sampler, true, false});
+                if (fragment_binding != UINT32_MAX)
+                    dp.sampled_textures.push_back({
+                        fragment_binding, tex, sampler, false, true});
+            }
         }
-        dp.sampled_textures.push_back({
-            smp.binding, tex, sampler});
     }
-    if (dp.vertex_stream.HasStorage() && !v::Draw(dp))
+    if (prog->uses_flat_fragment_inputs &&
+        !LowerFlatPrimitives(state.provoking_vertex, &dp))
+        return;
+    if (ConditionalRenderingAllowsCommands() &&
+        dp.vertex_stream.HasStorage() && !v::Draw(dp))
         PUSH_ERROR(GL_INVALID_OPERATION);
 }
 

@@ -1,5 +1,10 @@
 # EGL 导出符号清单
 
+当前 Amethyst 的 Mithril integration 会先请求 `EGL_OPENGL_ES3_BIT` config 并绑定
+`EGL_OPENGL_ES_API`，随后由 LWJGL 直接 dlsym Mithril 的 desktop OpenGL 3.3 Core
+exports。Mithril 将前者作为显式 host negotiation alias，并在 EGL query/context
+state 中如实保留绑定值；这不表示 DirectMetal 对外宣称独立的 OpenGL ES profile。
+
 ## 必须导出（Amethyst gl_bridge.m 直接 dlsym 的 18 个）
 ```
 eglBindAPI  eglChooseConfig  eglCreateContext  eglCreateWindowSurface

@@ -33,9 +33,10 @@ MGL_IMPL = frozenset({
     "glGetPointerv", "glClampColor",
     # GL 3.2 execution sync objects.
     "glClientWaitSync", "glDeleteSync", "glFenceSync", "glGetSynciv",
-    "glIsSync", "glPrimitiveRestartIndex", "glWaitSync",
+    "glIsSync", "glPrimitiveRestartIndex", "glProvokingVertex", "glWaitSync",
     # GL 3.3 occlusion-query objects. Timer queries remain explicitly unsupported.
-    "glBeginQuery", "glDeleteQueries", "glEndQuery", "glGenQueries",
+    "glBeginConditionalRender", "glBeginQuery", "glDeleteQueries",
+    "glEndConditionalRender", "glEndQuery", "glGenQueries",
     "glGetQueryObjecti64v", "glGetQueryObjectiv", "glGetQueryObjectui64v",
     "glGetQueryObjectuiv", "glGetQueryiv", "glIsQuery", "glQueryCounter",
     # S2 shaders/programs/uniforms implemented in src/gl/.
@@ -84,6 +85,9 @@ MGL_IMPL = frozenset({
     "glVertexAttrib4iv", "glVertexAttrib1ui", "glVertexAttrib1uiv", "glVertexAttrib2ui",
     "glVertexAttrib2uiv", "glVertexAttrib3ui", "glVertexAttrib3uiv", "glVertexAttrib4ui",
     "glVertexAttrib4uiv",
+    "glVertexAttribP1ui", "glVertexAttribP1uiv", "glVertexAttribP2ui",
+    "glVertexAttribP2uiv", "glVertexAttribP3ui", "glVertexAttribP3uiv",
+    "glVertexAttribP4ui", "glVertexAttribP4uiv",
     "glVertexAttribI1i", "glVertexAttribI1iv", "glVertexAttribI1ui",
     "glVertexAttribI1uiv", "glVertexAttribI2i", "glVertexAttribI2iv",
     "glVertexAttribI2ui", "glVertexAttribI2uiv", "glVertexAttribI3i",

@@ -1,7 +1,7 @@
 # Mithril-Wrapper 实现清单（CHECKLIST）
 
 > 状态：**M5 完成（S5 FBO/MRT/MSAA 验收通过）**；M4 及以前完成（Linux 六冒烟测试通过）。
-> 配套文档：`docs/gl33_core_list.md`（GL 3.3 core 342 函数分组）、`docs/egl_list.md`（EGL 符号清单）。
+> 配套文档：`docs/directmetal-gl33-semantic-matrix.md`（当前语义能力账本）、`docs/gl33_core_list.md`（GL 3.3 core 342 函数分组）、`docs/egl_list.md`（EGL 符号清单）。
 > 测试：`tests/contract_smoke.c`（EGL 契约）、`tests/state_smoke.c`（GL 状态机）、`tests/shader_smoke.c`（着色器管线）、`tests/draw_smoke.c`（GL→Vulkan→读回全链）、`tests/texture_smoke.c`（M4 纹理全链）、`tests/fbo_smoke.c`（M5 状态管线 + S5 FBO/MRT/MSAA），均需 lavapipe/llvmpipe。
 > M2 已完成：`src/shader/`（Shader/Program 对象表、glslang 编译缓存 .glsl→SPIR-V、SPIRV-Cross 反射 uniform/attrib）、GLSL 150 自动升级到 330 core（含采样器存在时自动升 450 以启用 layout(binding=...) 注入，声明序 1 起绑定）、`gl_VertexID/gl_InstanceID` 重写、松散 uniform 折入合成 UBO（ANGLE 模式）、`glUniform*` 全系 + 矩阵 setter/getter；`src/vk/`（dlsym 动态加载 Vulkan loader/ICD、instance 级函数经真实 instance 句柄解析、UBO 反射 VS+FS 双阶段合并 + 动态 UBO 池、staging 顶点缓冲、renderpass + 清屏 + 帧读回）；`draw_smoke` 全链通过。
 > M3 已完成：S3 组 76/114 真实现——顶点属性全家族（glVertexAttribPointer/IPointer、常量系 1-4、Divisor、Enable/Disable）、attribute 查询（fv/dv/iv/Iiv/Iuiv/Pointerv）、buffer 映射/查询家族（MapBuffer/Range、Unmap、FlushMapped、GetBufferParameteriv/i64v/Pointerv/SubData、CopyBufferSubData）、全部 10 个 draw 入口（DrawArrays/Instanced、DrawElements/BaseVertex/Instanced/InstancedBaseVertex、DrawRangeElements/BaseVertex、MultiDrawArrays/Elements/BaseVertex）；引擎新增双顶点流（VERTEX+INSTANCE binding）、索引缓冲（UBYTE/USHORT/UINT 统一扩 UINT32 staging）、TriangleStrip/Fan 拓扑、实例化（CPU 按 divisor 复制行，无需 EXT）；非 4 字节对齐 stride/offset 由 CPU 打包规整；draw_smoke 扩展 8 断言通过。
@@ -16,7 +16,7 @@
 在 iOS 上为 Minecraft Java（LWJGL 3）提供自研 OpenGL 实现：
 
 - **目标 GL**：OpenGL 3.3 Core Profile（仅实现必要的子集，由 Amethyst 启动器注释确认：`gl_bridge.m:127` "Mithril 是 OpenGL 3.3 Core Profile"）
-- **渲染后端**：自研 GL → Vulkan → Metal（MoltenVK），无 OpenGL ES 参与
+- **渲染后端**：Apple 默认走自研 GL → DirectMetal；Vulkan/MoltenVK 保留为显式 reference/fallback backend
 - **交付物**：`libmithril.dylib`（arm64），由 GitHub Actions macOS runner 构建，集成进 Amethyst 启动器
 - **开发循环**：本地 Linux 编译 `.so` 验证逻辑，CI 出 dylib
 - **参考实现**（仅参考，从零实现）：`~/Desktop/projects/dg/DesktopGlues`、`~/Desktop/opencode/mobilegl/MobileGL`（MobileGL，GL→Vulkan 完整实现）、`~/Desktop/opencode/air/Amethyst-iOS-MyRemastered`（启动器桥接契约）
@@ -35,12 +35,12 @@
 
 1. `eglGetDisplay(EGL_DEFAULT_DISPLAY)` → 非 NULL display
 2. `eglInitialize(display, NULL, NULL)` → 成功
-3. `eglChooseConfig` 对以下属性**必须返回 ≥1 个配置**（gl_bridge.m:133-141，否则 `assert(bundle->config)` 崩溃）：
+3. `eglChooseConfig` 对以下属性**必须返回 ≥1 个配置**（当前 `Amethyst-iOS-MyRemastered` 的 Mithril integration，否则 `assert(bundle->config)` 崩溃）：
    - `EGL_RED_SIZE=8, GREEN=8, BLUE=8, ALPHA=8, DEPTH=24`
    - `EGL_SURFACE_TYPE = EGL_WINDOW_BIT | EGL_PBUFFER_BIT`
-   - `EGL_RENDERABLE_TYPE = EGL_OPENGL_BIT`（desktop GL 分支，Mithril 走此路径）
+   - `EGL_RENDERABLE_TYPE = EGL_OPENGL_ES3_BIT`（Amethyst 将 Mithril 归入非 ANGLE negotiation 分支）
 4. `eglGetConfigAttrib(EGL_NATIVE_VISUAL_ID)` → 成功
-5. `eglBindAPI(EGL_OPENGL_API)` → EGL_TRUE（Mithril 走 desktop GL 分支 gl_bridge.m:161-163）
+5. `eglBindAPI(EGL_OPENGL_ES_API)` → EGL_TRUE；这是 host negotiation alias，LWJGL 随后仍直接加载 Mithril 的 desktop GL 3.3 Core exports
 6. `eglCreateWindowSurface(display, config, (EGLNativeWindowType)CALayer*, NULL)` — **native window 类型 = CALayer***（gl_bridge.m:171）
 7. `eglCreateContext(display, config, share_ctx, {EGL_CONTEXT_CLIENT_VERSION, 3})`（gl_bridge.m:178-183）
 8. `eglMakeCurrent` 支持解绑：`eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT)`（gl_bridge.m:194-200）
@@ -81,7 +81,7 @@
     - S5 FBO/渲染缓冲：24（glGenFramebuffers→glGetFramebufferAttachmentParameteriv 全系 + glDrawBuffer/glDrawBuffers/glReadBuffer + glRenderbufferStorageMultisample；**S5 全量 24 真实现完成，MRT + MSAA 支持，fbo_smoke 29 断言通过**）
     - S6 同步/Query/Sampler：36（glGenQueries/glFenceSync/glSamplerParameter 系）
   - 342 全部归入以上六组，无遗漏
-- 未实现函数：导出为 stub，返回 `GL_INVALID_OPERATION` + 日志（MobileGL `DECLARE_GL_FUNCTION_STUB_HEAD` 模式）
+- 未实现函数：当前生成 stub 只记录日志；这不是受支持语义，也不是合格的 fail-closed 行为。剩余清单与修复优先级见 semantic matrix。
 - 最终裁剪依据：M7 用 apitrace 抓 Minecraft 真实调用 → 与 desktopglues 清单交叉
 
 ## 4. 架构设计（从零实现）
@@ -90,7 +90,7 @@
 LWJGL (Minecraft Java) — dlsym libmithril.dylib
         │
         ▼
-GL 分发表（src/gl/gl_dispatch.cpp，手写 gl* 符号，未实现返回 INVALID_OPERATION+日志）
+GL frontend（src/gl/*.cpp 真实实现 + exports.cpp 生成的 logging-only stub；stub 不算支持）
 EGL 层（src/egl/，44 符号，display/config/context/surface 生命周期 + thread_local 当前状态）
         │  桥接契约：CAMetalLayer 作为 native window（iOS）
         ▼
@@ -117,9 +117,9 @@ Vulkan 后端（src/vk/，经 MoltenVK → Metal → CAMetalLayer）
 | EGL 虚拟后端 | 自实现 44 符号，config 生成器（单 display、单 config 满足契约属性即可） |
 | 上下文 | 单渲染上下文（MC 单窗口场景） |
 | 着色器 | glslang（vendored 或系统库）编译 GLSL→SPIR-V，SPIRV-Cross 做反射；无运行时 GLSL 编译 |
-| 正确性标准 | MC 画面跑通即可，不做 CTS |
+| 正确性标准 | OpenGL observable semantics + DirectMetal execution test；Minecraft 画面只是更高层 gate |
 | 对象 ID | 虚拟 ID → 驱动 ID 映射，名称池复用（MobileGL buffer.cpp 模式） |
-| 未实现函数 | stub 返回 GL_INVALID_OPERATION + 日志（不产生崩溃） |
+| 未实现函数 | 必须实现精确语义或显式 fail closed；仅导出/日志不算支持 |
 
 ### 4.2 源码目录规划
 
@@ -169,7 +169,7 @@ Vulkan 后端（src/vk/，经 MoltenVK → Metal → CAMetalLayer）
 |---|---|
 | EGL 18 符号 dlsym | Amethyst `Natives/ctxbridges/gl_bridge.m:73-97` |
 | eglChooseConfig 契约属性 | 同上 `:133-141` |
-| desktop GL 分支（EGL_OPENGL_BIT/API） | 同上 `:126-167` |
+| Mithril ES3 host negotiation alias | `Amethyst-iOS-MyRemastered` commit `696e230e`, `Natives/ctxbridges/gl_bridge.m` |
 | CALayer 作为 native window | 同上 `:171` |
 | context 属性 {CLIENT_VERSION,3} | 同上 `:178-183` |
 | 终止顺序 | 同上 `:249-257` |

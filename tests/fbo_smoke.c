@@ -240,6 +240,18 @@ static const char* FS_DEPTH_TEXTURE =
     "    fragColor = vec4(d, 0.0, 0.0, 1.0);\n"
     "}\n";
 
+/* Render-to-texture orientation probe.  GL framebuffer row zero and texture
+ * texel row zero are the same logical row, even when the native backend uses
+ * a top-left render-target origin. */
+static const char* FS_FBO_TEXEL =
+    "#version 150\n"
+    "uniform sampler2D colorImage;\n"
+    "uniform vec4 samplePoint;\n"
+    "layout(location=0) out vec4 fragColor;\n"
+    "void main() {\n"
+    "    fragColor = texelFetch(colorImage, ivec2(samplePoint.xy), 0);\n"
+    "}\n";
+
 static const char* FS_DEPTH_SHADOW =
     "#version 150\n"
     "uniform sampler2DShadow depthImage;\n"
@@ -250,7 +262,13 @@ static const char* FS_DEPTH_SHADOW =
     "}\n";
 
 int main(void) {
-    void* h = dlopen("./output/libmithril.so", RTLD_NOW | RTLD_GLOBAL);
+    const char* library = getenv("MITHRIL_LIBRARY");
+#if defined(__APPLE__)
+    if (!library || !*library) library = "./output/libmithril.dylib";
+#else
+    if (!library || !*library) library = "./output/libmithril.so";
+#endif
+    void* h = dlopen(library, RTLD_NOW | RTLD_GLOBAL);
     if (!h) { printf("dlopen: %s\n", dlerror()); return 2; }
 
     fn_glClearColor clearColor = (fn_glClearColor)dlsym(h, "glClearColor");
@@ -380,6 +398,8 @@ int main(void) {
     vertexAttribPtr(1, 4, GL_FLOAT, GL_FALSE, 28, (const GLvoid*)12);
 
     unsigned char px[4];
+    GLint direct_metal_marker = 0;
+    getIntegerv(GL_MAX_COLOR_TEXTURE_SAMPLES, &direct_metal_marker);
 
     /* -- depth test: near triangle wins over far ----------------- */
     {
@@ -816,6 +836,99 @@ int main(void) {
         deleteTextures(1, &tex);
     }
 
+    /* -- S5: framebuffer rows remain texture rows when sampled -------- */
+    if (direct_metal_marker > 0) {
+        GLuint fbo = 0, tex = 0;
+        genFramebuffers(1, &fbo);
+        genTextures(1, &tex);
+        bindTexture(GL_TEXTURE_2D, tex);
+        texImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 32, 32, 0, GL_RGBA,
+                   GL_UNSIGNED_BYTE, 0);
+        bindFramebuffer(GL_FRAMEBUFFER, fbo);
+        framebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                             GL_TEXTURE_2D, tex, 0);
+        CHECK(checkFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE,
+              "orientation FBO is complete");
+
+        /* Draw an asymmetric image in GL framebuffer coordinates: row 0 is
+         * red and row 31 is blue.  A solid image would not expose a native
+         * top-left/bottom-left mismatch, and a clear-only test would not
+         * exercise the vertex transform used by real Minecraft draws. */
+        useProgram(prog);
+        viewport(0, 0, 32, 32);
+        disable(GL_DEPTH_TEST);
+        disable(GL_SCISSOR_TEST);
+        clearColor(0, 0, 0, 1);
+        clear(GL_COLOR_BUFFER_BIT);
+        const float asymmetric[12][7] = {
+            {-1, -1, 0, 1, 0, 0, 1}, { 1, -1, 0, 1, 0, 0, 1},
+            { 1,  0, 0, 1, 0, 0, 1}, {-1, -1, 0, 1, 0, 0, 1},
+            { 1,  0, 0, 1, 0, 0, 1}, {-1,  0, 0, 1, 0, 0, 1},
+            {-1,  0, 0, 0, 0, 1, 1}, { 1,  0, 0, 0, 0, 1, 1},
+            { 1,  1, 0, 0, 0, 1, 1}, {-1,  0, 0, 0, 0, 1, 1},
+            { 1,  1, 0, 0, 0, 1, 1}, {-1,  1, 0, 0, 0, 1, 1},
+        };
+        bufferData(GL_ARRAY_BUFFER, (GLsizeiptr)sizeof(asymmetric),
+                   asymmetric, 0x88E4);
+        drawArrays(GL_TRIANGLES, 0, 12);
+        finish();
+
+        readPixels(16, 4, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        CHECK(px_match(px, 255, 0, 0, 255),
+              "FBO framebuffer row 4 is red (r=%d g=%d b=%d)",
+              px[0], px[1], px[2]);
+        readPixels(16, 27, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        CHECK(px_match(px, 0, 0, 255, 255),
+              "FBO framebuffer row 27 is blue (r=%d g=%d b=%d)",
+              px[0], px[1], px[2]);
+
+        GLuint fs_texel = createShader(GL_FRAGMENT_SHADER);
+        shaderSource(fs_texel, 1, &FS_FBO_TEXEL, 0);
+        compileShader(fs_texel);
+        GLuint sample_prog = createProgram();
+        attachShader(sample_prog, vs);
+        attachShader(sample_prog, fs_texel);
+        linkProgram(sample_prog);
+        useProgram(sample_prog);
+        const GLint sample_point = getUniformLoc(sample_prog, "samplePoint");
+        CHECK(sample_point >= 0,
+              "render-to-texture sample coordinate remains active");
+
+        bindFramebuffer(GL_FRAMEBUFFER, 0);
+        bindTexture(GL_TEXTURE_2D, tex);
+        viewport(0, 0, 512, 512);
+        const float full_screen[3][7] = {
+            {-1, -1, 0.0f, 1, 1, 1, 1},
+            { 3, -1, 0.0f, 1, 1, 1, 1},
+            {-1,  3, 0.0f, 1, 1, 1, 1},
+        };
+        bufferData(GL_ARRAY_BUFFER, (GLsizeiptr)sizeof(full_screen),
+                   full_screen, 0x88E4);
+
+        uniform4f(sample_point, 16.f, 4.f, 0.f, 0.f);
+        clearColor(0, 0, 0, 1);
+        clear(GL_COLOR_BUFFER_BIT);
+        drawArrays(GL_TRIANGLES, 0, 3);
+        finish();
+        readPixels(256, 256, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        CHECK(px_match(px, 255, 0, 0, 255),
+              "texture texel row 4 matches GL framebuffer row 4 "
+              "(r=%d g=%d b=%d)", px[0], px[1], px[2]);
+
+        uniform4f(sample_point, 16.f, 27.f, 0.f, 0.f);
+        clear(GL_COLOR_BUFFER_BIT);
+        drawArrays(GL_TRIANGLES, 0, 3);
+        finish();
+        readPixels(256, 256, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        CHECK(px_match(px, 0, 0, 255, 255),
+              "texture texel row 27 matches GL framebuffer row 27 "
+              "(r=%d g=%d b=%d)", px[0], px[1], px[2]);
+
+        useProgram(prog);
+        deleteFramebuffers(1, &fbo);
+        deleteTextures(1, &tex);
+    }
+
     /* -- S5: renderbuffer colour attachment --------------------------- */
     {
         GLuint rbo, fbo;
@@ -845,7 +958,8 @@ int main(void) {
 
     /* -- S5: target switching + framebuffer blit ----------------------- */
     {
-        /* Solid red into FBO A, solid blue into FBO B, then blit B into A. */
+        /* Solid red into FBO A, asymmetric blue/green rows into FBO B,
+         * then blit B into both A and the default framebuffer. */
         GLuint fboA, fboB, texA, texB;
         genFramebuffers(1, &fboA);
         genFramebuffers(1, &fboB);
@@ -872,10 +986,17 @@ int main(void) {
         enable(GL_DEPTH_TEST);  /* leave as-is; reuse red triangle */
         clearColor(1, 0, 0, 1.0f);
         clear(GL_COLOR_BUFFER_BIT);
-        /* draw blue into B */
+        /* Put blue in GL's bottom half and green in its top half. */
         bindFramebuffer(GL_FRAMEBUFFER, fboB);
+        disable(GL_DEPTH_TEST);
+        enable(GL_SCISSOR_TEST);
+        scissor(0, 0, 32, 16);
         clearColor(0, 0, 1, 1.0f);
         clear(GL_COLOR_BUFFER_BIT);
+        scissor(0, 16, 32, 16);
+        clearColor(0, 1, 0, 1.0f);
+        clear(GL_COLOR_BUFFER_BIT);
+        disable(GL_SCISSOR_TEST);
         finish();
 
         /* blit B (read) -> A (draw): full rects, GL_NEAREST */
@@ -886,10 +1007,30 @@ int main(void) {
         finish();
 
         bindFramebuffer(GL_READ_FRAMEBUFFER, fboA);
-        readPixels(16, 16, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        readPixels(16, 4, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
         CHECK(px_match(px, 0, 0, 255, 255),
-              "blit made A show B's blue at the centre (r=%d g=%d b=%d)",
+              "FBO blit preserves B's bottom blue row in A "
+              "(r=%d g=%d b=%d)",
               px[0], px[1], px[2]);
+        readPixels(16, 27, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        CHECK(px_match(px, 0, 255, 0, 255),
+              "FBO blit preserves B's top green row in A "
+              "(r=%d g=%d b=%d)", px[0], px[1], px[2]);
+
+        bindFramebuffer(GL_READ_FRAMEBUFFER, fboB);
+        bindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+        blitFramebuffer(0, 0, 32, 32, 0, 0, 32, 32,
+                        GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        finish();
+        bindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+        readPixels(16, 4, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        CHECK(px_match(px, 0, 0, 255, 255),
+              "FBO-to-default blit preserves the bottom blue row "
+              "(r=%d g=%d b=%d)", px[0], px[1], px[2]);
+        readPixels(16, 27, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        CHECK(px_match(px, 0, 255, 0, 255),
+              "FBO-to-default blit preserves the top green row "
+              "(r=%d g=%d b=%d)", px[0], px[1], px[2]);
 
         bindFramebuffer(GL_FRAMEBUFFER, 0);
         deleteFramebuffers(1, &fboA);
@@ -1146,8 +1287,6 @@ int main(void) {
     {
         /* The Vulkan reference backend reports this capability marker as 0;
            this focused vertical slice executes only on DirectMetal. */
-        GLint direct_metal_marker = 0;
-        getIntegerv(GL_MAX_COLOR_TEXTURE_SAMPLES, &direct_metal_marker);
         if (direct_metal_marker > 0) {
             GLuint color = 0, depth = 0, fbo = 0;
             genTextures(1, &color);

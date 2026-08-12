@@ -27,8 +27,10 @@ struct Shader {
     std::vector<uint32_t> spirv;   // SPIR-V words (empty until compiled)
 };
 
-// A reflected program uniform. `value` caches the last glUniform* write so
-// glGetUniform* can answer; the selected backend later uploads it into a UBO.
+// A reflected program uniform. `value` keeps a numeric cache for glGetUniform*
+// while `raw_value` preserves the exact scalar representation that native
+// backends upload. Storing GLint/GLuint values as float bytes would corrupt
+// integer uniforms even though the observable getter still looked plausible.
 struct Uniform {
     std::string name;
     GLenum type = GL_FLOAT;
@@ -40,15 +42,20 @@ struct Uniform {
     GLint matrix_stride = 0;
     GLboolean row_major = GL_FALSE;
     GLint size = 1;
+    std::vector<uint8_t> raw_value;
 };
 
-// A sampled-image uniform: the shared SPIR-V descriptor binding (assigned by
-// assign_sampler_bindings during compilation, 1-based) and the GL texture
-// unit value written by glUniform1i.
+// A sampled-image uniform: per-stage SPIR-V bindings (assigned during shader
+// compilation, 1-based) and the shared GL texture-unit values written through
+// its program-uniform locations. `size` is the active fixed array length;
+// scalar samplers use 1. Declaration order can differ between stages, so
+// bindings must not be collapsed merely because the GL name is shared.
 struct SamplerRef {
     std::string name;
     GLenum type = GL_SAMPLER_2D;
-    uint32_t binding = 0;      // shared descriptor binding for this sampler
+    GLint size = 1;
+    uint32_t vertex_binding = UINT32_MAX;
+    uint32_t fragment_binding = UINT32_MAX;
     GLint location = -1;
 };
 
@@ -114,6 +121,7 @@ struct Program {
     std::unordered_map<std::string, GLint> frag_data_locations;
     std::unordered_map<std::string, GLint> frag_data_indices;
     std::unordered_map<std::string, GLuint> requested_frag_data_locations;
+    bool uses_flat_fragment_inputs = false;
     std::vector<VertexInput> vertex_inputs;
     std::vector<SamplerRef> samplers;      // M4: active sampler uniforms
     std::vector<UniformBlock> uniform_blocks;
