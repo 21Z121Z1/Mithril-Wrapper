@@ -788,7 +788,8 @@ void DrawCommon(GLenum mode, const std::vector<uint32_t>& idx, GLint first,
     if (prog->uses_flat_fragment_inputs &&
         !LowerFlatPrimitives(state.provoking_vertex, &dp))
         return;
-    if (dp.vertex_stream.HasStorage() && !v::Draw(dp))
+    if (ConditionalRenderingAllowsCommands() &&
+        dp.vertex_stream.HasStorage() && !v::Draw(dp))
         PUSH_ERROR(GL_INVALID_OPERATION);
 }
 

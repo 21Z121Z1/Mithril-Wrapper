@@ -2,8 +2,8 @@
 
 来源：MobileGL include/GL/glcorearb.h（Khronos 官方），GL_VERSION_1_0..3_3 累计。
 
-> 实现状态（M5 进行中，stage A+B 完成）：S1 51/55、S2 60/71、S3 76/114、S4 42/42 已真实现（`src/gl/state.cpp`/`shader.cpp`/`vertex.cpp`/`draw.cpp`/`texture.cpp` + `src/shader/`（glsl/reflect/registry 三 TU）+ `src/vk/`（engine/dispatch/target/pipeline/draw 五 TU + texture）），合计 231 真导出；其余为 stub（返回 `GL_INVALID_OPERATION` + 日志）。M5 stage A 验收：`fbo_smoke`（depth/blend/scissor 状态管线 6 断言）；stage B 验收：cull/frontFace/stencil/colorMask/polygon 断言补齐（状态断言扩至 17，加符号解析共 18 行 ok），M3/M4 五冒烟回归未破坏。余 S5 FBO/MRT/MSAA 待启动。
-> S3 剩余 38 个 stub（无绘制影响）：TransformFeedback 系 5（Begin/End/GetVarying/BindBufferBase/Range）、glPointParameter* 4、整型属性 setter 系 20（glVertexAttribI1..I4 各变体）、打包 setter 系 8（glVertexAttribP*）、glVertexAttrib4Nub。
+> 本文件只负责 342 个 core entry point 的分组，不再以“导出存在”代表支持。当前 exact/partial/stub/explicit-unsupported/untested 状态见 `directmetal-gl33-semantic-matrix.md`。
+> 条件渲染实现后，生成表仍有 18 个 stub：transform feedback 4、point parameter 4、`glGetMultisamplefv`、`glTexImage3DMultisample` 和 packed `glVertexAttribP*` 8。stub 当前只记录日志，不能算 fail closed。
 
 ## S1 状态/使能/基础查询 — 55
 

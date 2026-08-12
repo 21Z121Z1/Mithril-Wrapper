@@ -40,6 +40,7 @@ static void SetCap(GLenum cap, bool on) {
 }
 
 static bool SubmitClear(v::ClearParams clear) {
+    if (!ConditionalRenderingAllowsCommands()) return true;
     if (!v::EnsureInit()) {
         PUSH_ERROR(GL_INVALID_OPERATION);
         return false;

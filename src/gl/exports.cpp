@@ -8,16 +8,8 @@ void GlStubCalled(const char* name);
 
 extern "C" {
 
-  void APIENTRY glBeginConditionalRender(GLuint id, GLenum mode) {
-    mithril::GlStubCalled("glBeginConditionalRender");
-  }
-
   void APIENTRY glBeginTransformFeedback(GLenum primitiveMode) {
     mithril::GlStubCalled("glBeginTransformFeedback");
-  }
-
-  void APIENTRY glEndConditionalRender(void) {
-    mithril::GlStubCalled("glEndConditionalRender");
   }
 
   void APIENTRY glEndTransformFeedback(void) {
