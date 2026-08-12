@@ -221,6 +221,63 @@ std::unordered_set<std::string> ExplicitLocationNames(
     return names;
 }
 
+GLenum BooleanTypeForName(const std::string& type) {
+    if (type == "bool") return GL_BOOL;
+    if (type == "bvec2") return GL_BOOL_VEC2;
+    if (type == "bvec3") return GL_BOOL_VEC3;
+    if (type == "bvec4") return GL_BOOL_VEC4;
+    return 0;
+}
+
+bool CollectDeclaredBooleanUniforms(
+    const Program& program,
+    std::unordered_map<std::string, GLenum>& declared,
+    std::string& error) {
+    // Vulkan interface blocks cannot preserve GL's source-level bool type
+    // reliably: glslang materializes bool/bvec members as integer storage.
+    // Recover only this lost API-visible type from the original attached GLSL.
+    // The SPIR-V reflection remains authoritative for activity, array size and
+    // layout; this metadata is used solely to restore the OpenGL uniform type.
+    static const std::regex declaration(
+        R"(\buniform\s+(?:(?:highp|mediump|lowp)\s+)?(bool|bvec2|bvec3|bvec4)\s+([^;]+);)",
+        std::regex::optimize);
+    static const std::regex name(
+        R"(^\s*([A-Za-z_]\w*))", std::regex::optimize);
+
+    for (GLuint shader_id : program.attached) {
+        const Shader* shader = GetShader(shader_id);
+        if (!shader) continue;
+        const std::string clean = WithoutComments(shader->source);
+        for (std::sregex_iterator it(clean.begin(), clean.end(), declaration),
+                                  end;
+             it != end; ++it) {
+            const GLenum type = BooleanTypeForName((*it)[1].str());
+            std::string declarators = (*it)[2].str();
+            size_t begin = 0;
+            while (begin <= declarators.size()) {
+                const size_t comma = declarators.find(',', begin);
+                const std::string item = declarators.substr(
+                    begin, comma == std::string::npos ? std::string::npos
+                                                       : comma - begin);
+                std::smatch matched;
+                if (std::regex_search(item, matched, name)) {
+                    const std::string uniform_name = matched[1].str();
+                    auto [existing, inserted] = declared.emplace(
+                        uniform_name, type);
+                    if (!inserted && existing->second != type) {
+                        error = "cross-stage source type mismatch for uniform " +
+                                uniform_name;
+                        return false;
+                    }
+                }
+                if (comma == std::string::npos) break;
+                begin = comma + 1;
+            }
+        }
+    }
+    return true;
+}
+
 uint32_t InterfaceLocationSpan(const spirv_cross::SPIRType& type) {
     uint64_t span = std::max<uint32_t>(type.columns, 1);
     for (uint32_t dimension : type.array)
@@ -384,6 +441,11 @@ bool ReflectProgram(Program& prog, std::string& error) {
         valid = false;
     };
 
+    std::unordered_map<std::string, GLenum> declared_boolean_uniforms;
+    if (!CollectDeclaredBooleanUniforms(
+            prog, declared_boolean_uniforms, error))
+        return false;
+
     auto reflect_stage = [&](const std::vector<uint32_t>& words,
                              bool vertex_stage) {
         if (words.empty()) return;
@@ -406,6 +468,10 @@ bool ReflectProgram(Program& prog, std::string& error) {
                         if (name.empty()) continue;
                         Uniform reflected = ReflectMember(
                             compiler, type, i, name);
+                        const auto declared_type =
+                            declared_boolean_uniforms.find(name);
+                        if (declared_type != declared_boolean_uniforms.end())
+                            reflected.type = declared_type->second;
                         // Default-block uniforms are not buffer-backed in GL's
                         // observable namespace even though lowering packs them.
                         reflected.offset = -1;
