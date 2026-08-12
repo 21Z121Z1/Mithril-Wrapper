@@ -956,6 +956,15 @@ EGLBoolean eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
     bool zero_area = (s->width <= 0 || s->height <= 0);
     if (s->swapchain_state && !zero_area) {
         backend_present_and_acquire(s->swapchain_state);
+        // FIX (纯红 + 闪一下 根因 - CRITICAL): present_and_acquire 已 acquire
+        // 下一帧的 swapchain image（currentImage 推进），但 g_state->eglDefaultColor
+        // 只在 eglMakeCurrent 时设置一次 —— draw/clear 永远渲染到最初 image，
+        // 而 present 的是每帧轮换的 image → 画面错位：present 的 image 没被画
+        // （只有 clear 色或残留）→ 纯红；偶尔 present 轮到画过的 image → 「闪一下」。
+        // 修复：每帧 present+acquire 后重新安装最新 image view 到 GLState，
+        // 使下一帧的 draw/clear 落在刚 acquire 的 image 上（MobileGL 每帧
+        // GetDrawableSize/AcquireNextImage 后即更新 FrameContext 的 color view）。
+        install_surface_on_state(s);
     }
 
     // Rebuild the swapchain if (a) the native window was resized between
