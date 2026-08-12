@@ -1125,7 +1125,11 @@ VkBuffer backend_get_or_create_buffer(GLuint name, const void* data, size_t size
     // discard 语义，无需拷贝旧内容，直接换新存储。空闲时才走快速原地路径。
     if (it != tbl.end() && it->second.size >= (VkDeviceSize)size) {
         if (data && size > 0 && mithril::vk::buffer_maybe_inflight(it->second)) {
-            // 可能仍在飞：orphan-rename
+            // 可能仍在飞：orphan-rename（GPU fault 诊断：记录 orphan 频率与
+            // 目标 buffer 大小 —— dump 里大量 96/80/64 字节 buffer 即来自这里）
+            LOG_RESOURCE("buf ORPHAN name=%u size=%llu (inflight lastWrite=%llu)",
+                         (unsigned)name, (unsigned long long)size,
+                         (unsigned long long)it->second.lastWriteSerial);
             mithril::vk::defer_destroy_buffer_entry(it->second);
             mithril::vk::BufferEntry e;
             if (!mithril::vk::create_buffer(e, size, mithril::vk::kAllGlBufferUsage, data, false)) {
@@ -1152,6 +1156,7 @@ VkBuffer backend_get_or_create_buffer(GLuint name, const void* data, size_t size
                 vkUnmapMemory(b->device, it->second.memory);
             }
         }
+        LOG_RESOURCE("buf INPLACE name=%u size=%llu", (unsigned)name, (unsigned long long)size);
         mithril::vk::stamp_buffer_write(it->second);
         return it->second.buffer;
     }

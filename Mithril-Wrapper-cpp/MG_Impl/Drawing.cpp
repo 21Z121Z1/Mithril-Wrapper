@@ -88,10 +88,25 @@ extern "C" {
  * Returning a status here — and re-checking it in the backend, see
  * backend_draw_* in CommandStream.cpp — makes that guarantee structural.
  */
+// prepare_draw 静默失败诊断（限流）：draw 被丢但无日志 → 纯红 + 画面空。
+static void log_prepare_draw_miss(const char* why, GLuint prog_id) {
+    static int missLog = 0;
+    if (missLog <= 6 || missLog % 100 == 0) {
+        MITHRIL_LOG_WARN("gl", "prepare_draw DROPPED: %s (program=%u) — draw "
+                          "silently skipped (screen shows only clear color)",
+                          why, (unsigned)prog_id);
+    }
+    missLog++;
+}
+
 static bool prepare_draw(GLenum mode) {
     // Resolve current program + its SPIR-V.
     mithril::Program* prog = mithril::state_get_program(g_state->currentProgram);
-    if (!prog || !prog->linked) return false;
+    if (!prog || !prog->linked) {
+        log_prepare_draw_miss(prog ? "program not linked" : "no program bound (currentProgram=0)",
+                              g_state->currentProgram);
+        return false;
+    }
 
     // Determine whether we are drawing to the default framebuffer (FBO 0) or a
     // user-created FBO. This selects the Y-flipped vs non-flipped vertex SPIR-V
@@ -136,7 +151,11 @@ static bool prepare_draw(GLenum mode) {
     if (color_count <= 0) {
         bool any_color = false;
         for (int i = 0; i < 8; ++i) if (colors[i] != VK_NULL_HANDLE) { any_color = true; break; }
-        if (!any_color) return false;
+        if (!any_color) {
+            log_prepare_draw_miss("no color attachment (eglDefaultColor unset or FBO empty)",
+                                  prog->id);
+            return false;
+        }
     }
 
     // Compute color attachment VkFormats.
@@ -453,21 +472,23 @@ static void trace_draw(const char* kind, int mode, int first, int count, int ins
 
 void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
     MITHRIL_ENSURE_INIT();
+    // GPU fault 诊断：在 prepare_draw 之前记录 draw 调用 —— 若 draw 被
+    // prepare_draw 静默拦截（无日志），这里仍能现形「MC 在调 draw 但被丢」。
+    trace_draw("arrays", (int)mode, (int)first, (int)count, 1);
     if (!validate_draw_call(mode, count)) return;
     // Root cause AI: a false return means no render pass was begun and no
     // pipeline was bound — issuing the draw anyway would record a vkCmdDraw
     // outside a render-pass instance and crash inside MoltenVK. Bail out
     // without calling end_draw(): there is no pass to end.
     if (!prepare_draw(mode)) return;
-    trace_draw("arrays", (int)mode, (int)first, (int)count, 1);
     backend_draw_arrays((int)mode, (int)first, (int)count);
     end_draw();
 }
 
 void glDrawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLsizei primcount) {
     MITHRIL_ENSURE_INIT();
-    if (!prepare_draw(mode)) return;  // root cause AI — see glDrawArrays
     trace_draw("arrays_inst", (int)mode, (int)first, (int)count, (int)primcount);
+    if (!prepare_draw(mode)) return;  // root cause AI — see glDrawArrays
     backend_draw_arrays_instanced((int)mode, (int)first, (int)count, (int)primcount);
     end_draw();
 }
@@ -479,11 +500,11 @@ void glDrawArraysInstancedBaseInstance(GLenum mode, GLint first, GLsizei count,
     // 完成后重置为 0。backend_draw_arrays_instanced 从 g_state 读取后传给
     // vkCmdDraw 的 firstInstance。深度对照 MobileGL drawParams.baseInstance。
     g_state->currentBaseInstance = baseinstance;
+    trace_draw("arrays_baseinst", (int)mode, (int)first, (int)count, (int)primcount);
     // Root cause AI — see glDrawArrays. currentBaseInstance MUST be reset on
     // the early-out path too, otherwise it leaks into the next draw (which
     // expects firstInstance == 0) and misaddresses its instance data.
     if (!prepare_draw(mode)) { g_state->currentBaseInstance = 0; return; }
-    trace_draw("arrays_baseinst", (int)mode, (int)first, (int)count, (int)primcount);
     backend_draw_arrays_instanced((int)mode, (int)first, (int)count, (int)primcount);
     g_state->currentBaseInstance = 0;
     end_draw();
