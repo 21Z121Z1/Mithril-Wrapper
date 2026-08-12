@@ -35,6 +35,7 @@ struct PresentationPixelCapture {
     bool armed = false;
     NSUInteger x = 0;
     NSUInteger y = 0;
+    id<MTLTexture> reference = nil;
     id<MTLBuffer> readback = nil;
     id<MTLCommandBuffer> command = nil;
 };
@@ -47,9 +48,13 @@ bool EncodePresentationPixelCapture(id<CAMetalDrawable> drawable,
     g_presentation_capture.armed = false;
 
     id<MTLTexture> texture = drawable.texture;
-    if (!texture || texture.framebufferOnly ||
+    id<MTLTexture> reference = g_presentation_capture.reference;
+    if (!texture || texture.framebufferOnly || !reference ||
         g_presentation_capture.x >= texture.width ||
-        g_presentation_capture.y >= texture.height) {
+        g_presentation_capture.y >= texture.height ||
+        g_presentation_capture.x >= reference.width ||
+        g_presentation_capture.y >= reference.height) {
+        g_presentation_capture.reference = nil;
         g_presentation_capture.readback = nil;
         g_presentation_capture.command = nil;
         return false;
@@ -57,7 +62,7 @@ bool EncodePresentationPixelCapture(id<CAMetalDrawable> drawable,
 
     auto& engine = GetEngine();
     id<MTLBuffer> readback = [engine.device
-        newBufferWithLength:256 options:MTLResourceStorageModeShared];
+        newBufferWithLength:512 options:MTLResourceStorageModeShared];
     id<MTLBlitCommandEncoder> blit = [command blitCommandEncoder];
     if (!readback || !blit) {
         g_presentation_capture.readback = nil;
@@ -74,10 +79,65 @@ bool EncodePresentationPixelCapture(id<CAMetalDrawable> drawable,
         destinationOffset:0
    destinationBytesPerRow:256
  destinationBytesPerImage:256];
+    [blit copyFromTexture:reference
+              sourceSlice:0
+              sourceLevel:0
+             sourceOrigin:MTLOriginMake(g_presentation_capture.x,
+                                        g_presentation_capture.y, 0)
+               sourceSize:MTLSizeMake(1, 1, 1)
+                 toBuffer:readback
+        destinationOffset:256
+   destinationBytesPerRow:256
+ destinationBytesPerImage:256];
     [blit endEncoding];
     g_presentation_capture.readback = readback;
     g_presentation_capture.command = command;
     return true;
+}
+#endif
+
+bool EncodePresentationRender(id<MTLCommandBuffer> command,
+                              id<MTLTexture> target,
+                              NSString* label) {
+    if (!command || !target) return false;
+    auto& engine = GetEngine();
+    MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+    pass.colorAttachments[0].texture = target;
+    pass.colorAttachments[0].loadAction = MTLLoadActionDontCare;
+    pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+
+    id<MTLRenderCommandEncoder> encoder =
+        [command renderCommandEncoderWithDescriptor:pass];
+    if (!encoder) return false;
+    encoder.label = label;
+    [encoder setRenderPipelineState:g_present_pipeline];
+    [encoder setFragmentTexture:engine.color atIndex:0];
+    [encoder drawPrimitives:MTLPrimitiveTypeTriangle
+                vertexStart:0
+                vertexCount:3];
+    [encoder endEncoding];
+    return true;
+}
+
+#if defined(MITHRIL_PRESENTATION_TEST_HOOKS)
+bool EncodePresentationReference(id<MTLCommandBuffer> command,
+                                 id<MTLTexture> drawable_texture) {
+    if (!g_presentation_capture.armed) return true;
+    MTLTextureDescriptor* descriptor = [MTLTextureDescriptor
+        texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+                                     width:drawable_texture.width
+                                    height:drawable_texture.height
+                                 mipmapped:NO];
+    descriptor.storageMode = MTLStorageModePrivate;
+    descriptor.usage = MTLTextureUsageRenderTarget;
+    g_presentation_capture.reference =
+        [GetEngine().device newTextureWithDescriptor:descriptor];
+    if (!g_presentation_capture.reference) return false;
+    g_presentation_capture.reference.label =
+        @"Mithril presentation test reference";
+    return EncodePresentationRender(
+        command, g_presentation_capture.reference,
+        @"Mithril RGBA-to-BGRA presentation reference");
 }
 #endif
 
@@ -220,24 +280,17 @@ bool Present() {
         }
         command.label = @"Mithril present";
 
-        MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
-        pass.colorAttachments[0].texture = drawable.texture;
-        pass.colorAttachments[0].loadAction = MTLLoadActionDontCare;
-        pass.colorAttachments[0].storeAction = MTLStoreActionStore;
-
-        id<MTLRenderCommandEncoder> encoder =
-            [command renderCommandEncoderWithDescriptor:pass];
-        if (!encoder) {
+#if defined(MITHRIL_PRESENTATION_TEST_HOOKS)
+        if (!EncodePresentationReference(command, drawable.texture)) {
+            ML_LOG_ERROR("metal: failed to encode presentation test reference");
+            return false;
+        }
+#endif
+        if (!EncodePresentationRender(command, drawable.texture,
+                                      @"Mithril RGBA-to-BGRA presentation")) {
             ML_LOG_ERROR("metal: failed to create presentation render encoder");
             return false;
         }
-        encoder.label = @"Mithril RGBA-to-BGRA presentation";
-        [encoder setRenderPipelineState:g_present_pipeline];
-        [encoder setFragmentTexture:engine.color atIndex:0];
-        [encoder drawPrimitives:MTLPrimitiveTypeTriangle
-                    vertexStart:0
-                    vertexCount:3];
-        [encoder endEncoding];
 
 #if defined(MITHRIL_PRESENTATION_TEST_HOOKS)
         // Capture before present on this command buffer. A second queue reading
@@ -260,6 +313,7 @@ bool mithrilTestArmNextPresentedPixel(uint32_t x, uint32_t y) {
     if (g_presentation_capture.armed) return false;
     g_presentation_capture.x = x;
     g_presentation_capture.y = y;
+    g_presentation_capture.reference = nil;
     g_presentation_capture.readback = nil;
     g_presentation_capture.command = nil;
     g_presentation_capture.armed = true;
@@ -267,8 +321,9 @@ bool mithrilTestArmNextPresentedPixel(uint32_t x, uint32_t y) {
 }
 
 extern "C" __attribute__((visibility("default")))
-bool mithrilTestReadPresentedPixel(uint8_t pixel[4]) {
-    if (!pixel || g_presentation_capture.armed ||
+bool mithrilTestReadPresentedPixels(uint8_t drawable_pixel[4],
+                                    uint8_t reference_pixel[4]) {
+    if (!drawable_pixel || !reference_pixel || g_presentation_capture.armed ||
         !g_presentation_capture.readback ||
         !g_presentation_capture.command)
         return false;
@@ -276,7 +331,12 @@ bool mithrilTestReadPresentedPixel(uint8_t pixel[4]) {
     if (g_presentation_capture.command.status !=
         MTLCommandBufferStatusCompleted)
         return false;
-    std::memcpy(pixel, g_presentation_capture.readback.contents, 4);
+    std::memcpy(drawable_pixel, g_presentation_capture.readback.contents, 4);
+    std::memcpy(reference_pixel,
+                static_cast<uint8_t*>(g_presentation_capture.readback.contents) +
+                    256,
+                4);
+    g_presentation_capture.reference = nil;
     g_presentation_capture.readback = nil;
     g_presentation_capture.command = nil;
     return true;

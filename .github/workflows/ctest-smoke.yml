@@ -56,7 +56,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ctest --test-dir build-ctest-metal -R '^amethyst_egl_smoke$' --output-on-failure
+          ctest --test-dir build-ctest-metal -V -R '^amethyst_egl_smoke$'
 
   vulkan-ctest:
     name: Vulkan CTest semantic suite

@@ -70,7 +70,7 @@ jobs:
         run: |
           set -euo pipefail
           ctest --test-dir build-hosted-metal \
-            -R '^amethyst_egl_smoke$' --output-on-failure
+            -V -R '^amethyst_egl_smoke$'
 
       - name: Require first-operation FBO clear/readback regression
         shell: bash
