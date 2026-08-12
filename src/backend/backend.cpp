@@ -11,7 +11,7 @@
 #include <cstring>
 
 #if defined(MITHRIL_HAS_DIRECT_METAL)
-#include <metal/engine.h>
+#include <metal/MetalDeviceSession.h>
 #endif
 
 namespace mithril::backend {
@@ -57,6 +57,12 @@ Kind SelectedKind() {
     static const Kind kind = ResolveKind();
     return kind;
 }
+
+#if defined(MITHRIL_HAS_DIRECT_METAL)
+metal::MetalDeviceSession& DirectSession() {
+    return metal::MetalDeviceSession::shared();
+}
+#endif
 
 } // namespace
 
@@ -148,7 +154,7 @@ bool EnsureInit() {
         case Kind::Vulkan: return vk::EnsureInit();
 #endif
 #if defined(MITHRIL_HAS_DIRECT_METAL)
-        case Kind::DirectMetal: return metal::EnsureInit();
+        case Kind::DirectMetal: return DirectSession().EnsureInit();
 #endif
         default: return false;
     }
@@ -160,7 +166,7 @@ bool IsInitialized() {
         case Kind::Vulkan: return vk::IsInitialized();
 #endif
 #if defined(MITHRIL_HAS_DIRECT_METAL)
-        case Kind::DirectMetal: return metal::IsInitialized();
+        case Kind::DirectMetal: return DirectSession().IsInitialized();
 #endif
         default: return false;
     }
@@ -175,8 +181,8 @@ bool IsInitialized() {
 #endif
 
 #if defined(MITHRIL_HAS_DIRECT_METAL)
-#define MITHRIL_METAL_RET_CASE(fn, ...) case Kind::DirectMetal: return metal::fn(__VA_ARGS__);
-#define MITHRIL_METAL_VOID_CASE(fn, ...) case Kind::DirectMetal: metal::fn(__VA_ARGS__); return;
+#define MITHRIL_METAL_RET_CASE(fn, ...) case Kind::DirectMetal: return DirectSession().fn(__VA_ARGS__);
+#define MITHRIL_METAL_VOID_CASE(fn, ...) case Kind::DirectMetal: DirectSession().fn(__VA_ARGS__); return;
 #else
 #define MITHRIL_METAL_RET_CASE(fn, ...)
 #define MITHRIL_METAL_VOID_CASE(fn, ...)
@@ -204,7 +210,7 @@ bool SetTargetSize(uint32_t w, uint32_t h) { DISPATCH_RET(SetTargetSize, false, 
 bool SetNativeWindow(void* native_window) {
 #if defined(MITHRIL_HAS_DIRECT_METAL)
     if (SelectedKind() == Kind::DirectMetal)
-        return metal::SetNativeWindow(native_window);
+        return DirectSession().SetNativeWindow(native_window);
 #endif
     (void)native_window;
     return true;
@@ -215,7 +221,7 @@ bool SwapBuffers() {
         case Kind::Vulkan: vk::SubmitFlush(); return true;
 #endif
 #if defined(MITHRIL_HAS_DIRECT_METAL)
-        case Kind::DirectMetal: return metal::Present();
+        case Kind::DirectMetal: return DirectSession().Present();
 #endif
         default: return false;
     }
@@ -228,7 +234,7 @@ uint32_t MaxFramebufferSamples() {
         case Kind::Vulkan: return vk::MaxFramebufferSamples();
 #endif
 #if defined(MITHRIL_HAS_DIRECT_METAL)
-        case Kind::DirectMetal: return metal::MaxColorTextureSamples();
+        case Kind::DirectMetal: return DirectSession().MaxColorTextureSamples();
 #endif
         default: return 0;
     }
@@ -236,12 +242,10 @@ uint32_t MaxFramebufferSamples() {
 uint32_t MaxColorTextureSamples() {
     switch (SelectedKind()) {
 #if !defined(MITHRIL_DIRECT_ONLY)
-        // Multisample texture storage has not been migrated to the Vulkan
-        // reference path. Keep the per-context capability boundary honest.
         case Kind::Vulkan: return 0;
 #endif
 #if defined(MITHRIL_HAS_DIRECT_METAL)
-        case Kind::DirectMetal: return metal::MaxColorTextureSamples();
+        case Kind::DirectMetal: return DirectSession().MaxColorTextureSamples();
 #endif
         default: return 0;
     }
@@ -249,13 +253,10 @@ uint32_t MaxColorTextureSamples() {
 bool SupportsDepthTextures() {
     switch (SelectedKind()) {
 #if !defined(MITHRIL_DIRECT_ONLY)
-        // The Vulkan reference texture path still creates only RGBA8 images.
-        // Reject depth texture storage at the frontend boundary instead of
-        // constructing an image that cannot be attached or sampled correctly.
         case Kind::Vulkan: return false;
 #endif
 #if defined(MITHRIL_HAS_DIRECT_METAL)
-        case Kind::DirectMetal: return metal::SupportsDepthTextures();
+        case Kind::DirectMetal: return DirectSession().SupportsDepthTextures();
 #endif
         default: return false;
     }
@@ -272,7 +273,7 @@ bool Draw(const DrawParams& params) {
         case Kind::Vulkan: vk::Draw(params); return true;
 #endif
 #if defined(MITHRIL_HAS_DIRECT_METAL)
-        case Kind::DirectMetal: return metal::Draw(params);
+        case Kind::DirectMetal: return DirectSession().Draw(params);
 #endif
         default: return false;
     }
@@ -288,7 +289,7 @@ void SubmitFlush(bool wait_for_completion) {
 #endif
 #if defined(MITHRIL_HAS_DIRECT_METAL)
         case Kind::DirectMetal:
-            metal::SubmitFlush(wait_for_completion);
+            DirectSession().SubmitFlush(wait_for_completion);
             return;
 #endif
         default: return;
@@ -300,22 +301,14 @@ void DestroyFence(uint64_t fence) { DISPATCH_VOID(DestroyFence, fence); }
 SyncWaitResult ClientWaitFence(uint64_t fence, uint64_t timeout_ns) {
     DISPATCH_RET(ClientWaitFence, SyncWaitResult::Failed, fence, timeout_ns);
 }
-bool FenceSignaled(uint64_t fence) {
-    DISPATCH_RET(FenceSignaled, false, fence);
-}
-bool ServerWaitFence(uint64_t fence) {
-    DISPATCH_RET(ServerWaitFence, false, fence);
-}
+bool FenceSignaled(uint64_t fence) { DISPATCH_RET(FenceSignaled, false, fence); }
+bool ServerWaitFence(uint64_t fence) { DISPATCH_RET(ServerWaitFence, false, fence); }
 
 uint64_t CreateOcclusionQuery(bool boolean_result) {
     DISPATCH_RET(CreateOcclusionQuery, 0, boolean_result);
 }
-void EndOcclusionQuery(uint64_t query) {
-    DISPATCH_VOID(EndOcclusionQuery, query);
-}
-void DestroyOcclusionQuery(uint64_t query) {
-    DISPATCH_VOID(DestroyOcclusionQuery, query);
-}
+void EndOcclusionQuery(uint64_t query) { DISPATCH_VOID(EndOcclusionQuery, query); }
+void DestroyOcclusionQuery(uint64_t query) { DISPATCH_VOID(DestroyOcclusionQuery, query); }
 bool OcclusionQueryAvailable(uint64_t query) {
     DISPATCH_RET(OcclusionQueryAvailable, false, query);
 }
@@ -333,15 +326,13 @@ void ReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, void* out) {
 #endif
 #if defined(MITHRIL_HAS_DIRECT_METAL)
         case Kind::DirectMetal:
-            metal::ReadPixels(x, y, width, height, out);
+            DirectSession().ReadPixels(x, y, width, height, out);
             return;
 #endif
         default: return;
     }
 }
-void UploadTexture(uint64_t id, const TexUpload& img) {
-    DISPATCH_VOID(UploadTexture, id, img);
-}
+void UploadTexture(uint64_t id, const TexUpload& img) { DISPATCH_VOID(UploadTexture, id, img); }
 void DestroyResidentTexture(uint64_t id) { DISPATCH_VOID(DestroyResidentTexture, id); }
 void DestroyBuffer(uint64_t id) { DISPATCH_VOID(DestroyBuffer, id); }
 void CreateRenderbuffer(uint64_t id, GLenum format, uint32_t w, uint32_t h, uint32_t samples) {

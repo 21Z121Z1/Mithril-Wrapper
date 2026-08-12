@@ -16,7 +16,7 @@ BOUNDARY=$2
 echo '--- DirectMetal Mach-O dependencies ---'
 DEPS=$(otool -L "$DYLIB")
 printf '%s\n' "$DEPS"
-printf '%s\n' "$DEPS" | grep -q '/System/Library/Frameworks/Metal.framework/Metal'
+printf '%s\n' "$DEPS" | grep -Eq '/Metal\.framework/(Versions/[^/]+/)?Metal'
 if printf '%s\n' "$DEPS" | grep -Eqi 'vulkan|moltenvk'; then
   echo 'forbidden Vulkan/MoltenVK runtime dependency in DirectMetal artifact' >&2
   exit 1
