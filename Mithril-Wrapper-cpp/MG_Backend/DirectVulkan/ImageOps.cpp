@@ -93,14 +93,24 @@ void end_one_shot(OneShotCtx& c) {
 
 } // namespace
 
+// 限流诊断：glGenerateMipmap 被调用但提前 return 的原因（真机日志此前从未
+// 出现 generate_mipmaps 主日志，需确认是没被调用还是提前退出）。
+static void log_mipmap_miss(const char* why, GLuint name) {
+    static int missLog = 0;
+    if (missLog <= 6 || missLog % 50 == 0) {
+        MITHRIL_LOG_WARN("vk", "generate_mipmaps MISS tex=%u reason=%s", name, why);
+    }
+    missLog++;
+}
+
 void generate_mipmaps(GLuint name) {
     Backend* b = backend();
-    if (!b->initialized || name == 0) return;
+    if (!b->initialized || name == 0) { log_mipmap_miss("not-init-or-name0", name); return; }
     auto& tbl = texture_table();
     auto it = tbl.find(name);
-    if (it == tbl.end()) return;
+    if (it == tbl.end()) { log_mipmap_miss("not-in-texture-table", name); return; }
     TextureEntry& tex = it->second;
-    if (tex.image == VK_NULL_HANDLE) return;
+    if (tex.image == VK_NULL_HANDLE) { log_mipmap_miss("no-image", name); return; }
 
     // 该纹理尺寸需要的完整 mip 链层数 (floor(log2(max(w,h)))+1)。
     int fullLevels = 1;
