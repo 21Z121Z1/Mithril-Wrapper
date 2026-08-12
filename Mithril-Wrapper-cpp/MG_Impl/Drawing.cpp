@@ -512,6 +512,7 @@ void glDrawArraysInstancedBaseInstance(GLenum mode, GLint first, GLsizei count,
 
 void glDrawElements(GLenum mode, GLsizei count, GLenum type, const void* indices) {
     MITHRIL_ENSURE_INIT();
+    trace_draw("elements", (int)mode, 0, (int)count, 1);
     if (!validate_draw_call(mode, count)) return;
     if (!prepare_draw(mode)) return;  // root cause AI — see glDrawArrays
     // If a VBO is bound for GL_ELEMENT_ARRAY_BUFFER, indices is an offset into it.
@@ -573,6 +574,7 @@ void glDrawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type,
 void glDrawElementsInstanced(GLenum mode, GLsizei count, GLenum type,
                              const void* indices, GLsizei primcount) {
     MITHRIL_ENSURE_INIT();
+    trace_draw("elements_inst", (int)mode, 0, (int)count, (int)primcount);
     if (!prepare_draw(mode)) return;  // root cause AI — see glDrawArrays
     mithril::VertexArray* vao = mithril::state_get_vao(g_state->currentVAO);
     GLuint ib_name = vao ? vao->elementArrayBuffer : 0;
