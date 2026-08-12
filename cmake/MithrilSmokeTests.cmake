@@ -35,6 +35,7 @@ set(_mithril_vulkan_smokes
     texture_smoke
     uniform_array_smoke
     uniform_type_smoke
+    uniform_integer_getter_smoke
     fbo_smoke
     3d_smoke
     render3d_smoke)
@@ -48,6 +49,7 @@ set(_mithril_directmetal_smokes
     matrix_uniform_smoke
     uniform_array_smoke
     uniform_type_smoke
+    uniform_integer_getter_smoke
     provoking_vertex_smoke
     buffer_texture_smoke
     typed_vertex_smoke

@@ -152,6 +152,30 @@ bool IsBooleanUniformType(GLenum type) {
     }
 }
 
+bool IsSignedIntegerUniformType(GLenum type) {
+    switch (type) {
+        case GL_INT:
+        case GL_INT_VEC2:
+        case GL_INT_VEC3:
+        case GL_INT_VEC4:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool IsUnsignedIntegerUniformType(GLenum type) {
+    switch (type) {
+        case GL_UNSIGNED_INT:
+        case GL_UNSIGNED_INT_VEC2:
+        case GL_UNSIGNED_INT_VEC3:
+        case GL_UNSIGNED_INT_VEC4:
+            return true;
+        default:
+            return false;
+    }
+}
+
 bool IsSamplerUniformType(GLenum type) {
     switch (type) {
         case GL_SAMPLER_1D:
@@ -198,6 +222,26 @@ bool IsSamplerUniformType(GLenum type) {
         default:
             return false;
     }
+}
+
+bool ReadRawSignedScalar(const sh::Uniform& uniform, size_t scalar,
+                         GLint* value) {
+    const size_t offset = scalar * sizeof(GLint);
+    if (!value || offset > uniform.raw_value.size() ||
+        sizeof(GLint) > uniform.raw_value.size() - offset)
+        return false;
+    std::memcpy(value, uniform.raw_value.data() + offset, sizeof(GLint));
+    return true;
+}
+
+bool ReadRawUnsignedScalar(const sh::Uniform& uniform, size_t scalar,
+                           GLuint* value) {
+    const size_t offset = scalar * sizeof(GLuint);
+    if (!value || offset > uniform.raw_value.size() ||
+        sizeof(GLuint) > uniform.raw_value.size() - offset)
+        return false;
+    std::memcpy(value, uniform.raw_value.data() + offset, sizeof(GLuint));
+    return true;
 }
 
 bool IsScalarVectorSetterType(GLenum type) {
@@ -813,9 +857,21 @@ void APIENTRY glGetUniformiv(GLuint program, GLint location, GLint* params) {
     }
     const size_t components = UniformComponentCount(uniform->type);
     const size_t start = static_cast<size_t>(element) * components;
-    for (size_t i = 0; i < components; ++i)
-        params[i] = start + i < uniform->value.size()
-            ? static_cast<GLint>(uniform->value[start + i]) : 0;
+    for (size_t i = 0; i < components; ++i) {
+        if (IsSignedIntegerUniformType(uniform->type) ||
+            IsSamplerUniformType(uniform->type)) {
+            GLint exact = 0;
+            ReadRawSignedScalar(*uniform, start + i, &exact);
+            params[i] = exact;
+        } else if (IsBooleanUniformType(uniform->type)) {
+            GLuint exact = 0;
+            ReadRawUnsignedScalar(*uniform, start + i, &exact);
+            params[i] = static_cast<GLint>(exact);
+        } else {
+            params[i] = start + i < uniform->value.size()
+                ? static_cast<GLint>(uniform->value[start + i]) : 0;
+        }
+    }
 }
 
 void APIENTRY glGetUniformuiv(GLuint program, GLint location, GLuint* params) {
@@ -829,9 +885,17 @@ void APIENTRY glGetUniformuiv(GLuint program, GLint location, GLuint* params) {
     }
     const size_t components = UniformComponentCount(uniform->type);
     const size_t start = static_cast<size_t>(element) * components;
-    for (size_t i = 0; i < components; ++i)
-        params[i] = start + i < uniform->value.size()
-            ? static_cast<GLuint>(uniform->value[start + i]) : 0u;
+    for (size_t i = 0; i < components; ++i) {
+        if (IsUnsignedIntegerUniformType(uniform->type) ||
+            IsBooleanUniformType(uniform->type)) {
+            GLuint exact = 0;
+            ReadRawUnsignedScalar(*uniform, start + i, &exact);
+            params[i] = exact;
+        } else {
+            params[i] = start + i < uniform->value.size()
+                ? static_cast<GLuint>(uniform->value[start + i]) : 0u;
+        }
+    }
 }
 
 // ---- uniform setters -------------------------------------------------------
