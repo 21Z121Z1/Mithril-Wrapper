@@ -18,7 +18,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: recursive
+          submodules: false
+
+      - name: Fetch DirectMetal shader submodules only
+        run: >-
+          git submodule update --init --depth=1
+          third_party/SPIRV-Cross
+          third_party/SPIRV-Headers
+          third_party/glslang
+
+      - name: Assert Vulkan-Headers was not checked out
+        run: test ! -f third_party/Vulkan-Headers/CMakeLists.txt
 
       - name: Configure Vulkan-free DirectMetal target
         run: >-
@@ -60,7 +70,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: recursive
+          submodules: false
+
+      - name: Fetch DirectMetal shader submodules only
+        run: >-
+          git submodule update --init --depth=1
+          third_party/SPIRV-Cross
+          third_party/SPIRV-Headers
+          third_party/glslang
+
+      - name: Assert Vulkan-Headers was not checked out
+        run: test ! -f third_party/Vulkan-Headers/CMakeLists.txt
 
       - name: Fetch pinned iOS CMake toolchain
         run: >-

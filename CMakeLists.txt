@@ -145,6 +145,15 @@ if(APPLE AND MITHRIL_BUILD_DIRECT)
         RUNTIME_OUTPUT_DIRECTORY "${MITHRIL_OUTPUT_DIRECTORY}")
 
     if(MITHRIL_IOS)
+        # ios-cmake defaults to -fvisibility=hidden. Mithril is dlopen/dlsym'd
+        # by Amethyst/LWJGL, so the public EGL/desktop-GL ABI must stay visible.
+        # Target-local -fvisibility=default keeps third-party static libraries
+        # hidden while restoring the shipping entry points from our own TUs.
+        target_compile_options(mithril_direct PRIVATE -fvisibility=default)
+        set_target_properties(mithril_direct PROPERTIES
+            C_VISIBILITY_PRESET default
+            CXX_VISIBILITY_PRESET default
+            VISIBILITY_INLINES_HIDDEN OFF)
         target_compile_definitions(mithril_direct PUBLIC MITHRIL_IOS=1)
         target_link_libraries(mithril_direct PRIVATE
             "-framework CoreGraphics"
@@ -215,7 +224,7 @@ if(APPLE AND NOT MITHRIL_IOS AND BUILD_TESTING AND TARGET mithril_direct)
     set_tests_properties(amethyst_egl_smoke PROPERTIES
         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
         ENVIRONMENT
-            "MITHRIL_BACKEND=metal;MITHRIL_EXPECT_RENDERER=DirectMetal;MITHRIL_LIBRARY=./runtime/libmithril.dylib;MTL_DEBUG_LAYER=1;MTL_SHADER_VALIDATION=1"
+            "MITHRIL_BACKEND=metal;MITHRIL_EXPECT_RENDERER=DirectMetal;MITHRIL_LIBRARY=./output/libmithril.dylib;MTL_DEBUG_LAYER=1;MTL_SHADER_VALIDATION=1"
         LABELS "directmetal;amethyst;presentation"
         TIMEOUT 120
         PASS_REGULAR_EXPRESSION "AMETHYST EGL SMOKE ALL PASSED")
