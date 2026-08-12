@@ -5,14 +5,14 @@ not considered supported merely because it is exported. Update this document
 from source plus executable evidence whenever a capability changes.
 
 Snapshot: 2026-08-12, based on
-`codex/autonomous-direct-metal-next@ae8c1fb` plus the captured-drawable
-presentation work that follows that base.
+`codex/autonomous-direct-metal-next@6b2533d` plus the capability-probed
+presentation transfer work that follows that base.
 
 Reference heads inspected for this snapshot:
 
 - `origin/feature/direct-metal@ca05c06` and
   `origin/feature/direct-metal-ios-amethyst@0a3c678`;
-- `uniaball/main@2fa0e63`;
+- `uniaball/main@49c7e65`;
 - `herbrine/main@ddc9c3d`,
   `herbrine/implement-gl33-core-renderer@9778de1`, `herbrine/fix@36b6913`,
   and the remaining drawable/black-screen experiment branches;
@@ -34,7 +34,7 @@ Reference heads inspected for this snapshot:
 | API family | DirectMetal status | Current execution evidence | Remaining semantic boundary / highest-value gap |
 | --- | --- | --- | --- |
 | EGL config/context/window surface | partial | `contract_smoke`, `amethyst_egl_smoke` | macOS `CAMetalLayer` presentation is covered through captured drawable pixels. Real iPhoneOS lifecycle, multiple contexts/surfaces, background/resume, and current Amethyst main integration are untested. |
-| Default framebuffer size/present | partial | `amethyst_egl_smoke` same-command-buffer BGRA drawable/reference capture | `eglSwapBuffers` appends the RGBA-to-BGRA presentation encoder to the pending GL frame command buffer, submits without an implicit CPU wait, and synchronizes non-square `drawableSize` changes before acquiring the replacement drawable. This removes a redundant submit and the hosted tile/virtual-GPU producer/consumer gap. Physical Apple GPU runs require both real drawable and same-pipeline reference bytes; Apple Paravirtual may skip only unreadable all-zero drawable bytes after its reference passes. Logical size vs physical pixels under UIKit scale, visible WindowServer/real-device presentation, pre-flushed-frame persistence, nil drawable recovery, and surface replacement still need dedicated coverage. |
+| Default framebuffer size/present | partial | `amethyst_egl_smoke` source/reference/drawable capture on direct and materialized paths | `eglSwapBuffers` appends RGBA-to-BGRA presentation to the pending GL frame command buffer, submits without an implicit CPU wait, and synchronizes non-square `drawableSize` changes before drawable acquisition. A one-time, current-size byte probe selects direct render-target sampling when exact; if and only if direct fails while a GPU-copy materialized source passes, the backend reuses one private compatibility texture. Both failures reject surface creation. Physical Apple GPU runs require source, reference, and real drawable bytes; Apple Paravirtual may skip only unreadable all-zero drawable bytes after source/reference pass. Logical size vs UIKit scale, visible WindowServer/real-device presentation, pre-flushed-frame persistence, nil drawable recovery, and surface replacement remain untested. |
 | Clear/viewport/scissor | exact for tested color/depth/stencil and masks; partial overall | `state_smoke`, `fbo_smoke`, `directmetal_fbo_smoke`, `query_smoke` | Conditional draw, `glClear`, and `glClearBuffer*` now consume real occlusion results. Per-draw-buffer indexed state and every integer clear format remain incomplete. |
 | Depth/stencil/blend/cull/polygon | partial | `fbo_smoke`, `stencil_persistence_smoke` pixel assertions | Basic depth, stencil, blend, cull, front-face and line polygon mode execute. Default and packed offscreen depth/stencil targets preserve stencil across completed Metal command buffers. Blend enum validation, independent indexed blend/masks, point polygon mode, and several uncommon factors are incomplete or rejected. |
 | Multisample/sample/raster state | partial / silent-risk | MSAA FBO and `sampler2DMS` cases in `fbo_smoke` | `glGetMultisamplefv` is a stub. Sample coverage/mask, alpha-to-coverage, rasterizer discard, dithering, logic op, program point size and line/point width are shadowed but are not all materialized by DirectMetal. Do not count state getters as execution support. |
