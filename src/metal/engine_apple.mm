@@ -111,6 +111,13 @@ bool EncodePresentationRender(id<MTLCommandBuffer> command,
     if (!encoder) return false;
     encoder.label = label;
     [encoder setRenderPipelineState:g_present_pipeline];
+    // Define the presentation raster bounds explicitly. Apple Paravirtual can
+    // otherwise accept and complete this encoder while producing no fragments.
+    [encoder setViewport:MTLViewport{0.0, 0.0,
+                                     static_cast<double>(target.width),
+                                     static_cast<double>(target.height),
+                                     0.0, 1.0}];
+    [encoder setScissorRect:MTLScissorRect{0, 0, target.width, target.height}];
     [encoder setFragmentTexture:engine.color atIndex:0];
     [encoder drawPrimitives:MTLPrimitiveTypeTriangle
                 vertexStart:0

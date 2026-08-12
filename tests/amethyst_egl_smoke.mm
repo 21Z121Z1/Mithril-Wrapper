@@ -259,14 +259,16 @@ int main(void) {
               "first presented drawable has the physical 80x48 extent");
         bool captured =
             mithrilTestReadPresentedPixels(presented, reference);
-        CHECK(captured && BgraMatches(reference, 128, 64, 32, 255),
+        bool reference_matches =
+            captured && BgraMatches(reference, 128, 64, 32, 255);
+        CHECK(reference_matches,
               "pending clear reaches the same-pipeline BGRA reference without glFlush "
               "(%u,%u,%u,%u)", reference[0], reference[1], reference[2],
               reference[3]);
         bool drawable_matches =
             captured && BgraMatches(presented, 128, 64, 32, 255);
         bool paravirtual_unreadable =
-            captured && PixelIsZero(presented) &&
+            reference_matches && PixelIsZero(presented) &&
             strstr(layer.device.name.UTF8String, "Paravirtual") != nullptr;
         CHECK(drawable_matches || paravirtual_unreadable,
               "physical drawable bytes match or Paravirtual readback is "
@@ -293,14 +295,16 @@ int main(void) {
                   layer.capturedDrawable.texture.height == 96,
               "resized presented drawable has the physical 56x96 extent");
         captured = mithrilTestReadPresentedPixels(presented, reference);
-        CHECK(captured && BgraMatches(reference, 32, 64, 128, 255),
+        reference_matches =
+            captured && BgraMatches(reference, 32, 64, 128, 255);
+        CHECK(reference_matches,
               "resized clear reaches the same-pipeline BGRA reference "
               "(%u,%u,%u,%u)", reference[0], reference[1], reference[2],
               reference[3]);
         drawable_matches =
             captured && BgraMatches(presented, 32, 64, 128, 255);
         paravirtual_unreadable =
-            captured && PixelIsZero(presented) &&
+            reference_matches && PixelIsZero(presented) &&
             strstr(layer.device.name.UTF8String, "Paravirtual") != nullptr;
         CHECK(drawable_matches || paravirtual_unreadable,
               "resized physical drawable bytes match or Paravirtual readback "
