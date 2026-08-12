@@ -8,6 +8,8 @@
 
 #include "engine.h"
 
+#include <mithril/directmetal_diagnostics.h>
+
 #include <util/log.h>
 #include <shader/shader.h>
 
@@ -60,11 +62,7 @@ uint64_t HashWords(const std::vector<uint32_t>& vs,
     return hash ? hash : 1;
 }
 
-struct UboMember {
-    std::string name;
-    uint32_t offset = 0;
-    uint32_t size = 0;
-};
+using UboMember = backend::UniformMemberLayout;
 
 struct ShaderStage {
     id<MTLLibrary> library = nil;
@@ -128,6 +126,8 @@ struct BoundTexture {
     id<MTLTexture> texture = nil;
     id<MTLSamplerState> sampler = nil;
     id<MTLBuffer> backing_buffer = nil;
+    bool vertex_stage = false;
+    bool fragment_stage = false;
 };
 
 struct BoundUniformBuffer {
@@ -213,6 +213,13 @@ struct OcclusionQueryState {
     std::vector<OcclusionSegment> segments;
 };
 
+MithrilDirectMetalBindingStatsV1 EmptyBindingStats() {
+    MithrilDirectMetalBindingStatsV1 stats{};
+    stats.version = MITHRIL_DIRECT_METAL_BINDING_STATS_VERSION;
+    stats.struct_size = static_cast<uint32_t>(sizeof(stats));
+    return stats;
+}
+
 struct Engine {
     id<MTLDevice> device = nil;
     id<MTLCommandQueue> queue = nil;
@@ -240,6 +247,7 @@ struct Engine {
     uint64_t next_occlusion_query = 1;
     uint64_t pipeline_clock = 0;
     uint64_t sampler_clock = 0;
+    MithrilDirectMetalBindingStatsV1 binding_stats = EmptyBindingStats();
     std::vector<PendingDraw> draws;
     std::vector<uint8_t> readback_pixels;
     bool initialized = false;
@@ -844,6 +852,23 @@ bool TranslateStage(const std::vector<uint32_t>& words,
                         block.base_type_id, i, spv::DecorationOffset);
                     member.size = static_cast<uint32_t>(
                         compiler.get_declared_struct_member_size(type, i));
+                    const auto& member_type =
+                        compiler.get_type(type.member_types[i]);
+                    member.vector_components =
+                        std::max(member_type.vecsize, 1u);
+                    member.matrix_columns =
+                        std::max(member_type.columns, 1u);
+                    member.array_elements = 1;
+                    for (uint32_t dimension : member_type.array)
+                        member.array_elements *= std::max(dimension, 1u);
+                    if (!member_type.array.empty())
+                        member.array_stride = static_cast<uint32_t>(
+                            compiler.type_struct_member_array_stride(type, i));
+                    if (member_type.columns > 1)
+                        member.matrix_stride = static_cast<uint32_t>(
+                            compiler.type_struct_member_matrix_stride(type, i));
+                    member.row_major = compiler.has_member_decoration(
+                        block.base_type_id, i, spv::DecorationRowMajor);
                     output->members.push_back(std::move(member));
                 }
             }
@@ -877,6 +902,13 @@ bool TranslateStage(const std::vector<uint32_t>& words,
 
         auto common_options = compiler.get_common_options();
         common_options.vertex.fixup_clipspace = true;
+        // Store every GL framebuffer in GL row order: texture row zero is the
+        // framebuffer's bottom row.  Metal raster targets are top-origin, so
+        // flip only the generated vertex position; texture coordinates and
+        // fragment outputs remain untouched.  The CAMetalLayer presentation
+        // seam converts this GL storage order back to display row order.
+        common_options.vertex.flip_vert_y =
+            expected_model == spv::ExecutionModelVertex;
         compiler.set_common_options(common_options);
 
         const std::string source = compiler.compile();
@@ -1367,10 +1399,12 @@ NSUInteger PackUniforms(FrameContext& frame, NSUInteger* cursor,
     for (const auto& member : stage.members) {
         auto value = draw.uniforms.find(member.name);
         if (value == draw.uniforms.end() || value->second.empty()) continue;
-        const size_t bytes = std::min<size_t>(
-            member.size, value->second.size() * sizeof(float));
-        if ((size_t)member.offset + bytes <= stage.ubo_size)
-            std::memcpy(packed.data() + member.offset, value->second.data(), bytes);
+        if (!backend::PackUniformValue(
+                member, value->second, packed.data(), stage.ubo_size)) {
+            ML_LOG_ERROR("metal: invalid reflected layout for uniform '%s'",
+                         member.name.c_str());
+            return NSNotFound;
+        }
     }
     // Exact byte identity is the only reuse criterion. The memo lives for one
     // frame arena, so offsets can never escape into a recycled frame context.
@@ -1423,23 +1457,23 @@ void ApplyDynamicState(id<MTLRenderCommandEncoder> encoder,
                        const backend::DynamicState& dynamic,
                        NSUInteger target_width, NSUInteger target_height) {
     const double vx = std::clamp<double>(dynamic.viewport[0], 0, target_width);
-    const double vy_bottom = std::clamp<double>(dynamic.viewport[1], 0, target_height);
+    const double vy = std::clamp<double>(dynamic.viewport[1], 0, target_height);
     const double vw = std::clamp<double>(dynamic.viewport[2], 0, target_width - vx);
-    const double vh = std::clamp<double>(dynamic.viewport[3], 0, target_height - vy_bottom);
-    MTLViewport viewport{vx, target_height - (vy_bottom + vh), vw, vh, 0.0, 1.0};
+    const double vh = std::clamp<double>(dynamic.viewport[3], 0, target_height - vy);
+    MTLViewport viewport{vx, vy, vw, vh, 0.0, 1.0};
     [encoder setViewport:viewport];
 
     MTLScissorRect scissor{0, 0, target_width, target_height};
     if (state.scissor_test) {
         const NSUInteger sx = std::clamp<NSInteger>((NSInteger)dynamic.scissor[0], 0,
                                                      (NSInteger)target_width);
-        const NSUInteger sy_bottom = std::clamp<NSInteger>((NSInteger)dynamic.scissor[1], 0,
-                                                            (NSInteger)target_height);
+        const NSUInteger sy = std::clamp<NSInteger>((NSInteger)dynamic.scissor[1], 0,
+                                                     (NSInteger)target_height);
         const NSUInteger sw = std::min<NSUInteger>((NSUInteger)std::max(0.f, dynamic.scissor[2]),
                                                     target_width - sx);
         const NSUInteger sh = std::min<NSUInteger>((NSUInteger)std::max(0.f, dynamic.scissor[3]),
-                                                    target_height - sy_bottom);
-        scissor = {sx, target_height - (sy_bottom + sh), sw, sh};
+                                                    target_height - sy);
+        scissor = {sx, sy, sw, sh};
     }
     [encoder setScissorRect:scissor];
 
@@ -1450,7 +1484,7 @@ void ApplyDynamicState(id<MTLRenderCommandEncoder> encoder,
     }
     [encoder setCullMode:cull];
     [encoder setFrontFacingWinding:state.front_face == GL_CCW
-        ? MTLWindingCounterClockwise : MTLWindingClockwise];
+        ? MTLWindingClockwise : MTLWindingCounterClockwise];
     [encoder setTriangleFillMode:state.polygon_mode == GL_LINE
         ? MTLTriangleFillModeLines : MTLTriangleFillModeFill];
     [encoder setDepthBias:state.poly_offset_units
@@ -1654,7 +1688,7 @@ bool EncodeClear(id<MTLRenderCommandEncoder> encoder,
             0, target.height);
         if (x1 <= x0 || y1 <= y0) return true;
         scissor = {static_cast<NSUInteger>(x0),
-                   target.height - static_cast<NSUInteger>(y1),
+                   static_cast<NSUInteger>(y0),
                    static_cast<NSUInteger>(x1 - x0),
                    static_cast<NSUInteger>(y1 - y0)};
     }
@@ -1683,6 +1717,18 @@ bool EncodeDraws(
     if (!ResolveTarget(engine.bound_draw_fbo, &target)) return false;
     NSUInteger cursor = 0;
     std::unordered_map<std::string, NSUInteger> uniform_memo;
+    // Metal encoder state persists across draw calls in one render pass. Keep
+    // a compact shadow per shader stage and only materialize changes. These
+    // references are valid for the whole loop because PendingDraw owns the
+    // native texture/sampler objects until submission has been encoded.
+    std::array<id<MTLTexture>, backend::kMaxTextureUnits>
+        vertex_textures{};
+    std::array<id<MTLTexture>, backend::kMaxTextureUnits>
+        fragment_textures{};
+    std::array<id<MTLSamplerState>, backend::kMaxTextureUnits>
+        vertex_samplers{};
+    std::array<id<MTLSamplerState>, backend::kMaxTextureUnits>
+        fragment_samplers{};
     OcclusionQueryState* active_occlusion = nullptr;
     for (const auto& pending : engine.draws) {
         const auto& draw = pending.params;
@@ -1752,10 +1798,50 @@ bool EncodeDraws(
                                    atIndex:binding.index];
         }
         for (const auto& binding : pending.textures) {
-            [encoder setVertexTexture:binding.texture atIndex:binding.slot];
-            [encoder setVertexSamplerState:binding.sampler atIndex:binding.slot];
-            [encoder setFragmentTexture:binding.texture atIndex:binding.slot];
-            [encoder setFragmentSamplerState:binding.sampler atIndex:binding.slot];
+            if (!binding.vertex_stage) {
+                ++engine.binding_stats.inactive_stage_texture_bind_calls_avoided;
+                ++engine.binding_stats.inactive_stage_sampler_bind_calls_avoided;
+            }
+            if (!binding.fragment_stage) {
+                ++engine.binding_stats.inactive_stage_texture_bind_calls_avoided;
+                ++engine.binding_stats.inactive_stage_sampler_bind_calls_avoided;
+            }
+            if (binding.vertex_stage) {
+                if (vertex_textures[binding.slot] != binding.texture) {
+                    [encoder setVertexTexture:binding.texture
+                                      atIndex:binding.slot];
+                    vertex_textures[binding.slot] = binding.texture;
+                    ++engine.binding_stats.vertex_texture_bind_calls;
+                } else {
+                    ++engine.binding_stats.texture_bind_calls_elided;
+                }
+                if (vertex_samplers[binding.slot] != binding.sampler) {
+                    [encoder setVertexSamplerState:binding.sampler
+                                           atIndex:binding.slot];
+                    vertex_samplers[binding.slot] = binding.sampler;
+                    ++engine.binding_stats.vertex_sampler_bind_calls;
+                } else {
+                    ++engine.binding_stats.sampler_bind_calls_elided;
+                }
+            }
+            if (binding.fragment_stage) {
+                if (fragment_textures[binding.slot] != binding.texture) {
+                    [encoder setFragmentTexture:binding.texture
+                                        atIndex:binding.slot];
+                    fragment_textures[binding.slot] = binding.texture;
+                    ++engine.binding_stats.fragment_texture_bind_calls;
+                } else {
+                    ++engine.binding_stats.texture_bind_calls_elided;
+                }
+                if (fragment_samplers[binding.slot] != binding.sampler) {
+                    [encoder setFragmentSamplerState:binding.sampler
+                                             atIndex:binding.slot];
+                    fragment_samplers[binding.slot] = binding.sampler;
+                    ++engine.binding_stats.fragment_sampler_bind_calls;
+                } else {
+                    ++engine.binding_stats.sampler_bind_calls_elided;
+                }
+            }
         }
 
         const NSUInteger vertex_count = draw.vertex_stream.record_count
@@ -1790,8 +1876,9 @@ bool EncodeDraws(
             [encoder drawPrimitives:primitive
                         vertexStart:0
                         vertexCount:vertex_count
-                      instanceCount:instance_count];
+                          instanceCount:instance_count];
         }
+        ++engine.binding_stats.draws_encoded;
     }
     return true;
 }
@@ -1827,12 +1914,16 @@ std::shared_ptr<CommandCompletion> CommitCommandBuffer(
     return completion;
 }
 
+using SubmitTailEncoder = bool (*)(id<MTLCommandBuffer>, void*);
+
 bool SubmitInternal(bool wait_for_completion, bool copy_for_readback,
-                    FrameContext** submitted_frame) {
+                    FrameContext** submitted_frame,
+                    SubmitTailEncoder tail_encoder = nullptr,
+                    void* tail_context = nullptr) {
     auto& engine = GetEngine();
     if (!engine.initialized) return false;
     const bool needs_render = engine.frame_dirty;
-    if (!needs_render && !copy_for_readback) {
+    if (!needs_render && !copy_for_readback && !tail_encoder) {
         if (wait_for_completion && engine.last_submitted) {
             [engine.last_submitted waitUntilCompleted];
             return CommandSucceeded(engine.last_submitted);
@@ -2022,6 +2113,12 @@ bool SubmitInternal(bool wait_for_completion, bool copy_for_readback,
     destinationBytesPerImage:frame.readback_row_bytes * read_target.height];
         [blit endEncoding];
     }
+
+    // Window presentation supplies a tail encoder so the default framebuffer
+    // producer and its RGBA-to-BGRA consumer share one command buffer. Besides
+    // avoiding an extra submit, this gives tile/virtual GPUs an explicit
+    // encoder boundary instead of relying on cross-command-buffer residency.
+    if (tail_encoder && !tail_encoder(command, tail_context)) return false;
 
     auto completion = CommitCommandBuffer(command);
     if (!completion) return false;
@@ -2321,6 +2418,10 @@ bool Draw(const backend::DrawParams& params) {
         pending.params.uniform_buffers[i].source_size = 0;
     }
     for (const auto& bind : params.sampled_textures) {
+        if (!bind.vertex_stage && !bind.fragment_stage) {
+            ML_LOG_ERROR("metal: sampled-image binding has no shader stage");
+            return false;
+        }
         const NSUInteger slot = bind.binding ? bind.binding - 1 : 0;
         if (slot >= backend::kMaxTextureUnits) {
             WarnUnsupported("sampled-image binding beyond the frontend limit");
@@ -2344,8 +2445,10 @@ bool Draw(const backend::DrawParams& params) {
                          bind.binding);
             return false;
         }
-        pending.textures.push_back({slot, texture->second.texture, sampler,
-                                    texture->second.backing_buffer});
+        pending.textures.push_back({
+            slot, texture->second.texture, sampler,
+            texture->second.backing_buffer,
+            bind.vertex_stage, bind.fragment_stage});
     }
     if (pending.occlusion) ++pending.occlusion->pending_draws;
     engine.draws.push_back(std::move(pending));
@@ -2537,7 +2640,7 @@ void ReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, void* output) {
         for (GLsizei row = 0; row < height; ++row) {
             const GLint gl_y = y + row;
             if (gl_y < 0 || gl_y >= (GLint)read_target.height) continue;
-            const GLint src_y = (GLint)read_target.height - 1 - gl_y;
+            const GLint src_y = gl_y;
             const GLint left = std::max<GLint>(x, 0);
             const GLint right = std::min<GLint>(x + width, (GLint)read_target.width);
             if (left >= right) continue;
@@ -2746,9 +2849,9 @@ void BlitFramebuffer(uint64_t src_id, uint64_t dst_id,
     id<MTLCommandBuffer> command = [engine.queue commandBuffer];
     id<MTLBlitCommandEncoder> blit = [command blitCommandEncoder];
     const NSUInteger source_x = std::min(sx0, sx1);
-    const NSUInteger source_y = source.height - std::max(sy0, sy1);
+    const NSUInteger source_y = std::min(sy0, sy1);
     const NSUInteger destination_x = std::min(dx0, dx1);
-    const NSUInteger destination_y = destination.height - std::max(dy0, dy1);
+    const NSUInteger destination_y = std::min(dy0, dy1);
     const AttachmentSelection& source_selection =
         source.color_selections[source_index];
     const AttachmentSelection& destination_selection =
@@ -2768,6 +2871,17 @@ void BlitFramebuffer(uint64_t src_id, uint64_t dst_id,
                 ? destination_selection.depth_plane : 0)];
     [blit endEncoding];
     (void)CommitCommandBuffer(command);
+}
+
+extern "C" void mithrilResetDirectMetalBindingStats(void) {
+    GetEngine().binding_stats = EmptyBindingStats();
+}
+
+extern "C" int mithrilGetDirectMetalBindingStatsV1(
+    MithrilDirectMetalBindingStatsV1* output, size_t output_size) {
+    if (!output || output_size < sizeof(*output)) return 0;
+    *output = GetEngine().binding_stats;
+    return 1;
 }
 
 } // namespace mithril::metal

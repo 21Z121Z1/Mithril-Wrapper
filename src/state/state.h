@@ -121,6 +121,7 @@ struct GLState {
     GLenum active_texture = GL_TEXTURE0;
     GLuint current_program = 0;   // set by glUseProgram; uniform setters target it
     GLuint primitive_restart_index = 0;
+    GLenum provoking_vertex = GL_LAST_VERTEX_CONVENTION;
 };
 
 // The global context instance.

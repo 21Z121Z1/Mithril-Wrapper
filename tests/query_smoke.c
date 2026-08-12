@@ -2,8 +2,9 @@
  *
  * Proves GL query lifetime/state reaches Metal visibility-result encoding,
  * query generations can span multiple command buffers without losing counts,
- * boolean queries observe depth rejection, and result retrieval is the only
- * mandatory CPU completion point.
+ * boolean queries observe depth rejection, result retrieval is the only
+ * mandatory CPU completion point, and conditional rendering gates real Metal
+ * draw/clear work without weakening query lifetime or GL error semantics.
  */
 
 #include <dlfcn.h>
@@ -15,6 +16,8 @@
 #define GL_FALSE 0
 #define GL_TRUE 1
 #define GL_NO_ERROR 0
+#define GL_INVALID_ENUM 0x0500
+#define GL_INVALID_VALUE 0x0501
 #define GL_INVALID_OPERATION 0x0502
 #define GL_VERTEX_SHADER 0x8B31
 #define GL_FRAGMENT_SHADER 0x8B30
@@ -23,8 +26,11 @@
 #define GL_ARRAY_BUFFER 0x8892
 #define GL_STATIC_DRAW 0x88E4
 #define GL_FLOAT 0x1406
+#define GL_UNSIGNED_BYTE 0x1401
 #define GL_TRIANGLES 0x0004
 #define GL_COLOR_BUFFER_BIT 0x00004000
+#define GL_COLOR 0x1800
+#define GL_RGBA 0x1908
 #define GL_DEPTH_TEST 0x0B71
 #define GL_NEVER 0x0200
 #define GL_SAMPLES_PASSED 0x8914
@@ -33,6 +39,10 @@
 #define GL_QUERY_COUNTER_BITS 0x8864
 #define GL_QUERY_RESULT 0x8866
 #define GL_QUERY_RESULT_AVAILABLE 0x8867
+#define GL_QUERY_WAIT 0x8E13
+#define GL_QUERY_NO_WAIT 0x8E14
+#define GL_QUERY_BY_REGION_WAIT 0x8E15
+#define GL_QUERY_BY_REGION_NO_WAIT 0x8E16
 #define GL_TIMESTAMP 0x8E28
 #define GL_RENDERER 0x1F01
 
@@ -67,7 +77,10 @@ typedef void (*fnVertexAttribPointer)(GLuint, GLint, GLenum, GLboolean,
                                       GLsizei, const void*);
 typedef void (*fnClearColor)(float, float, float, float);
 typedef void (*fnClear)(GLbitfield);
+typedef void (*fnClearBufferfv)(GLenum, GLint, const float*);
 typedef void (*fnDrawArrays)(GLenum, GLint, GLsizei);
+typedef void (*fnReadPixels)(GLint, GLint, GLsizei, GLsizei, GLenum, GLenum,
+                             void*);
 typedef void (*fnFlush)(void);
 typedef void (*fnEnable)(GLenum);
 typedef void (*fnDisable)(GLenum);
@@ -83,6 +96,8 @@ typedef void (*fnGetQueryObjectiv)(GLuint, GLenum, GLint*);
 typedef void (*fnGetQueryObjectui64v)(GLuint, GLenum, GLuint64*);
 typedef void (*fnGetQueryObjecti64v)(GLuint, GLenum, GLint64*);
 typedef void (*fnQueryCounter)(GLuint, GLenum);
+typedef void (*fnBeginConditionalRender)(GLuint, GLenum);
+typedef void (*fnEndConditionalRender)(void);
 
 static int failures;
 
@@ -136,7 +151,9 @@ int main(void) {
     LOAD(fnVertexAttribPointer, vertexAttribPointer, "glVertexAttribPointer");
     LOAD(fnClearColor, clearColor, "glClearColor");
     LOAD(fnClear, clear, "glClear");
+    LOAD(fnClearBufferfv, clearBufferfv, "glClearBufferfv");
     LOAD(fnDrawArrays, drawArrays, "glDrawArrays");
+    LOAD(fnReadPixels, readPixels, "glReadPixels");
     LOAD(fnFlush, flush, "glFlush");
     LOAD(fnEnable, enable, "glEnable");
     LOAD(fnDisable, disable, "glDisable");
@@ -153,15 +170,21 @@ int main(void) {
          "glGetQueryObjectui64v");
     LOAD(fnGetQueryObjecti64v, getQueryObjecti64v, "glGetQueryObjecti64v");
     LOAD(fnQueryCounter, queryCounter, "glQueryCounter");
+    LOAD(fnBeginConditionalRender, beginConditionalRender,
+         "glBeginConditionalRender");
+    LOAD(fnEndConditionalRender, endConditionalRender,
+         "glEndConditionalRender");
     CHECK(getString && getError && createShader && shaderSource &&
               compileShader && getShaderiv && createProgram && attachShader &&
               linkProgram && getProgramiv && useProgram && genVertexArrays &&
               bindVertexArray && genBuffers && bindBuffer && bufferData &&
               enableVertexAttribArray && vertexAttribPointer && clearColor &&
-              clear && drawArrays && flush && enable && disable && depthFunc &&
+              clear && clearBufferfv && drawArrays && readPixels && flush &&
+              enable && disable && depthFunc &&
               genQueries && deleteQueries && isQuery && beginQuery && endQuery &&
               getQueryiv && getQueryObjectuiv && getQueryObjectiv &&
-              getQueryObjectui64v && getQueryObjecti64v && queryCounter,
+              getQueryObjectui64v && getQueryObjecti64v && queryCounter &&
+              beginConditionalRender && endConditionalRender,
           "required GL occlusion-query symbols resolve");
     if (failures) return 1;
 
@@ -199,8 +222,8 @@ int main(void) {
     clearColor(0.f, 0.f, 0.f, 1.f);
     clear(GL_COLOR_BUFFER_BIT);
 
-    GLuint queries[5] = {0, 0, 0, 0, 0};
-    genQueries(5, queries);
+    GLuint queries[7] = {0, 0, 0, 0, 0, 0, 0};
+    genQueries(7, queries);
     CHECK(!isQuery(queries[0]),
           "generated name becomes a query object only on first BeginQuery");
 
@@ -258,6 +281,89 @@ int main(void) {
     CHECK(reused_occluded == GL_FALSE,
           "reused query generation resets and observes depth rejection");
 
+    /* Conditional rendering must consume the completed native query result,
+       not merely accept Begin/End while executing every command. */
+    unsigned char pixel[4] = {0, 0, 0, 0};
+    clearColor(0.f, 0.f, 0.f, 1.f);
+    clear(GL_COLOR_BUFFER_BIT);
+    beginConditionalRender(queries[2], GL_QUERY_WAIT);
+    drawArrays(GL_TRIANGLES, 0, 3);
+    endConditionalRender();
+    readPixels(256, 256, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
+    CHECK(pixel[0] < 16 && pixel[1] < 16 && pixel[2] < 16 && pixel[3] > 240,
+          "zero WAIT query discards a real Metal draw (%u,%u,%u,%u)",
+          pixel[0], pixel[1], pixel[2], pixel[3]);
+
+    beginConditionalRender(queries[0], GL_QUERY_BY_REGION_WAIT);
+    drawArrays(GL_TRIANGLES, 0, 3);
+    endConditionalRender();
+    readPixels(256, 256, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
+    CHECK(pixel[0] > 240 && pixel[1] > 240 && pixel[2] > 240,
+          "nonzero BY_REGION_WAIT query executes a real Metal draw (%u,%u,%u,%u)",
+          pixel[0], pixel[1], pixel[2], pixel[3]);
+
+    clearColor(1.f, 0.f, 0.f, 1.f);
+    beginConditionalRender(queries[2], GL_QUERY_NO_WAIT);
+    clear(GL_COLOR_BUFFER_BIT);
+    endConditionalRender();
+    readPixels(256, 256, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
+    CHECK(pixel[0] > 240 && pixel[1] > 240 && pixel[2] > 240,
+          "available zero NO_WAIT query discards glClear (%u,%u,%u,%u)",
+          pixel[0], pixel[1], pixel[2], pixel[3]);
+
+    const float green[4] = {0.f, 1.f, 0.f, 1.f};
+    beginConditionalRender(queries[2], GL_QUERY_BY_REGION_NO_WAIT);
+    clearBufferfv(GL_COLOR, 0, green);
+    endConditionalRender();
+    readPixels(256, 256, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
+    CHECK(pixel[0] > 240 && pixel[1] > 240 && pixel[2] > 240,
+          "available zero BY_REGION_NO_WAIT query discards glClearBuffer (%u,%u,%u,%u)",
+          pixel[0], pixel[1], pixel[2], pixel[3]);
+
+    beginConditionalRender(queries[0], GL_QUERY_WAIT);
+    beginConditionalRender(queries[0], GL_QUERY_WAIT);
+    CHECK(getError() == GL_INVALID_OPERATION,
+          "nested BeginConditionalRender is INVALID_OPERATION");
+    beginQuery(GL_SAMPLES_PASSED, queries[0]);
+    CHECK(getError() == GL_INVALID_OPERATION,
+          "conditional query cannot be restarted until EndConditionalRender");
+    endConditionalRender();
+    endConditionalRender();
+    CHECK(getError() == GL_INVALID_OPERATION,
+          "EndConditionalRender without a matching begin is INVALID_OPERATION");
+
+    beginConditionalRender(queries[0], 0xDEADu);
+    CHECK(getError() == GL_INVALID_ENUM,
+          "unknown conditional-render mode is INVALID_ENUM");
+    beginConditionalRender(0xFFFFu, GL_QUERY_WAIT);
+    CHECK(getError() == GL_INVALID_VALUE,
+          "unknown conditional-render query name is INVALID_VALUE");
+    beginConditionalRender(queries[5], GL_QUERY_WAIT);
+    CHECK(getError() == GL_INVALID_VALUE,
+          "reserved but uninitialized query name is INVALID_VALUE");
+    beginQuery(GL_ANY_SAMPLES_PASSED, queries[5]);
+    beginConditionalRender(queries[5], GL_QUERY_WAIT);
+    CHECK(getError() == GL_INVALID_OPERATION,
+          "query still in progress cannot drive conditional rendering");
+    endQuery(GL_ANY_SAMPLES_PASSED);
+
+    /* Deleting a name during conditional rendering releases the GL name but
+       retains the native generation until the matching EndConditionalRender. */
+    beginQuery(GL_ANY_SAMPLES_PASSED, queries[6]);
+    drawArrays(GL_TRIANGLES, 0, 3);
+    endQuery(GL_ANY_SAMPLES_PASSED);
+    clearColor(0.f, 0.f, 0.f, 1.f);
+    clear(GL_COLOR_BUFFER_BIT);
+    beginConditionalRender(queries[6], GL_QUERY_WAIT);
+    deleteQueries(1, &queries[6]);
+    drawArrays(GL_TRIANGLES, 0, 3);
+    endConditionalRender();
+    readPixels(256, 256, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
+    CHECK(!isQuery(queries[6]) && pixel[0] > 240 && pixel[1] > 240 &&
+              pixel[2] > 240 && getError() == GL_NO_ERROR,
+          "deleted conditional query retains native result through End (%u,%u,%u,%u)",
+          pixel[0], pixel[1], pixel[2], pixel[3]);
+
     beginQuery(GL_ANY_SAMPLES_PASSED, queries[4]);
     drawArrays(GL_TRIANGLES, 0, 3);
     deleteQueries(1, &queries[4]);
@@ -271,7 +377,7 @@ int main(void) {
     CHECK(getError() == GL_INVALID_OPERATION,
           "timer query is explicitly unsupported instead of returning fake time");
 
-    deleteQueries(4, queries);
+    deleteQueries(7, queries);
     dlclose(library);
     printf("\nquery_smoke: %s (%d failure%s)\n",
            failures ? "FAIL" : "PASS", failures,

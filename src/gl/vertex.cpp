@@ -764,6 +764,93 @@ void APIENTRY glVertexAttribI4usv(GLuint index, const GLushort* values) {
     SetConstantAttribUI(index, converted, 4);
 }
 
+// ---- packed generic current attributes ------------------------------------
+
+// GL 3.3's VertexAttribP* entry points always produce floating-point current
+// attributes.  The suffix selects how many leading components are consumed
+// from the 2_10_10_10_REV word; unconsumed components retain the conventional
+// (0, 0, 0, 1) expansion rather than leaking the remaining packed fields.
+static GLint SignExtendPacked(GLuint value, GLuint bits) {
+    const GLuint modulus = 1u << bits;
+    const GLuint sign = 1u << (bits - 1u);
+    value &= modulus - 1u;
+    return (value & sign)
+        ? static_cast<GLint>(value) - static_cast<GLint>(modulus)
+        : static_cast<GLint>(value);
+}
+
+static void SetConstantAttribP(GLuint index, GLenum type,
+                               GLboolean normalized, GLuint packed,
+                               GLsizei component_count) {
+    if (index >= kMaxAttribs) {
+        PUSH_ERROR(GL_INVALID_VALUE);
+        return;
+    }
+    if (type != GL_INT_2_10_10_10_REV &&
+        type != GL_UNSIGNED_INT_2_10_10_10_REV) {
+        PUSH_ERROR(GL_INVALID_ENUM);
+        return;
+    }
+
+    const GLuint fields[4] = {
+        packed & 0x3FFu,
+        (packed >> 10u) & 0x3FFu,
+        (packed >> 20u) & 0x3FFu,
+        (packed >> 30u) & 0x3u,
+    };
+    GLfloat decoded[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    for (GLsizei component = 0; component < component_count; ++component) {
+        const GLuint bits = component == 3 ? 2u : 10u;
+        if (type == GL_UNSIGNED_INT_2_10_10_10_REV) {
+            decoded[component] = normalized
+                ? static_cast<GLfloat>(fields[component]) /
+                    static_cast<GLfloat>((1u << bits) - 1u)
+                : static_cast<GLfloat>(fields[component]);
+        } else {
+            const GLint value = SignExtendPacked(fields[component], bits);
+            decoded[component] = normalized
+                ? std::max(-1.0f,
+                    static_cast<GLfloat>(value) /
+                    static_cast<GLfloat>((1u << (bits - 1u)) - 1u))
+                : static_cast<GLfloat>(value);
+        }
+    }
+    SetConstantAttrib(index, decoded, component_count);
+}
+
+void APIENTRY glVertexAttribP1ui(GLuint index, GLenum type,
+                                 GLboolean normalized, GLuint value) {
+    SetConstantAttribP(index, type, normalized, value, 1);
+}
+void APIENTRY glVertexAttribP2ui(GLuint index, GLenum type,
+                                 GLboolean normalized, GLuint value) {
+    SetConstantAttribP(index, type, normalized, value, 2);
+}
+void APIENTRY glVertexAttribP3ui(GLuint index, GLenum type,
+                                 GLboolean normalized, GLuint value) {
+    SetConstantAttribP(index, type, normalized, value, 3);
+}
+void APIENTRY glVertexAttribP4ui(GLuint index, GLenum type,
+                                 GLboolean normalized, GLuint value) {
+    SetConstantAttribP(index, type, normalized, value, 4);
+}
+void APIENTRY glVertexAttribP1uiv(GLuint index, GLenum type,
+                                  GLboolean normalized, const GLuint* value) {
+    SetConstantAttribP(index, type, normalized, *value, 1);
+}
+void APIENTRY glVertexAttribP2uiv(GLuint index, GLenum type,
+                                  GLboolean normalized, const GLuint* value) {
+    SetConstantAttribP(index, type, normalized, *value, 2);
+}
+void APIENTRY glVertexAttribP3uiv(GLuint index, GLenum type,
+                                  GLboolean normalized, const GLuint* value) {
+    SetConstantAttribP(index, type, normalized, *value, 3);
+}
+void APIENTRY glVertexAttribP4uiv(GLuint index, GLenum type,
+                                  GLboolean normalized, const GLuint* value) {
+    SetConstantAttribP(index, type, normalized, *value, 4);
+}
+
 // ---- attribute queries ------------------------------------------------------
 
 void GetConstantAttrib(const CurrentAttribData& a, GLfloat* out) {

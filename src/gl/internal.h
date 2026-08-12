@@ -221,6 +221,11 @@ void FlushDirtyTextureUploads();   // defined in texture.cpp
 // Query object names and target validation stay in query.cpp.
 uint64_t CurrentOcclusionQueryHandle();
 
+// Conditional rendering resolves one completed occlusion-query generation at
+// BeginConditionalRender. Draw and clear entry points still validate their GL
+// arguments, then consult this predicate before materializing framebuffer work.
+bool ConditionalRenderingAllowsCommands();
+
 // ---- draw-time attribute fetch helpers (defined in draw.cpp) ------------
 
 // IEEE 754 half (binary16) -> float.

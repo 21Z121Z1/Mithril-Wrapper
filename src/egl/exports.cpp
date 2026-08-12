@@ -68,7 +68,7 @@ EGLBoolean eglTerminate(EGLDisplay dpy) {
 }
 
 EGLint eglGetError() {
-    return globals().error;
+    return TakeError();
 }
 
 // ---- Configs -------------------------------------------------------------
@@ -116,7 +116,7 @@ EGLBoolean eglGetConfigAttrib(EGLDisplay dpy, EGLConfig config, EGLint attribute
         case EGL_DEPTH_SIZE: *value = 24; break;
         case EGL_STENCIL_SIZE: *value = 0; break;
         case EGL_SURFACE_TYPE: *value = EGL_WINDOW_BIT | EGL_PBUFFER_BIT; break;
-        case EGL_RENDERABLE_TYPE: *value = EGL_OPENGL_BIT; break;
+        case EGL_RENDERABLE_TYPE: *value = SupportedRenderableTypes(); break;
         case EGL_COLOR_BUFFER_TYPE: *value = EGL_RGB_BUFFER; break;
         case EGL_NATIVE_RENDERABLE: case EGL_TRANSPARENT_TYPE: *value = EGL_TRUE; break;
         case EGL_CONFIG_CAVEAT: *value = EGL_NONE; break;
@@ -131,24 +131,38 @@ EGLBoolean eglGetConfigAttrib(EGLDisplay dpy, EGLConfig config, EGLint attribute
 // ---- API binding ----------------------------------------------------------
 
 EGLBoolean eglBindAPI(EGLenum api) {
-    if (api != EGL_OPENGL_API) {
+    if (api != EGL_OPENGL_API && api != EGL_OPENGL_ES_API) {
         SetError(EGL_BAD_PARAMETER);
         return EGL_FALSE;
     }
-    ML_LOG_DEBUG("eglBindAPI(EGL_OPENGL_API)");
+    thread_state().bound_api = api;
+    ML_LOG_DEBUG("eglBindAPI(%s)",
+                 api == EGL_OPENGL_API ? "EGL_OPENGL_API"
+                                      : "EGL_OPENGL_ES_API (Amethyst alias)");
     SetError(EGL_SUCCESS);
     return EGL_TRUE;
 }
 
 EGLenum eglQueryAPI() {
-    return EGL_OPENGL_API;
+    return thread_state().bound_api;
 }
 
 EGLBoolean eglQueryContext(EGLDisplay dpy, EGLContext ctx, EGLint attribute, EGLint* value) {
-    (void)ctx;
+    if (dpy != reinterpret_cast<EGLDisplay>(&globals().display)) {
+        SetError(EGL_BAD_DISPLAY);
+        return EGL_FALSE;
+    }
+    if (ctx != reinterpret_cast<EGLContext>(&globals().context)) {
+        SetError(EGL_BAD_CONTEXT);
+        return EGL_FALSE;
+    }
+    if (!value) {
+        SetError(EGL_BAD_PARAMETER);
+        return EGL_FALSE;
+    }
     switch (attribute) {
-        case EGL_CONTEXT_CLIENT_TYPE: *value = EGL_OPENGL_API; break;
-        case EGL_CONTEXT_CLIENT_VERSION: *value = 3; break;
+        case EGL_CONTEXT_CLIENT_TYPE: *value = globals().context.client_api; break;
+        case EGL_CONTEXT_CLIENT_VERSION: *value = globals().context.client_version; break;
         default:
             SetError(EGL_BAD_ATTRIBUTE);
             return EGL_FALSE;
@@ -161,10 +175,44 @@ EGLBoolean eglQueryContext(EGLDisplay dpy, EGLContext ctx, EGLint attribute, EGL
 
 EGLContext eglCreateContext(EGLDisplay dpy, EGLConfig config, EGLContext share_context,
                             const EGLint* attrib_list) {
-    (void)attrib_list;
+    if (dpy != reinterpret_cast<EGLDisplay>(&globals().display)) {
+        SetError(EGL_BAD_DISPLAY);
+        return EGL_NO_CONTEXT;
+    }
+    if (config != ConfigToken()) {
+        SetError(EGL_BAD_CONFIG);
+        return EGL_NO_CONTEXT;
+    }
+    if (share_context != EGL_NO_CONTEXT &&
+        share_context != reinterpret_cast<EGLContext>(&globals().context)) {
+        SetError(EGL_BAD_CONTEXT);
+        return EGL_NO_CONTEXT;
+    }
+
+    EGLint client_version =
+        thread_state().bound_api == EGL_OPENGL_ES_API ? 1 : 3;
+    if (attrib_list) {
+        for (const EGLint* attribute = attrib_list;
+             *attribute != EGL_NONE; attribute += 2) {
+            if (attribute[0] == EGL_CONTEXT_CLIENT_VERSION) {
+                client_version = attribute[1];
+            }
+        }
+    }
+    if (thread_state().bound_api == EGL_OPENGL_ES_API &&
+        client_version != 3) {
+        SetError(EGL_BAD_MATCH);
+        return EGL_NO_CONTEXT;
+    }
+
     globals().context.config = config;
+    globals().context.client_api = thread_state().bound_api;
+    globals().context.client_version = client_version;
     globals().context.drawable_state_initialized = false;
-    ML_LOG_DEBUG("eglCreateContext(config=%p, share=%p)", config, share_context);
+    ML_LOG_DEBUG("eglCreateContext(config=%p, share=%p, api=0x%x, version=%d)",
+                 config, share_context,
+                 static_cast<unsigned>(globals().context.client_api),
+                 globals().context.client_version);
     SetError(EGL_SUCCESS);
     return reinterpret_cast<EGLContext>(&globals().context);
 }
@@ -180,27 +228,44 @@ EGLBoolean eglDestroyContext(EGLDisplay dpy, EGLContext ctx) {
 }
 
 EGLContext eglGetCurrentContext() {
-    return reinterpret_cast<EGLContext>(&globals().context);
+    return thread_state().current_context;
 }
 
 EGLDisplay eglGetCurrentDisplay() {
-    return reinterpret_cast<EGLDisplay>(&globals().display);
+    return thread_state().current_display;
 }
 
 EGLSurface eglGetCurrentSurface(EGLint readdraw) {
-    (void)readdraw;
-    return reinterpret_cast<EGLSurface>(&globals().surface);
+    if (readdraw == EGL_DRAW) return thread_state().current_draw;
+    if (readdraw == EGL_READ) return thread_state().current_read;
+    SetError(EGL_BAD_PARAMETER);
+    return EGL_NO_SURFACE;
 }
 
 EGLBoolean eglMakeCurrent(EGLDisplay dpy, EGLSurface draw, EGLSurface read, EGLContext ctx) {
-    (void)dpy;
-    if (ctx == EGL_NO_CONTEXT && draw == EGL_NO_SURFACE) {
+    if (dpy != reinterpret_cast<EGLDisplay>(&globals().display)) {
+        SetError(EGL_BAD_DISPLAY);
+        return EGL_FALSE;
+    }
+    if (ctx == EGL_NO_CONTEXT && draw == EGL_NO_SURFACE &&
+        read == EGL_NO_SURFACE) {
+        thread_state().current_display = EGL_NO_DISPLAY;
+        thread_state().current_context = EGL_NO_CONTEXT;
+        thread_state().current_draw = EGL_NO_SURFACE;
+        thread_state().current_read = EGL_NO_SURFACE;
         SetError(EGL_SUCCESS);
         return EGL_TRUE;
     }
-    if (ctx == reinterpret_cast<EGLContext>(&globals().context) &&
-        draw == reinterpret_cast<EGLSurface>(&globals().surface) &&
-        !globals().context.drawable_state_initialized) {
+    if (ctx != reinterpret_cast<EGLContext>(&globals().context)) {
+        SetError(EGL_BAD_CONTEXT);
+        return EGL_FALSE;
+    }
+    if (draw != reinterpret_cast<EGLSurface>(&globals().surface) ||
+        read != reinterpret_cast<EGLSurface>(&globals().surface)) {
+        SetError(EGL_BAD_SURFACE);
+        return EGL_FALSE;
+    }
+    if (!globals().context.drawable_state_initialized) {
         const GLsizei width = static_cast<GLsizei>(mithril::backend::TargetWidth());
         const GLsizei height = static_cast<GLsizei>(mithril::backend::TargetHeight());
         auto& state = mithril::state::GetState();
@@ -208,11 +273,16 @@ EGLBoolean eglMakeCurrent(EGLDisplay dpy, EGLSurface draw, EGLSurface read, EGLC
         state.scissor = {0, 0, width, height, true};
         globals().context.drawable_state_initialized = true;
     }
+    thread_state().current_display = dpy;
+    thread_state().current_context = ctx;
+    thread_state().current_draw = draw;
+    thread_state().current_read = read;
     SetError(EGL_SUCCESS);
     return EGL_TRUE;
 }
 
 EGLBoolean eglReleaseThread() {
+    ResetThreadState();
     SetError(EGL_SUCCESS);
     return EGL_TRUE;
 }
@@ -324,7 +394,7 @@ const char* eglQueryString(EGLDisplay dpy, EGLint name) {
     switch (name) {
         case EGL_VENDOR: return "MithrilWrapper";
         case EGL_VERSION: return "1.5";
-        case EGL_CLIENT_APIS: return "OpenGL";
+        case EGL_CLIENT_APIS: return "OpenGL OpenGL_ES";
         case EGL_EXTENSIONS: return "";
         default:
             SetError(EGL_BAD_PARAMETER);

@@ -116,12 +116,8 @@ struct FnTable {
 
 constexpr VkDeviceSize kUboPoolSize = 1u << 20;   // 1 MiB dynamic UBO pool
 
-// One reflected mithril_GlobalBlock member (std140 offsets from SPIR-V).
-struct UboMember {
-    std::string name;
-    VkDeviceSize offset = 0;
-    VkDeviceSize size = 0;
-};
+// One reflected mithril_GlobalBlock member (std140 offsets/strides from SPIR-V).
+using UboMember = backend::UniformMemberLayout;
 
 struct Program {
     VkShaderModule vs_mod = VK_NULL_HANDLE;

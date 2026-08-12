@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <limits>
 #include <string>
 #include <unordered_map>
 
@@ -18,6 +19,260 @@ extern "C" {
 
 namespace {
 namespace sh = mithril::shader;
+
+struct UniformLocationRef {
+    size_t uniform_index = 0;
+    GLint element = 0;
+};
+
+// OpenGL uniform locations are opaque handles. Reflection keeps one Uniform
+// object per active array while GL exposes a distinct location for each active
+// element. Keep that element indirection beside the program instead of
+// splitting the reflected object: the backend still receives one complete
+// tight value vector and can apply its reflected array/matrix strides once.
+std::unordered_map<GLuint, std::unordered_map<GLint, UniformLocationRef>>
+    g_uniform_location_refs;
+
+std::string ObservableUniformName(const sh::Uniform& uniform) {
+    if (uniform.location >= 0 && uniform.size > 1 &&
+        uniform.name.find('[') == std::string::npos)
+        return uniform.name + "[0]";
+    return uniform.name;
+}
+
+void RegisterUniformLocations(sh::Program& program) {
+    auto& refs = g_uniform_location_refs[program.id];
+    refs.clear();
+
+    int64_t next_location = 0;
+    for (const auto& entry : program.uniform_by_location)
+        next_location = std::max<int64_t>(
+            next_location, static_cast<int64_t>(entry.first) + 1);
+
+    for (size_t uniform_index = 0;
+         uniform_index < program.uniforms.size(); ++uniform_index) {
+        sh::Uniform& uniform = program.uniforms[uniform_index];
+        if (uniform.location < 0) continue;
+        refs[uniform.location] = {uniform_index, 0};
+        if (uniform.size <= 1) continue;
+
+        // Per GL, the first element is addressable through either `name` or
+        // `name[0]`. Subsequent locations need only be unique/opaque; callers
+        // must query them rather than relying on arithmetic.
+        program.uniform_by_name[uniform.name + "[0]"] = uniform.location;
+        program.active_uniform_by_name[uniform.name + "[0]"] =
+            static_cast<GLuint>(uniform_index);
+        for (GLint element = 1; element < uniform.size; ++element) {
+            if (next_location > std::numeric_limits<GLint>::max()) break;
+            while (next_location <= std::numeric_limits<GLint>::max() &&
+                   program.uniform_by_location.count(
+                       static_cast<GLint>(next_location)))
+                ++next_location;
+            if (next_location > std::numeric_limits<GLint>::max()) break;
+            const GLint location = static_cast<GLint>(next_location++);
+            program.uniform_by_location[location] = uniform_index;
+            program.uniform_by_name[uniform.name + "[" +
+                                    std::to_string(element) + "]"] = location;
+            program.active_uniform_by_name[uniform.name + "[" +
+                                            std::to_string(element) + "]"] =
+                static_cast<GLuint>(uniform_index);
+            refs[location] = {uniform_index, element};
+        }
+    }
+}
+
+bool ResolveUniformLocation(sh::Program* program, GLint location,
+                            sh::Uniform** uniform, GLint* element) {
+    if (!program) return false;
+    auto by_program = g_uniform_location_refs.find(program->id);
+    if (by_program != g_uniform_location_refs.end()) {
+        auto found = by_program->second.find(location);
+        if (found != by_program->second.end() &&
+            found->second.uniform_index < program->uniforms.size()) {
+            if (uniform)
+                *uniform = &program->uniforms[found->second.uniform_index];
+            if (element) *element = found->second.element;
+            return true;
+        }
+    }
+    // Defensive fallback for programs linked before this bookkeeping was
+    // introduced, and for scalar locations if a future path omits registration.
+    auto reflected = program->uniform_by_location.find(location);
+    if (reflected == program->uniform_by_location.end() ||
+        reflected->second >= program->uniforms.size())
+        return false;
+    if (uniform) *uniform = &program->uniforms[reflected->second];
+    if (element) *element = 0;
+    return true;
+}
+
+size_t UniformComponentCount(GLenum type) {
+    switch (type) {
+        case GL_FLOAT_VEC2:
+        case GL_INT_VEC2:
+        case GL_UNSIGNED_INT_VEC2:
+        case GL_BOOL_VEC2:
+            return 2;
+        case GL_FLOAT_VEC3:
+        case GL_INT_VEC3:
+        case GL_UNSIGNED_INT_VEC3:
+        case GL_BOOL_VEC3:
+            return 3;
+        case GL_FLOAT_VEC4:
+        case GL_INT_VEC4:
+        case GL_UNSIGNED_INT_VEC4:
+        case GL_BOOL_VEC4:
+            return 4;
+        case GL_FLOAT_MAT2: return 4;
+        case GL_FLOAT_MAT3: return 9;
+        case GL_FLOAT_MAT4: return 16;
+        case GL_FLOAT_MAT2x3:
+        case GL_FLOAT_MAT3x2:
+            return 6;
+        case GL_FLOAT_MAT2x4:
+        case GL_FLOAT_MAT4x2:
+            return 8;
+        case GL_FLOAT_MAT3x4:
+        case GL_FLOAT_MAT4x3:
+            return 12;
+        default:
+            return 1;
+    }
+}
+
+bool IsBooleanUniformType(GLenum type) {
+    switch (type) {
+        case GL_BOOL:
+        case GL_BOOL_VEC2:
+        case GL_BOOL_VEC3:
+        case GL_BOOL_VEC4:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool IsSignedIntegerUniformType(GLenum type) {
+    switch (type) {
+        case GL_INT:
+        case GL_INT_VEC2:
+        case GL_INT_VEC3:
+        case GL_INT_VEC4:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool IsUnsignedIntegerUniformType(GLenum type) {
+    switch (type) {
+        case GL_UNSIGNED_INT:
+        case GL_UNSIGNED_INT_VEC2:
+        case GL_UNSIGNED_INT_VEC3:
+        case GL_UNSIGNED_INT_VEC4:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool IsSamplerUniformType(GLenum type) {
+    switch (type) {
+        case GL_SAMPLER_1D:
+        case GL_SAMPLER_2D:
+        case GL_SAMPLER_3D:
+        case GL_SAMPLER_CUBE:
+        case GL_SAMPLER_1D_SHADOW:
+        case GL_SAMPLER_2D_SHADOW:
+        case GL_SAMPLER_1D_ARRAY:
+        case GL_SAMPLER_2D_ARRAY:
+        case GL_SAMPLER_1D_ARRAY_SHADOW:
+        case GL_SAMPLER_2D_ARRAY_SHADOW:
+        case GL_SAMPLER_2D_MULTISAMPLE:
+        case GL_SAMPLER_2D_MULTISAMPLE_ARRAY:
+        case GL_SAMPLER_CUBE_SHADOW:
+        case GL_SAMPLER_BUFFER:
+        case GL_SAMPLER_2D_RECT:
+        case GL_SAMPLER_2D_RECT_SHADOW:
+        case GL_SAMPLER_CUBE_MAP_ARRAY:
+        case GL_SAMPLER_CUBE_MAP_ARRAY_SHADOW:
+        case GL_INT_SAMPLER_1D:
+        case GL_INT_SAMPLER_2D:
+        case GL_INT_SAMPLER_3D:
+        case GL_INT_SAMPLER_CUBE:
+        case GL_INT_SAMPLER_1D_ARRAY:
+        case GL_INT_SAMPLER_2D_ARRAY:
+        case GL_INT_SAMPLER_2D_MULTISAMPLE:
+        case GL_INT_SAMPLER_2D_MULTISAMPLE_ARRAY:
+        case GL_INT_SAMPLER_BUFFER:
+        case GL_INT_SAMPLER_2D_RECT:
+        case GL_INT_SAMPLER_CUBE_MAP_ARRAY:
+        case GL_UNSIGNED_INT_SAMPLER_1D:
+        case GL_UNSIGNED_INT_SAMPLER_2D:
+        case GL_UNSIGNED_INT_SAMPLER_3D:
+        case GL_UNSIGNED_INT_SAMPLER_CUBE:
+        case GL_UNSIGNED_INT_SAMPLER_1D_ARRAY:
+        case GL_UNSIGNED_INT_SAMPLER_2D_ARRAY:
+        case GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE:
+        case GL_UNSIGNED_INT_SAMPLER_2D_MULTISAMPLE_ARRAY:
+        case GL_UNSIGNED_INT_SAMPLER_BUFFER:
+        case GL_UNSIGNED_INT_SAMPLER_2D_RECT:
+        case GL_UNSIGNED_INT_SAMPLER_CUBE_MAP_ARRAY:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool ReadRawSignedScalar(const sh::Uniform& uniform, size_t scalar,
+                         GLint* value) {
+    const size_t offset = scalar * sizeof(GLint);
+    if (!value || offset > uniform.raw_value.size() ||
+        sizeof(GLint) > uniform.raw_value.size() - offset)
+        return false;
+    std::memcpy(value, uniform.raw_value.data() + offset, sizeof(GLint));
+    return true;
+}
+
+bool ReadRawUnsignedScalar(const sh::Uniform& uniform, size_t scalar,
+                           GLuint* value) {
+    const size_t offset = scalar * sizeof(GLuint);
+    if (!value || offset > uniform.raw_value.size() ||
+        sizeof(GLuint) > uniform.raw_value.size() - offset)
+        return false;
+    std::memcpy(value, uniform.raw_value.data() + offset, sizeof(GLuint));
+    return true;
+}
+
+bool IsScalarVectorSetterType(GLenum type) {
+    switch (type) {
+        case GL_FLOAT:
+        case GL_FLOAT_VEC2:
+        case GL_FLOAT_VEC3:
+        case GL_FLOAT_VEC4:
+        case GL_INT:
+        case GL_INT_VEC2:
+        case GL_INT_VEC3:
+        case GL_INT_VEC4:
+        case GL_UNSIGNED_INT:
+        case GL_UNSIGNED_INT_VEC2:
+        case GL_UNSIGNED_INT_VEC3:
+        case GL_UNSIGNED_INT_VEC4:
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool UniformSetterMatches(GLenum uniform_type, GLenum setter_type) {
+    if (IsBooleanUniformType(uniform_type)) {
+        return IsScalarVectorSetterType(setter_type) &&
+               UniformComponentCount(uniform_type) ==
+                   UniformComponentCount(setter_type);
+    }
+    if (IsSamplerUniformType(uniform_type)) return setter_type == GL_INT;
+    return uniform_type == setter_type;
+}
 } // namespace
 
 GLuint APIENTRY glCreateShader(GLenum type) {
@@ -130,6 +385,7 @@ void APIENTRY glDeleteProgram(GLuint program) {
         v::DestroyProgram(it->second);
         g_backend_programs.erase(it);
     }
+    g_uniform_location_refs.erase(program);
     sh::DeleteProgram(program);
 }
 
@@ -192,6 +448,7 @@ void APIENTRY glLinkProgram(GLuint program) {
     auto* p = sh::GetProgram(program);
     if (!p) { PUSH_ERROR(GL_INVALID_VALUE); return; }
 
+    g_uniform_location_refs.erase(program);
     p->vertex_spirv.clear();
     p->fragment_spirv.clear();
     p->linked = false;
@@ -293,6 +550,7 @@ void APIENTRY glLinkProgram(GLuint program) {
             }
         }
     }
+    RegisterUniformLocations(*p);
     ML_LOG_DEBUG("glLinkProgram(%u): VS=%zu FS=%zu words, %zu uniforms, "
                  "%zu uniform blocks",
                  program, p->vertex_spirv.size(), p->fragment_spirv.size(),
@@ -311,7 +569,7 @@ void APIENTRY glGetProgramiv(GLuint program, GLenum pname, GLint* params) {
         case GL_ACTIVE_UNIFORM_MAX_LENGTH: {
             size_t length = 0;
             for (const auto& uniform : p->uniforms)
-                length = std::max(length, uniform.name.size() + 1);
+                length = std::max(length, ObservableUniformName(uniform).size() + 1);
             *params = static_cast<GLint>(length);
             return;
         }
@@ -407,9 +665,10 @@ void APIENTRY glGetActiveUniform(GLuint program, GLuint index, GLsizei bufSize,
     if (size) *size = u.size;
     if (type) *type = u.type;
     if (name && bufSize > 0) {
-        GLsizei n = (GLsizei)u.name.size();
+        const std::string observable_name = ObservableUniformName(u);
+        GLsizei n = (GLsizei)observable_name.size();
         if (n > bufSize - 1) n = bufSize - 1;
-        std::memcpy(name, u.name.data(), (size_t)n);
+        std::memcpy(name, observable_name.data(), (size_t)n);
         name[n] = 0;
         if (length) *length = n;
     } else if (length) *length = 0;
@@ -427,7 +686,7 @@ void APIENTRY glGetActiveUniformName(GLuint program, GLuint uniformIndex,
         if (length) *length = 0;
         return;
     }
-    const std::string& name = p->uniforms[uniformIndex].name;
+    const std::string name = ObservableUniformName(p->uniforms[uniformIndex]);
     GLsizei count = std::min<GLsizei>(static_cast<GLsizei>(name.size()),
                                      bufSize - 1);
     std::memcpy(uniformName, name.data(), static_cast<size_t>(count));
@@ -467,7 +726,8 @@ void APIENTRY glGetActiveUniformsiv(GLuint program, GLsizei uniformCount,
             case GL_UNIFORM_TYPE: params[i] = static_cast<GLint>(uniform.type); break;
             case GL_UNIFORM_SIZE: params[i] = uniform.size; break;
             case GL_UNIFORM_NAME_LENGTH:
-                params[i] = static_cast<GLint>(uniform.name.size() + 1); break;
+                params[i] = static_cast<GLint>(
+                    ObservableUniformName(uniform).size() + 1); break;
             case GL_UNIFORM_BLOCK_INDEX: params[i] = uniform.block_index; break;
             case GL_UNIFORM_OFFSET: params[i] = uniform.offset; break;
             case GL_UNIFORM_ARRAY_STRIDE: params[i] = uniform.array_stride; break;
@@ -574,33 +834,68 @@ void APIENTRY glGetUniformfv(GLuint program, GLint location, GLfloat* params) {
     if (!params) return;
     auto* p = sh::GetProgram(program);
     if (!p) { PUSH_ERROR(GL_INVALID_VALUE); return; }
-    auto it = p->uniform_by_location.find(location);
-    if (it == p->uniform_by_location.end()) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
-    sh::Uniform& u = p->uniforms[it->second];
-    if (u.value.empty()) { *params = 0.0f; return; }
-    std::memcpy(params, u.value.data(), u.value.size() * sizeof(float));
+    sh::Uniform* uniform = nullptr;
+    GLint element = 0;
+    if (!ResolveUniformLocation(p, location, &uniform, &element)) {
+        PUSH_ERROR(GL_INVALID_OPERATION); return;
+    }
+    const size_t components = UniformComponentCount(uniform->type);
+    const size_t start = static_cast<size_t>(element) * components;
+    for (size_t i = 0; i < components; ++i)
+        params[i] = start + i < uniform->value.size()
+            ? uniform->value[start + i] : 0.0f;
 }
 
 void APIENTRY glGetUniformiv(GLuint program, GLint location, GLint* params) {
     if (!params) return;
     auto* p = sh::GetProgram(program);
     if (!p) { PUSH_ERROR(GL_INVALID_VALUE); return; }
-    auto it = p->uniform_by_location.find(location);
-    if (it == p->uniform_by_location.end()) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
-    sh::Uniform& u = p->uniforms[it->second];
-    if (u.value.empty()) { *params = 0; return; }
-    for (size_t i = 0; i < u.value.size() && i < 4; ++i) params[i] = (GLint)u.value[i];
+    sh::Uniform* uniform = nullptr;
+    GLint element = 0;
+    if (!ResolveUniformLocation(p, location, &uniform, &element)) {
+        PUSH_ERROR(GL_INVALID_OPERATION); return;
+    }
+    const size_t components = UniformComponentCount(uniform->type);
+    const size_t start = static_cast<size_t>(element) * components;
+    for (size_t i = 0; i < components; ++i) {
+        if (IsSignedIntegerUniformType(uniform->type) ||
+            IsSamplerUniformType(uniform->type)) {
+            GLint exact = 0;
+            ReadRawSignedScalar(*uniform, start + i, &exact);
+            params[i] = exact;
+        } else if (IsBooleanUniformType(uniform->type)) {
+            GLuint exact = 0;
+            ReadRawUnsignedScalar(*uniform, start + i, &exact);
+            params[i] = static_cast<GLint>(exact);
+        } else {
+            params[i] = start + i < uniform->value.size()
+                ? static_cast<GLint>(uniform->value[start + i]) : 0;
+        }
+    }
 }
 
 void APIENTRY glGetUniformuiv(GLuint program, GLint location, GLuint* params) {
     if (!params) return;
     auto* p = sh::GetProgram(program);
     if (!p) { PUSH_ERROR(GL_INVALID_VALUE); return; }
-    auto it = p->uniform_by_location.find(location);
-    if (it == p->uniform_by_location.end()) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
-    sh::Uniform& u = p->uniforms[it->second];
-    if (u.value.empty()) { *params = 0; return; }
-    for (size_t i = 0; i < u.value.size() && i < 4; ++i) params[i] = (GLuint)u.value[i];
+    sh::Uniform* uniform = nullptr;
+    GLint element = 0;
+    if (!ResolveUniformLocation(p, location, &uniform, &element)) {
+        PUSH_ERROR(GL_INVALID_OPERATION); return;
+    }
+    const size_t components = UniformComponentCount(uniform->type);
+    const size_t start = static_cast<size_t>(element) * components;
+    for (size_t i = 0; i < components; ++i) {
+        if (IsUnsignedIntegerUniformType(uniform->type) ||
+            IsBooleanUniformType(uniform->type)) {
+            GLuint exact = 0;
+            ReadRawUnsignedScalar(*uniform, start + i, &exact);
+            params[i] = exact;
+        } else {
+            params[i] = start + i < uniform->value.size()
+                ? static_cast<GLuint>(uniform->value[start + i]) : 0u;
+        }
+    }
 }
 
 // ---- uniform setters -------------------------------------------------------
@@ -612,27 +907,173 @@ sh::Program* CurrentProgramForUniform() {
     return id ? sh::GetProgram(id) : nullptr;
 }
 
-// Store `count` elements of `comps` components each into uniform `location`.
-// Unreflected locations are ignored per GL semantics.
-void StoreUniform(GLenum type, GLint location, const GLfloat* v, GLsizei count, int comps) {
-    sh::Program* p = CurrentProgramForUniform();
-    if (!p || location < 0 || !v || count <= 0) return;
-    auto it = p->uniform_by_location.find(location);
-    if (it == p->uniform_by_location.end()) return;
-    sh::Uniform& u = p->uniforms[it->second];
-    u.type = type;
-    u.value.assign(v, v + (size_t)count * (size_t)comps);
+bool ResolveUniformWrite(GLenum setter_type, GLint location, GLsizei count,
+                         int comps, sh::Uniform** uniform,
+                         size_t* scalar_offset, GLsizei* effective_count) {
+    if (count < 0) {
+        PUSH_ERROR(GL_INVALID_VALUE);
+        return false;
+    }
+    if (location == -1 || count == 0) return false;
+    sh::Program* program = CurrentProgramForUniform();
+    if (!program) {
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return false;
+    }
+    sh::Uniform* resolved = nullptr;
+    GLint element = 0;
+    if (!ResolveUniformLocation(program, location, &resolved, &element)) {
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return false;
+    }
+    if (element < 0 || element >= resolved->size) {
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return false;
+    }
+    if (!UniformSetterMatches(resolved->type, setter_type) ||
+        UniformComponentCount(resolved->type) != static_cast<size_t>(comps)) {
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return false;
+    }
+    if (count > 1 && resolved->size <= 1) {
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return false;
+    }
+    const GLsizei remaining = resolved->size - element;
+    *effective_count = std::min(count, remaining);
+    *scalar_offset = static_cast<size_t>(element) * static_cast<size_t>(comps);
+    *uniform = resolved;
+    return *effective_count > 0;
 }
 
-void StoreUniformInt(GLenum type, GLint location, const GLint* v, GLsizei count, int comps) {
-    sh::Program* p = CurrentProgramForUniform();
-    if (!p || location < 0 || !v || count <= 0) return;
-    auto it = p->uniform_by_location.find(location);
-    if (it == p->uniform_by_location.end()) return;
-    sh::Uniform& u = p->uniforms[it->second];
-    u.type = type;
-    u.value.clear();
-    for (GLsizei i = 0; i < count * comps; ++i) u.value.push_back((float)v[i]);
+extern "C++" {
+template <typename T>
+void StoreBooleanScalars(sh::Uniform* uniform, size_t scalar_offset,
+                         const T* values, size_t scalars,
+                         size_t total_scalars) {
+    if (uniform->value.size() < total_scalars)
+        uniform->value.resize(total_scalars, 0.0f);
+    const size_t total_bytes = total_scalars * sizeof(GLuint);
+    if (uniform->raw_value.size() < total_bytes)
+        uniform->raw_value.resize(total_bytes, 0);
+    for (size_t i = 0; i < scalars; ++i) {
+        const GLuint normalized = values[i] == static_cast<T>(0) ? 0u : 1u;
+        uniform->value[scalar_offset + i] = static_cast<float>(normalized);
+        std::memcpy(uniform->raw_value.data() +
+                        (scalar_offset + i) * sizeof(normalized),
+                    &normalized, sizeof(normalized));
+    }
+}
+} // extern "C++"
+
+// Store `count` elements of `comps` components each into uniform `location`.
+// Array element locations resolve back to one reflected object so partial
+// writes preserve the other elements and backend snapshots remain complete.
+void StoreUniform(GLenum type, GLint location, const GLfloat* v, GLsizei count,
+                  int comps) {
+    if (!v && count > 0) return;
+    sh::Uniform* uniform = nullptr;
+    size_t scalar_offset = 0;
+    GLsizei effective_count = 0;
+    if (!ResolveUniformWrite(type, location, count, comps, &uniform,
+                             &scalar_offset, &effective_count))
+        return;
+    const size_t total_scalars = static_cast<size_t>(uniform->size) * comps;
+    const size_t scalars = static_cast<size_t>(effective_count) * comps;
+    if (IsBooleanUniformType(uniform->type)) {
+        StoreBooleanScalars(uniform, scalar_offset, v, scalars, total_scalars);
+        return;
+    }
+    if (uniform->value.size() < total_scalars)
+        uniform->value.resize(total_scalars, 0.0f);
+    std::copy(v, v + scalars, uniform->value.begin() + scalar_offset);
+    const size_t total_bytes = total_scalars * sizeof(*v);
+    if (uniform->raw_value.size() < total_bytes)
+        uniform->raw_value.resize(total_bytes, 0);
+    std::memcpy(uniform->raw_value.data() + scalar_offset * sizeof(*v), v,
+                scalars * sizeof(*v));
+}
+
+void StoreUniformInt(GLenum type, GLint location, const GLint* v,
+                     GLsizei count, int comps) {
+    if (!v && count > 0) return;
+    sh::Uniform* uniform = nullptr;
+    size_t scalar_offset = 0;
+    GLsizei effective_count = 0;
+    if (!ResolveUniformWrite(type, location, count, comps, &uniform,
+                             &scalar_offset, &effective_count))
+        return;
+    const size_t total_scalars = static_cast<size_t>(uniform->size) * comps;
+    const size_t scalars = static_cast<size_t>(effective_count) * comps;
+    if (IsBooleanUniformType(uniform->type)) {
+        StoreBooleanScalars(uniform, scalar_offset, v, scalars, total_scalars);
+        return;
+    }
+    if (uniform->value.size() < total_scalars)
+        uniform->value.resize(total_scalars, 0.0f);
+    for (size_t i = 0; i < scalars; ++i)
+        uniform->value[scalar_offset + i] = static_cast<float>(v[i]);
+    const size_t total_bytes = total_scalars * sizeof(*v);
+    if (uniform->raw_value.size() < total_bytes)
+        uniform->raw_value.resize(total_bytes, 0);
+    std::memcpy(uniform->raw_value.data() + scalar_offset * sizeof(*v), v,
+                scalars * sizeof(*v));
+}
+
+void StoreUniformUInt(GLenum type, GLint location, const GLuint* v,
+                      GLsizei count, int comps) {
+    if (!v && count > 0) return;
+    sh::Uniform* uniform = nullptr;
+    size_t scalar_offset = 0;
+    GLsizei effective_count = 0;
+    if (!ResolveUniformWrite(type, location, count, comps, &uniform,
+                             &scalar_offset, &effective_count))
+        return;
+    const size_t total_scalars = static_cast<size_t>(uniform->size) * comps;
+    const size_t scalars = static_cast<size_t>(effective_count) * comps;
+    if (IsBooleanUniformType(uniform->type)) {
+        StoreBooleanScalars(uniform, scalar_offset, v, scalars, total_scalars);
+        return;
+    }
+    if (uniform->value.size() < total_scalars)
+        uniform->value.resize(total_scalars, 0.0f);
+    for (size_t i = 0; i < scalars; ++i)
+        uniform->value[scalar_offset + i] = static_cast<float>(v[i]);
+    const size_t total_bytes = total_scalars * sizeof(*v);
+    if (uniform->raw_value.size() < total_bytes)
+        uniform->raw_value.resize(total_bytes, 0);
+    std::memcpy(uniform->raw_value.data() + scalar_offset * sizeof(*v), v,
+                scalars * sizeof(*v));
+}
+
+void StoreUniformMatrix(GLenum type, GLint location, GLsizei count,
+                        GLboolean transpose, const GLfloat* value,
+                        int columns, int rows) {
+    if (count < 0) {
+        PUSH_ERROR(GL_INVALID_VALUE);
+        return;
+    }
+    if (location == -1 || !value || count == 0) return;
+    const int components = columns * rows;
+    if (transpose == GL_FALSE) {
+        StoreUniform(type, location, value, count, components);
+        return;
+    }
+    // GL accepts row-major input when transpose is true but stores the same
+    // mathematical matrix as a normalized column-major scalar sequence.
+    std::vector<GLfloat> column_major(
+        static_cast<size_t>(count) * components);
+    for (GLsizei matrix = 0; matrix < count; ++matrix) {
+        const GLfloat* source = value +
+            static_cast<size_t>(matrix) * components;
+        GLfloat* destination = column_major.data() +
+            static_cast<size_t>(matrix) * components;
+        for (int column = 0; column < columns; ++column)
+            for (int row = 0; row < rows; ++row)
+                destination[column * rows + row] =
+                    source[row * columns + column];
+    }
+    StoreUniform(type, location, column_major.data(), count, components);
 }
 } // namespace
 
@@ -661,18 +1102,18 @@ void APIENTRY glUniform4i(GLint location, GLint v0, GLint v1, GLint v2, GLint v3
     GLint v[4] = {v0, v1, v2, v3}; StoreUniformInt(GL_INT_VEC4, location, v, 1, 4);
 }
 void APIENTRY glUniform1ui(GLint location, GLuint v0) {
-    GLint v[1] = {(GLint)v0}; StoreUniformInt(GL_UNSIGNED_INT, location, v, 1, 1);
+    GLuint v[1] = {v0}; StoreUniformUInt(GL_UNSIGNED_INT, location, v, 1, 1);
 }
 void APIENTRY glUniform2ui(GLint location, GLuint v0, GLuint v1) {
-    GLint v[2] = {(GLint)v0, (GLint)v1}; StoreUniformInt(GL_UNSIGNED_INT_VEC2, location, v, 1, 2);
+    GLuint v[2] = {v0, v1}; StoreUniformUInt(GL_UNSIGNED_INT_VEC2, location, v, 1, 2);
 }
 void APIENTRY glUniform3ui(GLint location, GLuint v0, GLuint v1, GLuint v2) {
-    GLint v[3] = {(GLint)v0, (GLint)v1, (GLint)v2};
-    StoreUniformInt(GL_UNSIGNED_INT_VEC3, location, v, 1, 3);
+    GLuint v[3] = {v0, v1, v2};
+    StoreUniformUInt(GL_UNSIGNED_INT_VEC3, location, v, 1, 3);
 }
 void APIENTRY glUniform4ui(GLint location, GLuint v0, GLuint v1, GLuint v2, GLuint v3) {
-    GLint v[4] = {(GLint)v0, (GLint)v1, (GLint)v2, (GLint)v3};
-    StoreUniformInt(GL_UNSIGNED_INT_VEC4, location, v, 1, 4);
+    GLuint v[4] = {v0, v1, v2, v3};
+    StoreUniformUInt(GL_UNSIGNED_INT_VEC4, location, v, 1, 4);
 }
 
 void APIENTRY glUniform1fv(GLint location, GLsizei count, const GLfloat* value) {
@@ -700,57 +1141,59 @@ void APIENTRY glUniform4iv(GLint location, GLsizei count, const GLint* value) {
     StoreUniformInt(GL_INT_VEC4, location, value, count, 4);
 }
 void APIENTRY glUniform1uiv(GLint location, GLsizei count, const GLuint* value) {
-    std::vector<GLint> tmp(value, value + count);
-    StoreUniformInt(GL_UNSIGNED_INT, location, tmp.data(), count, 1);
+    StoreUniformUInt(GL_UNSIGNED_INT, location, value, count, 1);
 }
 void APIENTRY glUniform2uiv(GLint location, GLsizei count, const GLuint* value) {
-    std::vector<GLint> tmp(value, value + count * 2);
-    StoreUniformInt(GL_UNSIGNED_INT_VEC2, location, tmp.data(), count, 2);
+    StoreUniformUInt(GL_UNSIGNED_INT_VEC2, location, value, count, 2);
 }
 void APIENTRY glUniform3uiv(GLint location, GLsizei count, const GLuint* value) {
-    std::vector<GLint> tmp(value, value + count * 3);
-    StoreUniformInt(GL_UNSIGNED_INT_VEC3, location, tmp.data(), count, 3);
+    StoreUniformUInt(GL_UNSIGNED_INT_VEC3, location, value, count, 3);
 }
 void APIENTRY glUniform4uiv(GLint location, GLsizei count, const GLuint* value) {
-    std::vector<GLint> tmp(value, value + count * 4);
-    StoreUniformInt(GL_UNSIGNED_INT_VEC4, location, tmp.data(), count, 4);
+    StoreUniformUInt(GL_UNSIGNED_INT_VEC4, location, value, count, 4);
 }
 
 void APIENTRY glUniformMatrix2fv(GLint location, GLsizei count, GLboolean transpose,
                                  const GLfloat* value) {
-    (void)transpose; StoreUniform(GL_FLOAT_MAT2, location, value, count, 4);
+    StoreUniformMatrix(GL_FLOAT_MAT2, location, count, transpose, value, 2, 2);
 }
 void APIENTRY glUniformMatrix3fv(GLint location, GLsizei count, GLboolean transpose,
                                  const GLfloat* value) {
-    (void)transpose; StoreUniform(GL_FLOAT_MAT3, location, value, count, 9);
+    StoreUniformMatrix(GL_FLOAT_MAT3, location, count, transpose, value, 3, 3);
 }
 void APIENTRY glUniformMatrix4fv(GLint location, GLsizei count, GLboolean transpose,
                                  const GLfloat* value) {
-    (void)transpose; StoreUniform(GL_FLOAT_MAT4, location, value, count, 16);
+    StoreUniformMatrix(GL_FLOAT_MAT4, location, count, transpose, value, 4, 4);
 }
 void APIENTRY glUniformMatrix2x3fv(GLint location, GLsizei count, GLboolean transpose,
                                    const GLfloat* value) {
-    (void)transpose; StoreUniform(GL_FLOAT_MAT2x3, location, value, count, 6);
+    StoreUniformMatrix(
+        GL_FLOAT_MAT2x3, location, count, transpose, value, 2, 3);
 }
 void APIENTRY glUniformMatrix3x2fv(GLint location, GLsizei count, GLboolean transpose,
                                    const GLfloat* value) {
-    (void)transpose; StoreUniform(GL_FLOAT_MAT3x2, location, value, count, 6);
+    StoreUniformMatrix(
+        GL_FLOAT_MAT3x2, location, count, transpose, value, 3, 2);
 }
 void APIENTRY glUniformMatrix2x4fv(GLint location, GLsizei count, GLboolean transpose,
                                    const GLfloat* value) {
-    (void)transpose; StoreUniform(GL_FLOAT_MAT2x4, location, value, count, 8);
+    StoreUniformMatrix(
+        GL_FLOAT_MAT2x4, location, count, transpose, value, 2, 4);
 }
 void APIENTRY glUniformMatrix4x2fv(GLint location, GLsizei count, GLboolean transpose,
                                    const GLfloat* value) {
-    (void)transpose; StoreUniform(GL_FLOAT_MAT4x2, location, value, count, 8);
+    StoreUniformMatrix(
+        GL_FLOAT_MAT4x2, location, count, transpose, value, 4, 2);
 }
 void APIENTRY glUniformMatrix3x4fv(GLint location, GLsizei count, GLboolean transpose,
                                    const GLfloat* value) {
-    (void)transpose; StoreUniform(GL_FLOAT_MAT3x4, location, value, count, 12);
+    StoreUniformMatrix(
+        GL_FLOAT_MAT3x4, location, count, transpose, value, 3, 4);
 }
 void APIENTRY glUniformMatrix4x3fv(GLint location, GLsizei count, GLboolean transpose,
                                    const GLfloat* value) {
-    (void)transpose; StoreUniform(GL_FLOAT_MAT4x3, location, value, count, 12);
+    StoreUniformMatrix(
+        GL_FLOAT_MAT4x3, location, count, transpose, value, 4, 3);
 }
 
 } // extern "C"

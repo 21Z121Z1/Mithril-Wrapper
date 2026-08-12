@@ -5,258 +5,140 @@ on:
     branches:
       - main
       - 'feature/**'
+      - 'refactor/**'
+      - 'codex/**'
   pull_request:
     branches: [main]
   workflow_dispatch:
 
 jobs:
-  # ---- macOS: produce the deliverable libmithril.dylib --------------------
-  build-macos:
-    runs-on: macos-14
+  directmetal-macos:
+    name: DirectMetal macOS semantics + boundary
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: recursive
+          submodules: false
 
-      - name: Configure (macOS arm64 Release)
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Fetch DirectMetal shader submodules only
+        run: >-
+          git submodule update --init --depth=1
+          third_party/SPIRV-Cross
+          third_party/SPIRV-Headers
+          third_party/glslang
 
-      - name: Build
-        run: cmake --build build -j$(sysctl -n hw.ncpu)
+      - name: Assert Vulkan-Headers was not checked out
+        run: test ! -f third_party/Vulkan-Headers/CMakeLists.txt
 
-      - name: Compile DirectMetal FBO regression smoke
-        run: clang -std=c11 -Wall -Wextra -Werror -fsyntax-only tests/directmetal_fbo_smoke.c
+      - name: Configure Vulkan-free DirectMetal target
+        run: >-
+          cmake -S . -B build-direct -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DMITHRIL_BUILD_LEGACY=OFF
+          -DMITHRIL_BUILD_DIRECT=ON
+          -DMITHRIL_ENABLE_SHADER_TOOLCHAIN=ON
+          -DMITHRIL_OUTPUT_DIRECTORY="$GITHUB_WORKSPACE/build-direct/artifacts"
 
-      - name: Locate dylib
-        id: locate
+      - name: Build DirectMetal and regression tests
+        run: cmake --build build-direct --parallel
+
+      - name: Run DirectMetal GL semantic suite
+        run: ctest --test-dir build-direct -L directmetal --output-on-failure
+
+      - name: Prove shipping target is Vulkan-free
         run: |
-          [ -f output/libmithril.dylib ] || (echo "dylib not found in output/" && exit 1)
-          echo "path=output/libmithril.dylib" >> "$GITHUB_OUTPUT"
-          file output/libmithril.dylib
+          chmod +x scripts/verify_directmetal_artifact.sh
+          scripts/verify_directmetal_artifact.sh \
+            build-direct/artifacts/libmithril.dylib \
+            build-direct/mithril_direct.boundary.json
 
-      - name: Verify exported EGL symbols (contract set)
+      - name: Verify macOS artifact
         run: |
-          NM_OUT=$(nm -gU "${{ steps.locate.outputs.path }}")
-          missing=0
-          for sym in eglBindAPI eglChooseConfig eglCreateContext eglCreateWindowSurface \
-                     eglDestroyContext eglDestroySurface eglGetConfigAttrib \
-                     eglGetCurrentContext eglGetCurrentSurface eglGetDisplay eglGetError \
-                     eglGetPlatformDisplay eglInitialize eglMakeCurrent eglReleaseThread \
-                     eglSwapBuffers eglSwapInterval eglTerminate; do
-            if echo "$NM_OUT" | grep -qE " T _?${sym}$"; then
-              echo "ok  $sym"
-            else
-              echo "MISS $sym"
-              missing=1
-            fi
-          done
-          [ "$missing" -eq 0 ]
-          echo "egl* symbols:"
-          echo "$NM_OUT" | grep -cE ' _egl'
+          file build-direct/artifacts/libmithril.dylib
+          codesign --force --sign - build-direct/artifacts/libmithril.dylib
+          codesign --verify --verbose=2 build-direct/artifacts/libmithril.dylib
 
-      - name: Verify GL symbol table (3.3 core exports)
-        run: |
-          NM_OUT=$(nm -gU "${{ steps.locate.outputs.path }}")
-          GL_COUNT=$(echo "$NM_OUT" | grep -cE ' T _?gl[A-Z0-9]')
-          echo "gl* defined exports: $GL_COUNT"
-          [ "$GL_COUNT" -ge 342 ]
-
-      - name: Ad-hoc codesign
-        run: codesign -s - "${{ steps.locate.outputs.path }}" || \
-             echo "codesign skipped (best-effort)"
-
-      - name: Upload dylib
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: libmithril-macos-arm64
-          path: ${{ steps.locate.outputs.path }}
+          name: mithril-direct-macos
+          path: build-direct/artifacts/libmithril.dylib
           if-no-files-found: error
 
-  # ---- iOS device: prove a real iphoneos/arm64 Amethyst renderer artifact --
-  build-ios:
-    runs-on: macos-14
+  directmetal-ios-arm64:
+    name: DirectMetal iPhoneOS arm64
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
         with:
-          submodules: recursive
+          submodules: false
 
-      - name: Configure (iPhoneOS arm64 Release)
-        run: |
-          cmake -S . -B build-ios \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_SYSTEM_NAME=iOS \
-            -DCMAKE_OSX_SYSROOT=iphoneos \
-            -DCMAKE_OSX_ARCHITECTURES=arm64 \
-            -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 \
-            -DMITHRIL_IOS=ON
+      - name: Fetch DirectMetal shader submodules only
+        run: >-
+          git submodule update --init --depth=1
+          third_party/SPIRV-Cross
+          third_party/SPIRV-Headers
+          third_party/glslang
 
-      - name: Build iPhoneOS dylib
-        run: cmake --build build-ios -j$(sysctl -n hw.ncpu)
+      - name: Assert Vulkan-Headers was not checked out
+        run: test ! -f third_party/Vulkan-Headers/CMakeLists.txt
 
-      - name: Verify iPhoneOS Mach-O contract
-        id: locate_ios
-        run: |
-          DYLIB=output/libmithril.dylib
-          [ -f "$DYLIB" ] || (echo "iOS dylib not found in output/" && exit 1)
-          echo "path=$DYLIB" >> "$GITHUB_OUTPUT"
-          file "$DYLIB"
-          lipo -info "$DYLIB"
-          file "$DYLIB" | grep -q 'Mach-O 64-bit dynamically linked shared library arm64'
-          lipo -info "$DYLIB" | grep -q 'arm64'
+      - name: Fetch pinned iOS CMake toolchain
+        run: >-
+          curl -fsSL -o ios.toolchain.cmake
+          https://raw.githubusercontent.com/leetal/ios-cmake/4.5.0/ios.toolchain.cmake
 
-          echo '--- build version ---'
-          vtool -show-build "$DYLIB"
-          vtool -show-build "$DYLIB" | grep -q 'platform IOS'
-
-          echo '--- install name ---'
-          otool -D "$DYLIB"
-          otool -D "$DYLIB" | tail -n +2 | grep -qx '@rpath/libmithril.dylib'
-
-      - name: Verify Amethyst EGL + desktop GL exports
-        run: |
-          DYLIB="${{ steps.locate_ios.outputs.path }}"
-          NM_OUT=$(nm -gU "$DYLIB")
-          missing=0
-          for sym in eglBindAPI eglChooseConfig eglCreateContext eglCreateWindowSurface \
-                     eglDestroyContext eglDestroySurface eglGetConfigAttrib \
-                     eglGetCurrentContext eglGetCurrentSurface eglGetDisplay eglGetError \
-                     eglGetPlatformDisplay eglInitialize eglMakeCurrent eglReleaseThread \
-                     eglSwapBuffers eglSwapInterval eglTerminate; do
-            if echo "$NM_OUT" | grep -qE " T _?${sym}$"; then
-              echo "ok  $sym"
-            else
-              echo "MISS $sym"
-              missing=1
-            fi
-          done
-          [ "$missing" -eq 0 ]
-          GL_COUNT=$(echo "$NM_OUT" | grep -cE ' T _?gl[A-Z0-9]')
-          echo "gl* defined exports: $GL_COUNT"
-          [ "$GL_COUNT" -ge 342 ]
-
-      - name: Verify Metal dependencies
-        run: |
-          DYLIB="${{ steps.locate_ios.outputs.path }}"
-          otool -L "$DYLIB"
-          otool -L "$DYLIB" | grep -q '/System/Library/Frameworks/Metal.framework/Metal'
-          otool -L "$DYLIB" | grep -q '/System/Library/Frameworks/QuartzCore.framework/QuartzCore'
+      - name: Build and verify the shipping iPhoneOS package
+        env:
+          MITHRIL_IOS_BUILD_DIR: ${{ github.workspace }}/build-ios
+          MITHRIL_IOS_OUTPUT_DIR: ${{ github.workspace }}/build-ios/artifacts
+          MITHRIL_IOS_DEPLOYMENT_TARGET: '16.0'
+          MITHRIL_IOS_TOOLCHAIN_FILE: ${{ github.workspace }}/ios.toolchain.cmake
+          MITHRIL_IOS_PLATFORM: OS64
+        run: scripts/build_iphoneos.sh
 
       - name: Ad-hoc codesign artifact
         run: |
-          codesign --force --sign - "${{ steps.locate_ios.outputs.path }}"
-          codesign --verify --verbose=2 "${{ steps.locate_ios.outputs.path }}"
+          codesign --force --sign - build-ios/artifacts/libmithril.dylib
+          codesign --verify --verbose=2 build-ios/artifacts/libmithril.dylib
 
-      - name: Upload iPhoneOS dylib
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
-          name: libmithril-iphoneos-arm64
-          path: ${{ steps.locate_ios.outputs.path }}
+          name: mithril-direct-ios-arm64
+          path: build-ios/artifacts/libmithril.dylib
           if-no-files-found: error
 
-  # ---- Linux: run the contract + state machine smoke tests ----------------
-  test-linux:
+  legacy-vulkan-linux:
+    name: Vulkan reference regression
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      - name: Configure (Linux)
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-
-      - name: Build
-        run: cmake --build build -j$(nproc)
-
-      - name: Install Vulkan runtime (lavapipe)
+      - name: Install Vulkan CPU runtime
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq libvulkan1 mesa-vulkan-drivers
-          vulkaninfo --summary 2>/dev/null | head -10 || true
+          sudo apt-get install -y -qq libvulkan1 mesa-vulkan-drivers vulkan-tools
+          vulkaninfo --summary | head -20
 
-      - name: Build smoke test binaries
+      - name: Configure legacy target only
+        run: >-
+          cmake -S . -B build-legacy -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DMITHRIL_BUILD_LEGACY=ON
+          -DMITHRIL_BUILD_DIRECT=OFF
+          -DMITHRIL_ENABLE_SHADER_TOOLCHAIN=ON
+          -DMITHRIL_OUTPUT_DIRECTORY="$GITHUB_WORKSPACE/build-legacy/artifacts"
+
+      - name: Build legacy target and tests
+        run: cmake --build build-legacy --parallel
+
+      - name: Run Vulkan reference smoke suite
+        run: ctest --test-dir build-legacy -L vulkan --output-on-failure
+
+      - name: Verify legacy artifact stays separate
         run: |
-          gcc -o tests/contract_smoke tests/contract_smoke.c -ldl
-          gcc -o tests/state_smoke   tests/state_smoke.c   -ldl
-          gcc -o tests/shader_smoke  tests/shader_smoke.c  -ldl
-          gcc -o tests/draw_smoke    tests/draw_smoke.c    -ldl
-          gcc -o tests/texture_smoke tests/texture_smoke.c -ldl
-          gcc -o tests/fbo_smoke     tests/fbo_smoke.c     -ldl
-          gcc -o tests/3d_smoke      tests/3d_smoke.c      -ldl -lm
-          gcc -o tests/render3d_smoke tests/render3d_smoke.c -ldl -lm
-
-      - name: Run EGL contract smoke
-        run: |
-          output=$(./tests/contract_smoke)
-          echo "$output"
-          echo "$output" | grep -q "ALL CONTRACT CHECKS PASSED"
-
-      - name: Run GL state machine smoke
-        run: |
-          output=$(./tests/state_smoke)
-          echo "$output"
-          echo "$output" | grep -q "STATE SMOKE ALL PASSED"
-
-      - name: Run shader pipeline smoke
-        run: |
-          output=$(./tests/shader_smoke)
-          echo "$output"
-          echo "$output" | grep -q "SHADER SMOKE ALL PASSED"
-
-      - name: Run GL->Vulkan draw smoke (lavapipe)
-        run: |
-          set -o pipefail
-          ./tests/draw_smoke 2>&1 | tee /tmp/draw-smoke.log
-          grep -q "DRAW SMOKE ALL PASSED" /tmp/draw-smoke.log
-
-      - name: Run GL->Vulkan texture smoke (lavapipe)
-        run: |
-          output=$(./tests/texture_smoke)
-          echo "$output"
-          echo "$output" | grep -q "TEXTURE SMOKE ALL PASSED"
-
-      - name: Run GL->Vulkan state-pipeline smoke (lavapipe)
-        run: |
-          output=$(./tests/fbo_smoke)
-          echo "$output"
-          echo "$output" | grep -q "FBO SMOKE ALL PASSED"
-
-      - name: Run 3D depth/perspective smoke (lavapipe)
-        run: |
-          output=$(./tests/3d_smoke)
-          echo "$output"
-          echo "$output" | grep -F "3D SMOKE ALL PASSED"
-
-      - name: Run 3D scene render smoke (lavapipe)
-        run: |
-          output=$(./tests/render3d_smoke)
-          echo "$output"
-          echo "$output" | grep -F "RENDER SMOKE ALL PASSED"
-
-      - name: Install Pillow for image export
-        run: |
-          python3 -m pip install --quiet --break-system-packages Pillow || \
-            python3 -m pip install --quiet Pillow
-          python3 -c "import PIL; print('Pillow', PIL.__version__)"
-
-      - name: Convert render to PNG
-        run: |
-          python3 scripts/ppm_render.py tests/render3d.ppm tests/render3d.png
-          ls -la tests/render3d.ppm tests/render3d.png
-
-      - name: Upload 3D render image (artifact)
-        uses: actions/upload-artifact@v4
-        with:
-          name: mithril-render3d-png
-          path: |
-            tests/render3d.ppm
-            tests/render3d.png
-          if-no-files-found: error
-
-      - name: Verify GL symbol table (Linux .so)
-        run: |
-          GL_COUNT=$(nm -D --defined-only output/libmithril.so | awk '{print $3}' | grep -cE '^gl[A-Z0-9]')
-          echo "GL* defined exports: $GL_COUNT"
-          [ "$GL_COUNT" -ge 342 ]
-          EGL_COUNT=$(nm -D --defined-only output/libmithril.so | awk '{print $3}' | grep -c '^egl')
-          echo "egl* defined exports: $EGL_COUNT"
-          [ "$EGL_COUNT" -ge 40 ]
+          test -f build-legacy/artifacts/libmithril.so
+          file build-legacy/artifacts/libmithril.so
+          nm -D --defined-only build-legacy/artifacts/libmithril.so | \
+            awk '{print $3}' | grep -q '^glDrawArrays$'

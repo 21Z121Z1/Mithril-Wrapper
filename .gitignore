@@ -1,9 +1,11 @@
 # build artifacts
 build/
+build-*/
 output/
 *.o
 *.so
 *.dylib
+.DS_Store
 
 # compiled test binaries (sources are tracked)
 tests/contract_smoke

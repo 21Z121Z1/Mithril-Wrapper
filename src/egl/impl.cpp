@@ -9,6 +9,11 @@ Globals& globals() {
     return g;
 }
 
+ThreadState& thread_state() {
+    static thread_local ThreadState state;
+    return state;
+}
+
 static const EGLint kNativeVisualId = 0x4D52; // "MR"
 
 EGLConfig ConfigToken() {
@@ -16,7 +21,25 @@ EGLConfig ConfigToken() {
 }
 
 void SetError(EGLenum err) {
-    globals().error = err;
+    thread_state().error = err;
+}
+
+EGLint TakeError() {
+    EGLint error = thread_state().error;
+    thread_state().error = EGL_SUCCESS;
+    return error;
+}
+
+void ResetThreadState() {
+    thread_state() = ThreadState{};
+}
+
+EGLint SupportedRenderableTypes() {
+    // Amethyst's Mithril bridge binds EGL_OPENGL_ES_API and requests the ES3
+    // config bit before loading Mithril's desktop OpenGL 3.3 exports.  Treat
+    // that EGL negotiation as an explicit host compatibility alias; the GL
+    // profile exposed to LWJGL remains OpenGL 3.3 Core.
+    return EGL_OPENGL_BIT | EGL_OPENGL_ES3_BIT;
 }
 
 bool ConfigMatches(const EGLint* attrib_list) {
@@ -35,7 +58,9 @@ bool ConfigMatches(const EGLint* attrib_list) {
                 if ((a[1] & (EGL_WINDOW_BIT | EGL_PBUFFER_BIT)) == 0) return false;
                 break;
             case EGL_RENDERABLE_TYPE:
-                if ((a[1] & EGL_OPENGL_BIT) == 0) return false;
+                if (a[1] == 0 ||
+                    (a[1] & ~SupportedRenderableTypes()) != 0)
+                    return false;
                 break;
             case EGL_COLOR_BUFFER_TYPE:
                 if (a[1] != EGL_RGB_BUFFER) return false;

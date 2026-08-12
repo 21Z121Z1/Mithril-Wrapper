@@ -16,12 +16,15 @@ struct QueryObject {
     GLenum target = 0;
     uint64_t backend = 0;
     bool active = false;
+    bool conditional_active = false;
     bool delete_pending = false;
 };
 
 std::unordered_map<GLuint, std::shared_ptr<QueryObject>> g_queries;
 std::unordered_map<GLenum, std::shared_ptr<QueryObject>> g_active_queries;
 std::shared_ptr<QueryObject> g_active_occlusion;
+std::shared_ptr<QueryObject> g_conditional_query;
+bool g_conditional_result = true;
 GLuint g_next_query = 1;
 
 bool IsOcclusionTarget(GLenum target) {
@@ -86,6 +89,10 @@ uint64_t CurrentOcclusionQueryHandle() {
     return g_active_occlusion ? g_active_occlusion->backend : 0;
 }
 
+bool ConditionalRenderingAllowsCommands() {
+    return !g_conditional_query || g_conditional_result;
+}
+
 extern "C" {
 
 void APIENTRY glGenQueries(GLsizei n, GLuint* ids) {
@@ -113,9 +120,10 @@ void APIENTRY glDeleteQueries(GLsizei n, const GLuint* ids) {
         if (found == g_queries.end()) continue;
         auto query = found->second;
         g_queries.erase(found);
-        if (query->active) {
+        if (query->active || query->conditional_active) {
             // GL deletion releases the name immediately, but commands until
-            // the matching EndQuery still belong to the underlying object.
+            // the matching EndQuery/EndConditionalRender still belong to the
+            // underlying object.
             query->delete_pending = true;
         } else if (query->backend) {
             v::DestroyOcclusionQuery(query->backend);
@@ -142,6 +150,7 @@ void APIENTRY glBeginQuery(GLenum target, GLuint id) {
     }
     auto query = found->second;
     if (g_active_queries.count(target) || query->active ||
+        query->conditional_active ||
         (query->target && query->target != target)) {
         PUSH_ERROR(GL_INVALID_OPERATION);
         return;
@@ -233,6 +242,66 @@ void APIENTRY glGetQueryObjecti64v(GLuint id, GLenum pname, GLint64* params) {
 void APIENTRY glQueryCounter(GLuint, GLenum target) {
     // GL_TIMESTAMP needs a real GPU timestamp/counter-sample implementation.
     PUSH_ERROR(target == GL_TIMESTAMP ? GL_INVALID_OPERATION : GL_INVALID_ENUM);
+}
+
+void APIENTRY glBeginConditionalRender(GLuint id, GLenum mode) {
+    const bool wait = mode == GL_QUERY_WAIT ||
+                      mode == GL_QUERY_BY_REGION_WAIT;
+    if (!wait && mode != GL_QUERY_NO_WAIT &&
+        mode != GL_QUERY_BY_REGION_NO_WAIT) {
+        PUSH_ERROR(GL_INVALID_ENUM);
+        return;
+    }
+    if (g_conditional_query) {
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return;
+    }
+
+    auto found = g_queries.find(id);
+    // GenQueries reserves a name, but it does not become a query object until
+    // the first successful BeginQuery. Such an unused name is INVALID_VALUE
+    // here, just like an unknown or deleted name.
+    if (found == g_queries.end() || !found->second->target) {
+        PUSH_ERROR(GL_INVALID_VALUE);
+        return;
+    }
+    auto query = found->second;
+    if (!IsOcclusionTarget(query->target) || query->active ||
+        query->conditional_active) {
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return;
+    }
+
+    uint64_t result = 1;
+    if (wait) {
+        if (!v::GetOcclusionQueryResult(query->backend, &result)) {
+            PUSH_ERROR(GL_INVALID_OPERATION);
+            return;
+        }
+    } else if (v::OcclusionQueryAvailable(query->backend)) {
+        // NO_WAIT may execute unconditionally while a result is unavailable.
+        // Once DirectMetal can observe a completed result, honour it exactly.
+        if (!v::GetOcclusionQueryResult(query->backend, &result)) {
+            PUSH_ERROR(GL_INVALID_OPERATION);
+            return;
+        }
+    }
+
+    query->conditional_active = true;
+    g_conditional_query = std::move(query);
+    g_conditional_result = result != 0;
+}
+
+void APIENTRY glEndConditionalRender(void) {
+    if (!g_conditional_query) {
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        return;
+    }
+    auto query = std::move(g_conditional_query);
+    query->conditional_active = false;
+    g_conditional_result = true;
+    if (query->delete_pending && query->backend)
+        v::DestroyOcclusionQuery(query->backend);
 }
 
 } // extern "C"

@@ -1,0 +1,97 @@
+name: ctest-smoke
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - codex/autonomous-direct-metal-next
+
+concurrency:
+  group: mithril-ctest-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  directmetal-ctest:
+    name: DirectMetal CTest semantic suite
+    runs-on: macos-26
+    env:
+      MTL_DEBUG_LAYER: '0'
+      MTL_SHADER_VALIDATION: '0'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Require Apple Silicon Metal GPU
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = "arm64"
+          xcrun swiftc -O -framework Metal .github/ci/HostedMetalCapabilityProbe.swift -o "$RUNNER_TEMP/hosted-metal-gpu-probe"
+          "$RUNNER_TEMP/hosted-metal-gpu-probe"
+
+      - name: Configure and build DirectMetal tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-ctest-metal -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-ctest-metal -j"$(sysctl -n hw.ncpu)"
+          test -L build-ctest-metal/output/libmithril.dylib
+          test -L build-ctest-metal/output/libmithril.so
+
+      - name: Require complete DirectMetal CTest inventory
+        shell: bash
+        run: |
+          set -euo pipefail
+          ctest --test-dir build-ctest-metal -N -L directmetal | tee "$RUNNER_TEMP/directmetal-tests.txt"
+          grep -Eq 'Total Tests: 22$' "$RUNNER_TEMP/directmetal-tests.txt"
+
+      - name: Run DirectMetal semantic suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          ctest --test-dir build-ctest-metal -L directmetal --output-on-failure
+
+      - name: Run Amethyst negotiation/presentation regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          ctest --test-dir build-ctest-metal -V -R '^amethyst_egl_smoke$'
+
+  vulkan-ctest:
+    name: Vulkan CTest semantic suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Install Vulkan CPU runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libvulkan1 mesa-vulkan-drivers vulkan-tools
+          vulkaninfo --summary 2>/dev/null | head -20 || true
+
+      - name: Configure and build Vulkan tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-ctest-vulkan -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-ctest-vulkan -j"$(nproc)"
+          test -L build-ctest-vulkan/output/libmithril.so
+
+      - name: Require complete Vulkan CTest inventory
+        shell: bash
+        run: |
+          set -euo pipefail
+          ctest --test-dir build-ctest-vulkan -N -L vulkan | tee "$RUNNER_TEMP/vulkan-tests.txt"
+          grep -Eq 'Total Tests: 12$' "$RUNNER_TEMP/vulkan-tests.txt"
+
+      - name: Run Vulkan semantic suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          ctest --test-dir build-ctest-vulkan -L vulkan --output-on-failure
+          test -f build-ctest-vulkan/tests/render3d.ppm

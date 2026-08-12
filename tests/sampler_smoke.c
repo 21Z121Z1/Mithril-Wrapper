@@ -1,8 +1,9 @@
 /* DirectMetal independent sampler-object vertical smoke.
  *
- * Draws the same 2x1 texture twice in one deferred Metal batch: nearest on
- * the left, linear on the right. Sampler objects are deleted before glFinish
- * so the readback also guards the frontend snapshot/native lifetime boundary.
+ * Draws two 2x1 textures through sampler uniforms mapped to non-matching GL
+ * texture units in one deferred Metal batch. Sampler and texture objects are
+ * deleted before glFinish so readback also guards the frontend snapshot/native
+ * lifetime boundary that real multi-texture Minecraft draws depend on.
  *
  * Build:
  *   clang -std=c11 -o /tmp/mithril-sampler-smoke tests/sampler_smoke.c
@@ -14,6 +15,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#include "../include/mithril/directmetal_diagnostics.h"
 
 #define GL_VERTEX_SHADER 0x8B31
 #define GL_FRAGMENT_SHADER 0x8B30
@@ -65,6 +68,8 @@ typedef void (*fnEnableVertexAttribArray)(GLuint);
 typedef void (*fnVertexAttribPointer)(GLuint, GLint, GLenum, GLboolean,
                                       GLsizei, const void*);
 typedef void (*fnGenTextures)(GLsizei, GLuint*);
+typedef void (*fnDeleteTextures)(GLsizei, const GLuint*);
+typedef GLboolean (*fnIsTexture)(GLuint);
 typedef void (*fnBindTexture)(GLenum, GLuint);
 typedef void (*fnActiveTexture)(GLenum);
 typedef void (*fnTexImage2D)(GLenum, GLint, GLint, GLsizei, GLsizei, GLint,
@@ -83,6 +88,8 @@ typedef void (*fnDrawArrays)(GLenum, GLint, GLsizei);
 typedef void (*fnFinish)(void);
 typedef void (*fnReadPixels)(GLint, GLint, GLsizei, GLsizei, GLenum, GLenum,
                              void*);
+typedef void (*fnResetBindingStats)(void);
+typedef int (*fnGetBindingStats)(MithrilDirectMetalBindingStatsV1*, size_t);
 
 static int failures;
 
@@ -102,9 +109,44 @@ static const char* vertex_source =
 
 static const char* fragment_source =
     "#version 150\n"
-    "uniform sampler2D image;\n"
+    "uniform sampler2D firstImage;\n"
+    "uniform sampler2D secondImage;\n"
+    "uniform int selection;\n"
     "layout(location=0) out vec4 color;\n"
-    "void main() { color = texture(image, vec2(0.4, 0.5)); }\n";
+    "void main() {\n"
+    "  vec4 first = texture(firstImage, vec2(0.4, 0.5));\n"
+    "  vec4 second = texture(secondImage, vec2(0.4, 0.5));\n"
+    "  color = selection == 0 ? first :\n"
+    "      (selection == 1 ? second : mix(first, second, 0.5));\n"
+    "}\n";
+
+/* sharedImage intentionally lands at binding 1 in the vertex stage and
+ * binding 2 in the fragment stage. The two stage-only samplers occupy the
+ * opposite slots, reproducing the declaration-order collision that a single
+ * name->binding map cannot represent. */
+static const char* cross_stage_vertex_source =
+    "#version 150\n"
+    "layout(location=0) in vec2 position;\n"
+    "uniform sampler2D sharedImage;\n"
+    "uniform sampler2D vertexOnly;\n"
+    "out vec4 vertexColor;\n"
+    "void main() {\n"
+    "  gl_Position = vec4(position, 0.0, 1.0);\n"
+    "  vertexColor = 0.25 * texture(sharedImage, vec2(0.5)) +\n"
+    "      0.25 * texture(vertexOnly, vec2(0.5));\n"
+    "}\n";
+
+static const char* cross_stage_fragment_source =
+    "#version 150\n"
+    "uniform sampler2D fragmentOnly;\n"
+    "uniform sampler2D sharedImage;\n"
+    "in vec4 vertexColor;\n"
+    "layout(location=0) out vec4 color;\n"
+    "void main() {\n"
+    "  color = vertexColor +\n"
+    "      0.25 * texture(fragmentOnly, vec2(0.5)) +\n"
+    "      0.25 * texture(sharedImage, vec2(0.5));\n"
+    "}\n";
 
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -136,6 +178,8 @@ int main(void) {
          "glEnableVertexAttribArray");
     LOAD(fnVertexAttribPointer, vertexAttribPointer, "glVertexAttribPointer");
     LOAD(fnGenTextures, genTextures, "glGenTextures");
+    LOAD(fnDeleteTextures, deleteTextures, "glDeleteTextures");
+    LOAD(fnIsTexture, isTexture, "glIsTexture");
     LOAD(fnBindTexture, bindTexture, "glBindTexture");
     LOAD(fnActiveTexture, activeTexture, "glActiveTexture");
     LOAD(fnTexImage2D, texImage2D, "glTexImage2D");
@@ -153,17 +197,22 @@ int main(void) {
     LOAD(fnDrawArrays, drawArrays, "glDrawArrays");
     LOAD(fnFinish, finish, "glFinish");
     LOAD(fnReadPixels, readPixels, "glReadPixels");
+    LOAD(fnResetBindingStats, resetBindingStats,
+         "mithrilResetDirectMetalBindingStats");
+    LOAD(fnGetBindingStats, getBindingStats,
+         "mithrilGetDirectMetalBindingStatsV1");
 
     CHECK(getString && getError && createShader && shaderSource &&
               compileShader && createProgram && attachShader && linkProgram &&
               useProgram && getUniformLocation && uniform1i &&
               genVertexArrays && bindVertexArray && genBuffers && bindBuffer &&
               bufferData && enableVertexAttribArray && vertexAttribPointer &&
-              genTextures && bindTexture && activeTexture && texImage2D &&
+              genTextures && deleteTextures && isTexture && bindTexture &&
+              activeTexture && texImage2D &&
               texParameteri && genSamplers && deleteSamplers && isSampler &&
               bindSampler && samplerParameteri && getSamplerParameteriv &&
               viewport && clearColor && clear && drawArrays && finish &&
-              readPixels,
+              readPixels && resetBindingStats && getBindingStats,
           "required independent-sampler symbols resolve");
     if (failures) return 1;
 
@@ -182,9 +231,14 @@ int main(void) {
     attachShader(program, fragment);
     linkProgram(program);
     useProgram(program);
-    GLint image_location = getUniformLocation(program, "image");
-    uniform1i(image_location, 0);
-    CHECK(image_location >= 0, "sampler uniform resolves");
+    GLint first_location = getUniformLocation(program, "firstImage");
+    GLint second_location = getUniformLocation(program, "secondImage");
+    GLint selection_location = getUniformLocation(program, "selection");
+    uniform1i(first_location, 5);
+    uniform1i(second_location, 2);
+    CHECK(first_location >= 0 && second_location >= 0 &&
+              selection_location >= 0,
+          "two sampler uniforms and loose integer uniform resolve");
 
     const float quad[] = {-1.f, -1.f, 1.f, -1.f, -1.f, 1.f, 1.f, 1.f};
     GLuint vao = 0, vbo = 0;
@@ -196,13 +250,22 @@ int main(void) {
     enableVertexAttribArray(0);
     vertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), NULL);
 
-    const unsigned char texels[] = {255, 0, 0, 255, 0, 0, 255, 255};
-    GLuint texture = 0;
-    genTextures(1, &texture);
-    activeTexture(GL_TEXTURE0);
-    bindTexture(GL_TEXTURE_2D, texture);
+    const unsigned char first_texels[] = {
+        255, 0, 0, 255, 0, 0, 255, 255};
+    const unsigned char second_texels[] = {
+        0, 255, 0, 255, 255, 255, 255, 255};
+    GLuint textures[2] = {0, 0};
+    genTextures(2, textures);
+    activeTexture(GL_TEXTURE0 + 5);
+    bindTexture(GL_TEXTURE_2D, textures[0]);
     texImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 2, 1, 0, GL_RGBA,
-               GL_UNSIGNED_BYTE, texels);
+               GL_UNSIGNED_BYTE, first_texels);
+    texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    activeTexture(GL_TEXTURE0 + 2);
+    bindTexture(GL_TEXTURE_2D, textures[1]);
+    texImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 2, 1, 0, GL_RGBA,
+               GL_UNSIGNED_BYTE, second_texels);
     texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 
@@ -222,36 +285,178 @@ int main(void) {
     CHECK(nearest == GL_NEAREST && linear == GL_LINEAR,
           "sampler parameter state round-trips independently");
 
+    resetBindingStats();
     clearColor(0.f, 1.f, 0.f, 1.f);
     clear(GL_COLOR_BUFFER_BIT);
-    bindSampler(0, samplers[0]);
+    bindSampler(5, samplers[0]);
+    bindSampler(2, samplers[1]);
+    uniform1i(selection_location, 0);
     viewport(0, 0, 32, 32);
     drawArrays(GL_TRIANGLE_STRIP, 0, 4);
-    bindSampler(0, samplers[1]);
+    uniform1i(selection_location, 1);
     viewport(32, 0, 32, 32);
+    drawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    uniform1i(selection_location, 2);
+    viewport(64, 0, 32, 32);
     drawArrays(GL_TRIANGLE_STRIP, 0, 4);
 
     /* Deletion unbinds the frontend names. Pending draws retain their fully
      * resolved state and native Metal objects until command submission. */
     deleteSamplers(2, samplers);
+    deleteTextures(2, textures);
     CHECK(!isSampler(samplers[0]) && !isSampler(samplers[1]),
           "deleted sampler names leave the frontend object table");
+    CHECK(!isTexture(textures[0]) && !isTexture(textures[1]),
+          "deleted texture names leave the frontend object table");
     finish();
 
-    unsigned char left[4] = {0}, right[4] = {0};
+    MithrilDirectMetalBindingStatsV1 stats = {0};
+    CHECK(!getBindingStats(&stats, sizeof(stats) - 1),
+          "binding counter ABI rejects an undersized output struct");
+    CHECK(getBindingStats(&stats, sizeof(stats)) &&
+              stats.version == MITHRIL_DIRECT_METAL_BINDING_STATS_VERSION &&
+              stats.struct_size == sizeof(stats),
+          "versioned DirectMetal binding counters are readable");
+    CHECK(stats.draws_encoded == 3 &&
+              stats.vertex_texture_bind_calls == 0 &&
+              stats.vertex_sampler_bind_calls == 0 &&
+              stats.fragment_texture_bind_calls == 2 &&
+              stats.fragment_sampler_bind_calls == 2 &&
+              stats.texture_bind_calls_elided == 4 &&
+              stats.sampler_bind_calls_elided == 4 &&
+              stats.inactive_stage_texture_bind_calls_avoided == 6 &&
+              stats.inactive_stage_sampler_bind_calls_avoided == 6,
+          "three fragment-only draws materialize 2+2 binds and avoid 10+10 redundant calls");
+    printf("DIRECTMETAL_BINDING_STATS "
+           "{\"version\":%u,\"draws_encoded\":%llu,"
+           "\"vertex_texture_bind_calls\":%llu,"
+           "\"fragment_texture_bind_calls\":%llu,"
+           "\"vertex_sampler_bind_calls\":%llu,"
+           "\"fragment_sampler_bind_calls\":%llu,"
+           "\"texture_bind_calls_elided\":%llu,"
+           "\"sampler_bind_calls_elided\":%llu,"
+           "\"inactive_stage_texture_bind_calls_avoided\":%llu,"
+           "\"inactive_stage_sampler_bind_calls_avoided\":%llu}\n",
+           stats.version,
+           (unsigned long long)stats.draws_encoded,
+           (unsigned long long)stats.vertex_texture_bind_calls,
+           (unsigned long long)stats.fragment_texture_bind_calls,
+           (unsigned long long)stats.vertex_sampler_bind_calls,
+           (unsigned long long)stats.fragment_sampler_bind_calls,
+           (unsigned long long)stats.texture_bind_calls_elided,
+           (unsigned long long)stats.sampler_bind_calls_elided,
+           (unsigned long long)stats.inactive_stage_texture_bind_calls_avoided,
+           (unsigned long long)stats.inactive_stage_sampler_bind_calls_avoided);
+
+    unsigned char left[4] = {0}, middle[4] = {0}, right[4] = {0};
     readPixels(16, 16, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, left);
-    readPixels(48, 16, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, right);
+    readPixels(48, 16, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, middle);
+    readPixels(80, 16, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, right);
     CHECK(abs((int)left[0] - 255) <= 3 && left[1] <= 3 && left[2] <= 3 &&
               abs((int)left[3] - 255) <= 3,
           "nearest sampler reads the red texel (%u,%u,%u,%u)",
           left[0], left[1], left[2], left[3]);
-    CHECK(right[0] >= 140 && right[0] <= 210 && right[1] <= 3 &&
-              right[2] >= 45 && right[2] <= 115 &&
+    CHECK(middle[0] >= 45 && middle[0] <= 115 && middle[1] >= 252 &&
+              middle[2] >= 45 && middle[2] <= 115 &&
+              abs((int)middle[3] - 255) <= 3,
+          "second sampler maps to non-matching unit 2 and blends green/white (%u,%u,%u,%u)",
+          middle[0], middle[1], middle[2], middle[3]);
+    CHECK(right[0] >= 135 && right[0] <= 195 &&
+              right[1] >= 105 && right[1] <= 150 &&
+              right[2] >= 20 && right[2] <= 65 &&
               abs((int)right[3] - 255) <= 3,
-          "linear sampler blends red and blue (%u,%u,%u,%u)",
+          "two independently mapped samplers combine in one draw (%u,%u,%u,%u)",
           right[0], right[1], right[2], right[3]);
     CHECK(getError() == GL_NO_ERROR,
           "sampler draw/readback finishes without GL errors");
+
+    GLuint cross_vertex = createShader(GL_VERTEX_SHADER);
+    GLuint cross_fragment = createShader(GL_FRAGMENT_SHADER);
+    shaderSource(cross_vertex, 1, &cross_stage_vertex_source, NULL);
+    shaderSource(cross_fragment, 1, &cross_stage_fragment_source, NULL);
+    compileShader(cross_vertex);
+    compileShader(cross_fragment);
+    GLuint cross_program = createProgram();
+    attachShader(cross_program, cross_vertex);
+    attachShader(cross_program, cross_fragment);
+    linkProgram(cross_program);
+    useProgram(cross_program);
+    GLint shared_location = getUniformLocation(cross_program, "sharedImage");
+    GLint vertex_only_location =
+        getUniformLocation(cross_program, "vertexOnly");
+    GLint fragment_only_location =
+        getUniformLocation(cross_program, "fragmentOnly");
+    CHECK(shared_location >= 0 && vertex_only_location >= 0 &&
+              fragment_only_location >= 0,
+          "cross-stage shared and stage-only samplers resolve");
+    uniform1i(shared_location, 5);
+    uniform1i(vertex_only_location, 3);
+    uniform1i(fragment_only_location, 2);
+
+    const unsigned char stage_texels[3][4] = {
+        {255, 0, 0, 255},
+        {0, 255, 0, 255},
+        {0, 0, 255, 255},
+    };
+    const GLint stage_units[3] = {5, 3, 2};
+    GLuint stage_textures[3] = {0, 0, 0};
+    genTextures(3, stage_textures);
+    for (int i = 0; i < 3; ++i) {
+        activeTexture(GL_TEXTURE0 + stage_units[i]);
+        bindTexture(GL_TEXTURE_2D, stage_textures[i]);
+        texImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA,
+                   GL_UNSIGNED_BYTE, stage_texels[i]);
+        texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    }
+
+    clearColor(0.f, 0.f, 0.f, 1.f);
+    clear(GL_COLOR_BUFFER_BIT);
+    viewport(0, 0, 32, 32);
+    resetBindingStats();
+    drawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    deleteTextures(3, stage_textures);
+    finish();
+
+    stats = (MithrilDirectMetalBindingStatsV1){0};
+    CHECK(getBindingStats(&stats, sizeof(stats)) &&
+              stats.draws_encoded == 1 &&
+              stats.vertex_texture_bind_calls == 2 &&
+              stats.fragment_texture_bind_calls == 2 &&
+              stats.vertex_sampler_bind_calls == 2 &&
+              stats.fragment_sampler_bind_calls == 2 &&
+              stats.texture_bind_calls_elided == 0 &&
+              stats.sampler_bind_calls_elided == 0 &&
+              stats.inactive_stage_texture_bind_calls_avoided == 4 &&
+              stats.inactive_stage_sampler_bind_calls_avoided == 4,
+          "different cross-stage slots materialize exactly two bindings per stage");
+    printf("DIRECTMETAL_CROSS_STAGE_BINDING_STATS "
+           "{\"draws_encoded\":%llu,"
+           "\"vertex_texture_bind_calls\":%llu,"
+           "\"fragment_texture_bind_calls\":%llu,"
+           "\"vertex_sampler_bind_calls\":%llu,"
+           "\"fragment_sampler_bind_calls\":%llu,"
+           "\"inactive_stage_texture_bind_calls_avoided\":%llu,"
+           "\"inactive_stage_sampler_bind_calls_avoided\":%llu}\n",
+           (unsigned long long)stats.draws_encoded,
+           (unsigned long long)stats.vertex_texture_bind_calls,
+           (unsigned long long)stats.fragment_texture_bind_calls,
+           (unsigned long long)stats.vertex_sampler_bind_calls,
+           (unsigned long long)stats.fragment_sampler_bind_calls,
+           (unsigned long long)stats.inactive_stage_texture_bind_calls_avoided,
+           (unsigned long long)stats.inactive_stage_sampler_bind_calls_avoided);
+    unsigned char cross_stage_pixel[4] = {0};
+    readPixels(16, 16, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE,
+               cross_stage_pixel);
+    CHECK(abs((int)cross_stage_pixel[0] - 128) <= 3 &&
+              abs((int)cross_stage_pixel[1] - 64) <= 3 &&
+              abs((int)cross_stage_pixel[2] - 64) <= 3 &&
+              abs((int)cross_stage_pixel[3] - 255) <= 3,
+          "shared sampler keeps distinct vertex/fragment bindings (%u,%u,%u,%u)",
+          cross_stage_pixel[0], cross_stage_pixel[1],
+          cross_stage_pixel[2], cross_stage_pixel[3]);
+    CHECK(getError() == GL_NO_ERROR,
+          "cross-stage sampler draw/readback finishes without GL errors");
 
     printf("\nsampler_smoke: %s (%d failure%s)\n",
            failures ? "FAIL" : "PASS", failures, failures == 1 ? "" : "s");

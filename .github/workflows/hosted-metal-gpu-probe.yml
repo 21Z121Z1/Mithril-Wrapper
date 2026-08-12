@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - feature/direct-metal
+      - codex/autonomous-direct-metal-next
 
 concurrency:
   group: directmetal-hosted-${{ github.ref }}
@@ -57,12 +58,19 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          tests=(state_smoke shader_smoke draw_smoke texture_smoke sampler_smoke buffer_texture_smoke typed_vertex_smoke ubo_smoke query_smoke sync_smoke 3d_smoke render3d_smoke fbo_smoke directmetal_fbo_smoke)
+          tests=(state_smoke shader_smoke draw_smoke texture_smoke sampler_smoke matrix_uniform_smoke provoking_vertex_smoke buffer_texture_smoke typed_vertex_smoke packed_vertex_attrib_smoke ubo_smoke query_smoke sync_smoke stencil_persistence_smoke 3d_smoke render3d_smoke fbo_smoke directmetal_fbo_smoke)
           for test_name in "${tests[@]}"; do
             echo "==> ${test_name}"
             clang -std=c11 -Wall -Wextra "tests/${test_name}.c" -o "$RUNNER_TEMP/${test_name}"
             "$RUNNER_TEMP/${test_name}"
           done
+
+      - name: Replay Amethyst EGL negotiation and presentation
+        shell: bash
+        run: |
+          set -euo pipefail
+          ctest --test-dir build-hosted-metal \
+            -V -R '^amethyst_egl_smoke$'
 
       - name: Require first-operation FBO clear/readback regression
         shell: bash
@@ -110,6 +118,7 @@ jobs:
             -DCMAKE_OSX_ARCHITECTURES=arm64 \
             -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 \
             -DMITHRIL_IOS=ON \
+            -DMITHRIL_OUTPUT_DIRECTORY="$PWD/build-hosted-ios/output" \
             -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO \
             -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED=NO
           cmake --build build-hosted-ios --config Release --target mithril
@@ -118,7 +127,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          artifact="$(find output -type f -name 'libmithril.dylib' -print -quit)"
+          artifact="$(find build-hosted-ios/output -type f -name 'libmithril.dylib' -print -quit)"
           test -n "$artifact"
           file "$artifact"
           otool -D "$artifact"
@@ -159,10 +168,11 @@ jobs:
             -G Xcode -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_SYSROOT="$sdk" \
             -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=16.0 \
             -DMITHRIL_IOS=ON \
+            -DMITHRIL_OUTPUT_DIRECTORY="$PWD/build-hosted-ios-sim/output" \
             -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO \
             -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED=NO
           cmake --build build-hosted-ios-sim --config Release --target mithril
-          artifact="$(find output -type f -name 'libmithril.dylib' -print -quit)"
+          artifact="$(find build-hosted-ios-sim/output -type f -name 'libmithril.dylib' -print -quit)"
           test -n "$artifact"
           echo "artifact=$artifact" >> "$GITHUB_OUTPUT"
           file "$artifact"
@@ -175,7 +185,7 @@ jobs:
           set -euo pipefail
           sdk="$(xcrun --sdk iphonesimulator --show-sdk-path)"
           target_flags=(-target arm64-apple-ios16.0-simulator -isysroot "$sdk")
-          for test_name in draw_smoke directmetal_fbo_smoke; do
+          for test_name in draw_smoke provoking_vertex_smoke packed_vertex_attrib_smoke fbo_smoke directmetal_fbo_smoke stencil_persistence_smoke; do
             xcrun --sdk iphonesimulator clang "${target_flags[@]}" \
               -std=c11 -Wall -Wextra -Dmain=mithril_smoke_main \
               -c "tests/${test_name}.c" -o "$RUNNER_TEMP/${test_name}.o"
@@ -250,7 +260,11 @@ jobs:
             echo "${test_name}: verified sandbox sentinel '${actual}'"
           }
           run_app draw_smoke com.mithril.ci.draw 'DRAW SMOKE ALL PASSED'
+          run_app provoking_vertex_smoke com.mithril.ci.provoking 'provoking_vertex_smoke: PASS'
+          run_app packed_vertex_attrib_smoke com.mithril.ci.packedattrib 'packed_vertex_attrib_smoke: PASS'
+          run_app fbo_smoke com.mithril.ci.fbofull 'FBO SMOKE ALL PASSED'
           run_app directmetal_fbo_smoke com.mithril.ci.fbo 'directmetal_fbo_smoke: PASS'
+          run_app stencil_persistence_smoke com.mithril.ci.stencil 'stencil_persistence_smoke: PASS'
 
       - name: Shutdown Simulator
         if: always()

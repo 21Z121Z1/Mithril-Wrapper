@@ -221,6 +221,63 @@ std::unordered_set<std::string> ExplicitLocationNames(
     return names;
 }
 
+GLenum BooleanTypeForName(const std::string& type) {
+    if (type == "bool") return GL_BOOL;
+    if (type == "bvec2") return GL_BOOL_VEC2;
+    if (type == "bvec3") return GL_BOOL_VEC3;
+    if (type == "bvec4") return GL_BOOL_VEC4;
+    return 0;
+}
+
+bool CollectDeclaredBooleanUniforms(
+    const Program& program,
+    std::unordered_map<std::string, GLenum>& declared,
+    std::string& error) {
+    // Vulkan interface blocks cannot preserve GL's source-level bool type
+    // reliably: glslang materializes bool/bvec members as integer storage.
+    // Recover only this lost API-visible type from the original attached GLSL.
+    // The SPIR-V reflection remains authoritative for activity, array size and
+    // layout; this metadata is used solely to restore the OpenGL uniform type.
+    static const std::regex declaration(
+        R"(\buniform\s+(?:(?:highp|mediump|lowp)\s+)?(bool|bvec2|bvec3|bvec4)\s+([^;]+);)",
+        std::regex::optimize);
+    static const std::regex name(
+        R"(^\s*([A-Za-z_]\w*))", std::regex::optimize);
+
+    for (GLuint shader_id : program.attached) {
+        const Shader* shader = GetShader(shader_id);
+        if (!shader) continue;
+        const std::string clean = WithoutComments(shader->source);
+        for (std::sregex_iterator it(clean.begin(), clean.end(), declaration),
+                                  end;
+             it != end; ++it) {
+            const GLenum type = BooleanTypeForName((*it)[1].str());
+            std::string declarators = (*it)[2].str();
+            size_t begin = 0;
+            while (begin <= declarators.size()) {
+                const size_t comma = declarators.find(',', begin);
+                const std::string item = declarators.substr(
+                    begin, comma == std::string::npos ? std::string::npos
+                                                       : comma - begin);
+                std::smatch matched;
+                if (std::regex_search(item, matched, name)) {
+                    const std::string uniform_name = matched[1].str();
+                    auto [existing, inserted] = declared.emplace(
+                        uniform_name, type);
+                    if (!inserted && existing->second != type) {
+                        error = "cross-stage source type mismatch for uniform " +
+                                uniform_name;
+                        return false;
+                    }
+                }
+                if (comma == std::string::npos) break;
+                begin = comma + 1;
+            }
+        }
+    }
+    return true;
+}
+
 uint32_t InterfaceLocationSpan(const spirv_cross::SPIRType& type) {
     uint64_t span = std::max<uint32_t>(type.columns, 1);
     for (uint32_t dimension : type.array)
@@ -372,6 +429,7 @@ bool ReflectProgram(Program& prog, std::string& error) {
     prog.vertex_inputs.clear();
     prog.frag_data_locations.clear();
     prog.frag_data_indices.clear();
+    prog.uses_flat_fragment_inputs = false;
     prog.samplers.clear();
     prog.uniform_blocks.clear();
     prog.uniform_block_by_name.clear();
@@ -382,6 +440,11 @@ bool ReflectProgram(Program& prog, std::string& error) {
         if (valid) error = message;
         valid = false;
     };
+
+    std::unordered_map<std::string, GLenum> declared_boolean_uniforms;
+    if (!CollectDeclaredBooleanUniforms(
+            prog, declared_boolean_uniforms, error))
+        return false;
 
     auto reflect_stage = [&](const std::vector<uint32_t>& words,
                              bool vertex_stage) {
@@ -405,6 +468,10 @@ bool ReflectProgram(Program& prog, std::string& error) {
                         if (name.empty()) continue;
                         Uniform reflected = ReflectMember(
                             compiler, type, i, name);
+                        const auto declared_type =
+                            declared_boolean_uniforms.find(name);
+                        if (declared_type != declared_boolean_uniforms.end())
+                            reflected.type = declared_type->second;
                         // Default-block uniforms are not buffer-backed in GL's
                         // observable namespace even though lowering packs them.
                         reflected.offset = -1;
@@ -486,27 +553,61 @@ bool ReflectProgram(Program& prog, std::string& error) {
             auto add_sampler = [&](spirv_cross::Resource& resource) {
                 const std::string name = resource.name;
                 if (name.empty()) return;
+                const auto& resource_type = compiler.get_type(resource.type_id);
                 const GLenum sampler_type = SamplerTypeFor(compiler, resource);
+                const GLint sampler_size = ArraySize(resource_type);
                 const uint32_t binding = compiler.get_decoration(
                     resource.id, spv::DecorationBinding);
-                const bool duplicate = std::any_of(
+                auto existing = std::find_if(
                     prog.samplers.begin(), prog.samplers.end(),
                     [&](const SamplerRef& sampler) {
                         return sampler.name == name;
                     });
-                if (!duplicate)
-                    prog.samplers.push_back(
-                        {name, sampler_type, binding, -1});
+                if (existing == prog.samplers.end()) {
+                    SamplerRef sampler;
+                    sampler.name = name;
+                    sampler.type = sampler_type;
+                    sampler.size = sampler_size;
+                    if (vertex_stage) sampler.vertex_binding = binding;
+                    else sampler.fragment_binding = binding;
+                    prog.samplers.push_back(std::move(sampler));
+                } else {
+                    if (existing->type != sampler_type ||
+                        existing->size != sampler_size)
+                        fail("cross-stage type/size mismatch for sampler " + name);
+                    if (vertex_stage) existing->vertex_binding = binding;
+                    else existing->fragment_binding = binding;
+                }
                 Uniform uniform;
                 uniform.name = name;
                 uniform.type = sampler_type;
-                loose_uniforms.emplace(name, std::move(uniform));
+                uniform.size = sampler_size;
+                auto [uniform_it, inserted] = loose_uniforms.emplace(
+                    name, std::move(uniform));
+                if (!inserted &&
+                    (uniform_it->second.type != sampler_type ||
+                     uniform_it->second.size != sampler_size))
+                    fail("cross-stage type/size mismatch for uniform " + name);
             };
             for (auto& resource : resources.sampled_images) add_sampler(resource);
             for (auto& resource : resources.separate_images) add_sampler(resource);
             for (auto& resource : resources.separate_samplers) add_sampler(resource);
 
             for (auto& resource : resources.stage_inputs) {
+                if (!vertex_stage) {
+                    bool flat = compiler.has_decoration(
+                        resource.id, spv::DecorationFlat);
+                    const auto& interface_type = compiler.get_type(
+                        resource.base_type_id);
+                    for (uint32_t member = 0;
+                         !flat && member < interface_type.member_types.size();
+                         ++member) {
+                        flat = compiler.has_member_decoration(
+                            resource.base_type_id, member,
+                            spv::DecorationFlat);
+                    }
+                    prog.uses_flat_fragment_inputs |= flat;
+                }
                 if (!vertex_stage ||
                     !compiler.has_decoration(resource.id,
                                              spv::DecorationLocation))
