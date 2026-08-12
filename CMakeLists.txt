@@ -1,5 +1,8 @@
 cmake_minimum_required(VERSION 3.22.1)
-project("mithril" LANGUAGES CXX)
+# C is required for 3rdparty/SPIRV-Reflect/spirv_reflect.c (Khronos single-file
+# SPIR-V reflection library compiled into the dylib for Shader.cpp's
+# cross-stage descriptor binding remap).
+project("mithril" LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -184,6 +187,13 @@ set(MITHRIL_SOURCES
     # MG_State: GL state machine
     Mithril-Wrapper-cpp/MG_State/State.cpp
 
+    # SPIRV-Reflect: SPIR-V reflection + descriptor binding rewriting used by
+    # Shader.cpp (remap_descriptor_bindings — the cross-stage binding
+    # reassignment MobileGL performs in RemapDescriptorBindingsForVulkan).
+    # Single-file Khronos library (spirv_reflect.c), compiled directly into
+    # the dylib rather than vendored as a submodule.
+    Mithril-Wrapper-cpp/3rdparty/SPIRV-Reflect/spirv_reflect.c
+
     # MG_Backend: Vulkan 1.2 + MoltenVK direct backend (platform-agnostic core)
     Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Device.cpp
     Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Resources.cpp
@@ -267,6 +277,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
 target_include_directories(${PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Mithril-Wrapper-cpp/3rdparty/SPIRV-Cross
     ${CMAKE_CURRENT_SOURCE_DIR}/Mithril-Wrapper-cpp/3rdparty/SPIRV-Headers/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/Mithril-Wrapper-cpp/3rdparty/SPIRV-Reflect
 )
 
 if(APPLE)

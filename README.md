@@ -161,19 +161,33 @@ framebuffer、VAO），以及 EGL 默认帧缓冲的 `VkImageView`。每个 `EGL
 
 ### 着色器翻译
 
-`Shader.cpp` 实现 GLSL → SPIR-V 编译管线，所有编译尝试统一使用
-`EShClientOpenGL` 输入方言并启用 `EShMsgVulkanRules`：
-1. 预处理阶段注入 `MG_MITHRIL` / `MG_MITHRIL_VERSION` 宏
-2. 自动升级 GLSL 版本到 330+（Vulkan GLSL 最低要求）
-3. 应用 `glBindAttribLocation` 映射，注入 `layout(location=N)`
-4. 归一化 Vulkan 不兼容 layout（`normalize_vulkan_incompatible_layouts`）：
-   `layout(packed/shared)` UBO→`std140`、SSBO→`std430`
-5. 归一化 GL 遗留构造（`normalize_gl_legacy_constructs`）：
-   `gl_FragColor`→合成命名输出 `_mithril_FragColor`
-6. 位置 fixup、loose uniform 包装、opaque binding 注入
-7. 调用 glslang 编译（`EShClientOpenGL` + `EShTargetOpenGL_450` +
-   `EShTargetSpv_1_5`），两级 strict 回退：wrapped 源码 → unwrapped 源码
-8. 线程安全（`std::mutex` 保护），带缓存
+`Shader.cpp` 实现 GLSL → SPIR-V 编译管线，管线形态与
+[MobileGL](https://github.com/MobileGL-Dev/MobileGL) 的
+`ShaderCompiler` / `ProgramFactory` 对齐：
+
+1. 预处理（幂等、注释感知）：注入 `MG_MITHRIL` / `MG_MITHRIL_VERSION` 宏；
+   自动升级 GLSL 版本到 460 core；归一化 Vulkan 不兼容 layout
+   （`normalize_vulkan_incompatible_layouts`：`layout(packed/shared)`
+   UBO→`std140`、SSBO→`std430`）；归一化 GL 遗留构造
+   （`normalize_gl_legacy_constructs`：`gl_FragColor`→合成命名输出）
+2. glslang 以 **Vulkan 客户端方言 + `EXT_vulkan_glsl_relaxed`** 编译
+   （`EShClientVulkan` + `EShTargetVulkan_1_1` + `EShTargetSpv_1_3`）：
+   loose uniform 由 `setGlobalUniformBlockName("mithril_GlobalBlock")` 自动
+   聚合进 UBO（同 MobileGL 的 `MGL_GLOBAL_UBO`），`gl_VertexID` /
+   `gl_InstanceID` 原生可用 —— **不再需要正则包装 / 标识符改名**
+3. `glLinkProgram` 在**单个 `glslang::TProgram`** 中编译 VS+FS 并执行
+   `mapIO()`；自定义 IO 解析器（对应 MobileGL `TMglGlslIoResolver`）把
+   `glBindAttribLocation` 映射钉到 stage input location，并对 inactive
+   input 从属性区间顶部向下分配 location（GL 语义：死输入不占槽位）
+4. 生成的 SPIR-V 经 **SPIRV-Reflect 统一重排 descriptor binding**
+   （对应 MobileGL `RemapDescriptorBindingsForVulkan`）：按
+   (set, binding, spirv_id) 序、VS 先 FS 后，跨阶段分配 0,1,2,…，
+   VS/FS 的 UBO 与 sampler 永不冲突；inactive sampler 也会获得合法
+   Binding 装饰
+5. 位置 fixup（Z remap 恒开启；default framebuffer 额外 Y flip）在 GLSL
+   层面注入 —— 等价于 MobileGL 的 SPIRV-Tools `GlToVulkanPositionFixPass`，
+   只是不引入 SPIRV-Tools 依赖
+6. 线程安全（`std::mutex` 保护），带 link 级缓存
 
 MoltenVK 在 `vkCreateShaderModule` 时自动将 SPIR-V 交叉翻译为 MSL。
 

@@ -92,41 +92,28 @@ void glCompileShader(GLuint shader) {
     mithril::Shader* s = mithril::state_get_shader(shader);
     if (!s) return;
     std::string info;
-    std::vector<uint32_t> spirv;
-    bool ok = mithril::shader_translate(s->type, s->source, spirv, info);
+    // Stage-validate the source with the same Vulkan-client relaxed dialect
+    // the link path uses, so GL_COMPILE_STATUS truthfully predicts whether
+    // the program will link. No SPIR-V is retained here — the link path
+    // re-compiles the sources in one cross-stage TProgram (see
+    // shader_link_program). A failed stage is marked uncompiled; the link
+    // path then substitutes fallback SPIR-V so draws are not silently
+    // skipped (the "stuck on clear color" red-screen failure mode).
+    bool ok = mithril::shader_compile_stage(s->type, s->source, info);
     s->infoLog = info;
     if (ok) {
         s->compiled = true;
-        s->spirv = std::move(spirv);
-        MITHRIL_LOG_INFO("shader", "Compiled shader %u (%s) -> %zu SPIR-V words",
+        MITHRIL_LOG_INFO("shader", "Compiled shader %u (%s)",
+                         shader,
+                         s->type == GL_VERTEX_SHADER ? "vertex" :
+                         s->type == GL_FRAGMENT_SHADER ? "fragment" : "other");
+    } else {
+        s->compiled = false;
+        MITHRIL_LOG_WARN("shader", "Shader %u (%s) failed to compile: %s",
                          shader,
                          s->type == GL_VERTEX_SHADER ? "vertex" :
                          s->type == GL_FRAGMENT_SHADER ? "fragment" : "other",
-                         s->spirv.size());
-    } else {
-        // FIX (red-screen): shader compilation failed. Instead of marking the
-        // shader uncompiled (which prevents the program from linking and
-        // causes ALL draws to be skipped — leaving only the application's
-        // glClearColor visible), substitute a minimal fallback SPIR-V that
-        // renders geometry in solid gray. This ensures the render pipeline
-        // is exercised and geometry is visible, rather than a stuck clear
-        // color. Deep reference: MobileGL VulkanRenderer.cpp fallback shader
-        // substitution (GetFallbackShader).
-        std::vector<uint32_t> fallback;
-        if (mithril::get_fallback_spirv(s->type, /*flip_y=*/false, fallback)) {
-            s->compiled = true;
-            s->spirv = std::move(fallback);
-            MITHRIL_LOG_WARN("shader", "Shader %u (%s) compilation failed — "
-                              "using FALLBACK shader (gray output): %s",
-                              shader,
-                              s->type == GL_VERTEX_SHADER ? "vertex" :
-                              s->type == GL_FRAGMENT_SHADER ? "fragment" : "other",
-                              info.c_str());
-        } else {
-            s->compiled = false;
-            MITHRIL_LOG_ERROR("shader", "Failed to compile shader %u: %s",
-                              shader, info.c_str());
-        }
+                         info.c_str());
     }
 }
 
@@ -174,11 +161,9 @@ void glLinkProgram(GLuint program) {
     // SPIR-V) — get_or_create_pipeline only creates the module once (when
     // pr.vertexModule == VK_NULL_HANDLE) and the pipeline signature hash does
     // NOT include SPIR-V content, so the stale pipeline would be returned
-    // from the cache on every subsequent draw. This manifests as "relink
-    // did nothing" or black screen if the old shaders are incompatible with
-    // the new render state. MobileGL rebuilds pipelines on every link
-    // (ProgramObject::Link -> GenerateBinary -> PipelineFactory); we mirror
-    // that by tearing down here so the next draw rebuilds from scratch.
+    // from the cache on every subsequent draw. MobileGL rebuilds pipelines on
+    // every link (ProgramObject::Link -> GenerateBinary -> PipelineFactory);
+    // we mirror that by tearing down here so the next draw rebuilds.
     backend_delete_program_resources(program);
 
     p->vertexSpirv.clear();
@@ -189,90 +174,76 @@ void glLinkProgram(GLuint program) {
     p->attribs.clear();
     p->uniformBlocks.clear();
 
-    // If the application called glBindAttribLocation before linking, re-translate
-    // the vertex shader with those location overrides so the SPIR-V stage_input
-    // locations match the app's vertex descriptor. Fragment shaders are
-    // unaffected by attribute bindings.
-    const bool has_attrib_bindings = !p->attribBindings.empty();
-
+    // Collect the attached stage sources. The link path compiles the vertex
+    // and fragment stages TOGETHER in one glslang TProgram (shader_link_program),
+    // so glslang can perform cross-stage interface matching and the
+    // SPIRV-Reflect binding remap can guarantee the two stages never collide
+    // on a descriptor binding. A stage whose glCompileShader failed is
+    // reported as missing here (its COMPILE_STATUS already said so).
+    std::string vs_source, fs_source;
     bool missing = false;
     for (GLuint sid : p->attachedShaders) {
         mithril::Shader* s = mithril::state_get_shader(sid);
         if (!s) continue;
-        if (!s->compiled || s->spirv.empty()) { missing = true; continue; }
-        if (s->type == GL_VERTEX_SHADER) {
-            // --- Non-flipped variant (for user-created FBOs) ---
-            // s->spirv (from glCompileShader) already has Z remap injected but
-            // no Y flip and no attrib bindings. Re-translate with bindings if
-            // needed; otherwise reuse s->spirv directly.
-            if (has_attrib_bindings) {
-                std::vector<uint32_t> spirv;
-                std::string info;
-                if (mithril::shader_translate(s->type, s->source, spirv, info, &p->attribBindings, /*flip_y=*/false)) {
-                    p->vertexSpirv = std::move(spirv);
-                } else {
-                    MITHRIL_LOG_ERROR("program", "Re-translation with attrib bindings "
-                                      "failed for program %u: %s (using auto-mapped SPIR-V)",
-                                      program, info.c_str());
-                    p->vertexSpirv = s->spirv;
-                }
-            } else {
-                p->vertexSpirv = s->spirv;
-            }
-
-            // --- Y-flipped variant (for default framebuffer / FBO 0) ---
-            // Always re-translate with flip_y=true so draws to the on-screen
-            // drawable get the Y inversion. Deep reference: MobileGL
-            // GetShaderTransformFlags sets PositionYFlip when
-            // currentDrawFBO->IsDefaultFramebuffer().
-            {
-                std::vector<uint32_t> spirv;
-                std::string info;
-                const auto* bindings_ptr = has_attrib_bindings ? &p->attribBindings : nullptr;
-                if (mithril::shader_translate(s->type, s->source, spirv, info, bindings_ptr, /*flip_y=*/true)) {
-                    p->vertexSpirvYFlipped = std::move(spirv);
-                } else {
-                    // FIX (red-screen): Y-flipped translation failed. If the
-                    // non-flipped variant is also a fallback shader (i.e. the
-                    // original shader source failed to compile), generate a
-                    // Y-flipped fallback so default-FBO draws get correct Y
-                    // orientation. Only fall back to the non-flipped variant
-                    // if the Y-flipped fallback also fails.
-                    std::vector<uint32_t> yflip_fallback;
-                    if (mithril::get_fallback_spirv(GL_VERTEX_SHADER, /*flip_y=*/true, yflip_fallback)) {
-                        p->vertexSpirvYFlipped = std::move(yflip_fallback);
-                        MITHRIL_LOG_WARN("program", "Y-flipped vertex translation "
-                                         "failed for program %u — using Y-flipped "
-                                         "FALLBACK shader: %s", program, info.c_str());
-                    } else {
-                        // Last resort: non-flipped variant (wrong Y orientation
-                        // but won't crash).
-                        MITHRIL_LOG_ERROR("program", "Y-flipped vertex translation "
-                                          "failed for program %u: %s (using non-flipped fallback)",
-                                          program, info.c_str());
-                        p->vertexSpirvYFlipped = p->vertexSpirv;
-                    }
-                }
-            }
-        } else if (s->type == GL_FRAGMENT_SHADER) {
-            p->fragmentSpirv = s->spirv;
+        if (!s->compiled) { missing = true; continue; }
+        if (s->type == GL_VERTEX_SHADER && vs_source.empty()) {
+            vs_source = s->source;
+        } else if (s->type == GL_FRAGMENT_SHADER && fs_source.empty()) {
+            fs_source = s->source;
         }
     }
-    // FIX (root cause K): link fails if EITHER stage is missing/empty (||),
-    // not only if BOTH are empty (&&). The old && logic let single-stage
-    // programs (VS-only or FS-only) "link successfully", but Drawing.cpp's
-    // prepare_draw uses || to skip draws whose VS or FS is empty — so every
-    // draw of a "linked" single-stage program was silently skipped, producing
-    // a black screen. GL also requires a complete program (VS+FS) to link.
-    if (missing || p->vertexSpirv.empty() || p->fragmentSpirv.empty()) {
-        p->linked = false;
-        p->infoLog = "link failed: a required stage was missing or uncompiled";
-        MITHRIL_LOG_ERROR("program", "Link failed for program %u: missing/empty stage "
-                          "(VS=%zu VS_yflip=%zu FS=%zu words)", program,
-                          p->vertexSpirv.size(), p->vertexSpirvYFlipped.size(),
-                          p->fragmentSpirv.size());
-        return;
+
+    mithril::ShaderLinkOutput linkOut;
+    std::string info;
+    bool linked = false;
+    if (!missing && !vs_source.empty() && !fs_source.empty()) {
+        // If the application called glBindAttribLocation before linking, pass
+        // the mappings to the IO resolver so the SPIR-V stage_input locations
+        // match the app's vertex descriptor.
+        const auto* bindings_ptr = p->attribBindings.empty() ? nullptr : &p->attribBindings;
+        linked = mithril::shader_link_program(vs_source, fs_source, bindings_ptr,
+                                              linkOut, info);
     }
+
+    if (linked) {
+        p->vertexSpirv = std::move(linkOut.vertexSpirv);
+        p->vertexSpirvYFlipped = std::move(linkOut.vertexSpirvFlipped);
+        p->fragmentSpirv = std::move(linkOut.fragmentSpirv);
+    } else {
+        // Link failed (uncompiled stage, glslang rejection, SPIR-V remap
+        // failure). Substitute the fallback shader pair so the program still
+        // links and its draws still run — the fallback vertex shader emits a
+        // degenerate position (draws nothing) and the fallback fragment
+        // shader outputs neutral gray, so the host sees its clear color plus
+        // gray, never a permanently skipped draw (the "stuck on clear color"
+        // red-screen failure mode). Deep reference: MobileGL VulkanRenderer
+        // fallback shader substitution.
+        std::vector<uint32_t> vs_fb, vs_fb_flip, fs_fb;
+        if (mithril::get_fallback_spirv(GL_VERTEX_SHADER, false, vs_fb) &&
+            mithril::get_fallback_spirv(GL_VERTEX_SHADER, true, vs_fb_flip) &&
+            mithril::get_fallback_spirv(GL_FRAGMENT_SHADER, false, fs_fb)) {
+            p->vertexSpirv = std::move(vs_fb);
+            p->vertexSpirvYFlipped = std::move(vs_fb_flip);
+            p->fragmentSpirv = std::move(fs_fb);
+            p->linked = true;
+            p->infoLog = "link failed; using fallback shaders: " + info;
+            MITHRIL_LOG_WARN("program", "Link failed for program %u — using "
+                              "FALLBACK shaders (gray output): %s", program, info.c_str());
+            // Fall back through the reflection pass below so the fallback
+            // program still gets a (empty) uniform table.
+            linked = true;
+        } else {
+            p->linked = false;
+            p->infoLog = "link failed: " + info;
+            MITHRIL_LOG_ERROR("program", "Link failed for program %u: %s",
+                              program, info.c_str());
+            return;
+        }
+    }
+
+    // FIX (root cause K): a complete program needs BOTH stages. The
+    // fallback path above guarantees both are present, so reaching here
+    // means the program is drawable.
     p->linked = true;
     p->infoLog.clear();
 

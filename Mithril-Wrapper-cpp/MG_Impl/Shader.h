@@ -1,5 +1,5 @@
 // Mithril-Wrapper - MG_Impl/Shader.h
-// GLSL (desktop Core Profile) -> SPIR-V translation via glslang.
+// GLSL (desktop Core Profile) -> Vulkan SPIR-V translation via glslang.
 //
 // This is the Vulkan/MoltenVK rewrite of the former gl/shader.h. The old
 // pipeline was GLSL -> SPIR-V (glslang, OpenGL client) -> MSL (SPIRV-Cross).
@@ -7,11 +7,36 @@
 // MoltenVK cross-translates the Vulkan SPIR-V to MSL internally at
 // vkCreateShaderModule time, so SPIRV-Cross is no longer needed here.
 //
-// The preprocessor injects the MG_MITHRIL / MG_MITHRIL_VERSION macros so host
-// shaders can branch on the Mithril backend (mirrors MobileGlues' MG_MOBILEGLUES
-// injection), and upgrades GLSL versions below 330 (the Vulkan minimum) so
-// desktop GLSL 150 shaders like Minecraft's blit_screen compile under the
-// Vulkan client.
+// Translation pipeline (mirrors MobileGL's ShaderCompiler/ProgramFactory):
+//   1. Preprocess: inject MG_MITHRIL / MG_MITHRIL_VERSION macros so host
+//      shaders can branch on the Mithril backend (mirrors MobileGlues'
+//      MG_MOBILEGLUES injection). Upgrade GLSL versions below 460 so desktop
+//      GLSL 150 shaders like Minecraft's blit_screen compile under the
+//      Vulkan client.
+//   2. Normalize Vulkan-incompatible layout qualifiers (layout(packed) ->
+//      layout(std140) for UBOs, layout(std430) for SSBOs) and GL legacy
+//      constructs (gl_FragColor -> synthetic named output). Both are
+//      source-level, idempotent, comment-aware passes.
+//   3. Inject GL->Vulkan position fixups (Z remap always; Y flip when
+//      flip_y) by wrapping main() (vertex shaders only). This is the GLSL
+//      equivalent of MobileGL's SPIRV-Tools GlToVulkanPositionFixPass.
+//   4. glslang compiles under the Vulkan client dialect with
+//      EXT_vulkan_glsl_relaxed (EShClientVulkan + VulkanRulesRelaxed):
+//      loose non-opaque uniforms are automatically folded into the
+//      `mithril_GlobalBlock` UBO (setGlobalUniformBlockName, the GLSL
+//      analogue of ANGLE's ANGLE_DefaultUniformBlock / MobileGL's
+//      MGL_GLOBAL_UBO), and desktop builtins such as gl_VertexID /
+//      gl_InstanceID are accepted natively — no regex rewriting.
+//   5. glLinkProgram compiles the vertex + fragment stages in ONE
+//      glslang::TProgram and runs mapIO() with a custom
+//      TIoMapResolver that pins glBindAttribLocation mappings onto the
+//      stage-input locations (exactly like MobileGL's TMglGlslIoResolver).
+//   6. The generated SPIR-V is post-processed by SPIRV-Reflect
+//      (remap_descriptor_bindings): every descriptor binding is reassigned
+//      deterministically across BOTH stages, keyed by (descriptor kind,
+//      block/uniform name), so the vertex and fragment stages can never
+//      collide on a binding. This replaces the old per-stage
+//      layout(binding=N) regex injection + 64-slot stage-offset hack.
 #ifndef MITHRIL_SHADER_H
 #define MITHRIL_SHADER_H
 
@@ -24,36 +49,49 @@
 
 namespace mithril {
 
-// Translate a desktop GLSL Core Profile source string into Vulkan SPIR-V
-// words. Returns true on success. On failure, out_info_log is populated.
-// Results are cached by (stage, source hash, attrib bindings hash, flip_y).
+// Result of one cross-stage link: the vertex SPIR-V in both its Y-flipped
+// (default framebuffer / on-screen drawable) and non-flipped (user FBO)
+// variants, plus the fragment SPIR-V.
+struct ShaderLinkOutput {
+    std::vector<uint32_t> vertexSpirv;        // non-flipped (user-created FBOs)
+    std::vector<uint32_t> vertexSpirvFlipped; // Y-flipped (default framebuffer)
+    std::vector<uint32_t> fragmentSpirv;
+};
+
+// Validate a single stage's source (glCompileShader). Compiles with the same
+// Vulkan-client relaxed dialect as the link path so the COMPILE_STATUS a host
+// sees matches what a later link would do. No SPIR-V is retained here — the
+// link path re-compiles the sources in one TProgram.
+bool shader_compile_stage(GLenum gl_stage, const std::string& glsl_source,
+                          std::string& out_info_log);
+
+// Translate a linked vertex + fragment source pair into Vulkan SPIR-V.
 //
-// attrib_bindings maps attribute names to the location the application
-// requested via glBindAttribLocation(). When non-empty, the translator injects
-// `layout(location=N)` qualifiers into the GLSL source before compilation so
-// that the SPIR-V stage_input locations match the application's vertex
-// descriptor layout. Pass nullptr when no explicit bindings are needed (falls
-// back to glslang auto-mapping).
+// attrib_bindings maps attribute names to the locations the application
+// requested via glBindAttribLocation(). When non-empty, a custom IO resolver
+// pins those locations onto the SPIR-V stage inputs so they match the
+// application's vertex descriptor (the MobileGL TMglGlslIoResolver pattern).
+// Pass nullptr when no explicit bindings are needed.
 //
-// flip_y (vertex shaders only): when true, the translator injects a Y-flip
-// (gl_Position.y = -gl_Position.y) in addition to the always-applied Z remap
-// (gl_Position.z = (z+w)*0.5). The Y-flipped variant is used for draws into
-// the default framebuffer (FBO 0, rendered to the on-screen drawable); the
-// non-flipped variant is used for draws into user-created FBOs (whose
-// textures are sampled by GL shaders using GL Y-up coords). Fragment shaders
-// ignore flip_y. Deep reference: MobileGL GetShaderTransformFlags.
-bool shader_translate(GLenum gl_stage, const std::string& glsl_source,
-                      std::vector<uint32_t>& out_spirv, std::string& out_info_log,
-                      const std::unordered_map<std::string, GLuint>* attrib_bindings = nullptr,
-                      bool flip_y = false);
+// The vertex shader is emitted twice: once without the Y flip (for user FBO
+// draws, whose textures are sampled with GL Y-up coords) and once with it
+// (for default-framebuffer draws). Both variants share the same descriptor
+// binding assignment (the resource set is identical), so switching
+// framebuffers never rebinds shaders to different textures.
+//
+// Deep reference: MobileGL ShaderCompiler::CompileShader/LinkProgram +
+// ProgramFactory::RemapDescriptorBindingsForVulkan.
+bool shader_link_program(const std::string& vs_source, const std::string& fs_source,
+                         const std::unordered_map<std::string, GLuint>* attrib_bindings,
+                         ShaderLinkOutput& out, std::string& out_info_log);
 
 // Generate a minimal fallback SPIR-V for a shader stage that failed to
 // compile. The fallback renders geometry with a solid gray color so that
 // draws are NOT skipped (which would leave only the application's clear
 // color visible — the "red screen" symptom on Minecraft's loading screen).
 //
-// Vertex fallback: reads position at location 0, applies Z-remap + optional
-// Y-flip (same transform as real shaders), outputs gl_Position.
+// Vertex fallback: reads no vertex attributes and outputs a degenerate
+// position (collapses to a point, nothing drawn, no page fault).
 // Fragment fallback: outputs vec4(0.5, 0.5, 0.5, 1.0) (neutral gray).
 // Other stages: returns false (no fallback for compute/geometry/etc).
 //
