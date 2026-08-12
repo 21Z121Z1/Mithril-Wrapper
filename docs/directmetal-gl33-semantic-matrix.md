@@ -5,8 +5,8 @@ not considered supported merely because it is exported. Update this document
 from source plus executable evidence whenever a capability changes.
 
 Snapshot: 2026-08-12, based on
-`codex/autonomous-direct-metal-next@6b2533d` plus the capability-probed
-presentation transfer work that follows that base.
+`codex/autonomous-direct-metal-next@3f46ed7` plus the packed-current-attribute
+work that follows that base.
 
 Reference heads inspected for this snapshot:
 
@@ -42,7 +42,7 @@ Reference heads inspected for this snapshot:
 | Loose uniforms and arrays | exact for reflected VS/FS scalar/vector/matrix cases | `matrix_uniform_smoke`, `uniform_array_smoke`, `uniform_type_smoke`, `uniform_integer_getter_smoke` | Cross-context sharing and larger Minecraft shader corpus remain untested. |
 | Uniform blocks | exact for tested VS/FS blocks | `ubo_smoke` | Up to 12 blocks per stage use resident versioned buffers. Geometry-stage blocks and broader layout corpus remain untested. |
 | Buffer objects / mapping | partial | `state_smoke`, `draw_smoke`, `ubo_smoke`, pixel pack/unpack cases | Array, element, uniform and pixel pack/unpack buffers execute. Transform-feedback buffer binding/storage is not implemented. Mapping flags and synchronization are not a complete GL 3.3 implementation. |
-| Vertex arrays and typed formats | partial | `typed_vertex_smoke`, `draw_smoke` | Resident float/half/normalized 8/16-bit and integer 8/16/32-bit formats plus exact current integer attributes execute. Eight `glVertexAttribP*` packed setters remain stubs. |
+| Vertex arrays and typed formats | partial | `typed_vertex_smoke`, `packed_vertex_attrib_smoke`, `draw_smoke` | Resident float/half/normalized 8/16-bit and integer 8/16/32-bit formats execute. Current integer attributes and all eight packed `glVertexAttribP*` setters preserve context/array state and reach DirectMetal pixels. Packed `glVertexAttribPointer` array formats and the complete legal conversion matrix remain gaps. |
 | Draw/topology/restart/provoking vertex | exact for tested triangle/line families | `draw_smoke`, `typed_vertex_smoke`, `provoking_vertex_smoke` | Arrays/elements/instance/base-vertex/multidraw, primitive restart and FIRST/LAST flat semantics execute. Points and geometry-shader topologies remain incomplete. |
 | 2D textures, mipmaps, pixel store | partial | `texture_smoke`, `sampler_smoke`, PBO cases | Common RGBA8 uploads, subimages, mips and pack/unpack offsets execute. The legal GL format/type matrix, compressed native formats, immutable storage extensions, and 3D mip-chain sampling are incomplete. |
 | Sampler objects / multiple samplers | exact for tested GL 3.3 state | `sampler_smoke`, `sampler_array_smoke` plus binding diagnostics | Separate sampler lifetime, wrap/filter/compare, cross-stage use, fixed arrays and deletion-after-draw execute. Arbitrary/integer border color and nonzero LOD bias fail closed. |
@@ -58,17 +58,14 @@ Reference heads inspected for this snapshot:
 
 ## Remaining exported stubs
 
-After conditional rendering moves to a real implementation, 18 generated GL
+After packed current attributes move to a real implementation, 10 generated GL
 3.3 entry points remain stubs:
 
 - transform feedback: `glBeginTransformFeedback`, `glEndTransformFeedback`,
   `glTransformFeedbackVaryings`, `glGetTransformFeedbackVarying`;
 - point/sample state: `glPointParameterf`, `glPointParameterfv`,
   `glPointParameteri`, `glPointParameteriv`, `glGetMultisamplefv`;
-- multisample arrays: `glTexImage3DMultisample`;
-- packed current attributes: `glVertexAttribP1ui`, `glVertexAttribP1uiv`,
-  `glVertexAttribP2ui`, `glVertexAttribP2uiv`, `glVertexAttribP3ui`,
-  `glVertexAttribP3uiv`, `glVertexAttribP4ui`, `glVertexAttribP4uiv`.
+- multisample arrays: `glTexImage3DMultisample`.
 
 The generated stub body currently logs but does not itself enqueue a GL error.
 Each family must either gain exact behavior or be converted to a precise
@@ -86,6 +83,18 @@ fail-closed path; it must not be marked supported by symbol count.
 - Uniaball's pending-frame and zero-sized-layer fixes exposed a presentation
   acceptance gap. `amethyst_egl_smoke` now captures the real BGRA drawable and
   checks pending clear submission plus physical-size replacement pixels.
+- Uniaball's packed-current implementation exposed the Minecraft-facing API
+  family, while Khronos requires P1/P2/P3 to consume only the first 1/2/3
+  fields and leave vertex-array state intact. `packed_vertex_attrib_smoke`
+  permanently covers all eight entry points, both signedness modes, normalized
+  extrema, invalid type/index recovery, disabled current values and re-enabled
+  VBO execution.
+- Uniaball's latest MoltenVK presentation fixes expose three backend-neutral
+  requirements: format/channel correctness, resize/suboptimal recovery and a
+  distinction between offscreen submission and live-layer presentation
+  failure. DirectMetal keeps its GL default target RGBA and uses a BGRA render
+  pipeline rather than adopting Vulkan target retargeting; the drawable pixel
+  test guards that conversion. Surface interruption/recovery remains queued.
 - Herbrine's black/red-screen history identifies permanent test targets:
   drawable size, default-vs-offscreen Y orientation, render area bounds,
   attachment replacement, sampler binding and presentation lifetime. Existing
@@ -106,5 +115,5 @@ and inverse change risk.
 | --- | ---: | --- |
 | Separate depth/stencil FBO attachment semantics | 34/40 | Represent depth and stencil attachment selection honestly; support the common same-packed-object case and reject unsupported distinct layouts without aliasing. |
 | CAMetalLayer interruption and surface replacement | 33/40 | Exercise nil-drawable failure, detach/rebind, replacement size and recovery without relying on Minecraft logs. |
-| Packed vertex attribute setters | 32/40 | Decode legal packed current attributes with getter, error and shader-pixel evidence; remove eight generated stubs. |
 | Fail-closed remaining silent state/stub families | 31/40 | Remove false support, prioritizing sample/raster state and transform-feedback declarations used by real workloads. |
+| iPhoneOS artifact validator fail-closed behavior | 30/40 | Make missing EGL/GL symbols unambiguously fail the script on macOS Bash 3.2 and add a deterministic self-test for the checker. |

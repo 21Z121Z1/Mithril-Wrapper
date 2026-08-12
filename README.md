@@ -15,6 +15,7 @@
 - **Conditional rendering**：`glBeginConditionalRender`/`glEndConditionalRender` 使用真实 DirectMetal occlusion generation。WAIT 模式等待结果；NO_WAIT 模式在未就绪时按规范允许无条件执行、结果已就绪时精确采用结果。零结果会同时丢弃 draw、`glClear` 和 `glClearBuffer*`，query 名称删除与底层 in-flight lifetime 分离；`query_smoke` 以真实 Metal 像素和错误断言覆盖。
 - **Stencil 跨提交持久化**：DirectMetal 的 default framebuffer 与 packed depth/stencil renderbuffer FBO 均以 Metal `Store`/后续 `Load` 保存 stencil；`stencil_persistence_smoke` 在第一次 draw 后强制完成 command buffer，再由第二个 render pass 读取 stencil，并以真实 GPU 像素覆盖匹配与拒绝路径。
 - **Amethyst 呈现像素契约**：`eglSwapBuffers` 把 pending GL frame 与 RGBA→BGRA presentation encoder 编入同一 Metal command buffer，消除每帧多一次 submit。window surface 初始化时会用当前 framebuffer 尺寸运行一次精确的 RGBA render-target→BGRA shader-read probe：通过则保持零额外 copy 的 direct path；只有 direct probe 失败而 texture→private buffer→fragment `uchar4` probe 的 BGRA 字节精确通过时，才复用一张带 256-byte row alignment 的 private compatibility buffer；两条都失败会拒绝 surface，避免黑屏假成功。`amethyst_egl_smoke` 同时读回 default RGBA source、同 pipeline BGRA reference 和可捕获的真实 `CAMetalLayer` drawable，并在 80×48 → 56×96 resize 后复验 replacement drawable。实体 Apple GPU 要求三者字节都正确；Apple Paravirtual 只有在 source/reference 通过且 drawable 全零时才明确报告 byte-readback capability skip。这不把 `EGL_TRUE` 当成视觉完成，也不把 hosted 虚拟 drawable 当成真机显示证据。
+- **Packed current vertex attributes**：8 个 `glVertexAttribP{1,2,3,4}{ui,uiv}` 会按 `INT_2_10_10_10_REV` / `UNSIGNED_INT_2_10_10_10_REV` 解包，仅消费入口名指定的前 N 分量，正确处理 normalized 与 `(0,0,0,1)` 隐式分量，且不修改 disabled array 的 VBO/format 状态。`packed_vertex_attrib_smoke` 同时覆盖 getter/error、DirectMetal 常量属性像素和重新 enable 后的 array 像素。
 - **DirectMetal 当前诚实边界**：window surface 必须由调用方提供 `CAMetalLayer`；swap 时会在编码 pending frame 前同步 drawable 尺寸，尺寸变化会重建默认 target。depth texture 目前仅支持 level 0、单采样 2D `DEPTH_COMPONENT32F`、NULL 初始数据，并支持匹配的 `sampler2DShadow` compare mode/function；CPU upload/readback、mipmap、D16/D24、depth-stencil 及 array/cube shadow sampler 会明确拒绝或不宣称支持。多重采样纹理目前仅支持 2D RGBA8 color（尚无 multisample array/integer/depth texture）；Vulkan context 对这些尚未迁移的纹理存储入口明确返回 unsupported，而不是单调用切换 backend。buffer texture 当前支持 `RGBA8/R8I/R8UI/R32I/R32UI/R32F`，其余合法 GL texel format 会明确返回 unsupported error。sync objects 当前限于单 context/单 Metal command queue（尚未宣称跨 context 共享）。timer/transform-feedback query、两个 occlusion target 同时重叠、dual-source fragment output/blending 尚未接通，会明确返回错误而不是假值。compute、缩放/过滤 framebuffer blit、任意/整数 border color、非零 sampler LOD bias，以及 3D texture 的 mip 链采样尚未接通；mip filter 遇到不完整链会明确拒绝 draw，其余相关路径也会返回错误并记录 unsupported，不宣称这些能力。需要这些功能时应显式使用 Vulkan backend。
 - **Vulkan reference 边界**：scissored clear 已保持顺序并按矩形执行；部分 color-channel 或 stencil-bit clear 暂不近似；真实 GL uniform block 与 texture-buffer descriptor seam 尚未接入。上述路径均明确返回 unsupported/error，不会误用 loose-uniform allocation 或 2D image descriptor 近似执行。
 - **M0 基建已交付**：CMake 双分支工程、EGL 44 符号 + 契约冒烟、GL 342 符号导出、CI build.yml、契约文档。
@@ -61,6 +62,8 @@ clang -std=c11 -o /tmp/mithril-sync-smoke tests/sync_smoke.c
 MITHRIL_BACKEND=metal MTL_DEBUG_LAYER=1 /tmp/mithril-sync-smoke
 clang -std=c11 -o /tmp/mithril-typed-vertex-smoke tests/typed_vertex_smoke.c
 MITHRIL_BACKEND=metal MTL_DEBUG_LAYER=1 /tmp/mithril-typed-vertex-smoke
+clang -std=c11 -o /tmp/mithril-packed-vertex-attrib-smoke tests/packed_vertex_attrib_smoke.c
+MITHRIL_BACKEND=metal MTL_DEBUG_LAYER=1 /tmp/mithril-packed-vertex-attrib-smoke
 clang -std=c11 -o /tmp/mithril-query-smoke tests/query_smoke.c
 MITHRIL_BACKEND=metal MTL_DEBUG_LAYER=1 /tmp/mithril-query-smoke
 clang -std=c11 -o /tmp/mithril-stencil-persistence-smoke tests/stencil_persistence_smoke.c
@@ -122,5 +125,5 @@ src/backend backend-neutral draw/resource contract 与显式 backend 选择
 src/metal   DirectMetal（SPIR-V→MSL、program/pipeline cache、frame arena、command encoding/readback）
 src/vk      Vulkan reference/fallback（dlsym 加载器、离屏渲染、动态 UBO 池、读回）
 scripts/    gen_gl_stubs.py（stub 生成器）、exported_symbols.txt
-tests/      contract_smoke.c / state_smoke.c / shader_smoke.c / draw_smoke.c / ubo_smoke.c / sampler_smoke.c / matrix_uniform_smoke.c / provoking_vertex_smoke.c / buffer_texture_smoke.c / sync_smoke.c / typed_vertex_smoke.c / query_smoke.c / stencil_persistence_smoke.c / texture_smoke.c / fbo_smoke.c / 3d_smoke.c / render3d_smoke.c
+tests/      contract_smoke.c / state_smoke.c / shader_smoke.c / draw_smoke.c / ubo_smoke.c / sampler_smoke.c / matrix_uniform_smoke.c / provoking_vertex_smoke.c / buffer_texture_smoke.c / sync_smoke.c / typed_vertex_smoke.c / packed_vertex_attrib_smoke.c / query_smoke.c / stencil_persistence_smoke.c / texture_smoke.c / fbo_smoke.c / 3d_smoke.c / render3d_smoke.c
 ```
