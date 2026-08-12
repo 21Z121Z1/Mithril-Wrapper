@@ -58,7 +58,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          tests=(state_smoke shader_smoke draw_smoke texture_smoke sampler_smoke matrix_uniform_smoke provoking_vertex_smoke buffer_texture_smoke typed_vertex_smoke ubo_smoke query_smoke sync_smoke 3d_smoke render3d_smoke fbo_smoke directmetal_fbo_smoke)
+          tests=(state_smoke shader_smoke draw_smoke texture_smoke sampler_smoke matrix_uniform_smoke provoking_vertex_smoke buffer_texture_smoke typed_vertex_smoke ubo_smoke query_smoke sync_smoke stencil_persistence_smoke 3d_smoke render3d_smoke fbo_smoke directmetal_fbo_smoke)
           for test_name in "${tests[@]}"; do
             echo "==> ${test_name}"
             clang -std=c11 -Wall -Wextra "tests/${test_name}.c" -o "$RUNNER_TEMP/${test_name}"
@@ -185,7 +185,7 @@ jobs:
           set -euo pipefail
           sdk="$(xcrun --sdk iphonesimulator --show-sdk-path)"
           target_flags=(-target arm64-apple-ios16.0-simulator -isysroot "$sdk")
-          for test_name in draw_smoke provoking_vertex_smoke directmetal_fbo_smoke; do
+          for test_name in draw_smoke provoking_vertex_smoke directmetal_fbo_smoke stencil_persistence_smoke; do
             xcrun --sdk iphonesimulator clang "${target_flags[@]}" \
               -std=c11 -Wall -Wextra -Dmain=mithril_smoke_main \
               -c "tests/${test_name}.c" -o "$RUNNER_TEMP/${test_name}.o"
@@ -262,6 +262,7 @@ jobs:
           run_app draw_smoke com.mithril.ci.draw 'DRAW SMOKE ALL PASSED'
           run_app provoking_vertex_smoke com.mithril.ci.provoking 'provoking_vertex_smoke: PASS'
           run_app directmetal_fbo_smoke com.mithril.ci.fbo 'directmetal_fbo_smoke: PASS'
+          run_app stencil_persistence_smoke com.mithril.ci.stencil 'stencil_persistence_smoke: PASS'
 
       - name: Shutdown Simulator
         if: always()

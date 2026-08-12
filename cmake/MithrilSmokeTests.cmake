@@ -57,6 +57,7 @@ set(_mithril_directmetal_smokes
     ubo_smoke
     query_smoke
     sync_smoke
+    stencil_persistence_smoke
     3d_smoke
     render3d_smoke
     fbo_smoke
