@@ -87,44 +87,14 @@ jobs:
           curl -fsSL -o ios.toolchain.cmake
           https://raw.githubusercontent.com/leetal/ios-cmake/4.5.0/ios.toolchain.cmake
 
-      - name: Configure iPhoneOS arm64 (iOS 16 baseline)
-        run: >-
-          cmake -S . -B build-ios -G Ninja
-          -DCMAKE_TOOLCHAIN_FILE=ios.toolchain.cmake
-          -DPLATFORM=OS64
-          -DDEPLOYMENT_TARGET=16.0
-          -DENABLE_BITCODE=OFF
-          -DENABLE_ARC=ON
-          -DCMAKE_BUILD_TYPE=Release
-          -DMITHRIL_IOS=ON
-          -DMITHRIL_BUILD_LEGACY=OFF
-          -DMITHRIL_BUILD_DIRECT=ON
-          -DMITHRIL_ENABLE_SHADER_TOOLCHAIN=ON
-          -DBUILD_TESTING=OFF
-          -DMITHRIL_OUTPUT_DIRECTORY="$GITHUB_WORKSPACE/build-ios/artifacts"
-
-      - name: Build DirectMetal dylib only
-        run: cmake --build build-ios --target mithril_direct --parallel
-
-      - name: Check iPhoneOS architecture and install name
-        run: |
-          DYLIB=build-ios/artifacts/libmithril.dylib
-          test -f "$DYLIB"
-          file "$DYLIB"
-          lipo -info "$DYLIB"
-          file "$DYLIB" | grep -q 'Mach-O 64-bit dynamically linked shared library arm64'
-          lipo -info "$DYLIB" | grep -q 'arm64'
-          vtool -show-build "$DYLIB"
-          vtool -show-build "$DYLIB" | grep -q 'platform IOS'
-          otool -D "$DYLIB"
-          otool -D "$DYLIB" | tail -n +2 | grep -qx '@rpath/libmithril.dylib'
-
-      - name: Prove iPhoneOS shipping target is Vulkan-free
-        run: |
-          chmod +x scripts/verify_directmetal_artifact.sh
-          scripts/verify_directmetal_artifact.sh \
-            build-ios/artifacts/libmithril.dylib \
-            build-ios/mithril_direct.boundary.json
+      - name: Build and verify the shipping iPhoneOS package
+        env:
+          MITHRIL_IOS_BUILD_DIR: ${{ github.workspace }}/build-ios
+          MITHRIL_IOS_OUTPUT_DIR: ${{ github.workspace }}/build-ios/artifacts
+          MITHRIL_IOS_DEPLOYMENT_TARGET: '16.0'
+          MITHRIL_IOS_TOOLCHAIN_FILE: ${{ github.workspace }}/ios.toolchain.cmake
+          MITHRIL_IOS_PLATFORM: OS64
+        run: scripts/build_iphoneos.sh
 
       - name: Ad-hoc codesign artifact
         run: |
