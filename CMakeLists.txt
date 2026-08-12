@@ -127,6 +127,7 @@ if(APPLE AND MITHRIL_BUILD_DIRECT)
 
     add_library(mithril_direct SHARED
         ${MITHRIL_FRONTEND_SOURCES}
+        src/metal/MetalDeviceSession.cpp
         src/metal/engine_apple.mm)
     mithril_configure_frontend_target(mithril_direct)
     target_compile_definitions(mithril_direct PRIVATE
@@ -147,8 +148,6 @@ if(APPLE AND MITHRIL_BUILD_DIRECT)
     if(MITHRIL_IOS)
         # ios-cmake defaults to -fvisibility=hidden. Mithril is dlopen/dlsym'd
         # by Amethyst/LWJGL, so the public EGL/desktop-GL ABI must stay visible.
-        # Target-local -fvisibility=default keeps third-party static libraries
-        # hidden while restoring the shipping entry points from our own TUs.
         target_compile_options(mithril_direct PRIVATE -fvisibility=default)
         set_target_properties(mithril_direct PROPERTIES
             C_VISIBILITY_PRESET default
