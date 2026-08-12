@@ -207,6 +207,38 @@ bool EnsurePresentPipeline() {
     return true;
 }
 
+struct PresentationSubmission {
+    id<CAMetalDrawable> drawable = nil;
+};
+
+bool EncodePresentationTail(id<MTLCommandBuffer> command, void* context) {
+    auto* submission = static_cast<PresentationSubmission*>(context);
+    if (!submission || !submission->drawable) return false;
+    command.label = @"Mithril DirectMetal frame + present";
+
+#if defined(MITHRIL_PRESENTATION_TEST_HOOKS)
+    if (!EncodePresentationReference(command, submission->drawable.texture)) {
+        ML_LOG_ERROR("metal: failed to encode presentation test reference");
+        return false;
+    }
+#endif
+    if (!EncodePresentationRender(command, submission->drawable.texture,
+                                  @"Mithril RGBA-to-BGRA presentation")) {
+        ML_LOG_ERROR("metal: failed to create presentation render encoder");
+        return false;
+    }
+
+#if defined(MITHRIL_PRESENTATION_TEST_HOOKS)
+    if (!EncodePresentationPixelCapture(submission->drawable, command)) {
+        ML_LOG_ERROR("metal: failed to capture presentation test pixel");
+        return false;
+    }
+#endif
+
+    [command presentDrawable:submission->drawable];
+    return true;
+}
+
 } // namespace
 
 bool SetNativeWindow(void* native_window) {
@@ -254,7 +286,6 @@ bool Present() {
         // Draws are recorded until submit, so resizing here re-targets the
         // complete pending GL frame without rendering an intermediate size.
         if (!SyncLayerTargetSize()) return false;
-        if (!SubmitInternal(false, false, nullptr)) return false;
         if (!EnsurePresentPipeline()) return false;
 
         id<CAMetalDrawable> drawable = [engine.layer nextDrawable];
@@ -273,37 +304,9 @@ bool Present() {
             return false;
         }
 
-        id<MTLCommandBuffer> command = [engine.queue commandBuffer];
-        if (!command) {
-            ML_LOG_ERROR("metal: failed to allocate presentation command buffer");
-            return false;
-        }
-        command.label = @"Mithril present";
-
-#if defined(MITHRIL_PRESENTATION_TEST_HOOKS)
-        if (!EncodePresentationReference(command, drawable.texture)) {
-            ML_LOG_ERROR("metal: failed to encode presentation test reference");
-            return false;
-        }
-#endif
-        if (!EncodePresentationRender(command, drawable.texture,
-                                      @"Mithril RGBA-to-BGRA presentation")) {
-            ML_LOG_ERROR("metal: failed to create presentation render encoder");
-            return false;
-        }
-
-#if defined(MITHRIL_PRESENTATION_TEST_HOOKS)
-        // Capture before present on this command buffer. A second queue reading
-        // an already-presented CAMetalDrawable can observe recycled contents.
-        if (!EncodePresentationPixelCapture(drawable, command)) {
-            ML_LOG_ERROR("metal: failed to capture presentation test pixel");
-            return false;
-        }
-#endif
-
-        [command presentDrawable:drawable];
-        if (!CommitCommandBuffer(command)) return false;
-        return true;
+        PresentationSubmission submission{drawable};
+        return SubmitInternal(false, false, nullptr, EncodePresentationTail,
+                              &submission);
     }
 }
 

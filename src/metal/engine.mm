@@ -1907,12 +1907,16 @@ std::shared_ptr<CommandCompletion> CommitCommandBuffer(
     return completion;
 }
 
+using SubmitTailEncoder = bool (*)(id<MTLCommandBuffer>, void*);
+
 bool SubmitInternal(bool wait_for_completion, bool copy_for_readback,
-                    FrameContext** submitted_frame) {
+                    FrameContext** submitted_frame,
+                    SubmitTailEncoder tail_encoder = nullptr,
+                    void* tail_context = nullptr) {
     auto& engine = GetEngine();
     if (!engine.initialized) return false;
     const bool needs_render = engine.frame_dirty;
-    if (!needs_render && !copy_for_readback) {
+    if (!needs_render && !copy_for_readback && !tail_encoder) {
         if (wait_for_completion && engine.last_submitted) {
             [engine.last_submitted waitUntilCompleted];
             return CommandSucceeded(engine.last_submitted);
@@ -2102,6 +2106,12 @@ bool SubmitInternal(bool wait_for_completion, bool copy_for_readback,
     destinationBytesPerImage:frame.readback_row_bytes * read_target.height];
         [blit endEncoding];
     }
+
+    // Window presentation supplies a tail encoder so the default framebuffer
+    // producer and its RGBA-to-BGRA consumer share one command buffer. Besides
+    // avoiding an extra submit, this gives tile/virtual GPUs an explicit
+    // encoder boundary instead of relying on cross-command-buffer residency.
+    if (tail_encoder && !tail_encoder(command, tail_context)) return false;
 
     auto completion = CommitCommandBuffer(command);
     if (!completion) return false;
