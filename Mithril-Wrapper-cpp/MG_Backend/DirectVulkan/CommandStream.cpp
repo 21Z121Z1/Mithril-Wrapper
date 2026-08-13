@@ -1,5 +1,6 @@
 // Mithril-Wrapper - MG_Backend/DirectVulkan/CommandStream.cpp
-// Render-pass orchestration via VK_KHR_dynamic_rendering (vkCmdBeginRendering)
+// Render-pass orchestration via traditional VkRenderPass / VkFramebuffer
+// (MobileGL's DirectVulkan architecture; previously VK_KHR_dynamic_rendering)
 // + encoder dynamic-state setters + draw recording + per-frame submit.
 #include "CommandStream.h"
 #include "Device.h"
@@ -17,6 +18,7 @@
 
 #include <cstring>
 #include <vector>
+#include <unordered_map>
 
 // glMemoryBarrier bit tested by backend_memory_barrier. The bundled
 // GL/glcorearb.h in include/ predates ARB_shader_image_load_store's token
@@ -71,6 +73,259 @@ bool format_has_alpha(VkFormat fmt) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Traditional VkRenderPass + VkFramebuffer cache.
+//
+// Mithril previously used VK_KHR_dynamic_rendering (vkCmdBeginRendering).
+// MobileGL's DirectVulkan backend uses TRADITIONAL VkRenderPass everywhere
+// (VkRenderPassManager) and is proven on iOS/A11 + MoltenVK, while our
+// dynamic-rendering path produced a kIOGPUCommandBufferCallbackErrorPageFault
+// on the main-menu blit pass. This cache implements the same API surface the
+// dynamic path had, backed by real render passes:
+//
+//   * get_or_create_render_pass():  keyed by (color_formats, count,
+//     depth_format, samples, loadClear). loadOp is CLEAR when the pass starts
+//     with a pending glClear (e.loadClear) and LOAD otherwise — the two
+//     behaviours the dynamic path selected per-pass. storeOp is always STORE.
+//     loadOp is part of the cache key because Vulkan fixes loadOp at render
+//     pass creation; a LOAD-pass and a CLEAR-pass over the same attachments
+//     are distinct VkRenderPass objects.
+//   * get_or_create_framebuffer(): keyed by (renderPass, color views,
+//     depth view, extent). Framebuffers are cheap and numerous (one per
+//     (pass, swapchain image, user-FBO) combination), so the cache is an
+//     unordered_map with no eviction — entries live for the process lifetime,
+//     matching MobileGL's RenderPassEntry lifetime model.
+//
+// Pipeline compatibility: Vulkan requires the pipeline's render pass to be
+// COMPATIBLE with the one used at draw time. Compatibility depends only on
+// attachment formats/samples/count — NOT on loadOp/storeOp. So every pipeline
+// is created against a canonical "template" render pass for its format set
+// (loadClear=false flavour), and any draw-time render pass with the same
+// formats is compatible. This is exactly how the dynamic-rendering pipeline
+// (VkPipelineRenderingCreateInfo) interoperated, so Pipeline.cpp only needs
+// the template render pass instead of VkPipelineRenderingCreateInfo.
+// ---------------------------------------------------------------------------
+
+struct RenderPassKey {
+    VkFormat colorFormats[8];
+    uint32_t colorCount;
+    VkFormat depthFormat;
+    VkSampleCountFlagBits samples;
+    bool loadClear;  // CLEAR vs LOAD loadOp flavour
+    bool operator==(const RenderPassKey& o) const {
+        if (colorCount != o.colorCount || depthFormat != o.depthFormat ||
+            samples != o.samples || loadClear != o.loadClear) return false;
+        for (uint32_t i = 0; i < colorCount; ++i)
+            if (colorFormats[i] != o.colorFormats[i]) return false;
+        return true;
+    }
+};
+
+struct RenderPassKeyHash {
+    size_t operator()(const RenderPassKey& k) const {
+        uint64_t h = 1469598103934665603ull;  // FNV-1a
+        auto mix = [&](const void* p, size_t n) {
+            const uint8_t* b = (const uint8_t*)p;
+            for (size_t i = 0; i < n; ++i) { h ^= b[i]; h *= 1099511628211ull; }
+        };
+        mix(&k.colorCount, sizeof(k.colorCount));
+        mix(&k.depthFormat, sizeof(k.depthFormat));
+        mix(&k.samples, sizeof(k.samples));
+        mix(&k.loadClear, sizeof(k.loadClear));
+        mix(k.colorFormats, k.colorCount * sizeof(VkFormat));
+        return (size_t)h;
+    }
+};
+
+struct FramebufferKey {
+    VkRenderPass renderPass;
+    VkImageView views[8];
+    uint32_t viewCount;
+    VkImageView depthView;
+    uint32_t width;
+    uint32_t height;
+    bool operator==(const FramebufferKey& o) const {
+        if (renderPass != o.renderPass || viewCount != o.viewCount ||
+            depthView != o.depthView || width != o.width || height != o.height)
+            return false;
+        for (uint32_t i = 0; i < viewCount; ++i)
+            if (views[i] != o.views[i]) return false;
+        return true;
+    }
+};
+
+struct FramebufferKeyHash {
+    size_t operator()(const FramebufferKey& k) const {
+        uint64_t h = 1469598103934665603ull;
+        auto mix = [&](const void* p, size_t n) {
+            const uint8_t* b = (const uint8_t*)p;
+            for (size_t i = 0; i < n; ++i) { h ^= b[i]; h *= 1099511628211ull; }
+        };
+        mix(&k.renderPass, sizeof(k.renderPass));
+        mix(&k.viewCount, sizeof(k.viewCount));
+        mix(&k.depthView, sizeof(k.depthView));
+        mix(&k.width, sizeof(k.width));
+        mix(&k.height, sizeof(k.height));
+        mix(k.views, k.viewCount * sizeof(VkImageView));
+        return (size_t)h;
+    }
+};
+
+static VkRenderPass impl_get_or_create_render_pass(const VkFormat* color_formats, int color_count,
+                                       VkFormat depth_format, int samples, bool loadClear) {
+    Backend* b = backend();
+    if (!b->device) return VK_NULL_HANDLE;
+    if (color_count > 8) color_count = 8;
+
+    RenderPassKey key{};
+    key.colorCount = (uint32_t)color_count;
+    key.depthFormat = depth_format;
+    key.samples = (samples > 1) ? VK_SAMPLE_COUNT_2_BIT
+                 : (samples > 2) ? VK_SAMPLE_COUNT_4_BIT
+                 : (samples > 4) ? VK_SAMPLE_COUNT_8_BIT
+                 : (samples > 8) ? VK_SAMPLE_COUNT_16_BIT
+                 : VK_SAMPLE_COUNT_1_BIT;
+    key.loadClear = loadClear;
+    for (int i = 0; i < color_count; ++i) key.colorFormats[i] = color_formats[i];
+
+    static std::unordered_map<RenderPassKey, VkRenderPass, RenderPassKeyHash> cache;
+    auto it = cache.find(key);
+    if (it != cache.end()) return it->second;
+
+    VkAttachmentLoadOp colorLoad = loadClear ? VK_ATTACHMENT_LOAD_OP_CLEAR
+                                             : VK_ATTACHMENT_LOAD_OP_LOAD;
+    VkAttachmentLoadOp depthLoad = loadClear ? VK_ATTACHMENT_LOAD_OP_CLEAR
+                                             : VK_ATTACHMENT_LOAD_OP_LOAD;
+
+    std::vector<VkAttachmentDescription> atts;
+    std::vector<VkAttachmentReference> colorRefs;
+    VkAttachmentReference depthRef{};
+    bool hasDepth = (depth_format != VK_FORMAT_UNDEFINED);
+
+    for (int i = 0; i < color_count; ++i) {
+        VkAttachmentDescription d{};
+        d.format = color_formats[i];
+        d.samples = key.samples;
+        d.loadOp = colorLoad;
+        d.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        d.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        d.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        d.initialLayout = colorLoad == VK_ATTACHMENT_LOAD_OP_CLEAR
+                          ? VK_IMAGE_LAYOUT_UNDEFINED          // clear discards prior content
+                          : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;  // LOAD preserves it
+        d.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        VkAttachmentReference ref{};
+        ref.attachment = (uint32_t)atts.size();
+        ref.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        atts.push_back(d);
+        colorRefs.push_back(ref);
+    }
+    if (hasDepth) {
+        VkAttachmentDescription d{};
+        d.format = depth_format;
+        d.samples = key.samples;
+        d.loadOp = depthLoad;
+        d.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        d.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        d.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        d.initialLayout = depthLoad == VK_ATTACHMENT_LOAD_OP_CLEAR
+                          ? VK_IMAGE_LAYOUT_UNDEFINED
+                          : VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        d.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        depthRef.attachment = (uint32_t)atts.size();
+        depthRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        atts.push_back(d);
+    }
+
+    VkSubpassDescription subpass{};
+    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    subpass.colorAttachmentCount = (uint32_t)colorRefs.size();
+    subpass.pColorAttachments = colorRefs.data();
+    if (hasDepth) subpass.pDepthStencilAttachment = &depthRef;
+
+    // External subpass dependency: transition attachments from their
+    // pre-pass layout (UNDEFINED on CLEAR, COLOR_ATTACHMENT_OPTIMAL on LOAD —
+    // the layout we left them in at the end of the previous pass) into the
+    // subpass's COLOR_ATTACHMENT_OPTIMAL. This mirrors the explicit
+    // record_layout_barrier calls the dynamic-rendering path emitted before
+    // vkCmdBeginRendering; with a render pass, the subpass dependency performs
+    // the same transition automatically.
+    VkSubpassDependency dep{};
+    dep.srcSubpass = VK_SUBPASS_EXTERNAL;
+    dep.dstSubpass = 0;
+    dep.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dep.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dep.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    dep.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT;
+    dep.dependencyFlags = 0;
+
+    VkRenderPassCreateInfo rpci{};
+    rpci.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+    rpci.attachmentCount = (uint32_t)atts.size();
+    rpci.pAttachments = atts.data();
+    rpci.subpassCount = 1;
+    rpci.pSubpasses = &subpass;
+    rpci.dependencyCount = 1;
+    rpci.pDependencies = &dep;
+
+    VkRenderPass rp = VK_NULL_HANDLE;
+    if (vkCreateRenderPass(b->device, &rpci, nullptr, &rp) != VK_SUCCESS) {
+        return VK_NULL_HANDLE;
+    }
+    cache.emplace(key, rp);
+    return rp;
+}
+
+static VkFramebuffer impl_get_or_create_framebuffer(VkRenderPass rp,
+                                        const VkImageView* color_views, int color_count,
+                                        VkImageView depth_view, int width, int height) {
+    Backend* b = backend();
+    if (!b->device || !rp) return VK_NULL_HANDLE;
+    if (color_count > 8) color_count = 8;
+
+    FramebufferKey key{};
+    key.renderPass = rp;
+    key.viewCount = (uint32_t)color_count;
+    key.depthView = depth_view;
+    key.width = (uint32_t)width;
+    key.height = (uint32_t)height;
+    for (int i = 0; i < color_count; ++i) key.views[i] = color_views[i];
+
+    static std::unordered_map<FramebufferKey, VkFramebuffer, FramebufferKeyHash> cache;
+    auto it = cache.find(key);
+    if (it != cache.end()) return it->second;
+
+    std::vector<VkImageView> views;
+    views.reserve(color_count + (depth_view ? 1 : 0));
+    for (int i = 0; i < color_count; ++i) views.push_back(color_views[i]);
+    if (depth_view) views.push_back(depth_view);
+
+    VkFramebufferCreateInfo fci{};
+    fci.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+    fci.renderPass = rp;
+    fci.attachmentCount = (uint32_t)views.size();
+    fci.pAttachments = views.data();
+    fci.width = (uint32_t)width;
+    fci.height = (uint32_t)height;
+    fci.layers = 1;
+
+    VkFramebuffer fb = VK_NULL_HANDLE;
+    if (vkCreateFramebuffer(b->device, &fci, nullptr, &fb) != VK_SUCCESS) {
+        return VK_NULL_HANDLE;
+    }
+    cache.emplace(key, fb);
+    return fb;
+}
+
+// The canonical "template" render pass a pipeline is created against. Uses the
+// LOAD flavour; any draw-time render pass with the same formats is compatible
+// (loadOp is not part of Vulkan's render pass compatibility rules).
+static VkRenderPass impl_get_template_render_pass(const VkFormat* color_formats, int color_count,
+                                      VkFormat depth_format, int samples) {
+    return impl_get_or_create_render_pass(color_formats, color_count, depth_format,
+                                          samples, /*loadClear=*/false);
+}
+
 // Encoder state carried between begin_render_pass() and the draw calls.
 struct EncoderState {
     bool passActive = false;
@@ -90,6 +345,7 @@ struct EncoderState {
 
     // Color/depth attachment views for the active pass.
     VkImageView colorViews[8] = {};
+    VkFormat colorFormats[8] = {};  // formats backing colorViews (render pass cache key)
     int colorCount = 0;
     VkImageView depthView = VK_NULL_HANDLE;
     int width = 0;
@@ -311,6 +567,24 @@ void record_layout_barrier(VkCommandBuffer cb, VkImage image, VkFormat format,
 }
 
 } // namespace
+
+// Public render-pass cache API (declared in CommandStream.h; used by
+// Pipeline.cpp to build pipelines against the compatible template pass).
+VkRenderPass get_or_create_render_pass(const VkFormat* color_formats, int color_count,
+                                       VkFormat depth_format, int samples, bool loadClear) {
+    return impl_get_or_create_render_pass(color_formats, color_count, depth_format,
+                                          samples, loadClear);
+}
+VkFramebuffer get_or_create_framebuffer(VkRenderPass rp,
+                                        const VkImageView* color_views, int color_count,
+                                        VkImageView depth_view, int width, int height) {
+    return impl_get_or_create_framebuffer(rp, color_views, color_count, depth_view,
+                                          width, height);
+}
+VkRenderPass get_template_render_pass(const VkFormat* color_formats, int color_count,
+                                      VkFormat depth_format, int samples) {
+    return impl_get_template_render_pass(color_formats, color_count, depth_format, samples);
+}
 
 bool render_pass_active() { return encoder().passActive; }
 
@@ -657,7 +931,27 @@ void begin_render_pass(VkImageView* color_views, int color_count,
 
     // Record the per-frame attachments so draw commands can reference them.
     e.colorCount = color_count > 8 ? 8 : color_count;
-    for (int i = 0; i < e.colorCount; ++i) e.colorViews[i] = color_views ? color_views[i] : VK_NULL_HANDLE;
+    // Record per-frame attachments and their formats (the render-pass cache
+    // key). Swapchain-backed color uses the swapchain format; user-FBO color
+    // attachments resolve via the registered tex_ids -> TextureEntry.format.
+    // This must mirror what Pipeline.cpp passes as color_formats when it
+    // builds the compatible pipeline, otherwise the pipeline's render pass
+    // would not be compatible with the draw-time render pass.
+    {
+        auto& tbl = texture_table();
+        for (int i = 0; i < e.colorCount; ++i) {
+            e.colorViews[i] = color_views ? color_views[i] : VK_NULL_HANDLE;
+            VkFormat fmt = VK_FORMAT_UNDEFINED;
+            if (e.activeSwapchain && i == 0 &&
+                e.colorViews[i] == e.activeSwapchain->views[e.activeSwapchain->currentImage]) {
+                fmt = e.activeSwapchain->format;  // FBO 0 (swapchain color)
+            } else if (i < e.fboColorTexCount && e.fboColorTexIds[i] != 0) {
+                auto it = tbl.find(e.fboColorTexIds[i]);
+                if (it != tbl.end()) fmt = it->second.format;
+            }
+            e.colorFormats[i] = fmt;
+        }
+    }
     e.depthView = depth_view;
     e.width = width;
     e.height = height;
@@ -882,142 +1176,94 @@ void begin_render_pass(VkImageView* color_views, int color_count,
         }
     }
 
-    // Begin dynamic rendering.
-    // loadOp selection — aligned with MobileGL's VkRenderPassManager
-    // (VkRenderPassManager.cpp:711-784). Priority order (hasClear first):
-    //   1. hasClear (e.loadClear)  -> CLEAR   (discard prior contents)
-    //   2. trackedLayout == UNDEFINED -> DONT_CARE (no valid contents to load;
-    //      LOAD on UNDEFINED is spec-illegal and wastes tile bandwidth)
-    //   3. otherwise               -> LOAD    (preserve existing contents)
-    // MobileGL sets initialLayout=UNDEFINED for cases 1 & 2; we achieve the
-    // same via the acquire->attachment barrier using oldLayout=UNDEFINED
-    // (swapchain_acquire_color deliberately resets currentColorLayout to
-    // UNDEFINED on every acquire, since post-present contents are undefined).
-    VkRenderingAttachmentInfoKHR colorAttachs[8] = {};
-    for (int i = 0; i < e.colorCount; ++i) {
-        colorAttachs[i].sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR;
-        colorAttachs[i].imageView = e.colorViews[i];
-        colorAttachs[i].imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-        // Color loadOp (MobileGL VkRenderPassManager.cpp:713,776-780):
-        //   hasClear -> CLEAR; !hasClear && UNDEFINED -> DONT_CARE; else LOAD.
-        // swapchainColorWasUndefined covers the swapchain image on its first
-        // pass of the frame (currentColorLayout was UNDEFINED before the
-        // acquire->attachment barrier). Subsequent passes in the same frame
-        // see COLOR_ATTACHMENT_OPTIMAL and correctly use LOAD to preserve the
-        // first pass's output.
-        if (e.loadClear) {
-            colorAttachs[i].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-        } else if (swapchainColorWasUndefined &&
-                   e.activeSwapchain &&
-                   e.colorViews[i] == e.activeSwapchain->views[e.activeSwapchain->currentImage]) {
-            colorAttachs[i].loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-        } else {
-            colorAttachs[i].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-        }
-        colorAttachs[i].storeOp = (e.invalidateColorMask & (1u << i))
-                                  ? VK_ATTACHMENT_STORE_OP_DONT_CARE
-                                  : VK_ATTACHMENT_STORE_OP_STORE;
-        colorAttachs[i].clearValue.color.float32[0] = e.clearColor[0];
-        colorAttachs[i].clearValue.color.float32[1] = e.clearColor[1];
-        colorAttachs[i].clearValue.color.float32[2] = e.clearColor[2];
-        // 根因 G: 若该 attachment 是 swapchain image 且格式无 alpha，强制 alpha=1.0
-        // （对标 MobileGL ResolveColorClearAlpha），防止合成器视窗口透明 → 黑屏。
+    // loadOp flavour selection — the CLEAR-vs-LOAD decision that used to be
+    // per-attachment in the dynamic-rendering path is now the render-pass
+    // cache key's loadClear flag (the whole pass is CLEAR or LOAD).
+    // depthWasUndefined: mirror the swapchain one-shot — if this pass is the
+    // very first use of a freshly-created (UNDEFINED) depth buffer — either
+    // the swapchain's persistent depth OR a user FBO's depth texture — clear
+    // it to far(1.0)/0 so the first GL_LESS draw's fragments pass.
+    // swapchainColorWasUndefined: the swapchain image's content is undefined
+    // after acquire, so the pass must CLEAR (not LOAD) it.
+    const bool depthWasUndefined = swapchainDepthWasUndefined || fboDepthWasUndefined;
+
+    // ---------------------------------------------------------------------
+    // Begin the render pass.
+    //
+    // Mithril previously used VK_KHR_dynamic_rendering here (vkCmdBeginRendering
+    // with per-pass loadOp selection). We now use a TRADITIONAL VkRenderPass +
+    // VkFramebuffer (MobileGL's architecture, proven on iOS/A11 + MoltenVK).
+    // The loadOp flavour (CLEAR vs LOAD) is baked into the cached render pass
+    // keyed by (formats, loadClear). The pass's loadOp selection mirrors the
+    // dynamic path: e.loadClear -> CLEAR; otherwise LOAD.
+    //
+    // The depth one-shot first-use CLEAR (root cause — swapchain + user-FBO
+    // depth initialized to far) is handled here too: when the depth buffer was
+    // in UNDEFINED layout before this pass, its content is garbage, so the
+    // render pass MUST be the CLEAR flavour even if e.loadClear is false.
+    // depthWasUndefined is computed above from the barrier path.
+    const bool needClear = e.loadClear || depthWasUndefined || swapchainColorWasUndefined;
+    VkRenderPass rp = impl_get_or_create_render_pass(e.colorFormats, e.colorCount,
+                                                e.depthFormat, samples, needClear);
+    if (rp == VK_NULL_HANDLE) {
+        e.passActive = false;
+        return;  // render pass creation failed — skip this pass
+    }
+    VkFramebuffer fb = impl_get_or_create_framebuffer(rp, e.colorViews, e.colorCount,
+                                                 e.depthView, e.width, e.height);
+    if (fb == VK_NULL_HANDLE) {
+        e.passActive = false;
+        return;  // framebuffer creation failed — skip this pass
+    }
+
+    VkRenderPassBeginInfo rpbi{};
+    rpbi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    rpbi.renderPass = rp;
+    rpbi.framebuffer = fb;
+    rpbi.renderArea.offset.x = 0;
+    rpbi.renderArea.offset.y = 0;
+    // Use e.width/e.height (clamped to swapchain dimensions above) instead of
+    // the raw caller-provided width/height. This ensures the render area never
+    // exceeds the swapchain image / IOSurface dimensions (IOSurfaceBindAccel
+    // SIGSEGV fix — MobileGL VkRenderPassManager.cpp:760).
+    rpbi.renderArea.extent.width = (uint32_t)e.width;
+    rpbi.renderArea.extent.height = (uint32_t)e.height;
+
+    // Clear values — one per attachment in render pass attachment order
+    // (color attachments first, then depth/stencil).
+    VkClearValue clearValues[9] = {};
+    for (int i = 0; i < e.colorCount && i < 8; ++i) {
+        clearValues[i].color.float32[0] = e.clearColor[0];
+        clearValues[i].color.float32[1] = e.clearColor[1];
+        clearValues[i].color.float32[2] = e.clearColor[2];
+        // 根因 G (MobileGL ResolveColorClearAlpha): 若该 attachment 是
+        // swapchain image 且格式无 alpha，强制 alpha=1.0，防止合成器把窗口
+        // 视为透明 → 黑屏。
         bool attachHasAlpha = true;
         if (e.activeSwapchain &&
             e.colorViews[i] == e.activeSwapchain->views[e.activeSwapchain->currentImage]) {
             attachHasAlpha = format_has_alpha(e.activeSwapchain->format);
         }
-        colorAttachs[i].clearValue.color.float32[3] = attachHasAlpha ? e.clearColor[3] : 1.0f;
+        clearValues[i].color.float32[3] = attachHasAlpha ? e.clearColor[3] : 1.0f;
     }
-    // Depth/stencil loadOp (MobileGL ResolveDepthStencilAttachmentLoadInfo,
-    // VkRenderPassManager.cpp:140-155). Same priority: hasClear -> CLEAR;
-    // UNDEFINED (first use) -> DONT_CARE; else LOAD. The depth image is
-    // persistent across frames (never presented), so after the one-shot
-    // UNDEFINED->DEPTH_STENCIL_ATTACHMENT_OPTIMAL transition it stays valid
-    // and subsequent passes use LOAD to preserve depth across passes.
-    // NOTE: glClear now uses backend_clear_attachments (vkCmdClearAttachments)
-    // to clear only the requested aspects, NOT loadOp=CLEAR. The loadClear
-    // flag here only affects the initial loadOp of the pass, and glClear
-    // sets it to LOAD (not CLEAR) before calling begin_render_pass.
-    VkRenderingAttachmentInfoKHR depthAttach{};
-    depthAttach.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR;
-    depthAttach.imageView = e.depthView;
-    depthAttach.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-    // Clear value for the depth/stencil attachment. Honour the host's
-    // glClearDepth for an explicit pass-start clear, EXCEPT on the ONE-SHOT
-    // first use of the persistent swapchain depth buffer (UNDEFINED layout)
-    // where we force far(1.0)/0 to initialise the buffer.
-    //
-    // ROOT CAUSE (systemic pure-red from frame 1): the persistent swapchain
-    // depth buffer is created with initialLayout=UNDEFINED and was NEVER
-    // initialized to "far" on its first use. With the old LOAD_OP_DONT_CARE
-    // the depth buffer holds garbage (typically 0 / near) on the first
-    // depth-tested draw; with the default depth func GL_LESS every fragment
-    // (depth in (0,1]) compares against garbage==near and FAILS, so only the
-    // swapchain clear color (red) survives -> pure red screen from the very
-    // first frame (loading screen, main menu, in-game all red with sound).
-    //
-    // MobileGL initializes the swapchain depth to far on first use. Fix:
-    // on the one-shot UNDEFINED->DEPTH_STENCIL_ATTACHMENT_OPTIMAL first use,
-    // CLEAR the depth buffer to far (1.0) instead of DONT_CARE so the first
-    // depth-tested draw's fragments (depth < 1.0) pass the GL_LESS compare.
-    depthAttach.clearValue.depthStencil.depth = (float)e.clearDepth;
-    depthAttach.clearValue.depthStencil.stencil = (uint32_t)e.clearStencil;
-    // FIX (user-FBO depth first use): mirror the swapchain one-shot — if this
-    // pass is the very first use of a freshly-created (UNDEFINED) depth buffer
-    // — either the swapchain's persistent depth OR a user FBO's depth texture —
-    // clear it to far(1.0)/0 so the first GL_LESS draw's fragments pass.
-    const bool depthWasUndefined = swapchainDepthWasUndefined || fboDepthWasUndefined;
-    if (depthWasUndefined) {
-        depthAttach.clearValue.depthStencil.depth = 1.0f;
-        depthAttach.clearValue.depthStencil.stencil = 0u;
+    if (e.depthView) {
+        clearValues[e.colorCount].depthStencil.depth = (float)e.clearDepth;
+        clearValues[e.colorCount].depthStencil.stencil = (uint32_t)e.clearStencil;
+        // ROOT CAUSE (systemic pure-red from frame 1): persistent swapchain
+        // depth buffer created with initialLayout=UNDEFINED and never
+        // initialized to "far". With DONT_CARE it holds garbage (0/near), so
+        // the first GL_LESS draw fails every fragment -> pure red. MobileGL
+        // initializes swapchain depth to far on first use. Force far(1.0)/0
+        // on the one-shot first use.
+        if (depthWasUndefined) {
+            clearValues[e.colorCount].depthStencil.depth = 1.0f;
+            clearValues[e.colorCount].depthStencil.stencil = 0u;
+        }
     }
-    if (e.loadClear) {
-        depthAttach.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    } else if (depthWasUndefined) {
-        depthAttach.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    } else {
-        depthAttach.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-    }
-    depthAttach.storeOp = (e.invalidateDepth || e.invalidateStencil)
-                          ? VK_ATTACHMENT_STORE_OP_DONT_CARE
-                          : VK_ATTACHMENT_STORE_OP_STORE;
+    rpbi.clearValueCount = (uint32_t)(e.colorCount + (e.depthView ? 1 : 0));
+    rpbi.pClearValues = clearValues;
 
-    VkRenderingInfoKHR ri{};
-    ri.sType = VK_STRUCTURE_TYPE_RENDERING_INFO_KHR;
-    ri.renderArea.offset.x = 0;
-    ri.renderArea.offset.y = 0;
-    // Use e.width/e.height (clamped to swapchain dimensions above) instead of
-    // the raw caller-provided width/height. This ensures renderArea never
-    // exceeds the swapchain image / IOSurface dimensions.
-    ri.renderArea.extent.width = (uint32_t)e.width;
-    ri.renderArea.extent.height = (uint32_t)e.height;
-    ri.layerCount = 1;
-    ri.colorAttachmentCount = (uint32_t)e.colorCount;
-    ri.pColorAttachments = e.colorCount > 0 ? colorAttachs : nullptr;
-    ri.pDepthAttachment = e.depthView ? &depthAttach : nullptr;
-    // Root cause AA (HIGH, VUID-VkRenderingInfo-pStencilAttachment-06126):
-    // pStencilAttachment's ImageView MUST contain a stencil aspect. For
-    // depth-only formats (D32_SFLOAT / D16_UNORM) the view's aspect is
-    // DEPTH_BIT only, so binding it as a stencil attachment is a spec
-    // violation that may cause MoltenVK to drop the draw -> black screen.
-    // Bind pStencilAttachment only when the depth format actually has a
-    // stencil aspect (D24_UNORM_S8_UINT / D32_SFLOAT_S8_UINT / S8_UINT).
-    // e.depthFormat is set above from the swapchain depth
-    // (always D32_SFLOAT_S8_UINT, has stencil — preserves existing
-    // swapchain behavior) or the registered user-FBO depth TextureEntry.
-    // When no depth attachment is bound (e.depthView == null) or the depth
-    // format is depth-only, pStencilAttachment is null.
-    ri.pStencilAttachment = (e.depthView && format_has_stencil(e.depthFormat))
-                            ? &depthAttach : nullptr;
-
-    // Resolve the dynamic-rendering entry point (Vulkan 1.2 + extension).
-    static PFN_vkCmdBeginRenderingKHR fn = nullptr;
-    if (!fn) {
-        fn = (PFN_vkCmdBeginRenderingKHR)vkGetDeviceProcAddr(b->device, "vkCmdBeginRendering");
-        if (!fn) fn = (PFN_vkCmdBeginRenderingKHR)vkGetDeviceProcAddr(b->device, "vkCmdBeginRenderingKHR");
-    }
-    if (fn) fn(b->commandBuffer, &ri);
+    vkCmdBeginRenderPass(b->commandBuffer, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
 
     e.passActive = true;
     e.hasCommands = true;  // begin_render_pass recorded real commands
@@ -1032,10 +1278,10 @@ void begin_render_pass(VkImageView* color_views, int color_count,
 void end_render_pass() {
     Backend* b = backend();
     EncoderState& e = encoder();
-    // FIX (VK_NOT_READY storm): only call vkCmdEndRendering when the command
+    // FIX (VK_NOT_READY storm): only call vkCmdEndRenderPass when the command
     // buffer is recording. If passActive is stale-true after a deviceLost
     // (commit_frame returned early without end_render_pass) and the buffer
-    // is not recording, calling vkCmdEndRendering spams VK_NOT_READY.
+    // is not recording, calling vkCmdEndRenderPass spams VK_NOT_READY.
     // Clear passActive regardless so the encoder state is consistent.
     if (!e.passActive) return;
     if (!b->commandBuffer || !b->commandBufferRecording) {
@@ -1043,16 +1289,11 @@ void end_render_pass() {
         return;
     }
 
-    static PFN_vkCmdEndRenderingKHR fn = nullptr;
-    if (!fn) {
-        fn = (PFN_vkCmdEndRenderingKHR)vkGetDeviceProcAddr(b->device, "vkCmdEndRendering");
-        if (!fn) fn = (PFN_vkCmdEndRenderingKHR)vkGetDeviceProcAddr(b->device, "vkCmdEndRenderingKHR");
-    }
-    if (fn) fn(b->commandBuffer);
+    vkCmdEndRenderPass(b->commandBuffer);
 
     // ---- Root cause Y (CRITICAL): barrier user-FBO attachments back to ----
     // ---- read-only layouts and update TextureEntry::currentLayout.      --
-    // vkCmdEndRendering leaves color attachments in COLOR_ATTACHMENT_OPTIMAL
+    // vkCmdEndRenderPass leaves color attachments in COLOR_ATTACHMENT_OPTIMAL
     // and depth attachments in DEPTH_STENCIL_ATTACHMENT_OPTIMAL. For the
     // swapchain color this is fixed up by commit_frame's PRESENT_SRC_KHR
     // barrier; for the swapchain depth the layout stays at
@@ -1427,20 +1668,10 @@ void commit_frame() {
             // can show garbage pixels on the first frame before any draws are
             // recorded. CLEAR ensures a clean black frame. MobileGL primes the
             // first swapchain image in Initialize() for the same reason.
-            VkRenderingAttachmentInfoKHR dummyAttach{};
-            dummyAttach.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR;
-            dummyAttach.imageView = sc->views[sc->currentImage];
-            dummyAttach.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-            dummyAttach.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-            dummyAttach.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-            dummyAttach.clearValue.color.float32[0] = 0.0f;
-            dummyAttach.clearValue.color.float32[1] = 0.0f;
-            dummyAttach.clearValue.color.float32[2] = 0.0f;
-            dummyAttach.clearValue.color.float32[3] = 1.0f;
-            VkRenderingInfoKHR dummyRI{};
-            dummyRI.sType = VK_STRUCTURE_TYPE_RENDERING_INFO_KHR;
-            dummyRI.renderArea.offset.x = 0;
-            dummyRI.renderArea.offset.y = 0;
+            VkFormat dummyFmt = sc->format;
+            VkRenderPass dummyRp = impl_get_or_create_render_pass(&dummyFmt, 1,
+                                                             VK_FORMAT_UNDEFINED, 1,
+                                                             /*loadClear=*/true);
             // FIX: clamp renderArea to min(swapchain extent, actual drawable
             // size). The swapchain extent (sc->width) may exceed the actual
             // IOSurface dimensions (sc->actualDrawableWidth) when drawableSize
@@ -1452,23 +1683,28 @@ void commit_frame() {
                 dummyW = sc->actualDrawableWidth;
             if (sc->actualDrawableHeight > 0 && sc->actualDrawableHeight < dummyH)
                 dummyH = sc->actualDrawableHeight;
-            dummyRI.renderArea.extent.width = (uint32_t)dummyW;
-            dummyRI.renderArea.extent.height = (uint32_t)dummyH;
-            dummyRI.layerCount = 1;
-            dummyRI.colorAttachmentCount = 1;
-            dummyRI.pColorAttachments = &dummyAttach;
-            static PFN_vkCmdBeginRenderingKHR beginFn = nullptr;
-            static PFN_vkCmdEndRenderingKHR endFn = nullptr;
-            if (!beginFn) {
-                beginFn = (PFN_vkCmdBeginRenderingKHR)vkGetDeviceProcAddr(b->device, "vkCmdBeginRendering");
-                if (!beginFn) beginFn = (PFN_vkCmdBeginRenderingKHR)vkGetDeviceProcAddr(b->device, "vkCmdBeginRenderingKHR");
+            VkFramebuffer dummyFb = impl_get_or_create_framebuffer(
+                dummyRp, &sc->views[sc->currentImage], 1,
+                VK_NULL_HANDLE, dummyW, dummyH);
+            if (dummyRp != VK_NULL_HANDLE && dummyFb != VK_NULL_HANDLE) {
+                VkRenderPassBeginInfo dummyRbi{};
+                dummyRbi.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+                dummyRbi.renderPass = dummyRp;
+                dummyRbi.framebuffer = dummyFb;
+                dummyRbi.renderArea.offset.x = 0;
+                dummyRbi.renderArea.offset.y = 0;
+                dummyRbi.renderArea.extent.width = (uint32_t)dummyW;
+                dummyRbi.renderArea.extent.height = (uint32_t)dummyH;
+                VkClearValue dummyClear{};
+                dummyClear.color.float32[0] = 0.0f;
+                dummyClear.color.float32[1] = 0.0f;
+                dummyClear.color.float32[2] = 0.0f;
+                dummyClear.color.float32[3] = 1.0f;
+                dummyRbi.clearValueCount = 1;
+                dummyRbi.pClearValues = &dummyClear;
+                vkCmdBeginRenderPass(b->commandBuffer, &dummyRbi, VK_SUBPASS_CONTENTS_INLINE);
+                vkCmdEndRenderPass(b->commandBuffer);
             }
-            if (!endFn) {
-                endFn = (PFN_vkCmdEndRenderingKHR)vkGetDeviceProcAddr(b->device, "vkCmdEndRendering");
-                if (!endFn) endFn = (PFN_vkCmdEndRenderingKHR)vkGetDeviceProcAddr(b->device, "vkCmdEndRenderingKHR");
-            }
-            if (beginFn) beginFn(b->commandBuffer, &dummyRI);
-            if (endFn) endFn(b->commandBuffer);
             // After the dummy pass, the image is in COLOR_ATTACHMENT_OPTIMAL.
             // The needsLayoutTransition block below will transition it to
             // PRESENT_SRC_KHR for present.

@@ -7,6 +7,7 @@
 #include "Device.h"
 #include "Resources.h"
 #include "DescriptorSet.h"
+#include "CommandStream.h"  // get_template_render_pass (traditional render pass)
 #include "../Backend.h"
 #include "../../MG_Impl/Log.h"
 // FIX (root cause AF - Primitive Restart): 读取 g_state->primitiveRestart /
@@ -781,38 +782,21 @@ VkPipeline get_or_create_pipeline(GLuint program,
         stages.push_back(fsStage);
     }
 
-    // ---- Dynamic rendering attachment info (Vulkan 1.2 + VK_KHR_dynamic_rendering) ----
+    // ---- Traditional render pass (MobileGL DirectVulkan architecture) ----
+    // The pipeline is created against a canonical "template" render pass for
+    // its attachment format set (LOAD flavour). Any draw-time render pass with
+    // the same formats is COMPATIBLE (Vulkan's compatibility rules ignore
+    // loadOp/storeOp), so the pipeline binds correctly for every cached pass
+    // of this format set. This replaces the former VkPipelineRenderingCreateInfo
+    // / VK_KHR_dynamic_rendering path.
     VkFormat colorFmts[8] = {};
     for (int i = 0; i < color_count && i < 8; ++i) colorFmts[i] = color_formats[i];
-    VkPipelineRenderingCreateInfo renderingCI{};
-    renderingCI.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
-    renderingCI.colorAttachmentCount = color_count > 0 ? (uint32_t)color_count : 1;
-    renderingCI.pColorAttachmentFormats = colorFmts;
-    renderingCI.depthAttachmentFormat = depth_format;
-    // FIX (root cause O): For packed depth-stencil formats (D32_SFLOAT_S8_UINT,
-    // D24_UNORM_S8_UINT), the stencil attachment format MUST match the depth
-    // format. begin_render_pass() binds the SAME VkImageView (depthView, which
-    // has aspect DEPTH|STENCIL) as both pDepthAttachment and pStencilAttachment.
-    // If the pipeline declares stencilAttachmentFormat = VK_FORMAT_UNDEFINED
-    // while the render pass provides a stencil attachment, this is a
-    // pipeline/render-pass incompatibility — MoltenVK may silently drop the
-    // entire draw or fail to compile the Metal stencil state, producing a
-    // black screen. MobileGL sets stencilAttachmentFormat = depth_format for
-    // packed D32S8/D24S8 formats. For depth-only formats (D32_SFLOAT,
-    // D16_UNORM) there is no stencil aspect, so UNDEFINED is correct.
-    if (depth_format == VK_FORMAT_D32_SFLOAT_S8_UINT ||
-        depth_format == VK_FORMAT_D24_UNORM_S8_UINT ||
-        depth_format == VK_FORMAT_D16_UNORM_S8_UINT ||
-        depth_format == VK_FORMAT_S8_UINT) {
-        renderingCI.stencilAttachmentFormat = depth_format;
-    } else {
-        renderingCI.stencilAttachmentFormat = VK_FORMAT_UNDEFINED;
-    }
+    VkRenderPass templateRP = mithril::vk::get_template_render_pass(
+        colorFmts, color_count > 0 ? color_count : 1, depth_format, /*samples=*/1);
 
     // ---- Graphics pipeline ----
     VkGraphicsPipelineCreateInfo gi{};
     gi.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-    gi.pNext = &renderingCI;
     gi.stageCount = (uint32_t)stages.size();
     gi.pStages = stages.data();
     gi.pVertexInputState = &vertexInput;
@@ -823,7 +807,12 @@ VkPipeline get_or_create_pipeline(GLuint program,
     gi.pDepthStencilState = &ds;
     gi.pColorBlendState = &cb;
     gi.pDynamicState = &dyn;
-    gi.renderPass = VK_NULL_HANDLE;
+    // Bind the template render pass. The stencil-aspect contract (root cause
+    // O) is preserved: a packed D32S8/D24S8 depth attachment in the render
+    // pass implies a stencil attachment (matching the old
+    // stencilAttachmentFormat=depth_format behaviour); depth-only formats
+    // simply have no stencil aspect, which is the correct pipeline contract.
+    gi.renderPass = templateRP;
     gi.subpass = 0;
 
     // Pipeline layout: use the program's reflected layout (built by

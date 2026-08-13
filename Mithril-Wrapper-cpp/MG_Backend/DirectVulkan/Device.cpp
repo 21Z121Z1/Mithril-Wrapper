@@ -917,36 +917,16 @@ bool init_device() {
     if (has_extension(devExtProps, VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME)) {
         devExts.push_back(VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME);
     }
-    // VK_KHR_dynamic_rendering: lets us create pipelines + record render passes
-    // without a VkRenderPass object (simpler than managing compat render passes).
-    //
-    // 注意这是**硬依赖**，不是可选优化。整个 CommandStream.cpp 只有
-    // vkCmdBeginRendering 一条录制路径，没有传统 VkRenderPass/VkFramebuffer
-    // 的退路。我们请求的是 Vulkan 1.2，而 dynamic_rendering 要到 1.3 才进核心，
-    // 所以在 1.2 上它必须以扩展形式存在。
-    //
-    // 缺席时 vkGetDeviceProcAddr("vkCmdBeginRendering") 返回 nullptr，
-    // CommandStream.cpp:826 的 `if (fn)` 会安静地跳过 —— pass 被标记成
-    // active，draw 照常录制，但没有任何附件被绑定，最终什么都画不出来。
-    // 那是最难排查的一类故障：没有报错、没有验证层警告，只有一块黑屏。
-    //
-    // 与其那样，不如在这里直接失败并说清原因。MoltenVK 从 1.1.0 起支持该
-    // 扩展（对应 iOS 14+ / macOS 11+），低于此版本的环境本来也跑不动 MC。
+    // VK_KHR_dynamic_rendering: OPTIONAL since the render-pass rework.
+    // CommandStream.cpp now records via TRADITIONAL VkRenderPass /
+    // VkFramebuffer (MobileGL DirectVulkan architecture), so dynamic rendering
+    // is no longer load-bearing. We still request the extension when present
+    // (harmless, keeps the door open for future optional fast paths), but a
+    // device without it no longer fails device creation.
     const bool hasDynamicRendering =
         has_extension(devExtProps, VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME);
     if (hasDynamicRendering) {
         devExts.push_back(VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME);
-    } else {
-        MITHRIL_LOG_ERROR("vk",
-            "设备不支持 VK_KHR_dynamic_rendering（%s，Vulkan %u.%u.%u）。"
-            "本渲染器的命令录制完全依赖该扩展，且当前请求的是 Vulkan 1.2"
-            "（dynamic_rendering 要到 1.3 才进核心），没有 VkRenderPass 退路。"
-            "请升级 MoltenVK 到 1.1.0 或更高版本（iOS 14+ / macOS 11+）。",
-            b->props.deviceName,
-            VK_VERSION_MAJOR(b->props.apiVersion),
-            VK_VERSION_MINOR(b->props.apiVersion),
-            VK_VERSION_PATCH(b->props.apiVersion));
-        return false;
     }
     // VK_EXT_extended_dynamic_state: vkCmdSetCullMode/FrontFace/DepthTestEnable/
     // DepthWriteEnable/DepthCompareOp etc. without rebuilding pipelines.
@@ -958,7 +938,7 @@ bool init_device() {
     // 比黑屏还糟。而且 Pipeline.cpp:633 已经把 cullMode 设成 NONE 并声明为
     // 动态状态，管线里根本没有静态的剔除配置可回退。
     //
-    // MoltenVK 从 1.1.0 起支持，与 dynamic_rendering 的门槛一致。
+    // MoltenVK 从 1.1.0 起支持。
     const bool hasExtDynState =
         has_extension(devExtProps, VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME);
     if (hasExtDynState) {

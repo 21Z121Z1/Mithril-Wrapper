@@ -112,6 +112,30 @@ void commit_frame();
  */
 void reset_encoder_state();
 
+// Traditional render-pass infrastructure (MobileGL DirectVulkan architecture;
+// replaces the former VK_KHR_dynamic_rendering path).
+//
+// get_or_create_render_pass() returns a cached VkRenderPass for the given
+// attachment formats / samples / loadClear flavour. loadOp is CLEAR when
+// loadClear=true (a glClear-headed pass) and LOAD otherwise; loadOp is part
+// of the cache key because Vulkan fixes it at render-pass creation.
+//
+// get_or_create_framebuffer() returns a cached VkFramebuffer for a
+// (renderPass, views, extent) triple.
+//
+// get_template_render_pass() returns the canonical LOAD-flavour render pass
+// for a format set — the one graphics pipelines are created against. Any
+// draw-time render pass with the same formats is COMPATIBLE (Vulkan's
+// compatibility rules ignore loadOp/storeOp), so pipelines built against the
+// template bind correctly for every cached pass of that format set.
+VkRenderPass get_or_create_render_pass(const VkFormat* color_formats, int color_count,
+                                       VkFormat depth_format, int samples, bool loadClear);
+VkFramebuffer get_or_create_framebuffer(VkRenderPass rp,
+                                        const VkImageView* color_views, int color_count,
+                                        VkImageView depth_view, int width, int height);
+VkRenderPass get_template_render_pass(const VkFormat* color_formats, int color_count,
+                                      VkFormat depth_format, int samples);
+
 } // namespace vk
 } // namespace mithril
 
