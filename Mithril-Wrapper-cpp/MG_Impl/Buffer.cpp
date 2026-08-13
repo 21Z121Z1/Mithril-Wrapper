@@ -127,6 +127,7 @@ void glBufferData(GLenum target, GLsizeiptr size, const void* data, GLenum usage
     b->data.assign((size_t)size, 0);
     if (data && size > 0) std::memcpy(b->data.data(), data, (size_t)size);
     b->mapped = nullptr;
+    b->mappedDirect = false;
     // Recreate the VkBuffer (allocates + uploads).
     backend_get_or_create_buffer(b->id, data && size ? b->data.data() : nullptr, (size_t)size);
 }
@@ -150,6 +151,8 @@ void glBufferStorage(GLenum target, GLsizeiptr size, const void* data, GLbitfiel
     b->usage = GL_STATIC_DRAW;  // not used for immutable buffers
     b->immutable = true;
     b->storageFlags = flags;
+    b->mapped = nullptr;
+    b->mappedDirect = false;
     b->data.assign((size_t)size, 0);
     if (data && size > 0) std::memcpy(b->data.data(), data, (size_t)size);
 
@@ -196,7 +199,11 @@ void glCopyBufferSubData(GLenum readTarget, GLenum writeTarget,
         mithril::state_set_error(GL_INVALID_VALUE);
         return;
     }
-    std::memmove(dst->data.data() + writeOffset, src->data.data() + readOffset, (size_t)size);
+    const uint8_t* srcBytes = src->data.data();
+    if (void* directSrc = backend_get_buffer_mapped_pointer(src->id)) {
+        srcBytes = static_cast<const uint8_t*>(directSrc);
+    }
+    std::memmove(dst->data.data() + writeOffset, srcBytes + readOffset, (size_t)size);
     backend_buffer_upload(dst->id, writeOffset, dst->data.data() + writeOffset, (size_t)size);
 }
 
@@ -204,10 +211,17 @@ void* glMapBuffer(GLenum target, GLenum access) {
     MITHRIL_ENSURE_INIT();
     mithril::Buffer* b = bound_buffer_for_target(target);
     if (!b) { mithril::state_set_error(GL_INVALID_OPERATION); return nullptr; }
-    b->mapAccess  = access;
-    b->mapOffset  = 0;
-    b->mapLength  = b->size;
-    b->mapped     = b->data.data();
+    if (b->mapped) { mithril::state_set_error(GL_INVALID_OPERATION); return nullptr; }
+    b->mapAccess = access;
+    b->mapOffset = 0;
+    b->mapLength = b->size;
+    if (void* direct = backend_get_buffer_mapped_pointer(b->id)) {
+        b->mapped = direct;
+        b->mappedDirect = true;
+    } else {
+        b->mapped = b->data.data();
+        b->mappedDirect = false;
+    }
     return b->mapped;
 }
 
@@ -215,17 +229,26 @@ void* glMapBufferRange(GLenum target, GLintptr offset, GLsizeiptr length, GLbitf
     MITHRIL_ENSURE_INIT();
     mithril::Buffer* b = bound_buffer_for_target(target);
     if (!b) { mithril::state_set_error(GL_INVALID_OPERATION); return nullptr; }
+    if (b->mapped) { mithril::state_set_error(GL_INVALID_OPERATION); return nullptr; }
     if (offset < 0 || length <= 0 || offset + length > b->size) {
         mithril::state_set_error(GL_INVALID_VALUE);
         return nullptr;
     }
-    if (access & GL_MAP_INVALIDATE_BUFFER_BIT) {
-        std::memset(b->data.data(), 0, (size_t)b->size);
+    b->mapAccess = access;
+    b->mapOffset = offset;
+    b->mapLength = length;
+    if (void* direct = backend_get_buffer_mapped_pointer(b->id)) {
+        // INVALIDATE is a reuse hint, not a zero-fill guarantee. Do not clear
+        // live persistently-mapped VkDeviceMemory.
+        b->mapped = static_cast<uint8_t*>(direct) + offset;
+        b->mappedDirect = true;
+    } else {
+        if (access & GL_MAP_INVALIDATE_BUFFER_BIT) {
+            std::memset(b->data.data(), 0, (size_t)b->size);
+        }
+        b->mapped = b->data.data() + offset;
+        b->mappedDirect = false;
     }
-    b->mapAccess  = access;
-    b->mapOffset  = offset;
-    b->mapLength  = length;
-    b->mapped     = b->data.data() + offset;
     return b->mapped;
 }
 
@@ -233,9 +256,11 @@ GLboolean glUnmapBuffer(GLenum target) {
     MITHRIL_ENSURE_INIT();
     mithril::Buffer* b = bound_buffer_for_target(target);
     if (!b || !b->mapped) return GL_FALSE;
-    // Upload the (possibly) modified range to the VkBuffer.
-    backend_buffer_upload(b->id, b->mapOffset, b->mapped, (size_t)b->mapLength);
+    if (!b->mappedDirect) {
+        backend_buffer_upload(b->id, b->mapOffset, b->mapped, (size_t)b->mapLength);
+    }
     b->mapped = nullptr;
+    b->mappedDirect = false;
     return GL_TRUE;
 }
 
@@ -244,8 +269,17 @@ void glFlushMappedBufferRange(GLenum target, GLintptr offset, GLsizeiptr length)
     mithril::Buffer* b = bound_buffer_for_target(target);
     if (!b || !b->mapped) return;
     GLintptr base = b->mapOffset + offset;
-    if (base < 0 || length <= 0 || base + length > b->size) return;
-    backend_buffer_upload(b->id, base, (uint8_t*)b->mapped + offset, (size_t)length);
+    if (offset < 0 || base < 0 || length <= 0 || offset + length > b->mapLength ||
+        base + length > b->size) {
+        mithril::state_set_error(GL_INVALID_VALUE);
+        return;
+    }
+    if (b->mappedDirect) {
+        // Persistent GL storage currently uses HOST_COHERENT Vulkan memory.
+        return;
+    }
+    backend_buffer_upload(b->id, base, static_cast<uint8_t*>(b->mapped) + offset,
+                          (size_t)length);
 }
 
 void glGetBufferParameteriv(GLenum target, GLenum pname, GLint* params) {
@@ -270,7 +304,11 @@ void glGetBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, void* d
     mithril::Buffer* b = bound_buffer_for_target(target);
     if (!b) return;
     if (offset < 0 || offset + size > b->size) return;
-    std::memcpy(data, b->data.data() + offset, (size_t)size);
+    const uint8_t* src = b->data.data();
+    if (void* direct = backend_get_buffer_mapped_pointer(b->id)) {
+        src = static_cast<const uint8_t*>(direct);
+    }
+    std::memcpy(data, src + offset, (size_t)size);
 }
 
 void glBindBufferBase(GLenum target, GLuint index, GLuint buffer) {

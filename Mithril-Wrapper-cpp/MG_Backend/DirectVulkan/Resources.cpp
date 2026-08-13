@@ -1338,10 +1338,17 @@ void backend_buffer_upload(GLuint name, GLintptr offset, const void* data, size_
             mithril::vk::safe_device_wait_idle();
             if (!mithril::vk::buffer_maybe_inflight(it->second)) {
                 // 已脱离在飞：安全原地写入，数据必达 GPU。
-                void* dst = nullptr;
-                vkMapMemory(b->device, it->second.memory, (VkDeviceSize)offset,
-                            (VkDeviceSize)size, 0, &dst);
-                if (dst) { std::memcpy(dst, data, (size_t)size); vkUnmapMemory(b->device, it->second.memory); }
+                if (it->second.persistentlyMapped && it->second.mapped) {
+                    std::memcpy(static_cast<uint8_t*>(it->second.mapped) + offset, data, size);
+                } else {
+                    void* dst = nullptr;
+                    vkMapMemory(b->device, it->second.memory, (VkDeviceSize)offset,
+                                (VkDeviceSize)size, 0, &dst);
+                    if (dst) {
+                        std::memcpy(dst, data, (size_t)size);
+                        vkUnmapMemory(b->device, it->second.memory);
+                    }
+                }
                 mithril::vk::stamp_buffer_write(it->second);
                 return;
             }
@@ -1359,11 +1366,19 @@ void backend_buffer_upload(GLuint name, GLintptr offset, const void* data, size_
         mithril::vk::stamp_buffer_write(it->second);
         return;
     }
-    // Buffer 不在飞：可以安全原地更新。
-    void* dst = nullptr;
+    // Buffer 不在飞：可以安全原地更新。 Persistent storage is already
+    // mapped for its lifetime, so mapping it again would violate Vulkan.
     if (data && size > 0) {
-        vkMapMemory(b->device, it->second.memory, offset, size, 0, &dst);
-        if (dst) { std::memcpy(dst, data, size); vkUnmapMemory(b->device, it->second.memory); }
+        if (it->second.persistentlyMapped && it->second.mapped) {
+            std::memcpy(static_cast<uint8_t*>(it->second.mapped) + offset, data, size);
+        } else {
+            void* dst = nullptr;
+            vkMapMemory(b->device, it->second.memory, offset, size, 0, &dst);
+            if (dst) {
+                std::memcpy(dst, data, size);
+                vkUnmapMemory(b->device, it->second.memory);
+            }
+        }
     }
     mithril::vk::stamp_buffer_write(it->second);
 }

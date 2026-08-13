@@ -51,6 +51,8 @@ typedef void      (*bindVertexArray_fn)(GLuint);
 typedef void      (*genBuffers_fn)(GLsizei, GLuint*);
 typedef void      (*bindBuffer_fn)(GLenum, GLuint);
 typedef void      (*bufferData_fn)(GLenum, GLsizeiptr, const void*, GLenum);
+typedef void      (*bufferStorage_fn)(GLenum, GLsizeiptr, const void*, GLbitfield);
+typedef void*     (*mapBufferRange_fn)(GLenum, GLintptr, GLsizeiptr, GLbitfield);
 typedef void      (*vertexAttribPtr_fn)(GLuint, GLint, GLenum, GLboolean,
                                         GLsizei, const void*);
 typedef void      (*enableAttrib_fn)(GLuint);
@@ -147,6 +149,8 @@ int main(int argc, char** argv) {
     genBuffers_fn         genBuffers         = NULL;
     bindBuffer_fn         bindBuffer         = NULL;
     bufferData_fn         bufferData         = NULL;
+    bufferStorage_fn      bufferStorage      = NULL;
+    mapBufferRange_fn     mapBufferRange     = NULL;
     vertexAttribPtr_fn vertexAttribPtr   = NULL;
     enableAttrib_fn enableAttrib  = NULL;
     createShader_fn       createShader       = NULL;
@@ -200,6 +204,8 @@ int main(int argc, char** argv) {
     RESOLVE(genBuffers, "glGenBuffers");
     RESOLVE(bindBuffer, "glBindBuffer");
     RESOLVE(bufferData, "glBufferData");
+    RESOLVE(bufferStorage, "glBufferStorage");
+    RESOLVE(mapBufferRange, "glMapBufferRange");
     RESOLVE(vertexAttribPtr, "glVertexAttribPointer");
     RESOLVE(enableAttrib, "glEnableVertexAttribArray");
     RESOLVE(createShader, "glCreateShader");
@@ -409,6 +415,41 @@ int main(int argc, char** argv) {
     "glGetSynciv reports GL_SIGNALED after wait (status=0x%x)", status);
         deleteSync(sync);
         CHECK(getError() == GL_NO_ERROR, "GLsync lifecycle leaves no error");
+    }
+
+    /* ---- persistent coherent VBO: Sodium upload-ring semantics ----------- */
+    {
+        GLuint persistentVao = 0, persistentVbo = 0;
+        genVertexArrays(1, &persistentVao);
+        bindVertexArray(persistentVao);
+        genBuffers(1, &persistentVbo);
+        bindBuffer(GL_ARRAY_BUFFER, persistentVbo);
+        bufferStorage(GL_ARRAY_BUFFER, sizeof(verts), NULL,
+                      GL_MAP_WRITE_BIT | GL_MAP_PERSISTENT_BIT |
+                      GL_MAP_COHERENT_BIT | GL_DYNAMIC_STORAGE_BIT);
+        GLfloat* mappedVerts = (GLfloat*)mapBufferRange(
+            GL_ARRAY_BUFFER, 0, sizeof(verts),
+            GL_MAP_WRITE_BIT | GL_MAP_PERSISTENT_BIT | GL_MAP_COHERENT_BIT);
+        CHECK(mappedVerts != NULL, "persistent coherent VBO returns a live map");
+        if (mappedVerts) memcpy(mappedVerts, verts, sizeof(verts));
+        vertexAttribPtr(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(GLfloat), (const void*)0);
+        enableAttrib(0);
+        bindFramebuffer(GL_FRAMEBUFFER, fbo);
+        viewport(0, 0, R, C);
+        clearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        clear(GL_COLOR_BUFFER_BIT);
+        useProgram(prog);
+        // Deliberately no FlushMappedBufferRange and no UnmapBuffer.
+        drawArrays(GL_TRIANGLES, 0, 3);
+        finish();
+        unsigned char persistentPx[4] = {0,0,0,0};
+        readPixels(R / 2, C / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, persistentPx);
+        CHECK(persistentPx[0] > 128 && persistentPx[1] < 32 && persistentPx[2] < 32,
+              "persistent coherent VBO direct write reaches GPU (rgba=%d,%d,%d,%d)",
+              persistentPx[0], persistentPx[1], persistentPx[2], persistentPx[3]);
+        CHECK(getError() == GL_NO_ERROR, "persistent-map draw leaves no GL error");
+        bindVertexArray(vao);
+        bindBuffer(GL_ARRAY_BUFFER, vbo);
     }
 
     /* =====================================================================

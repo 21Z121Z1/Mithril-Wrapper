@@ -275,6 +275,9 @@ struct Buffer {
     GLenum       usage = GL_STATIC_DRAW;
     std::vector<uint8_t> data;
     void*        mapped = nullptr;
+    // True when mapped aliases the persistent Vulkan host mapping rather
+    // than the CPU shadow vector. Direct maps must not be re-uploaded.
+    bool         mappedDirect = false;
     GLbitfield   mapAccess = 0;
     GLintptr     mapOffset = 0;
     GLsizeiptr   mapLength = 0;
