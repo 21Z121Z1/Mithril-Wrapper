@@ -210,8 +210,8 @@ pm_done:
     }
 
     // Acquire semaphores: one per frame slot. Before a slot is reused,
-    ensure_command_buffer_recording() waits its fence, proving the previous
-    queue wait on that acquire semaphore has completed.
+    // ensure_command_buffer_recording() waits its fence, proving the previous
+    // queue wait on that acquire semaphore has completed.
     VkSemaphoreCreateInfo semi{};
     semi.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
     sc->imageAvailablePerFrame.resize(kMaxFramesInFlight, VK_NULL_HANDLE);

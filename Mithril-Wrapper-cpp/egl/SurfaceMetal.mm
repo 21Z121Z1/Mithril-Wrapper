@@ -36,7 +36,10 @@ extern "C" void* surface_create(void* native_window, int* out_w, int* out_h) {
         mtlLayer = [CAMetalLayer layer];
         mtlLayer.frame = layer.bounds;
         mtlLayer.contentsScale = layer.contentsScale > 0.0 ? layer.contentsScale : 1.0;
-        mtlLayer.autoresizingMask = kCALayerWidthSizable | kCALayerHeightSizable;
+        // CALayer autoresizingMask is unavailable on iOS. Mark our child so
+        // surface_get_size() can synchronize it to the parent after UIView
+        // layout (including the common create-at-0x0 then resize startup path).
+        mtlLayer.name = @"Mithril-Wrapper-owned-CAMetalLayer";
         mtlLayer.delegate = layer.delegate;
         [layer addSublayer:mtlLayer];
         MITHRIL_LOG_WARN("egl", "SurfaceMetal: host supplied CALayer; created a dedicated CAMetalLayer child");
@@ -121,6 +124,15 @@ extern "C" bool surface_get_size(void* native_window, int* out_w, int* out_h) {
     CALayer* layer = (__bridge CALayer*)native_window;
     if (![layer isKindOfClass:[CAMetalLayer class]]) return false;
     CAMetalLayer* mtlLayer = (CAMetalLayer*)layer;
+    if ([mtlLayer.name isEqualToString:@"Mithril-Wrapper-owned-CAMetalLayer"] &&
+        mtlLayer.superlayer) {
+        CALayer* parent = mtlLayer.superlayer;
+        const CGFloat scale = parent.contentsScale > 0.0 ? parent.contentsScale : 1.0;
+        mtlLayer.frame = parent.bounds;
+        mtlLayer.contentsScale = scale;
+        const CGSize bounds = parent.bounds.size;
+        mtlLayer.drawableSize = CGSizeMake(bounds.width * scale, bounds.height * scale);
+    }
     CGSize sz = mtlLayer.drawableSize;
     if (out_w) *out_w = (int)sz.width;
     if (out_h) *out_h = (int)sz.height;
