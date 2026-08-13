@@ -138,3 +138,21 @@ extern "C" bool surface_get_size(void* native_window, int* out_w, int* out_h) {
     if (out_h) *out_h = (int)sz.height;
     return true;
 }
+
+
+// ---------------------------------------------------------------------------
+// surface_destroy: release platform state owned by Mithril without touching a
+// host-provided CAMetalLayer.  Repeated EGLSurface recreation (rotation,
+// background/foreground, device-loss recovery) must not leave stale Metal
+// children stacked under the host view's CALayer.
+// ---------------------------------------------------------------------------
+extern "C" void surface_destroy(void* native_window) {
+    if (!native_window) return;
+    CALayer* layer = (__bridge CALayer*)native_window;
+    if (![layer isKindOfClass:[CAMetalLayer class]]) return;
+    CAMetalLayer* mtlLayer = (CAMetalLayer*)layer;
+    if ([mtlLayer.name isEqualToString:@"Mithril-Wrapper-owned-CAMetalLayer"] &&
+        mtlLayer.superlayer) {
+        [mtlLayer removeFromSuperlayer];
+    }
+}

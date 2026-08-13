@@ -6,6 +6,7 @@
 
 using surface_create_fn = void* (*)(void*, int*, int*);
 using surface_get_size_fn = bool (*)(void*, int*, int*);
+using surface_destroy_fn = void (*)(void*);
 
 static int failures = 0;
 #define CHECK(c, fmt, ...) do { if (c) printf("ok : " fmt "\n", ##__VA_ARGS__); \
@@ -17,8 +18,9 @@ int main(int argc, char** argv) {
     if (!h) { fprintf(stderr, "dlopen: %s\n", dlerror()); return 2; }
     auto surface_create = (surface_create_fn)dlsym(h, "surface_create");
     auto surface_get_size = (surface_get_size_fn)dlsym(h, "surface_get_size");
-    CHECK(surface_create && surface_get_size, "surface Metal entry points exported");
-    if (!surface_create || !surface_get_size) return 1;
+    auto surface_destroy = (surface_destroy_fn)dlsym(h, "surface_destroy");
+    CHECK(surface_create && surface_get_size && surface_destroy, "surface Metal entry points exported");
+    if (!surface_create || !surface_get_size || !surface_destroy) return 1;
 
     @autoreleasepool {
         CALayer* parent = [CALayer layer];
@@ -36,6 +38,8 @@ int main(int argc, char** argv) {
         int qw = 0, qh = 0;
         CHECK(surface_get_size((__bridge void*)metal, &qw, &qh) && qw == 200 && qh == 100,
               "surface_get_size reports pixel drawable size (%dx%d)", qw, qh);
+        surface_destroy((__bridge void*)metal);
+        CHECK(metal.superlayer == nil, "owned fallback CAMetalLayer detaches on surface_destroy");
 
         CAMetalLayer* existing = [CAMetalLayer layer];
         existing.bounds = CGRectMake(0, 0, 80, 40);
@@ -45,6 +49,9 @@ int main(int argc, char** argv) {
         void* same = surface_create((__bridge void*)existing, &ew, &eh);
         CHECK((__bridge CAMetalLayer*)same == existing, "existing CAMetalLayer is reused");
         CHECK(ew == 123 && eh == 77, "existing nonzero drawableSize is preserved (%dx%d)", ew, eh);
+        surface_destroy((__bridge void*)existing);
+        CHECK((__bridge CAMetalLayer*)same == existing,
+              "surface_destroy never replaces or invalidates host CAMetalLayer");
     }
     dlclose(h);
     printf("SURFACE METAL SMOKE: %d failure(s)\n", failures);
