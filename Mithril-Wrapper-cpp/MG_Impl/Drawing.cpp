@@ -49,6 +49,7 @@
 #include "includes.h"
 #include "Framebuffer.h"
 #include "../MG_Backend/DirectVulkan/LogRing.h"  // draw 路径打点（GPU fault 诊断）
+#include "../MG_Backend/DirectVulkan/Device.h"   // real GLsync submission serials
 
 #include <algorithm>
 #include <cstring>
@@ -143,16 +144,14 @@ static bool prepare_draw(GLenum mode) {
     VkImageView depth_view = VK_NULL_HANDLE;
     int w = 0, h = 0;
     int color_count = mithril::collect_draw_fbo_attachments(colors, &depth_view, &w, &h);
-    // Defensive: if no color attachment is bound at all (e.g. the EGL default
-    // framebuffer has no swapchain yet because the surface isn't sized), skip
-    // the draw. Beginning a render pass with all-null attachments produces a
-    // validation error and a no-op pass on MoltenVK, so skipping is both
-    // cheaper and avoids log spam.
+    // A framebuffer may legally be depth-only (shadow maps / depth prepasses).
+    // Reject only a truly attachment-less target.  The Vulkan render-pass path
+    // below already supports color_count==0 with a valid depth attachment.
     if (color_count <= 0) {
         bool any_color = false;
         for (int i = 0; i < 8; ++i) if (colors[i] != VK_NULL_HANDLE) { any_color = true; break; }
-        if (!any_color) {
-            log_prepare_draw_miss("no color attachment (eglDefaultColor unset or FBO empty)",
+        if (!any_color && depth_view == VK_NULL_HANDLE) {
+            log_prepare_draw_miss("no framebuffer attachment (default surface unavailable or FBO empty)",
                                   prog->id);
             return false;
         }
@@ -1014,22 +1013,34 @@ void glTextureBarrier(void) {
     backend_memory_barrier(GL_FRAMEBUFFER_BARRIER_BIT);
 }
 
-/* ---- Sync objects (P1-16 FIX) ---- */
-// Real state tracking via g_state->syncObjects. Handles are allocated from
-// g_state->nextSyncHandle (monotonic, avoids the sentinel 0x1). CPU-side
-// fences are considered immediately signaled, matching the previous stub
-// behaviour but with proper existence/identity checks.
+/* ---- Sync objects: real GPU completion semantics ------------------------- */
+// The DirectVulkan backend already tracks a monotonically increasing serial for
+// every vkQueueSubmit and associates it with the frame-slot fence.  GL syncs
+// must use that mechanism: reporting a fence as signaled at creation lets
+// persistent-mapped upload rings overwrite bytes the GPU is still consuming.
 GLsync glFenceSync(GLenum condition, GLbitfield flags) {
     MITHRIL_ENSURE_INIT();
     if (condition != GL_SYNC_GPU_COMMANDS_COMPLETE) {
         mithril::state_set_error(GL_INVALID_ENUM);
         return nullptr;
     }
+    if (flags != 0) {
+        mithril::state_set_error(GL_INVALID_VALUE);
+        return nullptr;
+    }
+
+    // Eagerly flush commands preceding the fence. Drivers are allowed to flush
+    // earlier than required; doing it here gives the software fence an exact
+    // Vulkan submission serial without inventing a second synchronization path.
+    backend_end_render_pass();
+    backend_commit();
+
     mithril::Sync sync;
     sync.handle = g_state->nextSyncHandle;
     sync.condition = condition;
     sync.flags = flags;
-    sync.signaled = true;  // CPU-side fence is immediately signaled
+    sync.submitSerial = mithril::vk::backend_current_submit_serial();
+    sync.signaled = sync.submitSerial <= mithril::vk::backend_last_completed_serial();
     sync.markedForDeletion = false;
     g_state->syncObjects[sync.handle] = sync;
     g_state->nextSyncHandle = reinterpret_cast<void*>(
@@ -1041,23 +1052,69 @@ void glDeleteSync(GLsync sync) {
     MITHRIL_ENSURE_INIT();
     if (!sync) return;
     void* handle = reinterpret_cast<void*>(sync);
-    g_state->syncObjects.erase(handle);
+    auto it = g_state->syncObjects.find(handle);
+    if (it == g_state->syncObjects.end()) {
+        mithril::state_set_error(GL_INVALID_VALUE);
+        return;
+    }
+    g_state->syncObjects.erase(it);
 }
 
 GLenum glClientWaitSync(GLsync sync, GLbitfield flags, GLuint64 timeout) {
     MITHRIL_ENSURE_INIT();
-    (void)flags; (void)timeout;
-    if (!sync) return GL_WAIT_FAILED;
+    if (!sync) {
+        mithril::state_set_error(GL_INVALID_VALUE);
+        return GL_WAIT_FAILED;
+    }
+    if (flags & ~GL_SYNC_FLUSH_COMMANDS_BIT) {
+        mithril::state_set_error(GL_INVALID_VALUE);
+        return GL_WAIT_FAILED;
+    }
     void* handle = reinterpret_cast<void*>(sync);
     auto it = g_state->syncObjects.find(handle);
-    if (it == g_state->syncObjects.end()) return GL_WAIT_FAILED;
-    return it->second.signaled ? GL_ALREADY_SIGNALED : GL_TIMEOUT_EXPIRED;
+    if (it == g_state->syncObjects.end()) {
+        mithril::state_set_error(GL_INVALID_VALUE);
+        return GL_WAIT_FAILED;
+    }
+    mithril::Sync& s = it->second;
+
+    if (s.submitSerial <= mithril::vk::backend_last_completed_serial()) {
+        s.signaled = true;
+        return GL_ALREADY_SIGNALED;
+    }
+
+    // glFenceSync currently flushes eagerly, but honour the API flag as well so
+    // this remains correct if fence creation becomes lazy in the future.
+    if (flags & GL_SYNC_FLUSH_COMMANDS_BIT) {
+        backend_end_render_pass();
+        backend_commit();
+    }
+
+    if (mithril::vk::backend_wait_serial(s.submitSerial, (uint64_t)timeout)) {
+        s.signaled = true;
+        return GL_CONDITION_SATISFIED;
+    }
+    return GL_TIMEOUT_EXPIRED;
 }
 
 void glWaitSync(GLsync sync, GLbitfield flags, GLuint64 timeout) {
     MITHRIL_ENSURE_INIT();
-    (void)sync; (void)flags; (void)timeout;
-    // No-op: CPU-side fences are immediately signaled.
+    if (!sync || flags != 0 || timeout != GL_TIMEOUT_IGNORED) {
+        mithril::state_set_error(GL_INVALID_VALUE);
+        return;
+    }
+    void* handle = reinterpret_cast<void*>(sync);
+    auto it = g_state->syncObjects.find(handle);
+    if (it == g_state->syncObjects.end()) {
+        mithril::state_set_error(GL_INVALID_VALUE);
+        return;
+    }
+    // Mithril uses one Vulkan graphics queue for all contexts. A host wait is
+    // conservative but preserves GL server-wait semantics across thread/context
+    // hand-offs until a native VkSemaphore-backed cross-context path exists.
+    if (mithril::vk::backend_wait_serial(it->second.submitSerial, UINT64_MAX)) {
+        it->second.signaled = true;
+    }
 }
 
 GLboolean glIsSync(GLsync sync) {
@@ -1071,19 +1128,30 @@ GLboolean glIsSync(GLsync sync) {
 void glGetSynciv(GLsync sync, GLenum pname, GLsizei bufSize, GLsizei* length, GLint* values) {
     MITHRIL_ENSURE_INIT();
     if (length) *length = 0;
-    if (bufSize < 0 || !values || bufSize == 0) return;
-    if (!sync) return;
+    if (bufSize < 0) {
+        mithril::state_set_error(GL_INVALID_VALUE);
+        return;
+    }
+    if (!sync || !values || bufSize == 0) return;
     void* handle = reinterpret_cast<void*>(sync);
     auto it = g_state->syncObjects.find(handle);
-    if (it == g_state->syncObjects.end()) return;
-    const mithril::Sync& s = it->second;
+    if (it == g_state->syncObjects.end()) {
+        mithril::state_set_error(GL_INVALID_VALUE);
+        return;
+    }
+    mithril::Sync& s = it->second;
+    if (!s.signaled && s.submitSerial <= mithril::vk::backend_last_completed_serial()) {
+        s.signaled = true;
+    }
     GLint v = 0;
     switch (pname) {
         case GL_OBJECT_TYPE:    v = GL_SYNC_FENCE; break;
         case GL_SYNC_CONDITION: v = (GLint)s.condition; break;
         case GL_SYNC_FLAGS:     v = (GLint)s.flags; break;
         case GL_SYNC_STATUS:    v = s.signaled ? GL_SIGNALED : GL_UNSIGNALED; break;
-        default: return;
+        default:
+  mithril::state_set_error(GL_INVALID_ENUM);
+  return;
     }
     values[0] = v;
     if (length) *length = 1;

@@ -11,7 +11,6 @@
 #import <Metal/Metal.h>
 #import <QuartzCore/QuartzCore.h>
 #import <Foundation/Foundation.h>
-#import <objc/runtime.h>   // object_setClass() for layer coercion
 
 #include "../MG_Impl/Log.h"
 
@@ -27,22 +26,20 @@ extern "C" void* surface_create(void* native_window, int* out_w, int* out_h) {
 
     CALayer* layer = (__bridge CALayer*)native_window;
     CAMetalLayer* mtlLayer = nil;
-    bool coerced = false;
     if ([layer isKindOfClass:[CAMetalLayer class]]) {
         mtlLayer = (CAMetalLayer*)layer;
         MITHRIL_LOG_INFO("egl", "SurfaceMetal: layer is already CAMetalLayer");
     } else {
-        // Coerce: replace the layer's class with CAMetalLayer.
-        // NOTE: object_setClass on a CALayer to make it a CAMetalLayer is
-        // fundamentally unsafe — CAMetalLayer may add ivars (e.g. device
-        // storage) that a plain CALayer doesn't have, causing memory
-        // corruption when those ivars are accessed. This path should ideally
-        // never be taken; the host app MUST provide a CAMetalLayer.
-        MITHRIL_LOG_WARN("egl", "SurfaceMetal: coercing CALayer -> CAMetalLayer "
-                          "(unsafe, may corrupt memory!)");
-        object_setClass(layer, [CAMetalLayer class]);
-        mtlLayer = (CAMetalLayer*)layer;
-        coerced = true;
+        // Never object_setClass(CALayer, CAMetalLayer): the subclasses do not
+        // have a compatible object layout. Create a genuine Metal child layer
+        // and let the parent retain it for the EGLSurface lifetime.
+        mtlLayer = [CAMetalLayer layer];
+        mtlLayer.frame = layer.bounds;
+        mtlLayer.contentsScale = layer.contentsScale > 0.0 ? layer.contentsScale : 1.0;
+        mtlLayer.autoresizingMask = kCALayerWidthSizable | kCALayerHeightSizable;
+        mtlLayer.delegate = layer.delegate;
+        [layer addSublayer:mtlLayer];
+        MITHRIL_LOG_WARN("egl", "SurfaceMetal: host supplied CALayer; created a dedicated CAMetalLayer child");
     }
     if (!mtlLayer) {
         MITHRIL_LOG_WARN("egl", "SurfaceMetal: CAMetalLayer coercion failed");
@@ -102,7 +99,12 @@ extern "C" void* surface_create(void* native_window, int* out_w, int* out_h) {
     // enough to race with the next present.
     mtlLayer.opaque = YES;
     if (mtlLayer.drawableSize.width == 0 || mtlLayer.drawableSize.height == 0) {
-        mtlLayer.drawableSize = layer.bounds.size;
+        // CALayer bounds are in points; CAMetalLayer.drawableSize is pixels.
+        // Preserve an already-configured drawableSize (dynamic-resolution hosts),
+        // but when deriving it ourselves multiply by contentsScale.
+        const CGFloat scale = mtlLayer.contentsScale > 0.0 ? mtlLayer.contentsScale : 1.0;
+        const CGSize bounds = mtlLayer.bounds.size;
+        mtlLayer.drawableSize = CGSizeMake(bounds.width * scale, bounds.height * scale);
     }
 
     if (out_w) *out_w = (int)mtlLayer.drawableSize.width;

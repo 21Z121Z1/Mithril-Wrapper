@@ -625,9 +625,10 @@ bool init_device() {
     //   commit_frame 中的 dummy render pass（CommandStream.cpp:706-768）
     //   和 imageAvailable semaphore 等待解决，不再依赖 prefill。
     //
-    // MVK_CONFIG_RESUME_LOST_DEVICE=1: Automatically attempt to recover from
-    //   VK_ERROR_DEVICE_LOST by re-creating the VkDevice. Without this, a
-    //   single GPU error permanently kills rendering (black screen forever).
+    // MVK_CONFIG_RESUME_LOST_DEVICE=1: allow MoltenVK to continue using a Metal
+    //   device after a recoverable loss when the underlying physical device
+    //   remains usable. It does NOT recreate VkDevice; Mithril owns rebuild.
+    //   Keeping this enabled avoids needlessly making recoverable faults sticky.
     //
     // MVK_CONFIG_SHADER_CONVERSION_FLIP_VERTEX_Y=0: MoltenVK's global vertex Y
     //   flip is DISABLED. Y flipping is now handled at the shader-translation
@@ -640,7 +641,7 @@ bool init_device() {
     //   Deep reference: MobileGL GetShaderTransformFlags applies PositionYFlip
     //   only when currentDrawFBO->IsDefaultFramebuffer(), never globally.
     //
-    // MVK_CONFIG_SUBMIT_COMMAND_BUFFERS_PER_QUEUE=2 (深度参考 MobileGL 缺口):
+    // MVK_CONFIG_MAX_ACTIVE_METAL_COMMAND_BUFFERS_PER_QUEUE=2 (深度参考 MobileGL 缺口):
     //   限制每个 queue 同时未完成的 command buffer 数量。MoltenVK 默认
     //   是 64（即允许 64 个 command buffer 并发编码），每个 command buffer
     //   都会预分配 Metal 资源（编码器、IOSurface 引用等）。在 iPhone SE 3
@@ -656,7 +657,7 @@ bool init_device() {
     setenv("MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS", "0", 1);
     setenv("MVK_CONFIG_RESUME_LOST_DEVICE", "1", 1);
     setenv("MVK_CONFIG_SHADER_CONVERSION_FLIP_VERTEX_Y", "0", 1);
-    setenv("MVK_CONFIG_SUBMIT_COMMAND_BUFFERS_PER_QUEUE", "2", 1);
+    setenv("MVK_CONFIG_MAX_ACTIVE_METAL_COMMAND_BUFFERS_PER_QUEUE", "2", 1);
     // MVK_CONFIG_FAST_MATH_ENABLED=1: MoltenVK 用 fast-math 编译 MSL。
     // 真机 GPU Address Fault（kIOGPUCommandBufferCallbackErrorPageFault）
     // 在 A11 + iOS 16 上偶发于特定 shader 模式（如带 mip bias 的采样、
@@ -665,13 +666,13 @@ bool init_device() {
     // kIOGPUCommandBufferCallbackErrorPageFault 的标准 workaround）。
     // 对 MC 渲染无可见副作用（MC shader 均为常规 float 运算）。
     setenv("MVK_CONFIG_FAST_MATH_ENABLED", "1", 1);
-    // MVK_CONFIG_LOG_LEVEL=3 (Debug): 让 MoltenVK 输出 GPU fault 的详细
+    // MVK_CONFIG_LOG_LEVEL=3 (Info): 让 MoltenVK 输出 GPU fault 的详细
     // 上下文（fault 地址、涉及的 MTLCommandBuffer/资源）——日志里目前只有
     // 错误码 kIOGPUCommandBufferCallbackErrorPageFault，无 fault 地址。
-    // Debug 级别能看到 MoltenVK 内部对 GPU Address Fault 的地址转储，
-    // 是定位"哪个 GPU 资源被无效访问"的唯一手段。4=Info 会太吵。
+    // Info 级别保留 error/warning/info 诊断而不过度刷日志；
+    // MoltenVK 的 Debug 级别是 4，仅在专项抓取时临时开启。
     setenv("MVK_CONFIG_LOG_LEVEL", "3", 1);
-    // MVK_CONFIG_VK_SEMAPHORE_SUPPORT_STYLE=1 (根因 E，深度参考 MoltenVK):
+    // MVK_CONFIG_VK_SEMAPHORE_SUPPORT_STYLE=2 (根因 E，深度参考 MoltenVK):
     //   强制使用 Metal 信号量（真实 GPU 侧同步）。Mithril 的同步设计完全
     //   依赖 Vulkan semaphore（imageAvailable: acquire→render；renderFinished:
     //   render→present）。MoltenVK 默认 VK_SEMAPHORE_SUPPORT_STYLE_METAL_EVENTS_WHERE_SAFE
@@ -679,9 +680,9 @@ bool init_device() {
     //   SingleQueue 模式，此时 vkQueueSubmit 的 semaphore wait/signal 全是 no-op
     //   （MVKSync.mm:87-101），GPU 侧无真实同步 → 渲染读取 stale image / present
     //   读取未完成像素 → 黑屏有声音。
-    //   显式设为 1（METAL_SEMAPHORE）强制所有平台使用真实 Metal 信号量，
+    //   显式设为 2（METAL_EVENTS_WHERE_AVAILABLE）在可用平台强制使用 MTLEvent，
     //   消除跨 MoltenVK 版本/平台的不确定性。参考 MoltenVK MVKDevice.mm:3621-3627。
-    setenv("MVK_CONFIG_VK_SEMAPHORE_SUPPORT_STYLE", "1", 1);
+    setenv("MVK_CONFIG_VK_SEMAPHORE_SUPPORT_STYLE", "2", 1);
 
     // ---- Instance ----
     std::vector<VkExtensionProperties> instExtProps;

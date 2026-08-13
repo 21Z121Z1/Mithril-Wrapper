@@ -194,10 +194,10 @@ static VkRenderPass impl_get_or_create_render_pass(const VkFormat* color_formats
     RenderPassKey key{};
     key.colorCount = (uint32_t)color_count;
     key.depthFormat = depth_format;
-    key.samples = (samples > 1) ? VK_SAMPLE_COUNT_2_BIT
-                 : (samples > 2) ? VK_SAMPLE_COUNT_4_BIT
-                 : (samples > 4) ? VK_SAMPLE_COUNT_8_BIT
-                 : (samples > 8) ? VK_SAMPLE_COUNT_16_BIT
+    key.samples = (samples >= 16) ? VK_SAMPLE_COUNT_16_BIT
+                 : (samples >= 8) ? VK_SAMPLE_COUNT_8_BIT
+                 : (samples >= 4) ? VK_SAMPLE_COUNT_4_BIT
+                 : (samples >= 2) ? VK_SAMPLE_COUNT_2_BIT
                  : VK_SAMPLE_COUNT_1_BIT;
     key.loadClear = loadClear;
     for (int i = 0; i < color_count; ++i) key.colorFormats[i] = validFmts[i];
@@ -1840,11 +1840,18 @@ void commit_frame() {
     // (FrameContext.cpp:191-193).
     VkSemaphore waitSemaphore = VK_NULL_HANDLE;
     VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    if (sc && sc->imageAvailable != VK_NULL_HANDLE && !sc->imageAvailableConsumed) {
-        waitSemaphore = sc->imageAvailable;
-        si.waitSemaphoreCount = 1;
-        si.pWaitSemaphores = &waitSemaphore;
-        si.pWaitDstStageMask = &waitStage;
+    if (sc && !sc->imageAvailableConsumed) {
+        const int slot = sc->imageAvailableFrameSlot;
+        if (slot >= 0 && slot < (int)sc->imageAvailablePerFrame.size() &&
+            sc->imageAvailablePerFrame[slot] != VK_NULL_HANDLE) {
+            waitSemaphore = sc->imageAvailablePerFrame[slot];
+            si.waitSemaphoreCount = 1;
+            si.pWaitSemaphores = &waitSemaphore;
+            si.pWaitDstStageMask = &waitStage;
+        } else {
+            MITHRIL_LOG_ERROR("vk", "commit_frame: acquired swapchain image has no valid acquire semaphore");
+            sc->needsRebuild = true;
+        }
     }
 
     // ---- Signal renderFinished so present can wait on it ----

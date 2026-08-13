@@ -16,6 +16,7 @@
 //     must call vkDestroySurfaceKHR(b->instance, surface, nullptr) itself.
 #include "Swapchain.h"
 #include "Device.h"
+#include "CommandStream.h"
 #include "Resources.h"
 #include "../../MG_Impl/Log.h"
 #include "LogRing.h"   // device lost 时 dump 资源操作环形日志
@@ -208,10 +209,19 @@ pm_done:
         vkCreateImageView(b->device, &vci, nullptr, &sc->views[i]);
     }
 
-    // Acquire semaphore.
+    // Acquire semaphores: one per frame slot. Before a slot is reused,
+    ensure_command_buffer_recording() waits its fence, proving the previous
+    queue wait on that acquire semaphore has completed.
     VkSemaphoreCreateInfo semi{};
     semi.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-    vkCreateSemaphore(b->device, &semi, nullptr, &sc->imageAvailable);
+    sc->imageAvailablePerFrame.resize(kMaxFramesInFlight, VK_NULL_HANDLE);
+    for (int i = 0; i < kMaxFramesInFlight; ++i) {
+        if (vkCreateSemaphore(b->device, &semi, nullptr, &sc->imageAvailablePerFrame[i]) != VK_SUCCESS) {
+            MITHRIL_LOG_ERROR("vk", "failed to create acquire semaphore for frame slot %d", i);
+            destroy_swapchain(sc);
+            return nullptr;
+        }
+    }
 
     // Per-swapchain-image render-finished semaphores. One per swapchain image
     // so present always waits on the exact semaphore signaled by the submit
@@ -314,7 +324,11 @@ void destroy_swapchain(Swapchain* sc) {
     for (auto& v : sc->views) if (v) vkDestroyImageView(b->device, v, nullptr);
     sc->views.clear();
     sc->images.clear();
-    if (sc->imageAvailable) { vkDestroySemaphore(b->device, sc->imageAvailable, nullptr); sc->imageAvailable = VK_NULL_HANDLE; }
+    for (auto& sem : sc->imageAvailablePerFrame) {
+        if (sem) { vkDestroySemaphore(b->device, sem, nullptr); sem = VK_NULL_HANDLE; }
+    }
+    sc->imageAvailablePerFrame.clear();
+    sc->imageAvailableFrameSlot = -1;
     for (auto& sem : sc->renderFinishedPerImage) {
         if (sem) { vkDestroySemaphore(b->device, sem, nullptr); sem = VK_NULL_HANDLE; }
     }
@@ -341,9 +355,23 @@ VkImageView swapchain_acquire_color(Swapchain* sc) {
         return VK_NULL_HANDLE;  // 持久性故障已挂起，跳过 acquire
     }
     if (sc->currentImage < 0) {
+        // Standard Vulkan frame loop: retire the frame slot before reusing
+        // its acquire semaphore. ensure_command_buffer_recording() waits the
+        // slot fence (if pending), drains deferred resources, then begins the
+        // slot's command buffer. This proves the previous wait operation on
+        // imageAvailablePerFrame[slot] has completed.
+        if (!ensure_command_buffer_recording()) return VK_NULL_HANDLE;
+        const int acquireSlot = b->currentFrame;
+        if (acquireSlot < 0 || acquireSlot >= (int)sc->imageAvailablePerFrame.size() ||
+            sc->imageAvailablePerFrame[acquireSlot] == VK_NULL_HANDLE) {
+            MITHRIL_LOG_ERROR("vk", "swapchain acquire has no semaphore for frame slot %d", acquireSlot);
+            sc->needsRebuild = true;
+            return VK_NULL_HANDLE;
+        }
         uint32_t idx = 0;
         VkResult r = vkAcquireNextImageKHR(b->device, sc->swapchain, UINT64_MAX,
-                                           sc->imageAvailable, VK_NULL_HANDLE, &idx);
+                                           sc->imageAvailablePerFrame[acquireSlot],
+                                           VK_NULL_HANDLE, &idx);
         if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) {
             // FIX (VK_TIMEOUT 根因 - 深度参考 MobileGL):
             // VK_TIMEOUT 在 UINT64_MAX 超时下意味着 GPU watchdog 触发
@@ -390,6 +418,7 @@ VkImageView swapchain_acquire_color(Swapchain* sc) {
                 // （在本帧没有 acquire 成功的情况下等待 acquire 信号是 UB）。
                 // 下次成功 acquire 时 swapchain_acquire_color 会重置为 false。
                 sc->imageAvailableConsumed = true;
+                sc->imageAvailableFrameSlot = -1;
                 // 不标记 needsRebuild：swapchain 还活着，下帧重试
                 return VK_NULL_HANDLE;
             }
@@ -417,10 +446,12 @@ VkImageView swapchain_acquire_color(Swapchain* sc) {
             // FIX (缺口 3): 这些致命错误下 imageAvailable semaphore 状态
             // 也未定义。标记为已消费，避免后续 commit_frame 等待它。
             sc->imageAvailableConsumed = true;
+            sc->imageAvailableFrameSlot = -1;
             sc->needsRebuild = true;
             return VK_NULL_HANDLE;
         }
         sc->currentImage = (int)idx;
+        sc->imageAvailableFrameSlot = acquireSlot;
         // After acquire the image's actual layout is PRESENT_SRC_KHR (or
         // UNDEFINED on the very first acquire of that image). We deliberately
         // record the upcoming acquire->attachment barrier with oldLayout =
