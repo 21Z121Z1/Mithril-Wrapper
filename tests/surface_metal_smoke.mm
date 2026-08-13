@@ -35,7 +35,7 @@ int main(int argc, char** argv) {
         CHECK(w == 200 && hgt == 100, "drawableSize derives pixels from bounds*contentsScale (%dx%d)", w, hgt);
         int qw = 0, qh = 0;
         CHECK(surface_get_size((__bridge void*)metal, &qw, &qh) && qw == 200 && qh == 100,
-    "surface_get_size reports pixel drawable size (%dx%d)", qw, qh);
+              "surface_get_size reports pixel drawable size (%dx%d)", qw, qh);
 
         CAMetalLayer* existing = [CAMetalLayer layer];
         existing.bounds = CGRectMake(0, 0, 80, 40);
