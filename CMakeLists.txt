@@ -211,13 +211,6 @@ set(MITHRIL_SOURCES
 # (SwapchainMetal.mm) call create_swapchain_post_surface
     # after creating the VkSurfaceKHR.
     Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/SwapchainCommon.cpp
-    # SwapchainHeadless.cpp: Linux/headless swapchain stub (memory-backed
-    # color/depth images). Only needed for running tests/render_smoke.c on a
-    # non-Apple CI box; the Apple build uses SwapchainMetal.mm instead.
-    Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/SwapchainHeadless.cpp
-    # SurfaceHeadless.cpp: Linux/headless EGL surface stub (surface_create /
-    # surface_get_size). Apple build uses SurfaceMetal.mm instead.
-    Mithril-Wrapper-cpp/egl/SurfaceHeadless.cpp
 
     # MG_Impl: pure-logic EGL config table extracted from the EGL layer so it
     # can be unit-tested without an ObjC++ toolchain. Compiled into every
@@ -378,6 +371,15 @@ if(APPLE)
         Mithril-Wrapper-cpp/MG_Impl/Getter_gpu.mm
         Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/SwapchainMetal.mm
         PROPERTIES COMPILE_FLAGS "-fobjc-arc"
+    )
+else()
+    # Non-Apple (Linux CI / headless) swapchain + EGL surface stubs. The
+    # Apple build gets these symbols from SwapchainMetal.mm / SurfaceMetal.mm;
+    # on Linux they are memory-backed stand-ins so tests/render_smoke.c can
+    # exercise the full GL -> Vulkan draw path against lavapipe.
+    target_sources(${PROJECT_NAME} PRIVATE
+        Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/SwapchainHeadless.cpp
+        Mithril-Wrapper-cpp/egl/SurfaceHeadless.cpp
     )
 endif()
 
