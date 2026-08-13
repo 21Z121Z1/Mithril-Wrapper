@@ -100,9 +100,24 @@ static mithril::Texture* bound_texture_for_target(GLenum target) {
     if (unit >= mithril::kMaxTextureUnits) return nullptr;
     GLuint id = g_state->textureBindings[unit][(int)tt].name;
     mithril::Texture* t = mithril::state_get_texture(id);
-    if (t && t->target != target) {
-        mithril::state_set_error(GL_INVALID_OPERATION);
-        return nullptr;
+    if (t) {
+        // FIX (主菜单 panorama cubemap GPU fault 根因): target 一致性检查必须
+        // 归一化 cubemap 的 6 个 face target（GL_TEXTURE_CUBE_MAP_POSITIVE_X 等）。
+        // 旧实现直接比较原始 GLenum：纹理绑定时的 target 是 GL_TEXTURE_CUBE_MAP，
+        // 上传 face 时的 target 是 face 枚举 → 不相等 → GL_INVALID_OPERATION →
+        // cubemap 的 glTexImage2D/glTexSubImage2D 全部被静默拒绝 → panorama
+        // 背景纹理全空 → 主菜单采样未初始化纹理层 → GPU Address Fault。
+        // 用 textureTargetFromGL 归一化后比较（face target 与 CUBE_MAP 都映射
+        // 到 TextureTarget::CubeMap）。
+        bool same = (t->target == target);
+        if (!same) {
+            mithril::TextureTarget t1 = mithril::textureTargetFromGL(t->target);
+            same = (t1 != mithril::TextureTarget::Count && t1 == tt);
+        }
+        if (!same) {
+            mithril::state_set_error(GL_INVALID_OPERATION);
+            return nullptr;
+        }
     }
     return t;
 }
@@ -166,7 +181,18 @@ void glTexImage2D(GLenum target, GLint level, GLint internalFormat,
             g_state->pixelStore.unpackImageHeight,
             g_state->pixelStore.unpackSkipImages
         };
-        backend_texture_upload(t->id, level, 0, 0, 0, width, height, 1,
+        // FIX (主菜单 panorama cubemap GPU fault 根因): target 是 cubemap 面
+        // （GL_TEXTURE_CUBE_MAP_POSITIVE_X..NEGATIVE_Z）时，z 传 face 索引
+        // （0-5）。backend 的 stage_and_copy_image 对 cubemap 把 z 用作
+        // VkBufferImageCopy 的 baseArrayLayer（cubemap 的 array layer == face）。
+        // 旧实现 z 恒 0 → 全部 face 落到 layer 0（且此前 face target 未被
+        // textureTargetFromGL 识别，上传整个被丢弃）→ panorama 空纹理。
+        GLint uploadZ = 0;
+        if (target >= GL_TEXTURE_CUBE_MAP_POSITIVE_X &&
+            target <= GL_TEXTURE_CUBE_MAP_NEGATIVE_Z) {
+            uploadZ = (GLint)(target - GL_TEXTURE_CUBE_MAP_POSITIVE_X);
+        }
+        backend_texture_upload(t->id, level, 0, 0, uploadZ, width, height, 1,
                                format, type, pixels, &unpack,
                                /*is_full_upload=*/1);
     }
@@ -273,7 +299,14 @@ void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset,
         g_state->pixelStore.unpackImageHeight,
         g_state->pixelStore.unpackSkipImages
     };
-    backend_texture_upload(t->id, level, xoffset, yoffset, 0,
+    // FIX (cubemap face 上传, 同 glTexImage2D): face target 时 z = face 索引
+    // （backend 用作 baseArrayLayer）。
+    GLint subZ = 0;
+    if (target >= GL_TEXTURE_CUBE_MAP_POSITIVE_X &&
+        target <= GL_TEXTURE_CUBE_MAP_NEGATIVE_Z) {
+        subZ = (GLint)(target - GL_TEXTURE_CUBE_MAP_POSITIVE_X);
+    }
+    backend_texture_upload(t->id, level, xoffset, yoffset, subZ,
                            width, height, 1, format, type, pixels, &unpack,
                            /*is_full_upload=*/0);
 }
@@ -358,7 +391,13 @@ void glCompressedTexImage2D(GLenum target, GLint level, GLenum internalformat,
     if (t->levels < level + 1) t->levels = level + 1;
     backend_get_or_create_texture(t->id, t->width, t->height, 1, t->levels,
                                   internalformat, target, 1);
-    backend_texture_upload_compressed(t->id, level, 0, 0, 0, width, height, 1,
+    // FIX (cubemap face 上传, 同 glTexImage2D): face target 时 z = face 索引。
+    GLint cz = 0;
+    if (target >= GL_TEXTURE_CUBE_MAP_POSITIVE_X &&
+        target <= GL_TEXTURE_CUBE_MAP_NEGATIVE_Z) {
+        cz = (GLint)(target - GL_TEXTURE_CUBE_MAP_POSITIVE_X);
+    }
+    backend_texture_upload_compressed(t->id, level, 0, 0, cz, width, height, 1,
                                       internalformat, imageSize, data,
                                       /*is_full_upload=*/1);
 }

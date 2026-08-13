@@ -250,9 +250,13 @@ void glLinkProgram(GLuint program) {
     // GPU fault 诊断：link 成功时记录 program 身份（shader 源首行摘要），
     // 便于 LogRing dump 里的 prog=N 对应到具体 MC shader（fault 帧是
     // prog=1 + fbo=0 + count=6 全屏 quad —— 需要知道它是什么 shader）。
+    // 限流放宽到 64：MC 主菜单在 program 22-50 之间链接 panorama/blur/GUI
+    // shader，旧限流(20)把 fault 帧的 prog=46 身份吞掉，无法确定 fault
+    // draw 用的是哪个 MC shader（zink 对照正常 = MC 行为无异常，Mithril
+    // 转换层对某个主菜单 shader 的处理是 fault 唯一候选）。
     {
         static int linkLog = 0;
-        if (linkLog <= 20 || linkLog % 50 == 0) {
+        if (linkLog <= 64 || linkLog % 100 == 0) {
             std::string src_peek;
             for (GLuint sid : p->attachedShaders) {
                 mithril::Shader* sh = mithril::state_get_shader(sid);

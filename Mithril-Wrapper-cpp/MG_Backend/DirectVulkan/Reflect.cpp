@@ -5,6 +5,10 @@
 // Backend (which would require a real VkInstance).
 #include "Reflect.h"
 
+// samplerTarget 存 GLenum 数值；用项目自带 GL 头获取常量（Reflect.h 保持
+// 无 GL 依赖以便独立链接 unit-test）。
+#include <GL/glcorearb.h>
+
 #include <spirv_cross.hpp>
 // spirv_cross.hpp transitively pulls in SPIRV-Cross's bundled spirv.hpp,
 // which defines the spv:: namespace (spv::DecorationBinding, etc.) used below.
@@ -51,6 +55,20 @@ std::vector<DescriptorBinding> reflect_stage(const uint32_t* spirv, int words,
             const spirv_cross::SPIRType& t = compiler.get_type(r.type_id);
             b.descriptorCount = t.array.empty() ? 1u : static_cast<uint32_t>(t.array[0]);
             if (b.descriptorCount == 0) b.descriptorCount = 1;
+            // FIX (主菜单 panorama cubemap GPU fault 根因 - sampler 类型):
+            // 记录 sampler 的 GL target 类型（2D/Cube/3D/Array），descriptor
+            // 绑定时按类型从对应的 texture unit slot 取纹理。旧实现用
+            // boundTextureForUnit 无条件优先取 2D slot：主菜单里 unit 0 常
+            // 残留 GUI 2D 纹理绑定，panorama 的 samplerCube 会错误绑定 2D
+            // view → MoltenVK viewType 不匹配 → 采样 undefined/黑/GPU fault。
+            // zink 按 shader 声明类型正确选 slot，因此正常。
+            switch (t.image.dim) {
+                case spv::Dim1D:    b.samplerTarget = t.image.arrayed ? GL_TEXTURE_1D_ARRAY : GL_TEXTURE_1D; break;
+                case spv::Dim3D:    b.samplerTarget = GL_TEXTURE_3D; break;
+                case spv::DimCube:  b.samplerTarget = t.image.arrayed ? 0x9009u /* GL_TEXTURE_CUBE_MAP_ARRAY */ : GL_TEXTURE_CUBE_MAP; break;
+                case spv::Dim2D:
+                default:            b.samplerTarget = t.image.arrayed ? GL_TEXTURE_2D_ARRAY : GL_TEXTURE_2D; break;
+            }
             out.push_back(std::move(b));
         }
     } catch (const std::exception& e) {

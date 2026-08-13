@@ -717,9 +717,22 @@ void stage_and_copy_image(TextureEntry& tex, int level, int x, int y, int z,
     if (tex.format == VK_FORMAT_D24_UNORM_S8_UINT || tex.format == VK_FORMAT_D32_SFLOAT_S8_UINT)
         region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;  // depth aspect only
     region.imageSubresource.mipLevel = level;
-    region.imageSubresource.baseArrayLayer = 0;
-    region.imageSubresource.layerCount = 1;
-    region.imageOffset = { x, y, z };
+    // FIX (主菜单 panorama cubemap GPU fault 根因 - face→layer 映射):
+    // cubemap 的 array layer == face（0-5）。GL 层 glTexImage2D/glTexSubImage2D
+    // 对 face target 把 face 索引放在 z 参数传入。旧实现 baseArrayLayer 恒 0、
+    // z 恒 0 → 6 个 face 全部写入 layer 0，face 1-5 从未初始化 → 主菜单
+    // panorama 采样未初始化纹理层 → MoltenVK/A11 GPU Address Fault。
+    // 修复：cubemap 时 baseArrayLayer = z（face），imageOffset.z = 0；
+    // 3D 纹理保持 z 为 imageOffset.z、baseArrayLayer 0。
+    if (tex.target == GL_TEXTURE_CUBE_MAP && z >= 0 && z < 6) {
+        region.imageSubresource.baseArrayLayer = (uint32_t)z;
+        region.imageSubresource.layerCount = 1;
+        region.imageOffset = { x, y, 0 };
+    } else {
+        region.imageSubresource.baseArrayLayer = 0;
+        region.imageSubresource.layerCount = 1;
+        region.imageOffset = { x, y, z };
+    }
     region.imageExtent = { (uint32_t)w, (uint32_t)h, (uint32_t)d };
 
     // Transition the image layout to TRANSFER_DST for the copy.
@@ -749,7 +762,11 @@ void stage_and_copy_image(TextureEntry& tex, int level, int x, int y, int z,
     barrier.subresourceRange.aspectMask = region.imageSubresource.aspectMask;
     barrier.subresourceRange.baseMipLevel = level;
     barrier.subresourceRange.levelCount = 1;
-    barrier.subresourceRange.baseArrayLayer = 0;
+    // FIX (cubemap face 上传): barrier 的 subresourceRange 必须覆盖 copy 写入
+    // 的目标 layer。旧实现恒 baseArrayLayer=0：cubemap 传 face 到 layer z 时
+    // barrier 只转换 layer 0 → layer z 的 layout 从未正确转换 → 后续采样读
+    // 未转换/未初始化的 layer → MoltenVK/A11 GPU fault 风险。
+    barrier.subresourceRange.baseArrayLayer = region.imageSubresource.baseArrayLayer;
     barrier.subresourceRange.layerCount = 1;
     vkCmdPipelineBarrier(b->commandBuffer,
                          src_stage_for_layout(oldLayout),
@@ -1430,6 +1447,16 @@ VkImage backend_get_or_create_texture(GLuint name, int width, int height, int de
                                       int samples) {
     mithril::vk::Backend* b = mithril::vk::backend();
     if (!b->initialized || name == 0 || width <= 0 || height <= 0) return VK_NULL_HANDLE;
+    // FIX (主菜单 panorama cubemap GPU fault 根因): GL 层 glTexImage2D 传入的
+    // target 可能是 6 个 face target（GL_TEXTURE_CUBE_MAP_POSITIVE_X 等）。
+    // 后端所有 cubemap 判断（arrayLayers=6、VIEW_TYPE_CUBE、上传 face→layer）
+    // 都以 target == GL_TEXTURE_CUBE_MAP 为准 → 必须先归一化，否则 face target
+    // 会被当成普通 2D 纹理（arrayLayers=1）→ 6 面数据挤进 layer 0 + 采样
+    // 越界 → GPU Address Fault。
+    if (target >= GL_TEXTURE_CUBE_MAP_POSITIVE_X &&
+        target <= GL_TEXTURE_CUBE_MAP_NEGATIVE_Z) {
+        target = GL_TEXTURE_CUBE_MAP;
+    }
     VkFormat fmt = mithril::vk::gl_internal_to_vk(internal_format);
     if (fmt == VK_FORMAT_UNDEFINED) {
         // FIX (日志刷屏): 同一不支持的格式会被反复打印。用 static set 去重，
@@ -1800,9 +1827,17 @@ void backend_texture_upload_compressed(GLuint name, int level, int x, int y, int
     region.bufferImageHeight = 0;
     region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     region.imageSubresource.mipLevel = level;
-    region.imageSubresource.baseArrayLayer = 0;
-    region.imageSubresource.layerCount = 1;
-    region.imageOffset = {x, y, z};
+    // FIX (cubemap face 上传, 同 stage_and_copy_image): face 索引在 z 参数，
+    // cubemap 时映射到 baseArrayLayer（array layer == face）。
+    if (tex.target == GL_TEXTURE_CUBE_MAP && z >= 0 && z < 6) {
+        region.imageSubresource.baseArrayLayer = (uint32_t)z;
+        region.imageSubresource.layerCount = 1;
+        region.imageOffset = {x, y, 0};
+    } else {
+        region.imageSubresource.baseArrayLayer = 0;
+        region.imageSubresource.layerCount = 1;
+        region.imageOffset = {x, y, z};
+    }
     region.imageExtent = {(uint32_t)w, (uint32_t)h, (uint32_t)d};
 
     vkCmdCopyBufferToImage(b->commandBuffer, stagingBuffer, tex.image,

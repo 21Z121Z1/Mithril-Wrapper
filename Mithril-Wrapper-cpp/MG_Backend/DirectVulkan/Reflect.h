@@ -41,6 +41,12 @@ struct DescriptorBinding {
     VkShaderStageFlags stageMask = 0;
     uint32_t bufferSize = 0;        // UBO size in bytes (0 for images)
     uint32_t descriptorCount = 1;   // array size (1 for non-array samplers)
+    // FIX (主菜单 panorama cubemap GPU fault 根因): sampled image 的 GL target
+    // 类型（2D/Cube/3D/Array，从 SPIR-V image.dim 推导）。descriptor 绑定时
+    // 用它从对应的 texture unit slot 取纹理（samplerCube → CubeMap slot），
+    // 避免旧实现"无条件取 2D slot"把 2D 纹理喂给 samplerCube。
+    // 存 GLenum 数值（GL_TEXTURE_2D=0x0DE1 等）以保持头文件无 GL 依赖。
+    uint32_t samplerTarget = 0x0DE1;  // GL_TEXTURE_2D
     std::string name;               // reflected resource name (for UBO matching)
     std::vector<DescriptorBindingMember> members;  // UBO members (for packed $Global-style blocks)
 };

@@ -61,6 +61,19 @@ TextureTarget textureTargetFromGL(GLenum target) noexcept {
         case GL_TEXTURE_2D:                   return TextureTarget::_2D;
         case GL_TEXTURE_3D:                   return TextureTarget::_3D;
         case GL_TEXTURE_CUBE_MAP:             return TextureTarget::CubeMap;
+        // FIX (主菜单 panorama cubemap GPU fault 根因 - face target 未识别):
+        // GL 规范允许 glTexImage2D / glTexSubImage2D 以 6 个面 target
+        // （GL_TEXTURE_CUBE_MAP_POSITIVE_X .. NEGATIVE_Z）逐面上传 cubemap。
+        // MC 1.21.1 的主菜单背景（Cubemap）正是这样上传 6 张 panorama 图。
+        // 旧实现不认识这些 target → bound_texture_for_target 返回 nullptr →
+        // 上传被静默丢弃 → cubemap 纹理内容全空 → 主菜单首帧采样未初始化
+        // 纹理层 → MoltenVK/A11 GPU Address Fault（zink 正常上传因此正常）。
+        case GL_TEXTURE_CUBE_MAP_POSITIVE_X:
+        case GL_TEXTURE_CUBE_MAP_NEGATIVE_X:
+        case GL_TEXTURE_CUBE_MAP_POSITIVE_Y:
+        case GL_TEXTURE_CUBE_MAP_NEGATIVE_Y:
+        case GL_TEXTURE_CUBE_MAP_POSITIVE_Z:
+        case GL_TEXTURE_CUBE_MAP_NEGATIVE_Z:  return TextureTarget::CubeMap;
         case GL_TEXTURE_RECTANGLE:            return TextureTarget::Rectangle;
         case GL_TEXTURE_2D_MULTISAMPLE:       return TextureTarget::_2DMultisample;
         case GL_TEXTURE_BUFFER:               return TextureTarget::Buffer;

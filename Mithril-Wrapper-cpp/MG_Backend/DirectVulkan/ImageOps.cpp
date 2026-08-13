@@ -143,6 +143,15 @@ void generate_mipmaps(GLuint name) {
                  (int)tex.levels, fullLevels,
                  (tex.levels < fullLevels) ? "REBUILD" : "CASCADE");
 
+    // FIX (主菜单 panorama cubemap GPU fault 根因 - CASCADE 分支的 layer 覆盖):
+    // REBUILD 分支重建 image 时已正确分配 arrayLayers=6（cubemap），但 CASCADE
+    // 分支（tex.levels >= fullLevels，MC 图集/panorama 走此路径）的 barrier 和
+    // vkCmdBlitImage 全部 layerCount=1 → 只为 layer 0 生成 mip 链，layer 1-5 的
+    // mip 从未初始化 → 主菜单 panorama（cubemap + mipmap filter）采样未初始化
+    // mip 层 → MoltenVK/A11 GPU Address Fault。修复：blit/barrier 覆盖全部层
+    //（Vulkan 允许 layerCount>1 一次处理整个 array）。
+    const uint32_t blitLayers = (tex.target == GL_TEXTURE_CUBE_MAP) ? 6u : 1u;
+
     // FIX (Root Cause - 单层 image 被 mipmap 采样器越界采样 → page fault):
     // Minecraft 先 glTexImage2D(level=0) 上传 atlas 的 base level（Texture.cpp:145
     // 只把 t->levels 推到 level+1，故此时 tex.levels == 1，VkImage 只有 1 层 mip），
@@ -263,7 +272,10 @@ void generate_mipmaps(GLuint name) {
                 oldSrc.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
                 oldSrc.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
                 oldSrc.image = tex.image;
-                oldSrc.subresourceRange = { aspect, 0, 1, 0, 1 };
+                // FIX (cubemap): copy 读全部 6 层（copy.subresource layerCount
+                // = arrayLayers），barrier 必须同样覆盖，否则 layer 1-5 布局未
+                // 转换 → copy 读未定义布局的数据。
+                oldSrc.subresourceRange = { aspect, 0, 1, 0, arrayLayers };
                 vkCmdPipelineBarrier(c.cmd, oldStage, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
                                      0, nullptr, 0, nullptr, 1, &oldSrc);
 
@@ -277,15 +289,15 @@ void generate_mipmaps(GLuint name) {
                 newDst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
                 newDst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
                 newDst.image = newImage;
-                newDst.subresourceRange = { aspect, 0, 1, 0, 1 };
+                newDst.subresourceRange = { aspect, 0, 1, 0, arrayLayers };
                 vkCmdPipelineBarrier(c.cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                                      VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
                                      0, nullptr, 0, nullptr, 1, &newDst);
 
-                // copy old level0 -> new level0
+                // copy old level0 -> new level0（cubemap: arrayLayers=6，全部 layer 一并复制）
                 VkImageCopy copy{};
-                copy.srcSubresource = { aspect, 0, 0, 1 };
-                copy.dstSubresource = { aspect, 0, 0, 1 };
+                copy.srcSubresource = { aspect, 0, 0, arrayLayers };
+                copy.dstSubresource = { aspect, 0, 0, arrayLayers };
                 copy.srcOffset = { 0, 0, 0 };
                 copy.dstOffset = { 0, 0, 0 };
                 copy.extent = { (uint32_t)tex.width, (uint32_t)tex.height,
@@ -303,7 +315,7 @@ void generate_mipmaps(GLuint name) {
                 n0.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
                 n0.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
                 n0.image = newImage;
-                n0.subresourceRange = { aspect, 0, 1, 0, 1 };
+                n0.subresourceRange = { aspect, 0, 1, 0, arrayLayers };
                 vkCmdPipelineBarrier(c.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
                                      VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
                                      0, nullptr, 0, nullptr, 1, &n0);
@@ -321,14 +333,14 @@ void generate_mipmaps(GLuint name) {
                     toDst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
                     toDst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
                     toDst.image = newImage;
-                    toDst.subresourceRange = { aspect, (uint32_t)L, 1, 0, 1 };
+                    toDst.subresourceRange = { aspect, (uint32_t)L, 1, 0, arrayLayers };
                     vkCmdPipelineBarrier(c.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
                                          VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
                                          0, nullptr, 0, nullptr, 1, &toDst);
 
                     VkImageBlit blit{};
-                    blit.srcSubresource = { aspect, (uint32_t)(L - 1), 0, 1 };
-                    blit.dstSubresource = { aspect, (uint32_t)L, 0, 1 };
+                    blit.srcSubresource = { aspect, (uint32_t)(L - 1), 0, arrayLayers };
+                    blit.dstSubresource = { aspect, (uint32_t)L, 0, arrayLayers };
                     blit.srcOffsets[0] = { 0, 0, 0 };
                     blit.srcOffsets[1] = { (tex.width >> (L - 1)) > 0 ? (tex.width >> (L - 1)) : 1,
                                            (tex.height >> (L - 1)) > 0 ? (tex.height >> (L - 1)) : 1, 1 };
@@ -348,7 +360,7 @@ void generate_mipmaps(GLuint name) {
                     toSrc.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
                     toSrc.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
                     toSrc.image = newImage;
-                    toSrc.subresourceRange = { aspect, (uint32_t)L, 1, 0, 1 };
+                    toSrc.subresourceRange = { aspect, (uint32_t)L, 1, 0, arrayLayers };
                     vkCmdPipelineBarrier(c.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
                                          VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
                                          0, nullptr, 0, nullptr, 1, &toSrc);
@@ -364,7 +376,7 @@ void generate_mipmaps(GLuint name) {
                 toShader.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
                 toShader.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
                 toShader.image = newImage;
-                toShader.subresourceRange = { aspect, 0, (uint32_t)fullLevels, 0, 1 };
+                toShader.subresourceRange = { aspect, 0, (uint32_t)fullLevels, 0, arrayLayers };
                 // FIX (GPU page fault root cause - compute): 与下方非重建分支一致，
                 // 同时覆盖 fragment + compute 采样阶段，确保 mip 写入对 compute
                 // 着色器（Sodium/Iris 采样图集）可见。
@@ -515,7 +527,7 @@ void generate_mipmaps(GLuint name) {
     b0.subresourceRange.baseMipLevel = 0;
     b0.subresourceRange.levelCount = 1;
     b0.subresourceRange.baseArrayLayer = 0;
-    b0.subresourceRange.layerCount = 1;
+    b0.subresourceRange.layerCount = blitLayers;
     vkCmdPipelineBarrier(c.cmd, lvl0SrcStage,
                          VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
                          0, nullptr, 0, nullptr, 1, &b0);
@@ -540,7 +552,7 @@ void generate_mipmaps(GLuint name) {
         toDst.subresourceRange.baseMipLevel = (uint32_t)L;
         toDst.subresourceRange.levelCount = 1;
         toDst.subresourceRange.baseArrayLayer = 0;
-        toDst.subresourceRange.layerCount = 1;
+        toDst.subresourceRange.layerCount = blitLayers;
         vkCmdPipelineBarrier(c.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
                              VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
                              0, nullptr, 0, nullptr, 1, &toDst);
@@ -550,14 +562,14 @@ void generate_mipmaps(GLuint name) {
         blit.srcSubresource.aspectMask = aspect;
         blit.srcSubresource.mipLevel = (uint32_t)(L - 1);
         blit.srcSubresource.baseArrayLayer = 0;
-        blit.srcSubresource.layerCount = 1;
+        blit.srcSubresource.layerCount = blitLayers;
         blit.srcOffsets[0] = { 0, 0, 0 };
         blit.srcOffsets[1] = { tex.width >> (L - 1) > 0 ? (tex.width >> (L - 1)) : 1,
                                tex.height >> (L - 1) > 0 ? (tex.height >> (L - 1)) : 1, 1 };
         blit.dstSubresource.aspectMask = aspect;
         blit.dstSubresource.mipLevel = (uint32_t)L;
         blit.dstSubresource.baseArrayLayer = 0;
-        blit.dstSubresource.layerCount = 1;
+        blit.dstSubresource.layerCount = blitLayers;
         blit.dstOffsets[0] = { 0, 0, 0 };
         blit.dstOffsets[1] = { w, h, 1 };
 
@@ -583,7 +595,7 @@ void generate_mipmaps(GLuint name) {
         toSrc.subresourceRange.baseMipLevel = (uint32_t)L;
         toSrc.subresourceRange.levelCount = 1;
         toSrc.subresourceRange.baseArrayLayer = 0;
-        toSrc.subresourceRange.layerCount = 1;
+        toSrc.subresourceRange.layerCount = blitLayers;
         vkCmdPipelineBarrier(c.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
                              VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
                              0, nullptr, 0, nullptr, 1, &toSrc);
@@ -605,7 +617,7 @@ void generate_mipmaps(GLuint name) {
     toShader.subresourceRange.baseMipLevel = 0;
     toShader.subresourceRange.levelCount = (uint32_t)tex.levels;
     toShader.subresourceRange.baseArrayLayer = 0;
-    toShader.subresourceRange.layerCount = 1;
+    toShader.subresourceRange.layerCount = blitLayers;
     // FIX (GPU page fault root cause - compute): Sodium/Iris 会在 compute
     // 着色器里采样图集/光照贴图。dstStage 若只含 FRAGMENT_SHADER_BIT，mipmap
     // 生成的写入对 compute 采样不可见 → 采样到未初始化 mip 层 → GPU address fault。

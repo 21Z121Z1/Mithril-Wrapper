@@ -968,7 +968,21 @@ void bind_program_descriptors(GLuint program, VkPipelineBindPoint bindPoint) {
             }
             GLuint tex_id = 0;
             if (unit >= 0 && unit < mithril::kMaxTextureUnits) {
-                tex_id = mithril::g_state->boundTextureForUnit(unit);
+                // FIX (主菜单 panorama cubemap GPU fault 根因 - sampler 类型):
+                // 按 shader 声明的 sampler 类型（db.samplerTarget，反射自 SPIR-V
+                // image.dim）从对应的 target slot 精确取纹理（samplerCube →
+                // CubeMap slot）。旧实现 boundTextureForUnit(unit) 无条件优先取
+                // 2D slot：主菜单里 unit 0 常残留 GUI 2D 纹理绑定，panorama 的
+                // samplerCube 会错误绑定 2D view → MoltenVK viewType 不匹配 →
+                // 采样 undefined/黑/GPU fault。zink 按声明类型选 slot，因此正常。
+                mithril::TextureTarget tt = mithril::textureTargetFromGL(db.samplerTarget);
+                if (tt != mithril::TextureTarget::Count) {
+                    tex_id = mithril::g_state->boundTextureForUnit((GLuint)unit, tt);
+                }
+                if (tex_id == 0 && tt != mithril::TextureTarget::_2D) {
+                    // 目标 slot 未绑定：回退到任意 slot（兼容罕见 shader）。
+                    tex_id = mithril::g_state->boundTextureForUnit((GLuint)unit);
+                }
             }
             /* No texture on that unit.
              *
