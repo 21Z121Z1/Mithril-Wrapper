@@ -17,20 +17,19 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: fix/mobilegl-style-mc262-startup-preflight
-          fetch-depth: 2
+          fetch-depth: 3
       - name: Apply staged hardening patch
         shell: bash
         run: |
           set -euo pipefail
-          git show HEAD^:.github/workflows/bootstrap-vulkan-startup-hardening.yml > /tmp/staged.yml
+          git show HEAD^^:.github/workflows/bootstrap-vulkan-startup-hardening.yml > /tmp/staged.yml
           python3 - <<'PY'
           from pathlib import Path
-          import textwrap
           text = Path('/tmp/staged.yml').read_text()
           begin = "          python3 - <<'PY'\n"
           end = "\n          PY\n"
           payload = text.split(begin, 1)[1].split(end, 1)[0]
-          code = textwrap.dedent(payload)
+          code = '\n'.join(line[10:] if line.startswith('          ') else line for line in payload.splitlines())
           compile(code, '<staged-hardening>', 'exec')
           exec(code, {'__name__': '__main__'})
           PY
