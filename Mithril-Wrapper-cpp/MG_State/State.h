@@ -535,6 +535,13 @@ struct TransformFeedback {
     GLuint    primitivesWritten = 0;
     GLenum    primitiveMode = GL_POINTS;
     bool      markedForDeletion = false;
+    // GL 4.0+ transform feedback buffer bindings (glTransformFeedbackBufferBase/Range)
+    struct TFBinding {
+        GLuint buffer = 0;
+        GLintptr offset = 0;
+        GLsizeiptr size = 0; // 0 = whole buffer (BufferBase)
+    };
+    std::vector<TFBinding> bindings;
 };
 
 // ---- Program Pipeline (GL 4.1 ARB_separate_shader_objects) ----
