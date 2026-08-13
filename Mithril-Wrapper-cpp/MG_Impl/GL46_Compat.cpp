@@ -169,6 +169,15 @@
 #ifndef GL_TRANSFORM_FEEDBACK_ACTIVE
 #define GL_TRANSFORM_FEEDBACK_ACTIVE 0x8E24
 #endif
+#ifndef GL_TYPE
+#define GL_TYPE 0x92FA
+#endif
+#ifndef GL_ARRAY_SIZE
+#define GL_ARRAY_SIZE 0x92FB
+#endif
+#ifndef GL_NAME_LENGTH
+#define GL_NAME_LENGTH 0x92F9
+#endif
 
 // Forward declarations for entry points defined in other TUs but absent from
 // the minimal glcorearb.h — needed only so the delegation calls below compile.
