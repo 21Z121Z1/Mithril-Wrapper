@@ -1,0 +1,60 @@
+name: Bootstrap depth and sync fixes
+
+on:
+  push:
+    branches:
+      - fix/mobilegl-style-mc262-startup-preflight
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/mobilegl-style-mc262-startup-preflight
+      - name: Fix depth-only pipeline and sync completion state
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          p = Path('Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Pipeline.cpp')
+          s = p.read_text()
+          old = '''    VkPipelineColorBlendStateCreateInfo cb{};\n    cb.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;\n    cb.logicOpEnable = VK_FALSE;\n    cb.attachmentCount = color_count > 0 ? (uint32_t)color_count : 1;\n    cb.pAttachments = &cbAttach;\n'''
+          new = '''    // One blend-state record is required for EACH color attachment. A depth-only\n    // subpass has zero color blend attachments; inventing a dummy attachment\n    // makes its pipeline incompatible with the actual depth-only render pass.\n    // The old pAttachments=&cbAttach with attachmentCount>1 also let MRT\n    // pipeline creation read past a single struct.\n    std::vector<VkPipelineColorBlendAttachmentState> cbAttachments;\n    if (color_count > 0) {\n        cbAttachments.assign((size_t)color_count, cbAttach);\n    }\n    VkPipelineColorBlendStateCreateInfo cb{};\n    cb.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;\n    cb.logicOpEnable = VK_FALSE;\n    cb.attachmentCount = (uint32_t)cbAttachments.size();\n    cb.pAttachments = cbAttachments.empty() ? nullptr : cbAttachments.data();\n'''
+          if s.count(old) != 1: raise SystemExit(f'Pipeline blend block matches={s.count(old)}')
+          s = s.replace(old, new, 1)
+          old = '''    VkRenderPass templateRP = mithril::vk::get_template_render_pass(\n        colorFmts, color_count > 0 ? color_count : 1, depth_format, /*samples=*/1);\n'''
+          new = '''    VkRenderPass templateRP = mithril::vk::get_template_render_pass(\n        colorFmts, color_count, depth_format, /*samples=*/1);\n'''
+          if s.count(old) != 1: raise SystemExit('Pipeline template RP block mismatch')
+          p.write_text(s.replace(old, new, 1))
+
+          p = Path('Mithril-Wrapper-cpp/MG_Impl/Drawing.cpp')
+          s = p.read_text()
+          s = s.replace(
+              '''    sync.submitSerial = mithril::vk::backend_current_submit_serial();\n    sync.signaled = sync.submitSerial <= mithril::vk::backend_last_completed_serial();\n''',
+              '''    sync.submitSerial = mithril::vk::backend_current_submit_serial();\n    sync.signaled = sync.submitSerial <= mithril::vk::backend_last_completed_serial();\n    if (sync.signaled) sync.submitSerial = 0;\n''', 1)
+          s = s.replace(
+              '''    if (s.submitSerial <= mithril::vk::backend_last_completed_serial()) {\n        s.signaled = true;\n        return GL_ALREADY_SIGNALED;\n    }\n''',
+              '''    if (s.signaled || s.submitSerial == 0 ||\n        s.submitSerial <= mithril::vk::backend_last_completed_serial()) {\n        s.signaled = true;\n        s.submitSerial = 0;\n        return GL_ALREADY_SIGNALED;\n    }\n''', 1)
+          s = s.replace(
+              '''    if (mithril::vk::backend_wait_serial(s.submitSerial, (uint64_t)timeout)) {\n        s.signaled = true;\n        return GL_CONDITION_SATISFIED;\n    }\n''',
+              '''    if (mithril::vk::backend_wait_serial(s.submitSerial, (uint64_t)timeout)) {\n        s.signaled = true;\n        s.submitSerial = 0;  // satisfied is monotonic; no backend query needed again\n        return GL_CONDITION_SATISFIED;\n    }\n''', 1)
+          s = s.replace(
+              '''    if (mithril::vk::backend_wait_serial(it->second.submitSerial, UINT64_MAX)) {\n        it->second.signaled = true;\n    }\n''',
+              '''    if (it->second.signaled || it->second.submitSerial == 0 ||\n        mithril::vk::backend_wait_serial(it->second.submitSerial, UINT64_MAX)) {\n        it->second.signaled = true;\n        it->second.submitSerial = 0;\n    }\n''', 1)
+          old = '''    mithril::Sync& s = it->second;\n    if (!s.signaled && s.submitSerial <= mithril::vk::backend_last_completed_serial()) {\n        s.signaled = true;\n    }\n'''
+          new = '''    mithril::Sync& s = it->second;\n    if (!s.signaled && (s.submitSerial == 0 ||\n        s.submitSerial <= mithril::vk::backend_last_completed_serial())) {\n        s.signaled = true;\n        s.submitSerial = 0;\n    }\n'''
+          if s.count(old) != 1: raise SystemExit('Drawing getSync block mismatch')
+          p.write_text(s.replace(old, new, 1))
+          PY
+          git diff --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Pipeline.cpp Mithril-Wrapper-cpp/MG_Impl/Drawing.cpp
+          git commit -m 'fix: make depth-only and MRT pipelines render-pass compatible'
+          git push origin HEAD:fix/mobilegl-style-mc262-startup-preflight
