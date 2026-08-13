@@ -176,6 +176,20 @@ static VkRenderPass impl_get_or_create_render_pass(const VkFormat* color_formats
     Backend* b = backend();
     if (!b->device) return VK_NULL_HANDLE;
     if (color_count > 8) color_count = 8;
+    // Filter out VK_FORMAT_UNDEFINED entries: a caller may pass color_count>0
+    // with undefined formats for a depth-only pass (the render pass then has
+    // zero color attachments). Undefined formats cannot describe an attachment.
+    int validColors = 0;
+    VkFormat validFmts[8] = {};
+    for (int i = 0; i < color_count; ++i) {
+        if (color_formats[i] != VK_FORMAT_UNDEFINED && validColors < 8) {
+            validFmts[validColors++] = color_formats[i];
+        }
+    }
+    color_count = validColors;
+    if (color_count == 0 && depth_format == VK_FORMAT_UNDEFINED) {
+        return VK_NULL_HANDLE;  // nothing to attach — no render pass possible
+    }
 
     RenderPassKey key{};
     key.colorCount = (uint32_t)color_count;
@@ -186,7 +200,7 @@ static VkRenderPass impl_get_or_create_render_pass(const VkFormat* color_formats
                  : (samples > 8) ? VK_SAMPLE_COUNT_16_BIT
                  : VK_SAMPLE_COUNT_1_BIT;
     key.loadClear = loadClear;
-    for (int i = 0; i < color_count; ++i) key.colorFormats[i] = color_formats[i];
+    for (int i = 0; i < color_count; ++i) key.colorFormats[i] = validFmts[i];
 
     static std::unordered_map<RenderPassKey, VkRenderPass, RenderPassKeyHash> cache;
     auto it = cache.find(key);
@@ -204,15 +218,22 @@ static VkRenderPass impl_get_or_create_render_pass(const VkFormat* color_formats
 
     for (int i = 0; i < color_count; ++i) {
         VkAttachmentDescription d{};
-        d.format = color_formats[i];
+        d.format = validFmts[i];
         d.samples = key.samples;
         d.loadOp = colorLoad;
         d.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
         d.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
         d.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        d.initialLayout = colorLoad == VK_ATTACHMENT_LOAD_OP_CLEAR
-                          ? VK_IMAGE_LAYOUT_UNDEFINED          // clear discards prior content
-                          : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;  // LOAD preserves it
+        // initialLayout ALWAYS COLOR_ATTACHMENT_OPTIMAL: begin_render_pass
+        // emits explicit layout barriers (record_layout_barrier) from the
+        // attachment's current layout (UNDEFINED on first use, or read-only
+        // after a previous sampling pass) into COLOR_ATTACHMENT_OPTIMAL
+        // BEFORE vkCmdBeginRenderPass. So when the render pass begins, the
+        // image is already in COLOR_ATTACHMENT_OPTIMAL — the external subpass
+        // dependency's srcLayout must match that. loadOp=CLEAR still discards
+        // the contents (CLEAR does not require the initial layout to be
+        // UNDEFINED); loadOp=LOAD preserves them.
+        d.initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         d.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         VkAttachmentReference ref{};
         ref.attachment = (uint32_t)atts.size();
@@ -228,9 +249,9 @@ static VkRenderPass impl_get_or_create_render_pass(const VkFormat* color_formats
         d.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
         d.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
         d.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        d.initialLayout = depthLoad == VK_ATTACHMENT_LOAD_OP_CLEAR
-                          ? VK_IMAGE_LAYOUT_UNDEFINED
-                          : VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        // Same rule as color: begin_render_pass's explicit barrier leaves the
+        // depth image in DEPTH_STENCIL_ATTACHMENT_OPTIMAL before the pass.
+        d.initialLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
         d.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
         depthRef.attachment = (uint32_t)atts.size();
         depthRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
@@ -937,8 +958,16 @@ void begin_render_pass(VkImageView* color_views, int color_count,
     // This must mirror what Pipeline.cpp passes as color_formats when it
     // builds the compatible pipeline, otherwise the pipeline's render pass
     // would not be compatible with the draw-time render pass.
+    //
+    // NOTE: glClear (gl.cpp) calls backend_begin_render_pass directly WITHOUT
+    // registering tex_ids via backend_set_fbo_attachment_tex_ids — so the
+    // registration may be empty here even when rendering into a user FBO. In
+    // that case fall back to reading the current draw FBO's attachments from
+    // the GL state (g_state), which always reflects the live framebuffer.
     {
         auto& tbl = texture_table();
+        mithril::Framebuffer* curFbo = mithril::state_get_framebuffer(
+            mithril::g_state ? mithril::g_state->currentDrawFBO : 0);
         for (int i = 0; i < e.colorCount; ++i) {
             e.colorViews[i] = color_views ? color_views[i] : VK_NULL_HANDLE;
             VkFormat fmt = VK_FORMAT_UNDEFINED;
@@ -947,6 +976,11 @@ void begin_render_pass(VkImageView* color_views, int color_count,
                 fmt = e.activeSwapchain->format;  // FBO 0 (swapchain color)
             } else if (i < e.fboColorTexCount && e.fboColorTexIds[i] != 0) {
                 auto it = tbl.find(e.fboColorTexIds[i]);
+                if (it != tbl.end()) fmt = it->second.format;
+            } else if (curFbo && i < 8 && curFbo->colors[i].texture != 0) {
+                // Fallback for direct-begin paths (glClear): resolve the FBO
+                // attachment texture's format from the GL state.
+                auto it = tbl.find(curFbo->colors[i].texture);
                 if (it != tbl.end()) fmt = it->second.format;
             }
             e.colorFormats[i] = fmt;
@@ -1027,11 +1061,18 @@ void begin_render_pass(VkImageView* color_views, int color_count,
     // one-shot transition to DEPTH_STENCIL_ATTACHMENT_OPTIMAL on first use.
     //
     // swapchainColorWasUndefined: set when the colour image was transitioned
-    // out of UNDEFINED this frame. Used below to pick DONT_CARE for the load
-    // op (LOAD on an image whose contents were discarded is wasteful and
-    // spec-discouraged; DONT_CARE matches the discard semantics).
+    // out of UNDEFINED this frame. Used below to pick the render-pass loadOp
+    // flavour: a pass whose color content is undefined (first use of a
+    // freshly-created image, or a just-acquired swapchain image) MUST NOT use
+    // LOAD — the LOAD-flavour render pass asserts initialLayout =
+    // COLOR_ATTACHMENT_OPTIMAL and loading undefined contents is meaningless.
+    // The CLEAR flavour starts from UNDEFINED, which is the correct contract.
     bool swapchainColorWasUndefined = false;
     bool swapchainDepthWasUndefined = false;
+    // FBO color first-use (UNDEFINED): same rule — a user-FBO color texture
+    // freshly created (UNDEFINED) and never rendered into must be CLEARed,
+    // not LOADed, on its first pass.
+    bool fboColorWasUndefined = false;
     // FIX (root cause — user-FBO depth first use): Minecraft renders the
     // loading screen / main menu / world geometry into USER FBOs with their
     // OWN depth texture (only the final composite goes to FBO 0). Those depth
@@ -1128,6 +1169,12 @@ void begin_render_pass(VkImageView* color_views, int color_count,
             TextureEntry& tex = it->second;
             if (tex.image == VK_NULL_HANDLE) continue;
             if (tex.currentLayout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) continue;
+            // Capture the one-shot first use (UNDEFINED) BEFORE the barrier
+            // overwrites the layout: a fresh FBO color texture has undefined
+            // contents on its first render pass and must be CLEARed.
+            if (tex.currentLayout == VK_IMAGE_LAYOUT_UNDEFINED) {
+                fboColorWasUndefined = true;
+            }
             record_layout_barrier(b->commandBuffer,
                                   tex.image, tex.format,
                                   tex.currentLayout,
@@ -1202,7 +1249,8 @@ void begin_render_pass(VkImageView* color_views, int color_count,
     // in UNDEFINED layout before this pass, its content is garbage, so the
     // render pass MUST be the CLEAR flavour even if e.loadClear is false.
     // depthWasUndefined is computed above from the barrier path.
-    const bool needClear = e.loadClear || depthWasUndefined || swapchainColorWasUndefined;
+    const bool needClear = e.loadClear || depthWasUndefined || swapchainColorWasUndefined ||
+                           fboColorWasUndefined;
     VkRenderPass rp = impl_get_or_create_render_pass(e.colorFormats, e.colorCount,
                                                 e.depthFormat, samples, needClear);
     if (rp == VK_NULL_HANDLE) {
@@ -2437,6 +2485,53 @@ void backend_set_depth_bias(float slope, float clamp) {
     vkCmdSetDepthBias(b->commandBuffer, slope, clamp, 0.0f);
 }
 
+// ---------------------------------------------------------------------------
+// Extended-dynamic-state entry points.
+//
+// vkCmdSetCullMode / vkCmdSetFrontFace / vkCmdSetDepthTestEnable /
+// vkCmdSetDepthWriteEnable / vkCmdSetDepthCompareOp are Vulkan 1.3 CORE
+// functions (promoted from VK_EXT_extended_dynamic_state). When the device is
+// created at apiVersion 1.2 (Mithril requests VK_API_VERSION_1_2) the loader
+// does NOT resolve them as global symbols on a strict loader (lavapipe fails
+// with a null pointer; MoltenVK happens to export them, which masked the bug).
+// They MUST be resolved per-device via vkGetDeviceProcAddr, falling back to
+// the EXT name. We cache the resolved pointers once.
+// ---------------------------------------------------------------------------
+namespace {
+
+struct ExtDynState {
+    PFN_vkCmdSetCullModeEXT cullMode = nullptr;
+    PFN_vkCmdSetFrontFaceEXT frontFace = nullptr;
+    PFN_vkCmdSetDepthTestEnableEXT depthTestEnable = nullptr;
+    PFN_vkCmdSetDepthWriteEnableEXT depthWriteEnable = nullptr;
+    PFN_vkCmdSetDepthCompareOpEXT depthCompareOp = nullptr;
+};
+
+ExtDynState& ext_dyn_state() {
+    static ExtDynState s;
+    mithril::vk::Backend* b = mithril::vk::backend();
+    if (b->device && !s.cullMode) {
+        s.cullMode = (PFN_vkCmdSetCullModeEXT)vkGetDeviceProcAddr(b->device, "vkCmdSetCullMode");
+        if (!s.cullMode) s.cullMode = (PFN_vkCmdSetCullModeEXT)vkGetDeviceProcAddr(b->device, "vkCmdSetCullModeEXT");
+        s.frontFace = (PFN_vkCmdSetFrontFaceEXT)vkGetDeviceProcAddr(b->device, "vkCmdSetFrontFace");
+        if (!s.frontFace) s.frontFace = (PFN_vkCmdSetFrontFaceEXT)vkGetDeviceProcAddr(b->device, "vkCmdSetFrontFaceEXT");
+        s.depthTestEnable = (PFN_vkCmdSetDepthTestEnableEXT)vkGetDeviceProcAddr(b->device, "vkCmdSetDepthTestEnable");
+        if (!s.depthTestEnable) s.depthTestEnable = (PFN_vkCmdSetDepthTestEnableEXT)vkGetDeviceProcAddr(b->device, "vkCmdSetDepthTestEnableEXT");
+        s.depthWriteEnable = (PFN_vkCmdSetDepthWriteEnableEXT)vkGetDeviceProcAddr(b->device, "vkCmdSetDepthWriteEnable");
+        if (!s.depthWriteEnable) s.depthWriteEnable = (PFN_vkCmdSetDepthWriteEnableEXT)vkGetDeviceProcAddr(b->device, "vkCmdSetDepthWriteEnableEXT");
+        s.depthCompareOp = (PFN_vkCmdSetDepthCompareOpEXT)vkGetDeviceProcAddr(b->device, "vkCmdSetDepthCompareOp");
+        if (!s.depthCompareOp) s.depthCompareOp = (PFN_vkCmdSetDepthCompareOpEXT)vkGetDeviceProcAddr(b->device, "vkCmdSetDepthCompareOpEXT");
+        if (!s.cullMode || !s.frontFace || !s.depthTestEnable ||
+            !s.depthWriteEnable || !s.depthCompareOp) {
+            MITHRIL_LOG_WARN("vk", "extended_dynamic_state: some vkCmdSet* entry "
+                             "points unresolved — dynamic state will be skipped");
+        }
+    }
+    return s;
+}
+
+}  // namespace
+
 void backend_set_cull_mode(int mode) {
     mithril::vk::Backend* b = mithril::vk::backend();
     // FIX (VK_NOT_READY storm): guard against non-recording command buffer.
@@ -2445,22 +2540,25 @@ void backend_set_cull_mode(int mode) {
     if (mode == 1) cull = VK_CULL_MODE_FRONT_BIT;
     else if (mode == 2) cull = VK_CULL_MODE_BACK_BIT;
     else if (mode == 3) cull = VK_CULL_MODE_FRONT_AND_BACK;
-    vkCmdSetCullMode(b->commandBuffer, cull);
+    auto& e = ext_dyn_state();
+    if (e.cullMode) e.cullMode(b->commandBuffer, cull);
 }
 
 void backend_set_front_face(int ccw) {
     mithril::vk::Backend* b = mithril::vk::backend();
     // FIX (VK_NOT_READY storm): guard against non-recording command buffer.
     if (!b->commandBuffer || !b->commandBufferRecording) return;
-    vkCmdSetFrontFace(b->commandBuffer, ccw ? VK_FRONT_FACE_COUNTER_CLOCKWISE : VK_FRONT_FACE_CLOCKWISE);
+    auto& e = ext_dyn_state();
+    if (e.frontFace) e.frontFace(b->commandBuffer, ccw ? VK_FRONT_FACE_COUNTER_CLOCKWISE : VK_FRONT_FACE_CLOCKWISE);
 }
 
 void backend_set_depth_test(int enabled, int write_mask, int compare_func) {
     mithril::vk::Backend* b = mithril::vk::backend();
     // FIX (VK_NOT_READY storm): guard against non-recording command buffer.
     if (!b->commandBuffer || !b->commandBufferRecording) return;
-    vkCmdSetDepthTestEnable(b->commandBuffer, enabled ? VK_TRUE : VK_FALSE);
-    vkCmdSetDepthWriteEnable(b->commandBuffer, write_mask ? VK_TRUE : VK_FALSE);
+    auto& e = ext_dyn_state();
+    if (e.depthTestEnable) e.depthTestEnable(b->commandBuffer, enabled ? VK_TRUE : VK_FALSE);
+    if (e.depthWriteEnable) e.depthWriteEnable(b->commandBuffer, write_mask ? VK_TRUE : VK_FALSE);
     VkCompareOp op = VK_COMPARE_OP_LESS;
     switch (compare_func) {
         case 0x200: op = VK_COMPARE_OP_NEVER; break;    // GL_NEVER
@@ -2473,7 +2571,7 @@ void backend_set_depth_test(int enabled, int write_mask, int compare_func) {
         case 0x207: op = VK_COMPARE_OP_ALWAYS; break;
         default: op = VK_COMPARE_OP_LESS; break;
     }
-    vkCmdSetDepthCompareOp(b->commandBuffer, op);
+    if (e.depthCompareOp) e.depthCompareOp(b->commandBuffer, op);
 }
 
 void backend_set_color_write_mask(int r, int g, int b, int a) {
