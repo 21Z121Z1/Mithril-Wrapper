@@ -702,10 +702,13 @@ struct GLState {
     GLenum  clipDepthMode = 0x935E;   // GL_NEGATIVE_ONE_TO_ONE
 
     // ---- Viewport / scissor ----
+    // Default viewport to 1280x720 so MC has a valid render area before
+    // the first glViewport call. Without this, viewportW/H=0 causes the
+    // Vulkan render area to be 0x0 → nothing draws → red/black screen.
     GLint   viewportX = 0, viewportY = 0;
-    GLsizei viewportW = 0, viewportH = 0;
+    GLsizei viewportW = 1280, viewportH = 720;
     GLint   scissorX = 0, scissorY = 0;
-    GLsizei scissorW = 0, scissorH = 0;
+    GLsizei scissorW = 1280, scissorH = 720;
 
     // FIX (根因 AG - BaseVertex / BaseInstance): draw-time base offsets.
     // 由 glDrawElementsBaseVertex / glDrawElementsInstancedBaseVertex 设置

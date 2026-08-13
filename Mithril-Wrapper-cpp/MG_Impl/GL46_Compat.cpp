@@ -362,19 +362,25 @@ void glCreateSamplers(GLsizei n, GLuint* samplers) {
     glGenSamplers(n, samplers);
 }
 
-/* 32. glCreateProgramPipelines - Return zeros (no program pipeline support). */
+/* 32. glCreateProgramPipelines - DSA: generate pipeline names.
+ * Program pipelines are not fully supported on MoltenVK (no separate shader
+ * stages), but we return valid names so LWJGL capability checks succeed and
+ * Minecraft can start. glBindProgramPipeline / glUseProgramStages are no-ops. */
 void glCreateProgramPipelines(GLsizei n, GLuint* pipelines) {
     MITHRIL_ENSURE_INIT();
     if (n <= 0 || !pipelines) return;
-    for (GLsizei i = 0; i < n; ++i) pipelines[i] = 0;
+    glGenProgramPipelines(n, pipelines);
 }
 
-/* 33. glCreateQueries - Return zeros. */
+/* 33. glCreateQueries - DSA: generate query names.
+ * Delegates to glGenQueries which creates real Query objects in the state map.
+ * This ensures glBeginQuery/glEndQuery work correctly for occlusion queries
+ * (used by Iris/Sodium for culling). */
 void glCreateQueries(GLenum target, GLsizei n, GLuint* ids) {
     MITHRIL_ENSURE_INIT();
     (void)target;
     if (n <= 0 || !ids) return;
-    for (GLsizei i = 0; i < n; ++i) ids[i] = 0;
+    glGenQueries(n, ids);
 }
 
 /* 34. glCreateRenderbuffers - glGenRenderbuffers. */
@@ -384,11 +390,13 @@ void glCreateRenderbuffers(GLsizei n, GLuint* renderbuffers) {
     glGenRenderbuffers(n, renderbuffers);
 }
 
-/* 35. glCreateTransformFeedbacks - Return zeros. */
+/* 35. glCreateTransformFeedbacks - DSA: generate transform feedback names.
+ * Delegates to glGenTransformFeedbacks which creates real TransformFeedback
+ * objects in the state map. */
 void glCreateTransformFeedbacks(GLsizei n, GLuint* ids) {
     MITHRIL_ENSURE_INIT();
     if (n <= 0 || !ids) return;
-    for (GLsizei i = 0; i < n; ++i) ids[i] = 0;
+    glGenTransformFeedbacks(n, ids);
 }
 
 /* 36. glNamedBufferStorage - Bind to GL_ARRAY_BUFFER, glBufferStorage, restore. */

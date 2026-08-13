@@ -188,7 +188,6 @@ static const char* kExtensions[] = {
     "GL_ARB_texture_filter_anisotropic",
     "GL_KHR_debug",
     "GL_EXT_texture_filter_anisotropic",
-    "GL_EXT_direct_state_access",
     // Mithril-specific extension (probed by mods to detect Mithril backend)
     "GL_MITHRIL_wrapper",
 };
