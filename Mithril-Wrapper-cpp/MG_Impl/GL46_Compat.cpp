@@ -100,6 +100,75 @@
 #ifndef GL_PROGRAM_PIPELINE_BINDING
 #define GL_PROGRAM_PIPELINE_BINDING 0x825A
 #endif
+#ifndef GL_OFFSET
+#define GL_OFFSET 0x92FC
+#endif
+#ifndef GL_BLOCK_INDEX
+#define GL_BLOCK_INDEX 0x92FD
+#endif
+#ifndef GL_ARRAY_STRIDE
+#define GL_ARRAY_STRIDE 0x92FE
+#endif
+#ifndef GL_MATRIX_STRIDE
+#define GL_MATRIX_STRIDE 0x92FF
+#endif
+#ifndef GL_IS_ROW_MAJOR
+#define GL_IS_ROW_MAJOR 0x9300
+#endif
+#ifndef GL_LOCATION
+#define GL_LOCATION 0x930E
+#endif
+#ifndef GL_REFERENCED_BY_VERTEX_SHADER
+#define GL_REFERENCED_BY_VERTEX_SHADER 0x9306
+#endif
+#ifndef GL_REFERENCED_BY_FRAGMENT_SHADER
+#define GL_REFERENCED_BY_FRAGMENT_SHADER 0x930A
+#endif
+#ifndef GL_REFERENCED_BY_GEOMETRY_SHADER
+#define GL_REFERENCED_BY_GEOMETRY_SHADER 0x9307
+#endif
+#ifndef GL_REFERENCED_BY_COMPUTE_SHADER
+#define GL_REFERENCED_BY_COMPUTE_SHADER 0x930B
+#endif
+#ifndef GL_REFERENCED_BY_TESS_CONTROL_SHADER
+#define GL_REFERENCED_BY_TESS_CONTROL_SHADER 0x9308
+#endif
+#ifndef GL_REFERENCED_BY_TESS_EVALUATION_SHADER
+#define GL_REFERENCED_BY_TESS_EVALUATION_SHADER 0x9309
+#endif
+#ifndef GL_ACTIVE_UNIFORM_BLOCKS
+#define GL_ACTIVE_UNIFORM_BLOCKS 0x8A36
+#endif
+#ifndef GL_ACTIVE_ATTRIBUTES
+#define GL_ACTIVE_ATTRIBUTES 0x8B89
+#endif
+#ifndef GL_ACTIVE_ATTRIBUTE_MAX_LENGTH
+#define GL_ACTIVE_ATTRIBUTE_MAX_LENGTH 0x8B8A
+#endif
+#ifndef GL_INFO_LOG_LENGTH
+#define GL_INFO_LOG_LENGTH 0x8B84
+#endif
+#ifndef GL_PROGRAM_BINARY_FORMATS
+#define GL_PROGRAM_BINARY_FORMATS 0x87FF
+#endif
+#ifndef GL_NUM_PROGRAM_BINARY_FORMATS
+#define GL_NUM_PROGRAM_BINARY_FORMATS 0x87FE
+#endif
+#ifndef GL_TRANSFORM_FEEDBACK_BUFFER_BINDING
+#define GL_TRANSFORM_FEEDBACK_BUFFER_BINDING 0x8C8F
+#endif
+#ifndef GL_TRANSFORM_FEEDBACK_BUFFER_SIZE
+#define GL_TRANSFORM_FEEDBACK_BUFFER_SIZE 0x8C85
+#endif
+#ifndef GL_TRANSFORM_FEEDBACK_BUFFER_START
+#define GL_TRANSFORM_FEEDBACK_BUFFER_START 0x8C84
+#endif
+#ifndef GL_TRANSFORM_FEEDBACK_PAUSED
+#define GL_TRANSFORM_FEEDBACK_PAUSED 0x8E23
+#endif
+#ifndef GL_TRANSFORM_FEEDBACK_ACTIVE
+#define GL_TRANSFORM_FEEDBACK_ACTIVE 0x8E24
+#endif
 
 // Forward declarations for entry points defined in other TUs but absent from
 // the minimal glcorearb.h — needed only so the delegation calls below compile.
@@ -2340,24 +2409,15 @@ GLuint glCreateShaderProgramv(GLenum type, GLsizei count, const GLchar* const* s
     if (count <= 0 || !strings) return 0;
     auto* prog = mithril::state_create_program(0);
     if (!prog) return 0;
-    prog->separable = true; // GL 要求 glCreateShaderProgramv 的程序自动 separable
+    prog->separable = true; // glCreateShaderProgramv 的程序自动 separable
 
-    // 编译单 stage
-    mithril::Shader shader(0);
+    // 收集源码 (延迟编译: 程序在被 glUseProgramStages 绑定到时才编译)
     std::string src;
     for (GLsizei i = 0; i < count; ++i) {
         if (strings[i]) src += strings[i];
     }
-    if (!shader.compile((GLenum)type, src)) {
-        prog->infoLog = "glCreateShaderProgramv: shader compile failed: " + shader.infoLog;
-        return prog->id;
-    }
-    prog->attachedShaders.push_back(0);
-
-    // 单 stage 链接
-    if (!shader.link_program(*prog)) {
-        prog->infoLog = "glCreateShaderProgramv: link failed";
-    }
+    prog->sourceLine = src; // 存储源码供后续编译
+    prog->shaderTypeHint = (GLenum)type;
     return prog->id;
 }
 

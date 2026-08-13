@@ -416,6 +416,17 @@ Program* state_get_program(GLuint id) {
     return it == g_state->programs.end() ? nullptr : &it->second;
 }
 
+Program* state_create_program(uint32_t name) {
+    if (!g_state) return nullptr;
+    if (name == 0) {
+        mithril::state_gen_names("program", 1, &name);
+    }
+    mithril::Program p{};
+    p.id = name;
+    g_state->programs[name] = p;
+    return &g_state->programs[name];
+}
+
 Framebuffer* state_get_framebuffer(GLuint id) {
     if (!g_state) return nullptr;
     auto it = g_state->framebuffers.find(id);

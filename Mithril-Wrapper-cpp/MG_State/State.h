@@ -471,6 +471,9 @@ struct Program {
     GLenum tfBufferMode = GL_INTERLEAVED_ATTRIBS;
     // GL_PROGRAM_SEPARABLE flag (set by glProgramParameteri/glCreateShaderProgramv)
     bool    separable = false;
+    // glCreateShaderProgramv: 源码延迟编译 (在 glUseProgramStages 绑定时编译)
+    std::string sourceLine;
+    GLenum      shaderTypeHint = GL_VERTEX_SHADER;
     bool    markedForDeletion = false;
 };
 
@@ -844,6 +847,9 @@ Texture*      state_get_texture(GLuint id);
 Texture*      state_get_texture_by_target(GLenum target);
 Shader*       state_get_shader(GLuint id);
 Program*      state_get_program(GLuint id);
+Program*      state_create_program(uint32_t name = 0);
+ProgramPipeline* state_get_program_pipeline(GLuint id);
+ProgramPipeline* state_create_program_pipeline(GLuint id);
 Framebuffer*  state_get_framebuffer(GLuint id);
 Sampler*      state_get_sampler(GLuint id);
 Renderbuffer* state_get_renderbuffer(GLuint id);
