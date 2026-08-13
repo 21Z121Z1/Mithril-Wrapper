@@ -738,11 +738,20 @@ VkPipeline get_or_create_pipeline(GLuint program,
     if (color_write_mask & 8) cwm |= VK_COLOR_COMPONENT_A_BIT;
     cbAttach.colorWriteMask = cwm;
 
+    // One blend-state record is required for EACH color attachment. A depth-only
+    // subpass has zero color blend attachments; inventing a dummy attachment
+    // makes its pipeline incompatible with the actual depth-only render pass.
+    // The old pAttachments=&cbAttach with attachmentCount>1 also let MRT
+    // pipeline creation read past a single struct.
+    std::vector<VkPipelineColorBlendAttachmentState> cbAttachments;
+    if (color_count > 0) {
+        cbAttachments.assign((size_t)color_count, cbAttach);
+    }
     VkPipelineColorBlendStateCreateInfo cb{};
     cb.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
     cb.logicOpEnable = VK_FALSE;
-    cb.attachmentCount = color_count > 0 ? (uint32_t)color_count : 1;
-    cb.pAttachments = &cbAttach;
+    cb.attachmentCount = (uint32_t)cbAttachments.size();
+    cb.pAttachments = cbAttachments.empty() ? nullptr : cbAttachments.data();
 
     // ---- Dynamic state ----
     // VK_DYNAMIC_STATE_COLOR_WRITE_ENABLE_EXT requires the
@@ -792,7 +801,7 @@ VkPipeline get_or_create_pipeline(GLuint program,
     VkFormat colorFmts[8] = {};
     for (int i = 0; i < color_count && i < 8; ++i) colorFmts[i] = color_formats[i];
     VkRenderPass templateRP = mithril::vk::get_template_render_pass(
-        colorFmts, color_count > 0 ? color_count : 1, depth_format, /*samples=*/1);
+        colorFmts, color_count, depth_format, /*samples=*/1);
 
     // ---- Graphics pipeline ----
     VkGraphicsPipelineCreateInfo gi{};

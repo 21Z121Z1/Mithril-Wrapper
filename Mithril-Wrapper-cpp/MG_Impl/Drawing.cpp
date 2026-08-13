@@ -1041,6 +1041,7 @@ GLsync glFenceSync(GLenum condition, GLbitfield flags) {
     sync.flags = flags;
     sync.submitSerial = mithril::vk::backend_current_submit_serial();
     sync.signaled = sync.submitSerial <= mithril::vk::backend_last_completed_serial();
+    if (sync.signaled) sync.submitSerial = 0;
     sync.markedForDeletion = false;
     g_state->syncObjects[sync.handle] = sync;
     g_state->nextSyncHandle = reinterpret_cast<void*>(
@@ -1078,8 +1079,10 @@ GLenum glClientWaitSync(GLsync sync, GLbitfield flags, GLuint64 timeout) {
     }
     mithril::Sync& s = it->second;
 
-    if (s.submitSerial <= mithril::vk::backend_last_completed_serial()) {
+    if (s.signaled || s.submitSerial == 0 ||
+        s.submitSerial <= mithril::vk::backend_last_completed_serial()) {
         s.signaled = true;
+        s.submitSerial = 0;
         return GL_ALREADY_SIGNALED;
     }
 
@@ -1092,6 +1095,7 @@ GLenum glClientWaitSync(GLsync sync, GLbitfield flags, GLuint64 timeout) {
 
     if (mithril::vk::backend_wait_serial(s.submitSerial, (uint64_t)timeout)) {
         s.signaled = true;
+        s.submitSerial = 0;  // satisfied is monotonic; no backend query needed again
         return GL_CONDITION_SATISFIED;
     }
     return GL_TIMEOUT_EXPIRED;
@@ -1112,8 +1116,10 @@ void glWaitSync(GLsync sync, GLbitfield flags, GLuint64 timeout) {
     // Mithril uses one Vulkan graphics queue for all contexts. A host wait is
     // conservative but preserves GL server-wait semantics across thread/context
     // hand-offs until a native VkSemaphore-backed cross-context path exists.
-    if (mithril::vk::backend_wait_serial(it->second.submitSerial, UINT64_MAX)) {
+    if (it->second.signaled || it->second.submitSerial == 0 ||
+        mithril::vk::backend_wait_serial(it->second.submitSerial, UINT64_MAX)) {
         it->second.signaled = true;
+        it->second.submitSerial = 0;
     }
 }
 
@@ -1140,8 +1146,10 @@ void glGetSynciv(GLsync sync, GLenum pname, GLsizei bufSize, GLsizei* length, GL
         return;
     }
     mithril::Sync& s = it->second;
-    if (!s.signaled && s.submitSerial <= mithril::vk::backend_last_completed_serial()) {
+    if (!s.signaled && (s.submitSerial == 0 ||
+        s.submitSerial <= mithril::vk::backend_last_completed_serial())) {
         s.signaled = true;
+        s.submitSerial = 0;
     }
     GLint v = 0;
     switch (pname) {
