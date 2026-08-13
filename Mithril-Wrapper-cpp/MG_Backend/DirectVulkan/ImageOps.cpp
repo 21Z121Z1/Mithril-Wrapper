@@ -1160,7 +1160,7 @@ void backend_clear_texture(GLuint name, int level,
     // (or sub-region) to a caller-provided value via vkCmdClearColorImage /
     // vkCmdClearDepthStencilImage. Uses a one-shot command buffer to avoid
     // disturbing the main render pass.
-    Backend* b = backend();
+    mithril::vk::Backend* b = mithril::vk::backend();
     if (!b->initialized || name == 0) return;
     auto& tbl = mithril::vk::texture_table();
     auto it = tbl.find(name);
@@ -1168,23 +1168,19 @@ void backend_clear_texture(GLuint name, int level,
     mithril::vk::TextureEntry& tex = it->second;
     if (tex.image == VK_NULL_HANDLE) return;
 
-    // Ensure theimage has been allocated (storage committed). If not, create it.
-    // (The texture_table entry may exist from glCreateTextures without storage.)
-    if (tex.image == VK_NULL_HANDLE) return;
-
     // Use the texture's actual dimensions if w/h/d are 0 (full-image clear).
     if (w <= 0) w = tex.width;
     if (h <= 0) h = tex.height;
     if (d <= 0) d = tex.depth;
 
-    const VkImageAspectFlags aspect = aspect_for_format(tex.format);
+    const VkImageAspectFlags aspect = mithril::vk::aspect_for_format(tex.format);
 
     // Determine if this is a depth/stencil format for the correct clear command.
     bool isDepthStencil = (aspect & VK_IMAGE_ASPECT_DEPTH_BIT) ||
                           (aspect & VK_IMAGE_ASPECT_STENCIL_BIT);
 
-    OneShotCtx c;
-    if (!begin_one_shot(c)) return;
+    mithril::vk::OneShotCtx c;
+    if (!mithril::vk::begin_one_shot(c)) return;
 
     // Transition to TRANSFER_DST_OPTIMAL.
     VkImageMemoryBarrier toDst{};
@@ -1290,7 +1286,7 @@ void backend_clear_texture(GLuint name, int level,
                          0, nullptr, 0, nullptr, 1, &toShader);
 
     tex.currentLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    end_one_shot(c);
+    mithril::vk::end_one_shot(c);
 }
 
 } // extern "C"
