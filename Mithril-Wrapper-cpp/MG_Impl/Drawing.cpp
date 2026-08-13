@@ -1077,28 +1077,33 @@ GLenum glClientWaitSync(GLsync sync, GLbitfield flags, GLuint64 timeout) {
         mithril::state_set_error(GL_INVALID_VALUE);
         return GL_WAIT_FAILED;
     }
-    mithril::Sync& s = it->second;
 
-    if (s.signaled || s.submitSerial == 0 ||
-        s.submitSerial <= mithril::vk::backend_last_completed_serial()) {
-        s.signaled = true;
-        s.submitSerial = 0;
+    uint64_t serial = it->second.submitSerial;
+    if (serial == 0 || serial <= mithril::vk::backend_last_completed_serial()) {
+        it->second.signaled = true;
+        it->second.submitSerial = 0;
         return GL_ALREADY_SIGNALED;
     }
 
-    // glFenceSync currently flushes eagerly, but honour the API flag as well so
-    // this remains correct if fence creation becomes lazy in the future.
     if (flags & GL_SYNC_FLUSH_COMMANDS_BIT) {
         backend_end_render_pass();
         backend_commit();
     }
 
-    if (mithril::vk::backend_wait_serial(s.submitSerial, (uint64_t)timeout)) {
-        s.signaled = true;
-        s.submitSerial = 0;  // satisfied is monotonic; no backend query needed again
-        return GL_CONDITION_SATISFIED;
+    const bool completed = mithril::vk::backend_wait_serial(serial, (uint64_t)timeout);
+    if (!completed) return GL_TIMEOUT_EXPIRED;
+
+    // Backend work above may have crossed a command-buffer/context boundary.
+    // Re-find the object instead of writing through a reference retained across
+    // a potentially re-entrant call. Completion is monotonic.
+    it = g_state->syncObjects.find(handle);
+    if (it == g_state->syncObjects.end()) {
+        mithril::state_set_error(GL_INVALID_VALUE);
+        return GL_WAIT_FAILED;
     }
-    return GL_TIMEOUT_EXPIRED;
+    it->second.signaled = true;
+    it->second.submitSerial = 0;
+    return GL_CONDITION_SATISFIED;
 }
 
 void glWaitSync(GLsync sync, GLbitfield flags, GLuint64 timeout) {
@@ -1113,14 +1118,15 @@ void glWaitSync(GLsync sync, GLbitfield flags, GLuint64 timeout) {
         mithril::state_set_error(GL_INVALID_VALUE);
         return;
     }
-    // Mithril uses one Vulkan graphics queue for all contexts. A host wait is
-    // conservative but preserves GL server-wait semantics across thread/context
-    // hand-offs until a native VkSemaphore-backed cross-context path exists.
-    if (it->second.signaled || it->second.submitSerial == 0 ||
-        mithril::vk::backend_wait_serial(it->second.submitSerial, UINT64_MAX)) {
-        it->second.signaled = true;
-        it->second.submitSerial = 0;
+    const uint64_t serial = it->second.submitSerial;
+    if (serial != 0 && !mithril::vk::backend_wait_serial(serial, UINT64_MAX)) return;
+    it = g_state->syncObjects.find(handle);
+    if (it == g_state->syncObjects.end()) {
+        mithril::state_set_error(GL_INVALID_VALUE);
+        return;
     }
+    it->second.signaled = true;
+    it->second.submitSerial = 0;
 }
 
 GLboolean glIsSync(GLsync sync) {
@@ -1146,23 +1152,28 @@ void glGetSynciv(GLsync sync, GLenum pname, GLsizei bufSize, GLsizei* length, GL
         return;
     }
     mithril::Sync& s = it->second;
-    if (!s.signaled && (s.submitSerial == 0 ||
-        s.submitSerial <= mithril::vk::backend_last_completed_serial())) {
-        s.signaled = true;
+
+    // submitSerial==0 is the canonical completed state. Refresh from the Vulkan
+    // completion watermark only while a real serial is outstanding.
+    if (s.submitSerial != 0 &&
+        s.submitSerial <= mithril::vk::backend_last_completed_serial()) {
         s.submitSerial = 0;
+        s.signaled = true;
     }
+
     GLint v = 0;
     switch (pname) {
         case GL_OBJECT_TYPE:    v = GL_SYNC_FENCE; break;
         case GL_SYNC_CONDITION: v = (GLint)s.condition; break;
         case GL_SYNC_FLAGS:     v = (GLint)s.flags; break;
-        case GL_SYNC_STATUS:    v = s.signaled ? GL_SIGNALED : GL_UNSIGNALED; break;
+        case GL_SYNC_STATUS:    v = (s.submitSerial == 0) ? GL_SIGNALED : GL_UNSIGNALED; break;
         default:
-  mithril::state_set_error(GL_INVALID_ENUM);
-  return;
+            mithril::state_set_error(GL_INVALID_ENUM);
+            return;
     }
     values[0] = v;
     if (length) *length = 1;
 }
+
 
 } // extern "C"

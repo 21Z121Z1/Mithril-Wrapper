@@ -640,6 +640,158 @@ int read_pixels(int x, int y, int w, int h, GLenum format, GLenum type, void* ou
     Backend* b = backend();
     if (!b->initialized || !out_pixels || w <= 0 || h <= 0) return 0;
 
+    const GLuint readFboName = g_state ? g_state->currentReadFBO : 0;
+
+    // Depth readback needs a depth-aspect copy; treating it as RGBA color leaves
+    // the destination untouched (the old behavior) and also violates Vulkan's
+    // aspect contract for depth-only images.
+    if (format == GL_DEPTH_COMPONENT) {
+        VkImage srcImage = VK_NULL_HANDLE;
+        VkFormat srcFmt = VK_FORMAT_UNDEFINED;
+        VkImageLayout srcLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        GLuint srcTexId = 0;
+
+        if (readFboName == 0) {
+            srcImage = g_state->eglDefaultDepthImage;
+            srcFmt = g_state->eglDefaultDepthFormat;
+            // Swapchain depth remains attachment-optimal between passes.
+            srcLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        } else {
+            mithril::Framebuffer* fbo = mithril::state_get_framebuffer(readFboName);
+            if (!fbo || fbo->depth.texture == 0) return 0;
+            srcTexId = fbo->depth.texture;
+            auto& tbl = texture_table();
+            auto it = tbl.find(srcTexId);
+            if (it == tbl.end() || it->second.image == VK_NULL_HANDLE) return 0;
+            srcImage = it->second.image;
+            srcFmt = it->second.format;
+            srcLayout = it->second.currentLayout;
+        }
+        if (srcImage == VK_NULL_HANDLE || srcFmt == VK_FORMAT_UNDEFINED) return 0;
+
+        // End/submit any active draw pass before an out-of-band transfer. Queue
+        // order then makes the one-shot copy observe all prior depth writes.
+        backend_end_render_pass();
+        backend_commit();
+
+        // The just-ended user-FBO pass transitions its depth texture to the
+        // backend's sampled/read-only layout; refresh after the flush.
+        if (readFboName != 0 && srcTexId != 0) {
+            auto& tbl = texture_table();
+            auto it = tbl.find(srcTexId);
+            if (it != tbl.end()) srcLayout = it->second.currentLayout;
+        }
+        if (srcLayout == VK_IMAGE_LAYOUT_UNDEFINED) {
+            srcLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        }
+
+        int srcBpp = 0;
+        switch (srcFmt) {
+            case VK_FORMAT_D16_UNORM:             srcBpp = 2; break;
+            case VK_FORMAT_D32_SFLOAT:            srcBpp = 4; break;
+            case VK_FORMAT_D24_UNORM_S8_UINT:     srcBpp = 4; break;
+            case VK_FORMAT_D32_SFLOAT_S8_UINT:    srcBpp = 4; break; // depth aspect only
+            default: return 0;
+        }
+        const VkDeviceSize stagingSize = (VkDeviceSize)w * (VkDeviceSize)h * (VkDeviceSize)srcBpp;
+        BufferEntry staging{};
+        if (!create_buffer(staging, stagingSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT, nullptr)) return 0;
+
+        OneShotCtx c;
+        if (!begin_one_shot(c)) {
+            destroy_buffer_entry(staging);
+            return 0;
+        }
+
+        VkImageMemoryBarrier bar{};
+        bar.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        bar.oldLayout = srcLayout;
+        bar.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        bar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        bar.image = srcImage;
+        bar.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+        bar.subresourceRange.baseMipLevel = 0;
+        bar.subresourceRange.levelCount = 1;
+        bar.subresourceRange.baseArrayLayer = 0;
+        bar.subresourceRange.layerCount = 1;
+
+        VkPipelineStageFlags srcStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+                                        VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+                                        VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+        if (srcLayout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL ||
+            srcLayout == VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL) {
+            bar.srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                                VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+        } else {
+            bar.srcAccessMask = VK_ACCESS_SHADER_READ_BIT |
+                                VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT;
+        }
+        bar.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        vkCmdPipelineBarrier(c.cmd, srcStage, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+                             0, nullptr, 0, nullptr, 1, &bar);
+
+        VkBufferImageCopy region{};
+        region.bufferOffset = 0;
+        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+        region.imageSubresource.mipLevel = 0;
+        region.imageSubresource.baseArrayLayer = 0;
+        region.imageSubresource.layerCount = 1;
+        region.imageOffset = {x, y, 0};
+        region.imageExtent = {(uint32_t)w, (uint32_t)h, 1};
+        vkCmdCopyImageToBuffer(c.cmd, srcImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                               staging.buffer, 1, &region);
+
+        bar.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        bar.dstAccessMask = (srcLayout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL ||
+                             srcLayout == VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL)
+                                ? (VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                                   VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT)
+                                : (VK_ACCESS_SHADER_READ_BIT |
+                                   VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT);
+        bar.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        bar.newLayout = srcLayout;
+        VkPipelineStageFlags dstStage = (srcLayout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL ||
+                                         srcLayout == VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL)
+                                            ? (VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+                                               VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT)
+                                            : VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        vkCmdPipelineBarrier(c.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, dstStage, 0,
+                             0, nullptr, 0, nullptr, 1, &bar);
+        end_one_shot(c);
+
+        void* mapped = nullptr;
+        if (vkMapMemory(b->device, staging.memory, 0, stagingSize, 0, &mapped) != VK_SUCCESS || !mapped) {
+            destroy_buffer_entry(staging);
+            return 0;
+        }
+
+        const size_t count = (size_t)w * (size_t)h;
+        if (type == GL_FLOAT) {
+            float* dst = static_cast<float*>(out_pixels);
+            if (srcFmt == VK_FORMAT_D32_SFLOAT || srcFmt == VK_FORMAT_D32_SFLOAT_S8_UINT) {
+                std::memcpy(dst, mapped, count * sizeof(float));
+            } else if (srcFmt == VK_FORMAT_D16_UNORM) {
+                const uint16_t* src = static_cast<const uint16_t*>(mapped);
+                for (size_t i = 0; i < count; ++i) dst[i] = (float)src[i] / 65535.0f;
+            } else { // D24_UNORM_S8_UINT depth aspect is packed into 32 bits.
+                const uint32_t* src = static_cast<const uint32_t*>(mapped);
+                for (size_t i = 0; i < count; ++i) dst[i] = (float)(src[i] & 0x00FFFFFFu) / 16777215.0f;
+            }
+        } else {
+            // Keep the implementation explicit rather than silently returning
+            // mis-typed bytes. Minecraft's diagnostic/readback path and our
+            // regression use GL_FLOAT for depth.
+            vkUnmapMemory(b->device, staging.memory);
+            destroy_buffer_entry(staging);
+            return 0;
+        }
+
+        vkUnmapMemory(b->device, staging.memory);
+        destroy_buffer_entry(staging);
+        return 1;
+    }
+
     // Source: the current colour attachment installed on g_state. This covers
     // both FBO 0 (the EGL default framebuffer's swapchain image) and user
     // FBOs (their GL_COLOR_ATTACHMENT0 texture).
@@ -660,7 +812,7 @@ int read_pixels(int x, int y, int w, int h, GLenum format, GLenum type, void* ou
     // to update TextureEntry::currentLayout after the reverse barrier below.
     GLuint src_tex_id = 0;
 
-    if (g_state->currentDrawFBO == 0) {
+    if (readFboName == 0) {
         // EGL default framebuffer: read directly from the swapchain image.
         // The EGL layer installs both the VkImageView and the underlying
         // VkImage + format on g_state when a surface is made current. The
@@ -670,7 +822,7 @@ int read_pixels(int x, int y, int w, int h, GLenum format, GLenum type, void* ou
         src_fmt   = g_state->eglDefaultColorFormat;
         src_layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     } else {
-        mithril::Framebuffer* fbo = mithril::state_get_framebuffer(g_state->currentDrawFBO);
+        mithril::Framebuffer* fbo = mithril::state_get_framebuffer(readFboName);
         if (!fbo || !fbo->colors[0].texture) return 0;
         src_tex_id = fbo->colors[0].texture;
         src_image = backend_get_texture_image(src_tex_id);
@@ -696,12 +848,12 @@ int read_pixels(int x, int y, int w, int h, GLenum format, GLenum type, void* ou
     // no-op, so the subsequent vkCmdCopyImageToBuffer reads the image in the
     // wrong layout and returns garbage (observed as all-zero/black pixels on
     // the offscreen render smoke).
-    if (g_state->currentDrawFBO == 0) {
+    if (readFboName == 0) {
         // Swapchain image stays in COLOR_ATTACHMENT_OPTIMAL after a render pass
         // (transitioned to PRESENT_SRC_KHR only at present).
         src_layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     } else {
-        mithril::Framebuffer* fbo = mithril::state_get_framebuffer(g_state->currentDrawFBO);
+        mithril::Framebuffer* fbo = mithril::state_get_framebuffer(readFboName);
         if (fbo) {
             auto& tbl = mithril::vk::texture_table();
             auto tit = tbl.find(fbo->colors[0].texture);
