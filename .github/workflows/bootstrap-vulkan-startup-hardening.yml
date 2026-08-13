@@ -17,30 +17,97 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: fix/mobilegl-style-mc262-startup-preflight
-          fetch-depth: 4
-      - name: Apply business-code hardening patch
+          fetch-depth: 2
+      - name: Harden mid-frame acquire synchronization
         shell: bash
         run: |
           set -euo pipefail
-          git show 8bfad03ebeae951f0f30d5d8007d23f9117293bd:.github/workflows/bootstrap-vulkan-startup-hardening.yml > /tmp/staged.yml
           python3 - <<'PY'
           from pathlib import Path
-          text = Path('/tmp/staged.yml').read_text()
-          begin = "          python3 - <<'PY'\n"
-          end = "\n          PY\n"
-          payload = text.split(begin, 1)[1].split(end, 1)[0]
-          code = '\n'.join(line[10:] if line.startswith('          ') else line for line in payload.splitlines())
-          compile(code, '<staged-hardening>', 'exec')
-          exec(code, {'__name__': '__main__'})
+
+          def one(path, old, new):
+              p = Path(path)
+              s = p.read_text()
+              if s.count(old) != 1:
+                  raise SystemExit(f'{path}: expected one match, got {s.count(old)}')
+              p.write_text(s.replace(old, new, 1))
+
+          one('Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/CommandStream.h',
+              'void set_active_swapchain(Swapchain* sc);\n',
+              'void set_active_swapchain(Swapchain* sc);\n'
+              '// Read-only access for out-of-band submits (safe_device_wait_idle) that\n'
+              '// must consume the same acquire semaphore as normal frame submits.\n'
+              'Swapchain* active_swapchain();\n')
+
+          one('Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/CommandStream.cpp',
+              'void set_active_swapchain(Swapchain* sc) {\n    encoder().activeSwapchain = sc;\n}\n',
+              'void set_active_swapchain(Swapchain* sc) {\n    encoder().activeSwapchain = sc;\n}\n\n'
+              'Swapchain* active_swapchain() {\n    return encoder().activeSwapchain;\n}\n')
+
+          one('Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Device.cpp',
+              '#include "CommandStream.h"  // end_render_pass, ensure_command_buffer_recording, render_pass_active\n',
+              '#include "CommandStream.h"  // end_render_pass, ensure_command_buffer_recording, render_pass_active\n'
+              '#include "Swapchain.h"      // acquire semaphore edge for out-of-band submits\n')
+
+          p = Path('Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Device.cpp')
+          s = p.read_text()
+          old = '''            VkSubmitInfo si{};\n'''
+          old += '''            si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;\n'''
+          old += '''            si.commandBufferCount = 1;\n'''
+          old += '''            si.pCommandBuffers = &b->commandBuffer;\n'''
+          old += '''            VkFence fence = b->frameFences[b->currentFrame];\n'''
+          new = '''            VkSubmitInfo si{};\n'''
+          new += '''            si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;\n'''
+          new += '''            si.commandBufferCount = 1;\n'''
+          new += '''            si.pCommandBuffers = &b->commandBuffer;\n'''
+          new += '''\n'''
+          new += '''            // If this out-of-band flush contains work targeting the currently\n'''
+          new += '''            // acquired swapchain image, it is still the FIRST queue submit\n'''
+          new += '''            // that must consume vkAcquireNextImageKHR's binary semaphore.\n'''
+          new += '''            // Submitting without this wait races rendering against the\n'''
+          new += '''            // presentation engine; reusing the semaphore later is also invalid.\n'''
+          new += '''            Swapchain* sc = active_swapchain();\n'''
+          new += '''            VkSemaphore acquireWait = VK_NULL_HANDLE;\n'''
+          new += '''            VkPipelineStageFlags acquireStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;\n'''
+          new += '''            if (sc && sc->currentImage >= 0 && !sc->imageAvailableConsumed) {\n'''
+          new += '''                const int slot = sc->imageAvailableFrameSlot;\n'''
+          new += '''                if (slot >= 0 && slot < (int)sc->imageAvailablePerFrame.size() &&\n'''
+          new += '''                    sc->imageAvailablePerFrame[slot] != VK_NULL_HANDLE) {\n'''
+          new += '''                    acquireWait = sc->imageAvailablePerFrame[slot];\n'''
+          new += '''                    si.waitSemaphoreCount = 1;\n'''
+          new += '''                    si.pWaitSemaphores = &acquireWait;\n'''
+          new += '''                    si.pWaitDstStageMask = &acquireStage;\n'''
+          new += '''                } else {\n'''
+          new += '''                    MITHRIL_LOG_ERROR("vk", "safe_device_wait_idle: acquired image has no valid acquire semaphore");\n'''
+          new += '''                    sc->needsRebuild = true;\n'''
+          new += '''                }\n'''
+          new += '''            }\n'''
+          new += '''\n'''
+          new += '''            VkFence fence = b->frameFences[b->currentFrame];\n'''
+          if s.count(old) != 1:
+              raise SystemExit(f'Device.cpp submit block matches={s.count(old)}')
+          s = s.replace(old, new, 1)
+          old2 = '''            VkResult submitRc = vkQueueSubmit(b->graphicsQueue, 1, &si, fence);\n'''
+          old2 += '''            if (submitRc == VK_SUCCESS) {\n'''
+          old2 += '''                b->fencePending[b->currentFrame] = true;\n'''
+          old2 += '''            }\n'''
+          new2 = '''            VkResult submitRc = vkQueueSubmit(b->graphicsQueue, 1, &si, fence);\n'''
+          new2 += '''            if (submitRc == VK_SUCCESS) {\n'''
+          new2 += '''                b->fencePending[b->currentFrame] = true;\n'''
+          new2 += '''                if (sc && acquireWait != VK_NULL_HANDLE) {\n'''
+          new2 += '''                    sc->imageAvailableConsumed = true;\n'''
+          new2 += '''                }\n'''
+          new2 += '''            }\n'''
+          if s.count(old2) != 1:
+              raise SystemExit(f'Device.cpp submit result matches={s.count(old2)}')
+          p.write_text(s.replace(old2, new2, 1))
           PY
-          # The Actions token cannot update an existing workflow file. Keep the
-          # validated build.yml edit for a separate GitHub API write.
-          git checkout -- .github/workflows/build.yml
           git diff --check
-          git status --short
           git diff --stat
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add Mithril-Wrapper-cpp tests
-          git commit -m 'fix: harden Vulkan frame and GL synchronization semantics'
+          git add Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/CommandStream.h \
+                  Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/CommandStream.cpp \
+                  Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Device.cpp
+          git commit -m 'fix: preserve acquire dependency on out-of-band submits'
           git push origin HEAD:fix/mobilegl-style-mc262-startup-preflight
