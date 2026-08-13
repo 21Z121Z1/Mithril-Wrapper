@@ -19,6 +19,7 @@
 #include "Device.h"
 #include "Resources.h"
 #include "CommandStream.h"  // end_render_pass, ensure_command_buffer_recording, render_pass_active
+#include "Swapchain.h"      // acquire semaphore edge for out-of-band submits
 #include "Pipeline.h"     // clear_all_pipeline_caches() for deviceLost recovery
 #include "DescriptorSet.h"  // reset_all_descriptor_pools() for swapchain rebuild recovery
 #include "UniformArena.h"  // ubo_arena_shutdown() — transient UBO arena teardown
@@ -101,6 +102,29 @@ void safe_device_wait_idle() {
             si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
             si.commandBufferCount = 1;
             si.pCommandBuffers = &b->commandBuffer;
+
+            // If this out-of-band flush contains work targeting the currently
+            // acquired swapchain image, it is still the FIRST queue submit
+            // that must consume vkAcquireNextImageKHR's binary semaphore.
+            // Submitting without this wait races rendering against the
+            // presentation engine; reusing the semaphore later is also invalid.
+            Swapchain* sc = active_swapchain();
+            VkSemaphore acquireWait = VK_NULL_HANDLE;
+            VkPipelineStageFlags acquireStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+            if (sc && sc->currentImage >= 0 && !sc->imageAvailableConsumed) {
+                const int slot = sc->imageAvailableFrameSlot;
+                if (slot >= 0 && slot < (int)sc->imageAvailablePerFrame.size() &&
+                    sc->imageAvailablePerFrame[slot] != VK_NULL_HANDLE) {
+                    acquireWait = sc->imageAvailablePerFrame[slot];
+                    si.waitSemaphoreCount = 1;
+                    si.pWaitSemaphores = &acquireWait;
+                    si.pWaitDstStageMask = &acquireStage;
+                } else {
+                    MITHRIL_LOG_ERROR("vk", "safe_device_wait_idle: acquired image has no valid acquire semaphore");
+                    sc->needsRebuild = true;
+                }
+            }
+
             VkFence fence = b->frameFences[b->currentFrame];
             // FIX: fence 可能在 signaled 状态（ensure_command_buffer_recording
             // 的 vkWaitForFences 不 reset fence，或上一次 safe_device_wait_idle
@@ -110,6 +134,9 @@ void safe_device_wait_idle() {
             VkResult submitRc = vkQueueSubmit(b->graphicsQueue, 1, &si, fence);
             if (submitRc == VK_SUCCESS) {
                 b->fencePending[b->currentFrame] = true;
+                if (sc && acquireWait != VK_NULL_HANDLE) {
+                    sc->imageAvailableConsumed = true;
+                }
             }
             // 提交失败（OOM/deviceLost）时不设置 fencePending，后续的
             // vkDeviceWaitIdle 仍会等待其他 pending 工作。

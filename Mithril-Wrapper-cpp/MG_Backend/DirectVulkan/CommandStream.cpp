@@ -742,6 +742,10 @@ void set_active_swapchain(Swapchain* sc) {
     encoder().activeSwapchain = sc;
 }
 
+Swapchain* active_swapchain() {
+    return encoder().activeSwapchain;
+}
+
 /*
  * Root cause Y (CRITICAL): register the GL texture names backing the upcoming
  * user-FBO render pass's color/depth attachments. The GL draw path
