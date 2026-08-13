@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - codex/autonomous-direct-metal-next
+      - 'agent/**'
 
 concurrency:
   group: mithril-ctest-${{ github.ref }}
@@ -44,7 +45,7 @@ jobs:
         run: |
           set -euo pipefail
           ctest --test-dir build-ctest-metal -N -L directmetal | tee "$RUNNER_TEMP/directmetal-tests.txt"
-          grep -Eq 'Total Tests: 22$' "$RUNNER_TEMP/directmetal-tests.txt"
+          grep -Eq 'Total Tests: 24$' "$RUNNER_TEMP/directmetal-tests.txt"
 
       - name: Run DirectMetal semantic suite
         shell: bash

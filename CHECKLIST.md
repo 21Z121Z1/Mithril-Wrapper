@@ -7,7 +7,7 @@
 > M3 已完成：S3 组 76/114 真实现——顶点属性全家族（glVertexAttribPointer/IPointer、常量系 1-4、Divisor、Enable/Disable）、attribute 查询（fv/dv/iv/Iiv/Iuiv/Pointerv）、buffer 映射/查询家族（MapBuffer/Range、Unmap、FlushMapped、GetBufferParameteriv/i64v/Pointerv/SubData、CopyBufferSubData）、全部 10 个 draw 入口（DrawArrays/Instanced、DrawElements/BaseVertex/Instanced/InstancedBaseVertex、DrawRangeElements/BaseVertex、MultiDrawArrays/Elements/BaseVertex）；引擎新增双顶点流（VERTEX+INSTANCE binding）、索引缓冲（UBYTE/USHORT/UINT 统一扩 UINT32 staging）、TriangleStrip/Fan 拓扑、实例化（CPU 按 divisor 复制行，无需 EXT）；非 4 字节对齐 stride/offset 由 CPU 打包规整；draw_smoke 扩展 8 断言通过。
 > **M4 完成（S4 42/42）**：`src/vk/texture.cpp`——staging→CmdCopyBufferToImage 全 mip 逐切片上传、常驻 TexObj 表、1x1 白色 dummy 兜底、采样器描述符绑定；image 类型扩展（2D/1D、3D volume、2D/1D array、cubemap，image/view/sampler 按类型创建，wrap_r 接入）；GL 端 `src/gl/texture.cpp` S4 全量 42 函数真实现——对象表（Gen/Delete/Is/Bind/Active）、TexImage1D/2D/3D + TexSub1D/2D/3D（cubemap face 归位、array 分层）、GetTexImage（PACK 对齐回读）、GenerateMipmap（每切片盒式滤波）、TexParameter/GetTexParameter 全系、GetTexLevelParameter（宽/高/深/压缩）、S3TC（DXT1/3/5）CPU 解压 + 原始压缩镜像 + GetCompressedTexImage、CopyTexImage1D/2D + CopyTexSubImage1D/2D/3D（帧读回）、glTexBuffer（buffer 引用 → 1xN 镜像上传）、glPixelStoref；**texture_smoke 26 断言全过**（采样/mip/dummy 白/GetTexImage 往返/DXT1 解压/3D 切片/数组分层/cubemap 6 面+mip/拷贝/texBuffer）。CI 已接 texture_smoke。
 > **M5 完成（S5 FBO 全量 24 + MRT + MSAA）**：状态管线接入 Vulkan——深度附件（D24S8，renderpass 第二附件 + framebuffer 挂载）、`PipelineState` 快照（GL->vk 枚举映射 ToVkCompare/ToVkBlend/StencilOp/ColorMask）烘焙进 pipeline 缓存 key（`StateSignature`，含 depth/blend/scissor/cull/frontFace/stencil 全域含读/写掩码与 ref）与 `VkPipelineDepthStencil/ColorBlend/Rasterization...State`；深度清除统一为显式 `CmdClearDepthStencilImage`（depth 附件 loadOp=LOAD，修掉原先 `LOAD_OP_CLEAR` 无 clearValue 把 depth 清 0 的 bug）；动态 scissor 每 draw 下发（Y 翻转 + clamp，修 GL 左下/Vulkan 左上原点差）；`glClear(mask)`/`glDepthFunc`/`glDepthMask`/`glBlendFunc`/`glScissor`/`glColorMask`/`glCullFace`/`glFrontFace`/`glStencilFunc(Op/Mask)`/`glPolygonMode` 接入后端；`glStencilMask` 独立写掩码、depth view 补 S8 aspect、renderpass stencil loadOp=LOAD、stencil ref 入 pipeline key、GL→VK frontFace 取反。**S5 FBO/渲染缓冲 24 函数**：GL 层 `FbState`（color[8] 多附件槽 @attachment0..7 + depth，draw_bufs/read_buf，complete/dirty），`glGenFramebuffers→glGetFramebufferAttachmentParameteriv` 全系 + `glDrawBuffers/glDrawBuffer/glReadBuffer`；Vk 层 `FboObj`：每附件 FboSlot→ImageView、尺寸推 framebuffer 尺寸、rp_sig 含附件数/采样数。**MRT**：renderpass N 附件 + framebuffer N 视图、pipeline `attachmentCount=color_count` 每附件独立 blend（`draw_mask` 排除位写掩码清零）、显式 clear 每附件（仅 draw buffer 选中）、读回按 `read_buf` 挑附件。**MSAA**：renderbuffer `samples>1` → `rasterizationSamples` + resolve 附件（单采样转储）+ clear 写颜色与 resolve + 读回 resolve 图。**fbo_smoke 29 行 ok（28 断言）**：17 状态断言 + FBO 纹理/RBO/blit + MRT 双附件读回/单 drawBuffer 门控 + MSAA 4x 读回。回归：八个冒烟全过，M2/M3/M4 未破坏。
-> 待办：M6 同步与多帧。
+> **M6 同步与多帧已闭环**：`sync_smoke` 直接覆盖 `glFlush`/`glFinish`、native fence/wait、in-flight 删除与 32 帧交替提交/名称复用；下一阶段进入 Minecraft/真机集成验收。
 
 ---
 
@@ -81,7 +81,7 @@
     - S5 FBO/渲染缓冲：24（glGenFramebuffers→glGetFramebufferAttachmentParameteriv 全系 + glDrawBuffer/glDrawBuffers/glReadBuffer + glRenderbufferStorageMultisample；**S5 全量 24 真实现完成，MRT + MSAA 支持，fbo_smoke 29 断言通过**）
     - S6 同步/Query/Sampler：36（glGenQueries/glFenceSync/glSamplerParameter 系）
   - 342 全部归入以上六组，无遗漏
-- 未实现函数：当前生成 stub 只记录日志；这不是受支持语义，也不是合格的 fail-closed 行为。剩余清单与修复优先级见 semantic matrix。
+- 未实现函数：剩余 10 个 GL 3.3 导出统一显式 `GL_INVALID_OPERATION` fail-closed，并由 `unsupported_stub_smoke` 逐一动态调用验证；导出符号不再伪装成受支持语义。
 - 最终裁剪依据：M7 用 apitrace 抓 Minecraft 真实调用 → 与 desktopglues 清单交叉
 
 ## 4. 架构设计（从零实现）
@@ -90,7 +90,7 @@
 LWJGL (Minecraft Java) — dlsym libmithril.dylib
         │
         ▼
-GL frontend（src/gl/*.cpp 真实实现 + exports.cpp 生成的 logging-only stub；stub 不算支持）
+GL frontend（src/gl/*.cpp 真实实现 + exports.cpp 生成的显式 fail-closed unsupported entry；导出不等于支持）
 EGL 层（src/egl/，44 符号，display/config/context/surface 生命周期 + thread_local 当前状态）
         │  桥接契约：CAMetalLayer 作为 native window（iOS）
         ▼
@@ -149,7 +149,7 @@ Vulkan 后端（src/vk/，经 MoltenVK → Metal → CAMetalLayer）
 | **M3 顶点数据** | VAO/VBO、stride/offset 规整、glDrawElements | 用 App 数据绘制 | ✅ S3 76/114 完成（属性全系/映射查询/draw 十入口/双流+索引+拓扑+实例化）；draw_smoke 扩展 8 断言通过 |
 | **M4 纹理** | glTexImage2D 上传、格式/swizzle、采样器、mipmap | 贴图正确 | ✅ S4 42/42 完成（纹理对象表、TexImage/Sub/压缩/CopyTex/GetTexImage/GenerateMipmap/texBuffer）；texture_smoke 26 断言通过 |
 | **M5 状态与管线** | depth/stencil/blend/cull/FBO/MSAA → pipeline 缓存 | 完整三维画面 | ✅ S5 FBO/渲染缓冲 24 函数 + MRT（多附件/每附件 blend/read_buf 读回）+ MSAA（resolve 附件/readres）；fbo_smoke 29 断言全过 |
-| **M6 同步** | 双 CMD buffer、barrier、glFinish/glFlush | 多帧不花屏 |
+| **M6 同步** | 双 CMD buffer、barrier、glFinish/glFlush | ✅ `sync_smoke`：显式 flush/finish、native fence/wait、in-flight 删除、32 帧交替提交与名称复用 |
 | **M7 收窄** | apitrace 实测 MC 调用 → 裁剪/补漏 | 与 GL 参考输出截图一致 |
 | **M8 集成** | 打包进 Amethyst，真机验证 | 完整可玩 |
 

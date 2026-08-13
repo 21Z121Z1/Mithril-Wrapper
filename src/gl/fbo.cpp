@@ -40,7 +40,9 @@ struct FbState {
     Attach color[8];                 // GL_COLOR_ATTACHMENT0..7 (MRT)
     int n_color = 0;                 // highest attached color index + 1
     bool has_depth = false;
-    Attach depth;                    // GL_DEPTH_ATTACHMENT / _STENCIL_
+    Attach depth;                    // GL_DEPTH_ATTACHMENT
+    bool has_stencil = false;
+    Attach stencil;                  // GL_STENCIL_ATTACHMENT
     GLsizei width = 0, height = 0;
     GLenum draw_bufs[8] = {GL_COLOR_ATTACHMENT0};
     int n_draw = 1;
@@ -132,6 +134,11 @@ static bool IsDepthRenderbufferFormat(GLenum format) {
            format == GL_DEPTH32F_STENCIL8;
 }
 
+static bool IsStencilRenderbufferFormat(GLenum format) {
+    return format == GL_DEPTH_STENCIL || format == GL_DEPTH24_STENCIL8 ||
+           format == GL_DEPTH32F_STENCIL8;
+}
+
 static bool AttachIsDepth(const Attach& attachment, bool* is_depth) {
     if (!attachment.present || !is_depth) return false;
     if (attachment.is_texture) {
@@ -145,6 +152,32 @@ static bool AttachIsDepth(const Attach& attachment, bool* is_depth) {
         return false;
     *is_depth = IsDepthRenderbufferFormat(renderbuffer->second.internalformat);
     return true;
+}
+
+static bool AttachHasStencil(const Attach& attachment, bool* has_stencil) {
+    if (!attachment.present || !has_stencil) return false;
+    if (attachment.is_texture) {
+        if (!TextureSubresourceValid(attachment)) return false;
+        // DirectMetal depth textures currently expose Depth32Float only.
+        // Packed texture stencil storage is not advertised.
+        *has_stencil = false;
+        return true;
+    }
+    auto renderbuffer = g_renderbuffers.find(attachment.rbo_id);
+    if (renderbuffer == g_renderbuffers.end() || !renderbuffer->second.defined)
+        return false;
+    *has_stencil = IsStencilRenderbufferFormat(
+        renderbuffer->second.internalformat);
+    return true;
+}
+
+static bool SameAttachment(const Attach& a, const Attach& b) {
+    if (!a.present || !b.present || a.is_texture != b.is_texture)
+        return false;
+    if (a.is_texture)
+        return a.tex_id == b.tex_id && a.level == b.level &&
+               a.layer == b.layer;
+    return a.rbo_id == b.rbo_id;
 }
 
 // Push the current attachments into the selected backend and cache the GL
@@ -315,6 +348,24 @@ static void PushVkFramebuffer(GLuint id) {
         }
     }
 
+    // The native contract currently has one packed depth/stencil slot.
+    // A standard GL_DEPTH_STENCIL_ATTACHMENT therefore maps exactly when
+    // depth and stencil name the same packed renderbuffer. Distinct depth
+    // and stencil images are kept distinct in frontend state and make the
+    // framebuffer incomplete instead of silently aliasing one attachment.
+    if (f->has_stencil && f->stencil.present) {
+        GLsizei width = 0, height = 0, samples = 0;
+        bool has_stencil = false;
+        if (!f->has_depth || !f->depth.present ||
+            !SameAttachment(f->depth, f->stencil) ||
+            !AttachDimensions(f->stencil, &width, &height) ||
+            !AttachSampleCount(f->stencil, &samples) ||
+            !AttachHasStencil(f->stencil, &has_stencil) || !has_stencil ||
+            width != fw || height != fh || samples != framebuffer_samples) {
+            attachments_match = false;
+        }
+    }
+
     spec.read_buf = f->read_buf;
     bool selectors_valid = ColorBufferHasAttachment(*f, f->read_buf);
     for (int i = 0; i < f->n_draw; ++i) {
@@ -353,8 +404,12 @@ void NotifyTextureStorageChanged(GLuint texture) {
     for (auto& entry : g_framebuffers) {
         FbState& framebuffer = entry.second;
         bool references_texture = framebuffer.has_depth &&
-            framebuffer.depth.present && framebuffer.depth.is_texture &&
-            framebuffer.depth.tex_id == texture;
+    framebuffer.depth.present && framebuffer.depth.is_texture &&
+    framebuffer.depth.tex_id == texture;
+references_texture = references_texture ||
+    (framebuffer.has_stencil && framebuffer.stencil.present &&
+     framebuffer.stencil.is_texture &&
+     framebuffer.stencil.tex_id == texture);
         for (const Attach& color : framebuffer.color)
             references_texture = references_texture ||
                 (color.present && color.is_texture && color.tex_id == texture);
@@ -376,34 +431,46 @@ static GLuint AttachmentFbo(GLenum target) {
     }
 }
 
-// Map a GL attachment enum to a color slot index (-1 for depth, -2 invalid).
+// Map a GL attachment enum to a color slot index (-1 means non-color).
 static int ColorAttachIndex(GLenum attachment) {
-    if (attachment == GL_DEPTH_ATTACHMENT ||
-        attachment == GL_DEPTH_STENCIL_ATTACHMENT)
-        return -1;
-    if (attachment < GL_COLOR_ATTACHMENT0) return -2;
+    if (attachment < GL_COLOR_ATTACHMENT0) return -1;
     int i = (int)(attachment - GL_COLOR_ATTACHMENT0);
-    return i < 8 ? i : -2;
+    return i < 8 ? i : -1;
 }
 
-// Attach a texture (texture == 0 => detach) to an attachment of `fbo`.
+static void AssignTextureAttachment(Attach* attachment, GLuint texture,
+                                    GLint level, GLint layer) {
+    attachment->present = texture != 0;
+    attachment->is_texture = true;
+    attachment->tex_id = texture;
+    attachment->level = level;
+    attachment->layer = layer;
+    attachment->rbo_id = 0;
+}
+
+// Attach a texture (texture == 0 => detach) without collapsing depth
+// and stencil frontend state into one alias.
 static void SetTextureAttachment(GLenum attachment, GLuint fbo, GLuint texture,
                                  GLint level, GLint layer) {
     FbState* f = FboGet(fbo);
     if (!f) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
-    int ci = ColorAttachIndex(attachment);
-    if (ci < -1) { PUSH_ERROR(GL_INVALID_ENUM); return; }
-    Attach& a = ci < 0 ? f->depth : f->color[ci];
-    a.present = texture != 0;
-    a.is_texture = true;
-    a.tex_id = texture;
-    a.level = level;
-    a.layer = layer;
-    a.rbo_id = 0;
-    if (ci < 0)
+    if (attachment == GL_DEPTH_STENCIL_ATTACHMENT) {
+        AssignTextureAttachment(&f->depth, texture, level, layer);
+        AssignTextureAttachment(&f->stencil, texture, level, layer);
         f->has_depth = texture != 0;
-    else if (ci + 1 > f->n_color)
-        f->n_color = ci + 1;
+        f->has_stencil = texture != 0;
+    } else if (attachment == GL_DEPTH_ATTACHMENT) {
+        AssignTextureAttachment(&f->depth, texture, level, layer);
+        f->has_depth = texture != 0;
+    } else if (attachment == GL_STENCIL_ATTACHMENT) {
+        AssignTextureAttachment(&f->stencil, texture, level, layer);
+        f->has_stencil = texture != 0;
+    } else {
+        int ci = ColorAttachIndex(attachment);
+        if (ci < 0) { PUSH_ERROR(GL_INVALID_ENUM); return; }
+        AssignTextureAttachment(&f->color[ci], texture, level, layer);
+        if (ci + 1 > f->n_color) f->n_color = ci + 1;
+    }
     f->dirty = true;
     if (fbo == g_bound_draw_fbo) PushVkFramebuffer(fbo);
 }
@@ -639,9 +706,10 @@ void APIENTRY glReadBuffer(GLenum buf) {
 
 static void AttachTexture(GLenum attachment, GLuint fbo, GLuint texture,
                           GLint level, GLint layer) {
-    bool has_depth = attachment == GL_DEPTH_ATTACHMENT ||
-                     attachment == GL_DEPTH_STENCIL_ATTACHMENT;
-    if (!has_depth && ColorAttachIndex(attachment) < 0) {
+    const bool depth_or_stencil = attachment == GL_DEPTH_ATTACHMENT ||
+        attachment == GL_STENCIL_ATTACHMENT ||
+        attachment == GL_DEPTH_STENCIL_ATTACHMENT;
+    if (!depth_or_stencil && ColorAttachIndex(attachment) < 0) {
         PUSH_ERROR(GL_INVALID_ENUM);
         return;
     }
@@ -779,8 +847,11 @@ void APIENTRY glFramebufferRenderbuffer(GLenum target, GLenum attachment,
         PUSH_ERROR(GL_INVALID_OPERATION);
         return;
     }
-    int ci = ColorAttachIndex(attachment);
-    if (ci < -1) {
+    const bool depth_or_stencil = attachment == GL_DEPTH_ATTACHMENT ||
+        attachment == GL_STENCIL_ATTACHMENT ||
+        attachment == GL_DEPTH_STENCIL_ATTACHMENT;
+    const int ci = ColorAttachIndex(attachment);
+    if (!depth_or_stencil && ci < 0) {
         PUSH_ERROR(GL_INVALID_ENUM);
         return;
     }
@@ -788,15 +859,29 @@ void APIENTRY glFramebufferRenderbuffer(GLenum target, GLenum attachment,
     if (renderbuffer && !fbo) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
     FbState* f = FboGet(fbo);
     if (!f) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
-    Attach& a = ci < 0 ? f->depth : f->color[ci];
-    a.present = renderbuffer != 0;
-    a.is_texture = false;
-    a.rbo_id = renderbuffer;
-    a.tex_id = 0;
-    if (ci < 0)
+    auto assign = [&](Attach* a) {
+        a->present = renderbuffer != 0;
+        a->is_texture = false;
+        a->rbo_id = renderbuffer;
+        a->tex_id = 0;
+        a->level = 0;
+        a->layer = 0;
+    };
+    if (attachment == GL_DEPTH_STENCIL_ATTACHMENT) {
+        assign(&f->depth);
+        assign(&f->stencil);
         f->has_depth = renderbuffer != 0;
-    else if (ci + 1 > f->n_color)
-        f->n_color = ci + 1;
+        f->has_stencil = renderbuffer != 0;
+    } else if (attachment == GL_DEPTH_ATTACHMENT) {
+        assign(&f->depth);
+        f->has_depth = renderbuffer != 0;
+    } else if (attachment == GL_STENCIL_ATTACHMENT) {
+        assign(&f->stencil);
+        f->has_stencil = renderbuffer != 0;
+    } else {
+        assign(&f->color[ci]);
+        if (ci + 1 > f->n_color) f->n_color = ci + 1;
+    }
     f->dirty = true;
     if (fbo == g_bound_draw_fbo) PushVkFramebuffer(fbo);
 }
@@ -811,8 +896,11 @@ void APIENTRY glGetFramebufferAttachmentParameteriv(GLenum target,
         return;
     }
     if (!params) return;
-    int ci = ColorAttachIndex(attachment);
-    if (ci < -1) { PUSH_ERROR(GL_INVALID_ENUM); return; }
+    const bool depth_or_stencil = attachment == GL_DEPTH_ATTACHMENT ||
+        attachment == GL_STENCIL_ATTACHMENT ||
+        attachment == GL_DEPTH_STENCIL_ATTACHMENT;
+    const int ci = ColorAttachIndex(attachment);
+    if (!depth_or_stencil && ci < 0) { PUSH_ERROR(GL_INVALID_ENUM); return; }
     GLuint id = AttachmentFbo(target);
     const FbState* f = FboGet(id);
     if (!f) {
@@ -822,7 +910,16 @@ void APIENTRY glGetFramebufferAttachmentParameteriv(GLenum target,
             *params = 0;
         return;
     }
-    const Attach& a = ci < 0 ? f->depth : f->color[ci];
+    const Attach* selected = nullptr;
+    if (attachment == GL_DEPTH_ATTACHMENT) selected = &f->depth;
+    else if (attachment == GL_STENCIL_ATTACHMENT) selected = &f->stencil;
+    else if (attachment == GL_DEPTH_STENCIL_ATTACHMENT) {
+        if (f->has_depth && f->has_stencil &&
+            SameAttachment(f->depth, f->stencil))
+            selected = &f->depth;
+    } else selected = &f->color[ci];
+    const Attach empty{};
+    const Attach& a = selected ? *selected : empty;
     switch (pname) {
         case GL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE:
             *params = a.present ? (a.is_texture ? GL_TEXTURE : GL_RENDERBUFFER)

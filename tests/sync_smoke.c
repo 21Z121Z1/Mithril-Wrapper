@@ -1,9 +1,9 @@
 /* DirectMetal GL sync vertical smoke.
  *
- * Proves a real GL clear is submitted as native Metal work by glFenceSync,
- * client waits observe command-buffer completion without making ordinary GL
- * submission synchronous, sync queries are live, and deleting an in-flight
- * GL name does not invalidate the native completion callback.
+ * Proves real GL work is submitted as native Metal work by fences, explicit
+ * glFlush/glFinish obey their asynchronous/synchronous contracts, client waits
+ * observe command-buffer completion, and repeated frame/fence/name lifetimes do
+ * not invalidate native completion state.
  */
 
 #include <dlfcn.h>
@@ -49,6 +49,8 @@ typedef const unsigned char* (*fnGetString)(GLenum);
 typedef GLenum (*fnGetError)(void);
 typedef void (*fnClearColor)(float, float, float, float);
 typedef void (*fnClear)(GLbitfield);
+typedef void (*fnFlush)(void);
+typedef void (*fnFinish)(void);
 typedef void (*fnReadPixels)(GLint, GLint, GLsizei, GLsizei, GLenum, GLenum,
                              void*);
 typedef GLsync (*fnFenceSync)(GLenum, GLbitfield);
@@ -89,6 +91,8 @@ int main(void) {
     LOAD(fnGetError, getError, "glGetError");
     LOAD(fnClearColor, clearColor, "glClearColor");
     LOAD(fnClear, clear, "glClear");
+    LOAD(fnFlush, flush, "glFlush");
+    LOAD(fnFinish, finish, "glFinish");
     LOAD(fnReadPixels, readPixels, "glReadPixels");
     LOAD(fnFenceSync, fenceSync, "glFenceSync");
     LOAD(fnDeleteSync, deleteSync, "glDeleteSync");
@@ -96,9 +100,9 @@ int main(void) {
     LOAD(fnClientWaitSync, clientWaitSync, "glClientWaitSync");
     LOAD(fnWaitSync, waitSync, "glWaitSync");
     LOAD(fnGetSynciv, getSynciv, "glGetSynciv");
-    CHECK(getString && getError && clearColor && clear && readPixels &&
-              fenceSync && deleteSync && isSync && clientWaitSync &&
-              waitSync && getSynciv,
+    CHECK(getString && getError && clearColor && clear && flush && finish &&
+              readPixels && fenceSync && deleteSync && isSync &&
+              clientWaitSync && waitSync && getSynciv,
           "required GL sync symbols resolve");
     if (failures) return 1;
 
@@ -159,8 +163,6 @@ int main(void) {
               getError() == GL_INVALID_VALUE,
           "waiting on a deleted sync is rejected safely");
 
-    // The backend completion block owns its completion state independently of
-    // the frontend name, so immediate name deletion cannot release it early.
     clearColor(0.f, 1.f, 0.f, 1.f);
     clear(GL_COLOR_BUFFER_BIT);
     GLsync deleted_in_flight = fenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
@@ -168,6 +170,51 @@ int main(void) {
     readPixels(0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
     CHECK(pixel_is(pixel, 0, 255, 0) && getError() == GL_NO_ERROR,
           "deleting an in-flight fence retains native completion safely");
+
+    clearColor(0.f, 0.f, 1.f, 1.f);
+    clear(GL_COLOR_BUFFER_BIT);
+    flush();
+    CHECK(getError() == GL_NO_ERROR,
+          "glFlush submits pending DirectMetal work without GL error");
+    GLsync flushed = fenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+    waited = clientWaitSync(flushed, GL_SYNC_FLUSH_COMMANDS_BIT,
+                            GL_TIMEOUT_IGNORED);
+    CHECK(waited == GL_ALREADY_SIGNALED || waited == GL_CONDITION_SATISFIED,
+          "fence after glFlush observes prior queue completion (0x%x)", waited);
+    readPixels(0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
+    CHECK(pixel_is(pixel, 0, 0, 255),
+          "glFlush preserves submitted clear ordering");
+    deleteSync(flushed);
+
+    clearColor(1.f, 1.f, 0.f, 1.f);
+    clear(GL_COLOR_BUFFER_BIT);
+    finish();
+    CHECK(getError() == GL_NO_ERROR,
+          "glFinish synchronously drains pending DirectMetal work");
+    readPixels(0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
+    CHECK(pixel_is(pixel, 255, 255, 0),
+          "glFinish makes the completed clear observable");
+
+    for (int frame = 0; frame < 32; ++frame) {
+        const int r = (frame & 1) ? 255 : 0;
+        const int g = (frame & 2) ? 255 : 0;
+        const int b = (frame & 4) ? 255 : 0;
+        clearColor(r / 255.f, g / 255.f, b / 255.f, 1.f);
+        clear(GL_COLOR_BUFFER_BIT);
+        if (frame & 1) flush(); else finish();
+        GLsync frame_sync = fenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+        GLenum frame_wait = clientWaitSync(frame_sync,
+                                            GL_SYNC_FLUSH_COMMANDS_BIT,
+                                            GL_TIMEOUT_IGNORED);
+        CHECK(frame_sync && (frame_wait == GL_ALREADY_SIGNALED ||
+                             frame_wait == GL_CONDITION_SATISFIED),
+              "frame %d reaches native completion (0x%x)", frame, frame_wait);
+        deleteSync(frame_sync);
+        readPixels(0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
+        CHECK(pixel_is(pixel, r, g, b) && getError() == GL_NO_ERROR,
+              "frame %d survives flush/finish/fence/name reuse (%u,%u,%u)",
+              frame, pixel[0], pixel[1], pixel[2]);
+    }
 
     dlclose(library);
     printf("\nsync_smoke: %s (%d failure%s)\n",

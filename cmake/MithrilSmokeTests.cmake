@@ -43,6 +43,7 @@ set(_mithril_vulkan_smokes
 
 set(_mithril_directmetal_smokes
     state_smoke
+    unsupported_stub_smoke
     shader_smoke
     draw_smoke
     texture_smoke
@@ -63,6 +64,7 @@ set(_mithril_directmetal_smokes
     3d_smoke
     render3d_smoke
     fbo_smoke
+    layered_fbo_smoke
     directmetal_fbo_smoke)
 
 if(APPLE)

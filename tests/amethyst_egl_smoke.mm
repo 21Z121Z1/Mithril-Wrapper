@@ -20,6 +20,7 @@
 #define EGL_TRUE 1
 #define EGL_DEFAULT_DISPLAY 0
 #define EGL_SUCCESS 0x3000
+#define EGL_BAD_SURFACE 0x300D
 #define EGL_NONE 0x3038
 #define EGL_RED_SIZE 0x3024
 #define EGL_GREEN_SIZE 0x3023
@@ -88,10 +89,15 @@ static int failures = 0;
 
 @interface CapturingMetalLayer : CAMetalLayer
 @property(nonatomic, strong) id<CAMetalDrawable> capturedDrawable;
+@property(nonatomic) BOOL failNextDrawable;
 @end
 
 @implementation CapturingMetalLayer
 - (id<CAMetalDrawable>)nextDrawable {
+    if (self.failNextDrawable) {
+        self.failNextDrawable = NO;
+        return nil;
+    }
     id<CAMetalDrawable> drawable = [super nextDrawable];
     self.capturedDrawable = drawable;
     return drawable;
@@ -411,15 +417,96 @@ int main(void) {
         CHECK(glGetError() == GL_NO_ERROR && eglGetError() == EGL_SUCCESS,
               "asymmetric presentation leaves GL/EGL error state clean");
 
-        CHECK(eglMakeCurrent(display, nullptr, nullptr, nullptr) == EGL_TRUE,
-              "context is released from the thread");
-        CHECK(eglGetCurrentContext() == nullptr &&
-                  eglGetCurrentSurface(EGL_DRAW) == nullptr,
-              "released context/surface are no longer reported current");
-        CHECK(eglDestroySurface(display, surface) == EGL_TRUE,
-              "window surface lifecycle closes cleanly");
-        CHECK(eglDestroyContext(display, context) == EGL_TRUE,
-              "context lifecycle closes cleanly");
+
+
+    /* A transient CAMetalLayer drawable miss models background/foreground
+     * interruption. The failed swap is observable but cannot consume the
+     * pending GL frame or poison the next drawable. */
+    glClearColor(0.25f, 0.75f, 0.5f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    layer.failNextDrawable = YES;
+    CHECK(eglSwapBuffers(display, surface) == EGL_FALSE,
+          "transient nextDrawable failure is reported by eglSwapBuffers");
+    CHECK(eglGetError() == EGL_BAD_SURFACE,
+          "transient drawable miss reports EGL_BAD_SURFACE");
+    CHECK(glGetError() == GL_NO_ERROR,
+          "transient drawable miss leaves GL error state clean");
+    CHECK(mithrilTestArmNextPresentedPixel(28, 48),
+          "post-interruption recovery capture is armed");
+    CHECK(eglSwapBuffers(display, surface) == EGL_TRUE,
+          "next swap recovers after transient drawable miss");
+    glFinish();
+    memset(presented, 0, sizeof(presented));
+    memset(reference, 0, sizeof(reference));
+    memset(source, 0, sizeof(source));
+    captured = mithrilTestReadPresentedPixels(presented, reference, source);
+    CHECK(captured && PixelMatches(source, 64, 191, 128, 255),
+          "pending clear survives failed presentation (%u,%u,%u,%u)",
+          source[0], source[1], source[2], source[3]);
+    CHECK(captured && PixelMatches(reference, 128, 191, 64, 255),
+          "recovered presentation preserves BGRA conversion (%u,%u,%u,%u)",
+          reference[0], reference[1], reference[2], reference[3]);
+    CHECK(eglGetError() == EGL_SUCCESS,
+          "successful recovery leaves EGL error state clean");
+
+    CHECK(eglMakeCurrent(display, nullptr, nullptr, nullptr) == EGL_TRUE,
+          "context is released before replacing native surface");
+    CHECK(eglDestroySurface(display, surface) == EGL_TRUE,
+          "old CAMetalLayer surface is destroyed cleanly");
+
+    CapturingMetalLayer* replacementLayer = [CapturingMetalLayer layer];
+    replacementLayer.drawableSize = CGSizeMake(72, 40);
+    surface = eglCreateWindowSurface(
+        display, config, (__bridge void*)replacementLayer, nullptr);
+    CHECK(surface != nullptr,
+          "replacement CAMetalLayer window surface is created");
+    CHECK(surface && replacementLayer.device != nil &&
+replacementLayer.pixelFormat == MTLPixelFormatBGRA8Unorm &&
+replacementLayer.framebufferOnly,
+          "replacement layer inherits DirectMetal drawable contract");
+    replacementLayer.framebufferOnly = NO;
+    CHECK(eglMakeCurrent(display, surface, surface, context) == EGL_TRUE,
+          "existing context rebinds to replacement CAMetalLayer");
+    CHECK(eglGetCurrentContext() == context &&
+eglGetCurrentSurface(EGL_DRAW) == surface,
+          "replacement surface becomes current without replacing context");
+
+    glClearColor(0.75f, 0.125f, 0.25f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    CHECK(mithrilTestArmNextPresentedPixel(36, 20),
+          "replacement surface pixel capture is armed");
+    CHECK(eglSwapBuffers(display, surface) == EGL_TRUE,
+          "replacement CAMetalLayer presents with existing context");
+    glFinish();
+    memset(presented, 0, sizeof(presented));
+    memset(reference, 0, sizeof(reference));
+    memset(source, 0, sizeof(source));
+    captured = mithrilTestReadPresentedPixels(presented, reference, source);
+    CHECK(replacementLayer.capturedDrawable.texture.width == 72 &&
+replacementLayer.capturedDrawable.texture.height == 40,
+          "replacement drawable adopts 72x40 physical extent");
+    CHECK(captured && PixelMatches(source, 191, 32, 64, 255),
+          "replacement surface receives context clear (%u,%u,%u,%u)",
+          source[0], source[1], source[2], source[3]);
+    CHECK(captured && PixelMatches(reference, 64, 32, 191, 255),
+          "replacement presentation converts RGBA to BGRA (%u,%u,%u,%u)",
+          reference[0], reference[1], reference[2], reference[3]);
+    CHECK(eglQuerySurface(display, surface, EGL_WIDTH, &width) == EGL_TRUE &&
+eglQuerySurface(display, surface, EGL_HEIGHT, &height) == EGL_TRUE &&
+width == 72 && height == 40,
+          "replacement surface physical dimensions propagate (%dx%d)", width, height);
+    CHECK(glGetError() == GL_NO_ERROR && eglGetError() == EGL_SUCCESS,
+          "replacement surface presentation leaves errors clean");
+
+    CHECK(eglMakeCurrent(display, nullptr, nullptr, nullptr) == EGL_TRUE,
+          "context is released from replacement surface");
+    CHECK(eglGetCurrentContext() == nullptr &&
+eglGetCurrentSurface(EGL_DRAW) == nullptr,
+          "released replacement context/surface are no longer current");
+    CHECK(eglDestroySurface(display, surface) == EGL_TRUE,
+          "replacement window surface lifecycle closes cleanly");
+    CHECK(eglDestroyContext(display, context) == EGL_TRUE,
+          "context lifecycle closes cleanly after surface replacement");
         CHECK(eglTerminate(display) == EGL_TRUE && eglReleaseThread() == EGL_TRUE,
               "display and thread EGL state terminate cleanly");
 
