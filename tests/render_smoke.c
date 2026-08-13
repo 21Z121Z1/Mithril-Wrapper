@@ -37,6 +37,19 @@
 #define GL_INVALID_INDEX 0xFFFFFFFFu
 #endif
 
+#ifndef GL_SYNC_GPU_COMMANDS_COMPLETE
+#define GL_SYNC_GPU_COMMANDS_COMPLETE 0x9117
+#endif
+#ifndef GL_UNSIGNALED
+#define GL_UNSIGNALED 0x9118
+#endif
+#ifndef GL_SIGNALED
+#define GL_SIGNALED 0x9119
+#endif
+#ifndef GL_SYNC_STATUS
+#define GL_SYNC_STATUS 0x9114
+#endif
+
 /* ---- 依赖的 GL 函数指针 typedef（与 glcorearb.h 签名一致） -------------- */
 typedef void      (*genTextures_fn)(GLsizei, GLuint*);
 typedef void      (*bindTexture_fn)(GLenum, GLuint);
