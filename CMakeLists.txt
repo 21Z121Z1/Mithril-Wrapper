@@ -108,6 +108,13 @@ endif()
 # MobileGlues layout which uses add_subdirectory(3rdparty/glslang) instead of
 # FetchContent so the sources are available for local hacking).
 #
+# NOTE: the submodule is MobileGL-Dev/glslang@900b29d — the exact commit
+# MobileGL's DirectVulkan backend pins. ENABLE_OPT stays OFF (the fork would
+# otherwise SEND_ERROR asking for SPIRV-Tools; MobileGL builds it with
+# BUILD_EXTERNAL=ON + the full SPIRV-Tools submodule present, which we don't
+# vendor). The fork compiles fine with OPT OFF — glslang's glslang/SPIRV
+# targets do not require spirv-opt.
+#
 # SPIRV-Cross is used at runtime for SPIR-V *reflection* (not translation):
 # DescriptorSet.cpp reflects each linked program's VS+FS SPIR-V to discover
 # UBO / sampled-image bindings, then builds VkDescriptorSetLayout /
