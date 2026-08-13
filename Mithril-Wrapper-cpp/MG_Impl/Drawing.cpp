@@ -477,10 +477,11 @@ static bool validate_draw_call(GLenum mode, GLsizei count) {
     return true;
 }
 
-// GPU fault 诊断：记录最近 draw 的上下文（program + 绑定的纹理对象）。
-// fault 时 LogRing dump 显示「fault 前最后一次 draw」，配合 program 的
-// shader 与纹理对象，定位「采样了已释放 view」的具体 draw。
-static void trace_draw(const char* kind, int mode, int first, int count, int inst) {
+// GPU fault 诊断 + 越界保护：记录最近 draw 的上下文，并在检测到顶点/索引
+// 缓冲区越界时返回 false。桌面 GL 读相邻内存不崩，Vulkan 精确 size buffer
+// 越界读 = GPU page fault → DEVICE_LOST → 红屏。检测到越界时由调用方跳过
+// draw（return），避免 GPU fault。返回 true 表示可以安全 draw。
+static bool trace_draw(const char* kind, int mode, int first, int count, int inst) {
     // GPU fault 诊断：记录 draw 上下文 —— program、FBO、绑定的纹理对象、
     // 以及 ELEMENT_ARRAY_BUFFER（索引缓冲）。fault 帧 prog=1/fbo=0/count=6
     // 全屏 quad 的索引缓冲有效性是关键线索。
@@ -512,7 +513,7 @@ static void trace_draw(const char* kind, int mode, int first, int count, int ins
     // 越界读检查（GPU Address Fault 高危）：索引 buffer 不够 count 个索引，
     // 或顶点 attrib 覆盖范围超出 buffer —— 桌面 GL 读相邻内存不崩，Vulkan
     // 精确 size 的 buffer 直接 GPU page fault。每次 draw 检查，越界即记录
-    // 到 LogRing（fault 后 dump 直接现形）。
+    // 到 LogRing（fault 后 dump 直接现形）并返回 false 让调用方跳过 draw。
     if (vao) {
         // 索引越界（仅 indexed draw）
         if (kind[0] == 'e' && ib && ib_size > 0 && count > 0) {
@@ -524,6 +525,7 @@ static void trace_draw(const char* kind, int mode, int first, int count, int ins
                              (unsigned)g_state->currentProgram, count,
                              (unsigned)g_state->drawIndexType, (size_t)count * elem,
                              (long long)ib_size);
+                return false;  // 跳过 draw 防止 GPU fault
             }
         }
         // 顶点 attrib 越界：前 2 个 enabled attrib，检查 (first+count) 顶点
@@ -545,16 +547,21 @@ static void trace_draw(const char* kind, int mode, int first, int count, int ins
                              (unsigned)g_state->currentProgram, a,
                              (unsigned)at.boundBuffer, (int)stride, offset,
                              first + count, need, (long long)vb->size);
+                return false;  // 跳过 draw 防止 GPU fault
             }
         }
     }
+    return true;  // 安全，可以 draw
 }
 
 void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
     MITHRIL_ENSURE_INIT();
     // GPU fault 诊断：在 prepare_draw 之前记录 draw 调用 —— 若 draw 被
     // prepare_draw 静默拦截（无日志），这里仍能现形「MC 在调 draw 但被丢」。
-    trace_draw("arrays", (int)mode, (int)first, (int)count, 1);
+    // FIX (DRAW-OVERRUN GPU page fault): 顶点/索引 buffer 越界时跳过 draw，
+    // 避免 Vulkan GPU Address Fault → DEVICE_LOST → 红屏。桌面 GL 读相邻
+    // 内存不崩，但 Vulkan 精确 size buffer 越界读触发 GPU page fault。
+    if (!trace_draw("arrays", (int)mode, (int)first, (int)count, 1)) return;
     if (!validate_draw_call(mode, count)) return;
     // Root cause AI: a false return means no render pass was begun and no
     // pipeline was bound — issuing the draw anyway would record a vkCmdDraw
@@ -567,7 +574,7 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
 
 void glDrawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLsizei primcount) {
     MITHRIL_ENSURE_INIT();
-    trace_draw("arrays_inst", (int)mode, (int)first, (int)count, (int)primcount);
+    if (!trace_draw("arrays_inst", (int)mode, (int)first, (int)count, (int)primcount)) return;
     if (!prepare_draw(mode)) return;  // root cause AI — see glDrawArrays
     backend_draw_arrays_instanced((int)mode, (int)first, (int)count, (int)primcount);
     end_draw();
@@ -580,7 +587,7 @@ void glDrawArraysInstancedBaseInstance(GLenum mode, GLint first, GLsizei count,
     // 完成后重置为 0。backend_draw_arrays_instanced 从 g_state 读取后传给
     // vkCmdDraw 的 firstInstance。深度对照 MobileGL drawParams.baseInstance。
     g_state->currentBaseInstance = baseinstance;
-    trace_draw("arrays_baseinst", (int)mode, (int)first, (int)count, (int)primcount);
+    if (!trace_draw("arrays_baseinst", (int)mode, (int)first, (int)count, (int)primcount)) { g_state->currentBaseInstance = 0; return; }
     // Root cause AI — see glDrawArrays. currentBaseInstance MUST be reset on
     // the early-out path too, otherwise it leaks into the next draw (which
     // expects firstInstance == 0) and misaddresses its instance data.
@@ -593,7 +600,7 @@ void glDrawArraysInstancedBaseInstance(GLenum mode, GLint first, GLsizei count,
 void glDrawElements(GLenum mode, GLsizei count, GLenum type, const void* indices) {
     MITHRIL_ENSURE_INIT();
     g_state->drawIndexType = type;  // GPU fault 诊断：供 trace_draw 越界检查
-    trace_draw("elements", (int)mode, 0, (int)count, 1);
+    if (!trace_draw("elements", (int)mode, 0, (int)count, 1)) return;
     // GPU fault 诊断：索引类型（0=USHORT 1=UINT 2=UBYTE）——UINT8 依赖
     // VK_EXT_index_type_uint8，若扩展未启用则 vkCmdBindIndexBuffer 非法。
     LOG_RESOURCE("draw index_type=%d type=0x%x", index_type_to_int(type), (unsigned)type);
@@ -659,7 +666,7 @@ void glDrawElementsInstanced(GLenum mode, GLsizei count, GLenum type,
                              const void* indices, GLsizei primcount) {
     MITHRIL_ENSURE_INIT();
     g_state->drawIndexType = type;  // GPU fault 诊断：供 trace_draw 越界检查
-    trace_draw("elements_inst", (int)mode, 0, (int)count, (int)primcount);
+    if (!trace_draw("elements_inst", (int)mode, 0, (int)count, (int)primcount)) return;
     if (!prepare_draw(mode)) return;  // root cause AI — see glDrawArrays
     mithril::VertexArray* vao = mithril::state_get_vao(g_state->currentVAO);
     GLuint ib_name = vao ? vao->elementArrayBuffer : 0;
@@ -761,8 +768,37 @@ void glMultiDrawArrays(GLenum mode, const GLint* first, const GLsizei* count, GL
     MITHRIL_ENSURE_INIT();
     if (!first || !count || drawcount <= 0) return;
     if (!prepare_draw(mode)) return;  // root cause AI — 一次 SetupDraw
+    // FIX (DRAW-OVERRUN GPU page fault): 逐 sub-draw 检查顶点 buffer 越界，
+    // 越界则跳过该 sub-draw 防止 GPU Address Fault。
     for (GLsizei i = 0; i < drawcount; ++i) {
-        if (count[i] > 0) backend_draw_arrays((int)mode, (int)first[i], (int)count[i]);
+        if (count[i] <= 0) continue;
+        // 快速越界检查：与前 2 个 enabled attrib 的 buffer 大小比较
+        if (g_state->currentVAO) {
+            mithril::VertexArray* vao = mithril::state_get_vao(g_state->currentVAO);
+            if (vao) {
+                int checked = 0;
+                bool overrun = false;
+                for (int a = 0; a < mithril::kMaxVertexAttribs && checked < 2 && !overrun; ++a) {
+                    const mithril::VertexAttrib& at = vao->attribs[a];
+                    if (!at.enabled || !at.boundBuffer) continue;
+                    auto* vb = mithril::state_get_buffer(at.boundBuffer);
+                    if (!vb) continue;
+                    checked++;
+                    GLsizei stride = at.stride ? at.stride : (GLsizei)(at.size * 4);
+                    if (stride <= 0) continue;
+                    size_t offset = (size_t)(intptr_t)at.pointer;
+                    size_t need = offset + (size_t)((int)first[i] + count[i]) * (size_t)stride;
+                    if (need > (size_t)vb->size) {
+                        LOG_RESOURCE("DRAW-OVERRUN multidraw_arrays i=%d attr=%d buf=%u stride=%d off=%zu first+count=%d need=%zuB have=%lldB",
+                                     (int)i, a, (unsigned)at.boundBuffer, (int)stride, offset,
+                                     (int)first[i] + count[i], need, (long long)vb->size);
+                        overrun = true;
+                    }
+                }
+                if (overrun) continue;  // 跳过越界的 sub-draw
+            }
+        }
+        backend_draw_arrays((int)mode, (int)first[i], (int)count[i]);
     }
     end_draw();  // 一次 end_render_pass
 }
@@ -782,7 +818,31 @@ void glMultiDrawElements(GLenum mode, const GLsizei* count, GLenum type,
     if (ib != VK_NULL_HANDLE) {
         // VBO 路径：indices[i] 是 offset，零拷贝
         for (GLsizei i = 0; i < drawcount; ++i) {
-            if (count[i] > 0)
+            if (count[i] <= 0) continue;
+            // FIX (DRAW-OVERRUN GPU page fault): 检查顶点 buffer 越界
+            bool overrun = false;
+            mithril::VertexArray* vao2 = mithril::state_get_vao(g_state->currentVAO);
+            if (vao2) {
+                int checked = 0;
+                for (int a = 0; a < mithril::kMaxVertexAttribs && checked < 2 && !overrun; ++a) {
+                    const mithril::VertexAttrib& at = vao2->attribs[a];
+                    if (!at.enabled || !at.boundBuffer) continue;
+                    auto* vb = mithril::state_get_buffer(at.boundBuffer);
+                    if (!vb) continue;
+                    checked++;
+                    GLsizei stride = at.stride ? at.stride : (GLsizei)(at.size * 4);
+                    if (stride <= 0) continue;
+                    size_t offset = (size_t)(intptr_t)at.pointer;
+                    size_t need = offset + (size_t)count[i] * (size_t)stride;
+                    if (need > (size_t)vb->size) {
+                        LOG_RESOURCE("DRAW-OVERRUN multidraw_elem i=%d attr=%d buf=%u stride=%d off=%zu count=%d need=%zuB have=%lldB",
+                                     (int)i, a, (unsigned)at.boundBuffer, (int)stride, offset,
+                                     (int)count[i], need, (long long)vb->size);
+                        overrun = true;
+                    }
+                }
+            }
+            if (!overrun)
                 backend_draw_indexed((int)mode, (int)count[i], idx_type, ib,
                                      (VkDeviceSize)(intptr_t)indices[i]);
         }
@@ -814,11 +874,33 @@ void glMultiDrawElementsBaseVertex(GLenum mode, const GLsizei* count, GLenum typ
     if (!prepare_draw(mode)) return;
     if (ib != VK_NULL_HANDLE && basevertex) {
         for (GLsizei i = 0; i < drawcount; ++i) {
-            if (count[i] > 0) {
-                g_state->currentBaseVertex = basevertex[i];
-                backend_draw_indexed((int)mode, (int)count[i], idx_type, ib,
-                                     (VkDeviceSize)(intptr_t)indices[i]);
+            if (count[i] <= 0) continue;
+            // FIX (DRAW-OVERRUN GPU page fault): 检查顶点 buffer 越界
+            if (g_state->currentVAO) {
+                mithril::VertexArray* vao3 = mithril::state_get_vao(g_state->currentVAO);
+                if (vao3) {
+                    int checked = 0;
+                    bool overrun = false;
+                    for (int a = 0; a < mithril::kMaxVertexAttribs && checked < 2 && !overrun; ++a) {
+                        const mithril::VertexAttrib& at = vao3->attribs[a];
+                        if (!at.enabled || !at.boundBuffer) continue;
+                        auto* vb = mithril::state_get_buffer(at.boundBuffer);
+                        if (!vb) continue;
+                        checked++;
+                        GLsizei stride2 = at.stride ? at.stride : (GLsizei)(at.size * 4);
+                        if (stride2 <= 0) continue;
+                        size_t offset = (size_t)(intptr_t)at.pointer;
+                        size_t need = offset + (size_t)count[i] * (size_t)stride2;
+                        if (need > (size_t)vb->size) {
+                            overrun = true;
+                        }
+                    }
+                    if (overrun) continue;
+                }
             }
+            g_state->currentBaseVertex = basevertex[i];
+            backend_draw_indexed((int)mode, (int)count[i], idx_type, ib,
+                                 (VkDeviceSize)(intptr_t)indices[i]);
         }
         g_state->currentBaseVertex = 0;
     } else if (basevertex) {
