@@ -360,6 +360,16 @@ void        backend_texture_set_params(GLuint name, GLint min_filter, GLint mag_
 VkImageView backend_get_texture_view(GLuint name);
 VkImage     backend_get_texture_image(GLuint name);
 void        backend_delete_texture(GLuint name);
+/* Clear a texture level (or sub-region) to a caller-provided value. Implements
+ * glClearTexImage / glClearTexSubImage. Uses a one-shot command buffer to
+ * transition the image to TRANSFER_DST_OPTIMAL, issue vkCmdClearColorImage
+ * (or vkCmdClearDepthStencilImage), then transition back to
+ * SHADER_READ_ONLY_OPTIMAL. data==nullptr means "clear to zero". */
+void        backend_clear_texture(GLuint name, int level,
+                                  int x, int y, int z,
+                                  int w, int h, int d,
+                                  GLenum format, GLenum type,
+                                  const void* data);
 /* Drop any VkSampler cached for `name`. Called from glTexParameter*i* when a
  * texture's filtering/wrap state changes, so the next sampler fetch rebuilds a
  * VkSampler reflecting the new params instead of returning the stale cached one. */

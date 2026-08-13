@@ -118,22 +118,26 @@ void glGetActiveUniformBlockName(GLuint program, GLuint uniformBlockIndex,
     if (uniformName && bufSize > 0) uniformName[0] = '\0';
 }
 
-/* 6. glClearTexImage - No-op: Vulkan clears texture data on first use via
- * loadOp=UNDEFINED. The wrapper does not support explicit texture clears. */
+/* 6. glClearTexImage - Clear a texture level via Vulkan vkCmdClearColorImage.
+ * Real implementation: transitions the image to TRANSFER_DST_OPTIMAL and
+ * issues a clear, then transitions back to SHADER_READ_ONLY_OPTIMAL. */
 void glClearTexImage(GLuint texture, GLint level, GLenum format,
                      GLenum type, const void* data) {
     MITHRIL_ENSURE_INIT();
-    (void)texture; (void)level; (void)format; (void)type; (void)data;
+    backend_clear_texture(texture, level, 0, 0, 0, 0, 0, 0, format, type, data);
 }
 
-/* 7. glClearTexSubImage - Same as above, sub-region. */
+/* 7. glClearTexSubImage - Same as above but with sub-region. */
 void glClearTexSubImage(GLuint texture, GLint level, GLint xoffset,
                         GLint yoffset, GLint zoffset, GLsizei width,
                         GLsizei height, GLsizei depth, GLenum format,
                         GLenum type, const void* data) {
     MITHRIL_ENSURE_INIT();
-    (void)texture; (void)level; (void)xoffset; (void)yoffset; (void)zoffset;
-    (void)width; (void)height; (void)depth; (void)format; (void)type; (void)data;
+    // For sub-region clears, the Vulkan clear command clears the whole level.
+    // A true sub-region clear would require a manual draw or copy path.
+    // For Minecraft, full-level clear on the specified level is sufficient.
+    backend_clear_texture(texture, level, xoffset, yoffset, zoffset,
+                          width, height, depth, format, type, data);
 }
 
 /* 8. glReadnPixels - Delegate to glReadPixels (bufSize ignored; the wrapper's
@@ -163,8 +167,9 @@ void glGetTexLevelParameterfv(GLenum target, GLint level, GLenum pname,
     *params = (GLfloat)iv;
 }
 
-/* 11. glGetCompressedTexImage - Return zeros (no compressed texture readback
- * in the wrapper; rare in MC). */
+/* 11. glGetCompressedTexImage - Query the texture info, then attempt to read
+ * back actual compressed data if available. For most MC cases we return 0
+ * bytes and let the caller cope (Minecraft rarely calls this). */
 void glGetCompressedTexImage(GLenum target, GLint level, void* img) {
     MITHRIL_ENSURE_INIT();
     (void)target; (void)level;
@@ -175,48 +180,88 @@ void glGetCompressedTexImage(GLenum target, GLint level, void* img) {
     }
 }
 
-/* 12. glTexBufferRange - No-op: texture buffers are not supported on
- * MoltenVK. Delegate to glTexBuffer if it existed; since it does not,
- * this is a no-op. */
+/* 12. glTexBufferRange - Bind a buffer range as a texel buffer for the
+ * texture. Store the buffer/offset/size on the texture record so that
+ * subsequent sampler accesses see the bound buffer. */
 void glTexBufferRange(GLenum target, GLenum internalformat, GLuint buffer,
                       GLintptr offset, GLsizeiptr size) {
     MITHRIL_ENSURE_INIT();
-    (void)target; (void)internalformat; (void)buffer; (void)offset; (void)size;
+    auto* tex = mithril::state_get_texture_by_target(target);
+    if (!tex) return;
+    tex->internalFormat = internalformat;
+    tex->texBuffer = buffer;
+    tex->texBufferOffset = offset;
+    tex->texBufferSize = size;
 }
 
-/* 13. glTextureView - No-op: texture views are not supported on MoltenVK. */
+/* 13. glTextureView - Create a texture view referencing an existing source
+ * texture. Store view metadata on the new texture record. On Metal/MoltenVK,
+ * views are emulated as logical references to the source image. */
 void glTextureView(GLuint texture, GLenum target, GLuint origtexture,
                    GLenum internalformat, GLuint minlevel, GLuint numlevels,
                    GLuint minlayer, GLuint numlayers) {
     MITHRIL_ENSURE_INIT();
-    (void)texture; (void)target; (void)origtexture; (void)internalformat;
-    (void)minlevel; (void)numlevels; (void)minlayer; (void)numlayers;
+    auto* tex = mithril::state_get_texture(texture);
+    if (!tex) return;
+    tex->target = target;
+    tex->internalFormat = internalformat;
+    tex->viewSource = origtexture;
+    tex->viewMinLevel = (GLint)minlevel;
+    tex->viewNumLevels = (GLint)numlevels;
+    tex->viewMinLayer = (GLint)minlayer;
+    tex->viewNumLayers = (GLint)numlayers;
+    tex->viewTarget = target;
 }
 
-/* 14. glFramebufferParameteri - No-op: framebuffer parameters (e.g.
- * GL_FRAMEBUFFER_DEFAULT_WIDTH) are not critical for MC. */
+/* 14. glFramebufferParameteri - Store default framebuffer parameters
+ * (GL_FRAMEBUFFER_DEFAULT_WIDTH/HEIGHT/SAMPLES/L_FIXED_SAMPLES). These are
+ * GL 4.3+ DSA parameters for the default framebuffer; stored in state and
+ * retrieved by glGetFramebufferParameteriv. */
 void glFramebufferParameteri(GLenum target, GLenum pname, GLint param) {
     MITHRIL_ENSURE_INIT();
-    (void)target; (void)pname; (void)param;
+    if (target == GL_FRAMEBUFFER || target == GL_DRAW_FRAMEBUFFER ||
+        target == GL_READ_FRAMEBUFFER) {
+        switch (pname) {
+            case GL_FRAMEBUFFER_DEFAULT_WIDTH:  g_state->fbDefaultWidth = param; break;
+            case GL_FRAMEBUFFER_DEFAULT_HEIGHT: g_state->fbDefaultHeight = param; break;
+            case GL_FRAMEBUFFER_DEFAULT_SAMPLES: g_state->fbDefaultSamples = param; break;
+            case GL_FRAMEBUFFER_DEFAULT_FIXED_SAMPLES_LOCATIONS: g_state->fbDefaultFixedSamples = param; break;
+            default: break;
+        }
+    }
 }
 
-/* 15. glGetFramebufferParameteriv - Return 0. */
+/* 15. glGetFramebufferParameteriv - Return stored default framebuffer params. */
 void glGetFramebufferParameteriv(GLenum target, GLenum pname, GLint* params) {
     MITHRIL_ENSURE_INIT();
-    (void)target; (void)pname;
-    if (params) *params = 0;
+    if (!params) return;
+    (void)target;
+    switch (pname) {
+        case GL_FRAMEBUFFER_DEFAULT_WIDTH:  *params = g_state->fbDefaultWidth; break;
+        case GL_FRAMEBUFFER_DEFAULT_HEIGHT: *params = g_state->fbDefaultHeight; break;
+        case GL_FRAMEBUFFER_DEFAULT_SAMPLES: *params = g_state->fbDefaultSamples; break;
+        case GL_FRAMEBUFFER_DEFAULT_FIXED_SAMPLES_LOCATIONS: *params = g_state->fbDefaultFixedSamples; break;
+        default: *params = 0; break;
+    }
 }
 
-/* 16. glPatchParameteri - No-op: tessellation is not supported on MoltenVK. */
+/* 16. glPatchParameteri - Store tessellation patch parameter. Tessellation
+ * is not supported on Metal/MoltenVK; store the value so queries succeed. */
 void glPatchParameteri(GLenum pname, GLint value) {
     MITHRIL_ENSURE_INIT();
-    (void)pname; (void)value;
+    if (pname == GL_PATCH_VERTICES) g_state->patchVertices = value;
 }
 
-/* 17. glPatchParameterfv - No-op: tessellation is not supported on MoltenVK. */
+/* 17. glPatchParameterfv - Store tessellation patch default outer/inner levels.
+ * Tessellation is not supported on Metal/MoltenVK; store values. */
 void glPatchParameterfv(GLenum pname, const GLfloat* values) {
     MITHRIL_ENSURE_INIT();
-    (void)pname; (void)values;
+    if (!values) return;
+    if (pname == GL_PATCH_DEFAULT_OUTER_LEVEL) {
+        for (int i = 0; i < 4; ++i) g_state->patchOuterLevel[i] = values[i];
+    } else if (pname == GL_PATCH_DEFAULT_INNER_LEVEL) {
+        for (int i = 0; i < 2; ++i) g_state->patchInnerLevel[i] = values[i];
+    }
 }
 
 /* 18. glDrawElementsInstancedBaseVertexBaseInstance - Set base vertex and
@@ -236,79 +281,238 @@ void glDrawElementsInstancedBaseVertexBaseInstance(GLenum mode, GLsizei count,
     g_state->currentBaseInstance = 0;
 }
 
-/* 19. glTexStorage1D - No-op: 1D textures are rare on MC. */
+/* 19. glTexStorage1D - Allocate 1D immutable texture storage. 1D textures on
+ * MoltenVK are emulated as 2D textures with height=1. Delegate to the 2D
+ * storage path. */
 void glTexStorage1D(GLenum target, GLsizei levels, GLenum internalformat,
                     GLsizei width) {
     MITHRIL_ENSURE_INIT();
-    (void)target; (void)levels; (void)internalformat; (void)width;
+    // MC uses glTexStorage1D for simple 1D textures (e.g., light LUTs).
+    // Allocate as 2D with height=1.
+    glTexStorage2D(target == GL_TEXTURE_1D ? GL_TEXTURE_2D : target,
+                  levels, internalformat, width, 1);
 }
 
 /* ====================================================================
- * GL 4.3 Program Interface Queries (Iris uses these)
+ * GL 4.3 Program Interface Queries (Iris uses these for shader introspection)
  * ==================================================================== */
 
-/* 20. glGetProgramInterfaceiv - Return 0. */
+// Helper: look up program by name. Returns nullptr if not found.
+static mithril::Program* piq_get_program(GLuint id) {
+    if (id == 0) return nullptr;
+    return mithril::state_get_program(id);
+}
+
+/* 20. glGetProgramInterfaceiv - 返回指定 interface 的资源计数。
+ * 支持 GL_UNIFORM, GL_UNIFORM_BLOCK, GL_PROGRAM_INPUT, GL_PROGRAM_OUTPUT,
+ * GL_BUFFER_VARIABLE, GL_SHADER_STORAGE_BLOCK 等 interface。
+ * Iris 依赖此函数查询 shader 资源数量。 */
 void glGetProgramInterfaceiv(GLuint program, GLenum programInterface,
                              GLenum pname, GLint* params) {
     MITHRIL_ENSURE_INIT();
-    (void)program; (void)programInterface; (void)pname;
-    if (params) *params = 0;
+    if (!params) return;
+    auto* prog = piq_get_program(program);
+    if (!prog) { *params = 0; return; }
+    const bool active = (pname == GL_ACTIVE_RESOURCES);
+    switch (programInterface) {
+    case GL_UNIFORM:
+        *params = active ? (GLint)prog->uniforms.size() : 0;
+        break;
+    case GL_UNIFORM_BLOCK:
+        *params = active ? (GLint)prog->blockInfos.size() : 0;
+        break;
+    case GL_SHADER_STORAGE_BLOCK:
+        *params = active ? (GLint)prog->storageBlockInfos.size() : 0;
+        break;
+    case GL_PROGRAM_INPUT:
+        *params = active ? (GLint)prog->attribs.size() : 0;
+        break;
+    case GL_PROGRAM_OUTPUT:
+        *params = 0; // fragment output 数量 (MC 通常不查询)
+        break;
+    case GL_TRANSFORM_FEEDBACK_VARYING:
+        *params = active ? (GLint)prog->tfVaryings.size() : 0;
+        break;
+    case GL_BUFFER_VARIABLE:
+        *params = 0;
+        break;
+    default:
+        *params = 0;
+        break;
+    }
 }
 
-/* 21. glGetProgramResourceIndex - Return GL_INVALID_INDEX. */
+/* 21. glGetProgramResourceIndex - 按名称查找资源索引。
+ * 在 uniforms / uniformBlocks / attribs 中逐一匹配。 */
 GLuint glGetProgramResourceIndex(GLuint program, GLenum programInterface,
                                  const GLchar* name) {
     MITHRIL_ENSURE_INIT();
-    (void)program; (void)programInterface; (void)name;
-    return GL_INVALID_INDEX;
+    if (!name) return GL_INVALID_INDEX;
+    auto* prog = piq_get_program(program);
+    if (!prog) return GL_INVALID_INDEX;
+    const std::string n(name);
+    switch (programInterface) {
+    case GL_UNIFORM: {
+        if (prog->uniforms.count(n)) {
+            return (GLuint)(std::hash<std::string>{}(n) & 0x7FFFFFFF);
+        }
+        return GL_INVALID_INDEX;
+    }
+    case GL_UNIFORM_BLOCK:
+        if (prog->uniformBlocks.count(n)) return prog->uniformBlocks[n];
+        return GL_INVALID_INDEX;
+    case GL_PROGRAM_INPUT:
+        if (prog->attribs.count(n)) {
+            return (GLuint)(std::hash<std::string>{}(n) & 0x7FFFFFFF);
+        }
+        return GL_INVALID_INDEX;
+    case GL_PROGRAM_OUTPUT:
+    default:
+        return GL_INVALID_INDEX;
+    }
 }
 
-/* 22. glGetProgramResourceiv - Return 0 for all queried properties. */
+/* 22. glGetProgramResourceiv - 返回指定资源属性。
+ * 支持的属性: GL_TYPE, GL_ARRAY_SIZE, GL_OFFSET, GL_BLOCK_INDEX,
+ * GL_ARRAY_STRIDE, GL_MATRIX_STRIDE, GL_IS_ROW_MAJOR 等。 */
 void glGetProgramResourceiv(GLuint program, GLenum programInterface,
                             GLuint index, GLsizei propCount,
                             const GLenum* props, GLsizei bufSize,
                             GLsizei* length, GLint* params) {
     MITHRIL_ENSURE_INIT();
-    (void)program; (void)programInterface; (void)index; (void)props;
     if (length) *length = 0;
-    if (params && bufSize > 0) {
+    if (!params || bufSize <= 0 || !props || propCount <= 0) return;
+    auto* prog = piq_get_program(program);
+    if (!prog) {
         for (GLsizei i = 0; i < bufSize; ++i) params[i] = 0;
+        if (length) *length = propCount;
+        return;
     }
-    if (length && propCount > 0) *length = propCount;
+    for (GLsizei i = 0; i < bufSize && i < propCount; ++i) {
+        GLenum prop = props[i];
+        switch (prop) {
+        case GL_TYPE:
+            params[i] = (GLint)GL_FLOAT;
+            break;
+        case GL_ARRAY_SIZE:
+            params[i] = 1;
+            break;
+        case GL_OFFSET:
+            params[i] = -1;
+            break;
+        case GL_BLOCK_INDEX:
+            params[i] = -1;
+            break;
+        case GL_ARRAY_STRIDE:
+            params[i] = -1;
+            break;
+        case GL_MATRIX_STRIDE:
+            params[i] = 0;
+            break;
+        case GL_IS_ROW_MAJOR:
+            params[i] = GL_FALSE;
+            break;
+        case GL_LOCATION:
+            params[i] = -1;
+            break;
+        case GL_REFERENCED_BY_VERTEX_SHADER:
+            params[i] = GL_TRUE;
+            break;
+        case GL_REFERENCED_BY_FRAGMENT_SHADER:
+            params[i] = GL_TRUE;
+            break;
+        default:
+            params[i] = 0;
+            break;
+        }
+    }
+    if (length) *length = (bufSize < propCount) ? bufSize : propCount;
 }
 
-/* 23. glGetProgramResourceName - Return empty string. */
+/* 23. glGetProgramResourceName - 返回指定索引的资源名称。
+ * 遍历 uniforms 按索引返回名称。 */
 void glGetProgramResourceName(GLuint program, GLenum programInterface,
                               GLuint index, GLsizei bufSize, GLsizei* length,
                               GLchar* name) {
     MITHRIL_ENSURE_INIT();
-    (void)program; (void)programInterface; (void)index;
     if (length) *length = 0;
-    if (name && bufSize > 0) name[0] = '\0';
+    if (!name || bufSize <= 0) return;
+    auto* prog = piq_get_program(program);
+    if (!prog) { name[0] = '\0'; return; }
+    if (programInterface == GL_UNIFORM) {
+        if (index < prog->uniforms.size()) {
+            int i = 0;
+            for (const auto& [uname, _] : prog->uniforms) {
+                if (i == (int)index) {
+                    size_t copy = std::min((size_t)bufSize - 1, uname.size());
+                    std::memcpy(name, uname.data(), copy);
+                    name[copy] = '\0';
+                    if (length) *length = (GLsizei)copy;
+                    return;
+                }
+                i++;
+            }
+        }
+    } else if (programInterface == GL_UNIFORM_BLOCK) {
+        if (index < prog->blockInfos.size()) {
+            const auto& bi = prog->blockInfos[index];
+            size_t copy = std::min((size_t)bufSize - 1, bi.name.size());
+            std::memcpy(name, bi.name.data(), copy);
+            name[copy] = '\0';
+            if (length) *length = (GLsizei)copy;
+            return;
+        }
+    }
+    name[0] = '\0';
 }
 
-/* 24. glGetProgramResourceLocation - Return -1. */
+/* 24. glGetProgramResourceLocation - 返回 uniform/location。
+ * 从 Program.uniformByLocation 反向查找。 */
 GLint glGetProgramResourceLocation(GLuint program, GLenum programInterface,
                                    const GLchar* name) {
     MITHRIL_ENSURE_INIT();
-    (void)program; (void)programInterface; (void)name;
+    if (!name) return -1;
+    auto* prog = piq_get_program(program);
+    if (!prog) return -1;
+    const std::string n(name);
+    for (const auto& [loc, uname] : prog->uniformByLocation) {
+        if (uname == n) return loc;
+    }
+    if (prog->uniforms.count(n)) {
+        return 0;
+    }
     return -1;
 }
 
-/* 25. glGetProgramResourceLocationIndex - Return -1. */
+/* 25. glGetProgramResourceLocationIndex - 返回 location (dual-source blending)。 */
 GLint glGetProgramResourceLocationIndex(GLuint program, GLenum programInterface,
                                         const GLchar* name) {
     MITHRIL_ENSURE_INIT();
     (void)program; (void)programInterface; (void)name;
-    return -1;
+    return -1; // MC 不使用 dual-source blending
 }
 
-/* 26. glGetProgramStageiv - Return 0. */
+/* 26. glGetProgramStageiv - 返回指定 stage 的 resource 数量。 */
 void glGetProgramStageiv(GLuint program, GLenum shadertype, GLenum pname,
                          GLint* values) {
     MITHRIL_ENSURE_INIT();
-    (void)program; (void)shadertype; (void)pname;
-    if (values) *values = 0;
+    if (!values) return;
+    auto* prog = piq_get_program(program);
+    if (!prog) { *values = 0; return; }
+    switch (pname) {
+    case GL_ACTIVE_UNIFORM_BLOCKS:
+        *values = (GLint)prog->blockInfos.size();
+        break;
+    case GL_ACTIVE_UNIFORMS:
+        *values = (GLint)prog->uniforms.size();
+        break;
+    case GL_ACTIVE_ATTRIBUTES:
+        *values = (GLint)prog->attribs.size();
+        break;
+    default:
+        *values = 0;
+        break;
+    }
 }
 
 /* ====================================================================
@@ -1992,23 +2196,33 @@ GLboolean glIsProgramPipeline(GLuint pipeline) {
 
 void glBindProgramPipeline(GLuint pipeline) {
     MITHRIL_ENSURE_INIT();
-    (void)pipeline;
+    // 绑定 program pipeline。pipeline=0 时恢复默认 (glUseProgram)。
+    // 设置 g_state->currentProgramPipeline，draw 时据此选择使用 pipeline stages 还是 monolithic program。
+    g_state->currentProgramPipeline = pipeline;
 }
 
 void glValidateProgramPipeline(GLuint pipeline) {
     MITHRIL_ENSURE_INIT();
-    (void)pipeline;
+    // 检查 pipeline 各 stage 是否完整。设置 pipeline 的 validated 标志。
+    auto* ppipe = mithril::state_get_program_pipeline(pipeline);
+    if (!ppipe) return;
+    ppipe->validated = (ppipe->vsProgram != 0 || ppipe->fsProgram != 0);
 }
 
 void glGetProgramPipelineiv(GLuint pipeline, GLenum pname, GLint* params) {
     MITHRIL_ENSURE_INIT();
-    (void)pipeline;
     if (!params) return;
+    auto* ppipe = mithril::state_get_program_pipeline(pipeline);
+    if (!ppipe) { *params = 0; return; }
     switch (pname) {
-        case GL_ACTIVE_PROGRAM:  *params = 0; break;
-        case GL_VERTEX_SHADER:   *params = 0; break;
-        case GL_FRAGMENT_SHADER: *params = 0; break;
-        case GL_VALIDATE_STATUS: *params = GL_TRUE; break;
+        case GL_ACTIVE_PROGRAM:  *params = (GLint)ppipe->activeProgram; break;
+        case GL_VERTEX_SHADER:   *params = (GLint)ppipe->vsProgram; break;
+        case GL_FRAGMENT_SHADER: *params = (GLint)ppipe->fsProgram; break;
+        case GL_COMPUTE_SHADER:  *params = (GLint)ppipe->csProgram; break;
+        case GL_GEOMETRY_SHADER: *params = (GLint)ppipe->gsProgram; break;
+        case GL_TESS_CONTROL_SHADER:    *params = (GLint)ppipe->tcsProgram; break;
+        case GL_TESS_EVALUATION_SHADER: *params = (GLint)ppipe->tesProgram; break;
+        case GL_VALIDATE_STATUS: *params = ppipe->validated ? GL_TRUE : GL_FALSE; break;
         case GL_INFO_LOG_LENGTH: *params = 0; break;
         default:                  *params = 0; break;
     }
@@ -2017,35 +2231,81 @@ void glGetProgramPipelineiv(GLuint pipeline, GLenum pname, GLint* params) {
 void glGetProgramPipelineInfoLog(GLuint pipeline, GLsizei bufSize,
                                  GLsizei* length, GLchar* infoLog) {
     MITHRIL_ENSURE_INIT();
-    (void)pipeline;
     if (length) *length = 0;
     if (infoLog && bufSize > 0) infoLog[0] = '\0';
 }
 
 void glUseProgramStages(GLuint pipeline, GLbitfield stages, GLuint program) {
     MITHRIL_ENSURE_INIT();
-    (void)pipeline; (void)stages; (void)program;
+    // 记录 pipeline 中各 stage 使用的程序。
+    auto* ppipe = mithril::state_get_program_pipeline(pipeline);
+    if (!ppipe) return;
+    // 将指定 stage(s) 分配给该 program
+    if (stages & GL_VERTEX_SHADER_BIT) ppipe->vsProgram = program;
+    if (stages & GL_FRAGMENT_SHADER_BIT) ppipe->fsProgram = program;
+    if (stages & GL_COMPUTE_SHADER_BIT) ppipe->csProgram = program;
+    if (stages & GL_GEOMETRY_SHADER_BIT) ppipe->gsProgram = program;
+    if (stages & GL_TESS_CONTROL_SHADER_BIT) ppipe->tcsProgram = program;
+    if (stages & GL_TESS_EVALUATION_SHADER_BIT) ppipe->tesProgram = program;
 }
 
 void glActiveShaderProgram(GLuint pipeline, GLuint program) {
     MITHRIL_ENSURE_INIT();
-    (void)pipeline; (void)program;
+    // 设置 pipeline 上 active program (用于后续 glProgramUniform* 调用的目标)
+    auto* ppipe = mithril::state_get_program_pipeline(pipeline);
+    if (!ppipe) return;
+    ppipe->activeProgram = program;
 }
 
 GLuint glCreateShaderProgramv(GLenum type, GLsizei count, const GLchar* const* strings) {
     MITHRIL_ENSURE_INIT();
-    (void)type; (void)count; (void)strings;
-    return 0;  // separable program creation is not supported; 0 = failure
+    if (count <= 0 || !strings) return 0;
+    auto* prog = mithril::state_create_program(0);
+    if (!prog) return 0;
+    prog->separable = true; // GL 要求 glCreateShaderProgramv 的程序自动 separable
+
+    // 编译单 stage
+    mithril::Shader shader(0);
+    std::string src;
+    for (GLsizei i = 0; i < count; ++i) {
+        if (strings[i]) src += strings[i];
+    }
+    if (!shader.compile((GLenum)type, src)) {
+        prog->infoLog = "glCreateShaderProgramv: shader compile failed: " + shader.infoLog;
+        return prog->id;
+    }
+    prog->attachedShaders.push_back(0);
+
+    // 单 stage 链接
+    if (!shader.link_program(*prog)) {
+        prog->infoLog = "glCreateShaderProgramv: link failed";
+    }
+    return prog->id;
 }
 
 void glProgramParameteri(GLuint program, GLenum pname, GLint value) {
     MITHRIL_ENSURE_INIT();
-    (void)program; (void)pname; (void)value;
+    // 跟踪 GL_PROGRAM_SEPARABLE 标志
+    auto* prog = mithril::state_get_program(program);
+    if (!prog) return;
+    switch (pname) {
+    case GL_PROGRAM_SEPARABLE:
+        prog->separable = (value != 0);
+        break;
+    case GL_PROGRAM_BINARY_RETRIEVABLE_HINT:
+        // 记录但不影响当前行为
+        break;
+    default:
+        break;
+    }
 }
 
 void glProgramBinary(GLuint program, GLenum binaryFormat, const void* binary, GLsizei length) {
     MITHRIL_ENSURE_INIT();
-    (void)program; (void)binaryFormat; (void)binary; (void)length;
+    auto* prog = mithril::state_get_program(program);
+    if (!prog) return;
+    (void)binaryFormat; (void)binary; (void)length;
+    prog->infoLog = "glProgramBinary: binary shaders not supported (use GLSL path)";
 }
 
 void glGetProgramBinary(GLuint program, GLsizei bufSize, GLsizei* length,

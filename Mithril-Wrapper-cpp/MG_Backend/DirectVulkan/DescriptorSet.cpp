@@ -1270,7 +1270,7 @@ void bind_program_descriptors(GLuint program, VkPipelineBindPoint bindPoint) {
 
             GLuint tex_id = 0;
             if (unit >= 0 && unit < mithril::kMaxTextureUnits) {
-                tex_id = mithril::g_state->imageTextureUnits[unit];
+                tex_id = mithril::g_state->imageTexUnits[unit].texture;
             }
             VkImageView view = VK_NULL_HANDLE;
             VkSampler samp = VK_NULL_HANDLE;

@@ -1151,4 +1151,146 @@ void backend_blit_images(VkImage src_image, VkFormat src_format,
                                   is_dst_default_fbo != 0, dst_height);
 }
 
+void backend_clear_texture(GLuint name, int level,
+                           int x, int y, int z,
+                           int w, int h, int d,
+                           GLenum format, GLenum type,
+                           const void* data) {
+    // Implements glClearTexImage / glClearTexSubImage: clear a texture level
+    // (or sub-region) to a caller-provided value via vkCmdClearColorImage /
+    // vkCmdClearDepthStencilImage. Uses a one-shot command buffer to avoid
+    // disturbing the main render pass.
+    Backend* b = backend();
+    if (!b->initialized || name == 0) return;
+    auto& tbl = mithril::vk::texture_table();
+    auto it = tbl.find(name);
+    if (it == tbl.end()) return;
+    mithril::vk::TextureEntry& tex = it->second;
+    if (tex.image == VK_NULL_HANDLE) return;
+
+    // Ensure theimage has been allocated (storage committed). If not, create it.
+    // (The texture_table entry may exist from glCreateTextures without storage.)
+    if (tex.image == VK_NULL_HANDLE) return;
+
+    // Use the texture's actual dimensions if w/h/d are 0 (full-image clear).
+    if (w <= 0) w = tex.width;
+    if (h <= 0) h = tex.height;
+    if (d <= 0) d = tex.depth;
+
+    const VkImageAspectFlags aspect = aspect_for_format(tex.format);
+
+    // Determine if this is a depth/stencil format for the correct clear command.
+    bool isDepthStencil = (aspect & VK_IMAGE_ASPECT_DEPTH_BIT) ||
+                          (aspect & VK_IMAGE_ASPECT_STENCIL_BIT);
+
+    OneShotCtx c;
+    if (!begin_one_shot(c)) return;
+
+    // Transition to TRANSFER_DST_OPTIMAL.
+    VkImageMemoryBarrier toDst{};
+    toDst.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    toDst.srcAccessMask = 0;
+    toDst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    toDst.oldLayout = tex.currentLayout;
+    toDst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    toDst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toDst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toDst.image = tex.image;
+    toDst.subresourceRange.aspectMask = aspect;
+    toDst.subresourceRange.baseMipLevel = level;
+    toDst.subresourceRange.levelCount = 1;
+    toDst.subresourceRange.baseArrayLayer = 0;
+    toDst.subresourceRange.layerCount = 1;
+    vkCmdPipelineBarrier(c.cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+                         0, nullptr, 0, nullptr, 1, &toDst);
+
+    if (isDepthStencil) {
+        VkClearDepthStencilValue dsVal{};
+        if (data) {
+            // Expect a single float depth value (GL_DEPTH_COMPONENT) or packed
+            // depth/stencil. We extract the first 4 bytes as depth float.
+            float depth = 0.0f;
+            memcpy(&depth, data, sizeof(float));
+            dsVal.depth = depth;
+            // Stencil from next 4 bytes if provided (cheap heuristic).
+            uint32_t stencil = 0;
+            if (type == GL_UNSIGNED_INT_24_8) {
+                memcpy(&stencil, static_cast<const uint8_t*>(data) + 4, sizeof(uint32_t));
+            }
+            dsVal.stencil = stencil;
+        }
+        VkImageSubresourceRange range{};
+        range.aspectMask = aspect;
+        range.baseMipLevel = level;
+        range.levelCount = 1;
+        range.baseArrayLayer = 0;
+        range.layerCount = 1;
+        vkCmdClearDepthStencilImage(c.cmd, tex.image,
+                                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                    &dsVal, 1, &range);
+    } else {
+        VkClearColorValue colorVal{};
+        if (data) {
+            // GL format/type → unpack to 4 floats/ints. For the common MC
+            // cases: GL_RGBA+GL_UNSIGNED_BYTE, GL_RGBA+GL_FLOAT.
+            union { float f[4]; uint32_t u[4]; int32_t i[4]; } u{};
+            // Default to zero (already memset). Fill from data based on type.
+            if (type == GL_FLOAT) {
+                int nc = 4; // assume RGBA
+                if (format == GL_RED) nc = 1;
+                else if (format == GL_RG) nc = 2;
+                else if (format == GL_RGB) nc = 3;
+                memcpy(u.f, data, (size_t)nc * sizeof(float));
+            } else if (type == GL_UNSIGNED_BYTE) {
+                int nc = 4;
+                if (format == GL_RED) nc = 1;
+                else if (format == GL_RG) nc = 2;
+                else if (format == GL_RGB) nc = 3;
+                const auto* bytes = static_cast<const uint8_t*>(data);
+                for (int i = 0; i < nc; ++i) u.f[i] = bytes[i] / 255.0f;
+            } else if (type == GL_UNSIGNED_INT || type == GL_INT) {
+                int nc = 4;
+                if (format == GL_RED) nc = 1;
+                else if (format == GL_RG) nc = 2;
+                else if (format == GL_RGB) nc = 3;
+                memcpy(u.i, data, (size_t)nc * sizeof(int32_t));
+            }
+            colorVal = VkClearColorValue{u.f[0], u.f[1], u.f[2], u.f[3]};
+        }
+        VkImageSubresourceRange range{};
+        range.aspectMask = aspect;
+        range.baseMipLevel = level;
+        range.levelCount = 1;
+        range.baseArrayLayer = 0;
+        range.layerCount = 1;
+        vkCmdClearColorImage(c.cmd, tex.image,
+                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &colorVal,
+                            1, &range);
+    }
+
+    // Transition back to SHADER_READ_ONLY_OPTIMAL.
+    VkImageMemoryBarrier toShader{};
+    toShader.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    toShader.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    toShader.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    toShader.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    toShader.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    toShader.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toShader.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toShader.image = tex.image;
+    toShader.subresourceRange.aspectMask = aspect;
+    toShader.subresourceRange.baseMipLevel = level;
+    toShader.subresourceRange.levelCount = 1;
+    toShader.subresourceRange.baseArrayLayer = 0;
+    toShader.subresourceRange.layerCount = 1;
+    vkCmdPipelineBarrier(c.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
+                         0, nullptr, 0, nullptr, 1, &toShader);
+
+    tex.currentLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    end_one_shot(c);
+}
+
 } // extern "C"

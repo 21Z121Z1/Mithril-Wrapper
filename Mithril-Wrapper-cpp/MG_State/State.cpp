@@ -383,6 +383,27 @@ Texture* state_get_texture(GLuint id) {
     return it == g_state->textures.end() ? nullptr : &it->second;
 }
 
+Texture* state_get_texture_by_target(GLenum target) {
+    if (!g_state) return nullptr;
+    // GL_TEXTURE_BUFFER is the target used by glTexBufferRange/TexBuffer.
+    // The active texture unit's binding for that target gives us the texture.
+    int unit = g_state->activeTextureUnit;
+    if (unit >= mithril::kMaxTextureUnits) return nullptr;
+    TextureTarget tt;
+    switch (target) {
+        case GL_TEXTURE_2D:          tt = TextureTarget::_2D; break;
+        case GL_TEXTURE_3D:          tt = TextureTarget::_3D; break;
+        case GL_TEXTURE_CUBE_MAP:    tt = TextureTarget::CubeMap; break;
+        case GL_TEXTURE_1D:          tt = TextureTarget::_1D; break;
+        case GL_TEXTURE_2D_ARRAY:    tt = TextureTarget::_2DArray; break;
+        case GL_TEXTURE_BUFFER:      tt = TextureTarget::Buffer; break;
+        default:                     tt = TextureTarget::_2D; break;
+    }
+    GLuint name = g_state->textureBindings[unit][static_cast<int>(tt)].name;
+    if (name == 0) return nullptr;
+    return state_get_texture(name);
+}
+
 Shader* state_get_shader(GLuint id) {
     if (!g_state || id == 0) return nullptr;
     auto it = g_state->shaders.find(id);
@@ -423,6 +444,20 @@ Query* state_get_query(GLuint id) {
     if (!g_state || id == 0) return nullptr;
     auto it = g_state->queries.find(id);
     return it == g_state->queries.end() ? nullptr : &it->second;
+}
+
+// ---- Program pipeline helpers (GL 4.1 ARB_separate_shader_objects) ----
+ProgramPipeline* state_get_program_pipeline(GLuint id) {
+    if (!g_state || id == 0) return nullptr;
+    auto it = g_state->programPipelines.find(id);
+    return it == g_state->programPipelines.end() ? nullptr : &it->second;
+}
+
+ProgramPipeline* state_create_program_pipeline(GLuint id) {
+    if (!g_state || id == 0) return nullptr;
+    auto& ppipe = g_state->programPipelines[id];
+    ppipe.id = id;
+    return &ppipe;
 }
 
 // =========================================================================

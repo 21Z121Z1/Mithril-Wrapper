@@ -503,10 +503,10 @@ static void trace_draw(const char* kind, int mode, int first, int count, int ins
                  "stex0=%u stex1=%u stex2=%u stex3=%u",
                  kind, (unsigned)g_state->currentProgram, mode, first, count, inst,
                  (unsigned)g_state->currentDrawFBO,
-                 (unsigned)g_state->imageTextureUnits[0],
-                 (unsigned)g_state->imageTextureUnits[1],
-                 (unsigned)g_state->imageTextureUnits[2],
-                 (unsigned)g_state->imageTextureUnits[3],
+                 (unsigned)g_state->imageTexUnits[0].texture,
+                 (unsigned)g_state->imageTexUnits[1].texture,
+                 (unsigned)g_state->imageTexUnits[2].texture,
+                 (unsigned)g_state->imageTexUnits[3].texture,
                  (unsigned)ib, (long long)ib_size, (unsigned)g_state->currentVAO,
                  (unsigned)stex[0], (unsigned)stex[1], (unsigned)stex[2], (unsigned)stex[3]);
     // 越界读检查（GPU Address Fault 高危）：索引 buffer 不够 count 个索引，

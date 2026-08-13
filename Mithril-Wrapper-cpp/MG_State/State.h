@@ -326,6 +326,17 @@ struct Texture {
 
     uint16_t  paramsVersion = 0;
     uint64_t  contentVersion = 0;
+
+    // GL 4.3+ texture view / tex buffer range 元数据
+    GLuint    viewSource = 0;        // glTextureView: 源纹理 id (0 = 非 view)
+    GLint     viewMinLevel = 0;
+    GLint     viewNumLevels = 0;
+    GLint     viewMinLayer = 0;
+    GLint     viewNumLayers = 0;
+    GLenum    viewTarget = GL_TEXTURE_2D;
+    GLuint    texBuffer = 0;        // glTexBufferRange: 绑定的 buffer (0 = 无)
+    GLintptr  texBufferOffset = 0;
+    GLsizeiptr texBufferSize = 0;
 };
 
 // ---- Sampler object ----
@@ -366,10 +377,15 @@ struct Shader {
     GLenum    type = GL_VERTEX_SHADER;
     std::string source;
     bool      compiled = false;
+    bool      specialized = false;  // glSpecializeShader 已调用
     std::string infoLog;
     std::vector<uint32_t> spirv;
     bool      markedForDeletion = false;
     int       attachCount = 0;
+    // glSpecializeShader parameters (ARB_gl_spirv)
+    std::string entryPoint = "main";
+    GLuint      numSpecConstants = 0;
+    std::unordered_map<GLuint, GLuint> specConstants; // index -> value
 };
 
 // ---- Uniform / Attrib metadata ----
@@ -453,6 +469,8 @@ struct Program {
     // Transform feedback varyings (recorded, backend wiring deferred).
     std::vector<std::string> tfVaryings;
     GLenum tfBufferMode = GL_INTERLEAVED_ATTRIBS;
+    // GL_PROGRAM_SEPARABLE flag (set by glProgramParameteri/glCreateShaderProgramv)
+    bool    separable = false;
     bool    markedForDeletion = false;
 };
 
@@ -492,6 +510,7 @@ struct Query {
     bool         ended = false;
     bool         resultCached = false;
     uint64_t     cachedResult = 0;
+    uint64_t     timestampValue = 0;  // glQueryCounter 返回值
     bool         markedForDeletion = false;
 };
 
@@ -509,7 +528,24 @@ struct TransformFeedback {
     GLuint    id = 0;
     bool      active = false;
     bool      paused = false;
+    bool      captureEnded = false;
+    GLuint    primitivesWritten = 0;
     GLenum    primitiveMode = GL_POINTS;
+    bool      markedForDeletion = false;
+};
+
+// ---- Program Pipeline (GL 4.1 ARB_separate_shader_objects) ----
+// Records per-stage program assignments for separable program pipelines.
+struct ProgramPipeline {
+    GLuint    id = 0;
+    GLuint    vsProgram = 0;   // GL_VERTEX_SHADER_BIT
+    GLuint    fsProgram = 0;   // GL_FRAGMENT_SHADER_BIT
+    GLuint    csProgram = 0;   // GL_COMPUTE_SHADER_BIT
+    GLuint    gsProgram = 0;   // GL_GEOMETRY_SHADER_BIT
+    GLuint    tcsProgram = 0;  // GL_TESS_CONTROL_SHADER_BIT
+    GLuint    tesProgram = 0;  // GL_TESS_EVALUATION_SHADER_BIT
+    GLuint    activeProgram = 0; // glActiveShaderProgram target
+    bool      validated = false;
     bool      markedForDeletion = false;
 };
 
@@ -592,7 +628,16 @@ struct GLState {
     // ---- Texture bindings (per-unit per-target) ----
     BindingSlot textureBindings[kMaxTextureUnits][kTextureTargetCount];
     GLuint      samplerBindings[kMaxTextureUnits] = {};  // sampler object name per unit
-    GLuint      imageTextureUnits[kMaxTextureUnits] = {}; // texture object bound to each unit (for sampler descriptors)
+    // Image texture unit: stores full glBindImageTexture parameters (GL 4.2 ARB_shader_image_load_store)
+    struct ImageTexUnit {
+        GLuint texture = 0;
+        GLint  level = 0;
+        GLboolean layered = GL_FALSE;
+        GLint  layer = 0;
+        GLenum access = GL_READ_WRITE;
+        GLenum format = GL_RGBA8;
+    };
+    ImageTexUnit imageTexUnits[kMaxTextureUnits]; // image texture binding per unit
     Texture     defaultTextures[kTextureTargetCount];    // name=0, immortal, one per target
     int         activeTextureUnit = 0;                   // GL_TEXTURE0 relative
     uint64_t    textureBindGeneration = 0;
@@ -605,6 +650,7 @@ struct GLState {
     GLuint      currentProgram = 0;
     GLuint      currentRenderbuffer = 0;
     GLuint      currentTransformFeedback = 0;  // TF 0 = default
+    GLuint      currentProgramPipeline = 0;    // ProgramPipeline 0 = default (use glUseProgram)
 
     // ---- EGL-backed default framebuffer ----
     VkImageView eglDefaultColor = VK_NULL_HANDLE;
@@ -615,6 +661,20 @@ struct GLState {
     VkFormat    eglDefaultDepthFormat = VK_FORMAT_UNDEFINED;
     int         eglDefaultWidth  = 0;
     int         eglDefaultHeight = 0;
+
+    // ---- Default framebuffer parameters (GL 4.3 glFramebufferParameteri) ----
+    // 这些参数是 GL 4.3+ DSA 接口, 用于查询默认 FBO 的默认宽度/高度 etc.
+    GLint   fbDefaultWidth = 0;
+    GLint   fbDefaultHeight = 0;
+    GLint   fbDefaultSamples = 0;
+    GLint   fbDefaultFixedSamples = 0;
+
+    // ---- Tessellation (GL 4.2) ----
+    // Metal/MoltenVK 不支持真正的 tessellation, 但 MC 有时会查询这些值,
+    // 存储它们以确保 get 调用返回合理值.
+    GLint   patchVertices = 3;
+    GLfloat patchOuterLevel[4] = {1,1,1,1};
+    GLfloat patchInnerLevel[2] = {1,1};
 
     // ---- Clear values ----
     float   clearColor[4] = {0, 0, 0, 0};
@@ -779,6 +839,9 @@ void     state_destroy(GLState* s);
 VertexArray*  state_get_vao(GLuint id);
 Buffer*       state_get_buffer(GLuint id);
 Texture*      state_get_texture(GLuint id);
+/* Look up the texture currently bound to `target` on the active texture unit.
+ * Used by glTexBufferRange to find the texture object to attach a buffer to. */
+Texture*      state_get_texture_by_target(GLenum target);
 Shader*       state_get_shader(GLuint id);
 Program*      state_get_program(GLuint id);
 Framebuffer*  state_get_framebuffer(GLuint id);
