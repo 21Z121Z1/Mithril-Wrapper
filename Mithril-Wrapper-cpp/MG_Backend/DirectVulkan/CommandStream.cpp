@@ -388,6 +388,10 @@ struct EncoderState {
     // MoltenVK / IOSurface UAF crashes).
     bool hasCommands = false;
 
+    // GPU fault 诊断：本帧已记录的 draw 数（commit_frame 时写帧摘要进
+    // LogRing，fault 后能确认 fault 帧的 draw 密度与结构）。
+    int  frameDrawCount = 0;
+
     // ---- Root cause Y (CRITICAL): user-FBO attachment layout transitions ----
     // VK_KHR_dynamic_rendering's vkCmdBeginRendering does NOT auto-transition
     // attachment image layouts — it only validates that each image is in the
@@ -588,6 +592,11 @@ void record_layout_barrier(VkCommandBuffer cb, VkImage image, VkFormat format,
 }
 
 } // namespace
+
+// GPU fault 诊断：backend_draw_*（全局 extern "C" 作用域，看不到匿名
+// namespace 的 encoder()）通过此函数递增本帧 draw 计数，供 commit_frame
+// 的帧摘要记录使用。
+void frame_draw_count_inc() { encoder().frameDrawCount++; }
 
 // Public render-pass cache API (declared in CommandStream.h; used by
 // Pipeline.cpp to build pipelines against the compatible template pass).
@@ -863,6 +872,7 @@ bool ensure_command_buffer_recording() {
     }
     b->commandBufferRecording = true;
     encoder().hasCommands = false;  // fresh buffer, no commands yet
+    encoder().frameDrawCount = 0;   // fresh buffer 重新统计本帧 draw 数
 
     // FIX (Invalid Resource 根因 - per-frame transient staging arena rewind):
     // 到达这里意味着 command buffer 被重置+重新 begin（新帧开始）。
@@ -1868,6 +1878,13 @@ void commit_frame() {
 
     VkFence fence = b->frameFences[b->currentFrame];
     vkResetFences(b->device, 1, &fence);
+    // GPU fault 诊断：帧提交摘要 —— fault 后 LogRing dump 能按帧边界切分
+    // draw 序列，确认 fault 帧的 draw 结构（prog/count 组合、image index）。
+    {
+        int curImg = (sc && sc->currentImage >= 0) ? sc->currentImage : -1;
+        LOG_RESOURCE("frame SUBMIT slot=%d img=%d draws=%d cmds=%d",
+                     b->currentFrame, curImg, e.frameDrawCount, (int)e.hasCommands);
+    }
     r = vkQueueSubmit(b->graphicsQueue, 1, &si, fence);
     if (r != VK_SUCCESS) {
         // GPU fault / device lost 诊断：dump 最近资源操作，定位 fault 前
@@ -1990,6 +2007,7 @@ void commit_frame() {
     // Success: a clean submit clears the consecutive-failure counter (only
     // persistent faults should keep it climbing toward the deviceLost threshold).
     b->consecutiveSubmitFailures = 0;
+    e.frameDrawCount = 0;  // 帧摘要已记录，归零供下一帧统计
 
     // Submit succeeded: imageAvailable is now consumed (the wait was honored).
     if (sc) {
@@ -2609,6 +2627,7 @@ void backend_draw_arrays(int primitive, int first, int count) {
     uint32_t firstInstance = 0;
     if (mithril::g_state) firstInstance = mithril::g_state->currentBaseInstance;
     vkCmdDraw(b->commandBuffer, (uint32_t)count, 1, (uint32_t)first, firstInstance);
+    mithril::vk::frame_draw_count_inc();
 }
 
 void backend_draw_indexed(int primitive, int count, int index_type,
@@ -2648,6 +2667,7 @@ void backend_draw_indexed(int primitive, int count, int index_type,
     }
     vkCmdDrawIndexed(b->commandBuffer, (uint32_t)count, 1, 0,
                      (int32_t)vertexOffset, firstInstance);
+    mithril::vk::frame_draw_count_inc();
 }
 
 void backend_draw_arrays_instanced(int primitive, int first, int count, int primcount) {
@@ -2663,6 +2683,7 @@ void backend_draw_arrays_instanced(int primitive, int first, int count, int prim
     if (mithril::g_state) firstInstance = mithril::g_state->currentBaseInstance;
     vkCmdDraw(b->commandBuffer, (uint32_t)count, (uint32_t)primcount,
               (uint32_t)first, firstInstance);
+    mithril::vk::frame_draw_count_inc();
 }
 
 void backend_draw_indexed_instanced(int primitive, int count, int index_type,
@@ -2692,6 +2713,7 @@ void backend_draw_indexed_instanced(int primitive, int count, int index_type,
     }
     vkCmdDrawIndexed(b->commandBuffer, (uint32_t)count, (uint32_t)primcount, 0,
                      (int32_t)vertexOffset, firstInstance);
+    mithril::vk::frame_draw_count_inc();
 }
 
 /* ---- Indirect draws (GL 4.0 ARB_draw_indirect) ----

@@ -766,6 +766,37 @@ void bind_program_descriptors(GLuint program, VkPipelineBindPoint bindPoint) {
                         if (ubuf != VK_NULL_HANDLE && sl.hasExplicitRange) {
                             uoff   = (VkDeviceSize)sl.offset;
                             urange = (VkDeviceSize)sl.size;
+                            // GPU Address Fault 防御：glBindBufferRange 的
+                            // offset+size 超出 buffer 实际大小 → descriptor
+                            // 让 GPU 读越界 → page fault（MobileGL 上同样
+                            // 配置不崩说明是 Mithril 侧 buffer 缩小所致，
+                            // 用 backend 侧实际 size 校验并 clamp）。
+                            const auto& bt = mithril::vk::buffer_table();
+                            auto bit = bt.find(sl.name);
+                            if (bit != bt.end() && bit->second.buffer != VK_NULL_HANDLE) {
+                                const VkDeviceSize real = bit->second.size;
+                                if (uoff + urange > real) {
+                                    static int ubRangeWarn = 0;
+                                    if (ubRangeWarn < 10) {
+                                        MITHRIL_LOG_WARN("vk", "UBO range OOB prog=%u "
+                                                          "block=%u point=%u off=%llu "
+                                                          "range=%llu real=%llu — clamping",
+                                                          program, plan.glBlockIndex, point,
+                                                          (unsigned long long)uoff,
+                                                          (unsigned long long)urange,
+                                                          (unsigned long long)real);
+                                    }
+                                    ubRangeWarn++;
+                                    LOG_RESOURCE("UBO-RANGE-OOB prog=%u block=%u off=%llu "
+                                                 "range=%llu real=%llu",
+                                                 program, plan.glBlockIndex,
+                                                 (unsigned long long)uoff,
+                                                 (unsigned long long)urange,
+                                                 (unsigned long long)real);
+                                    if (uoff >= real) { urange = 0; }
+                                    else { urange = real - uoff; }
+                                }
+                            }
                         }
                     }
                 }
@@ -1136,6 +1167,33 @@ void bind_program_descriptors(GLuint program, VkPipelineBindPoint bindPoint) {
                     if (ssbo != VK_NULL_HANDLE && sl.hasExplicitRange) {
                         ssboOff   = (VkDeviceSize)sl.offset;
                         ssboRange = (VkDeviceSize)sl.size;
+                        // GPU Address Fault 防御：SSBO range 越界 clamp（同 UBO）。
+                        const auto& bt = mithril::vk::buffer_table();
+                        auto bit = bt.find(sl.name);
+                        if (bit != bt.end() && bit->second.buffer != VK_NULL_HANDLE) {
+                            const VkDeviceSize real = bit->second.size;
+                            if (ssboOff + ssboRange > real) {
+                                static int ssboRangeWarn = 0;
+                                if (ssboRangeWarn < 10) {
+                                    MITHRIL_LOG_WARN("vk", "SSBO range OOB prog=%u "
+                                                      "point=%u off=%llu range=%llu "
+                                                      "real=%llu — clamping",
+                                                      program, point,
+                                                      (unsigned long long)ssboOff,
+                                                      (unsigned long long)ssboRange,
+                                                      (unsigned long long)real);
+                                }
+                                ssboRangeWarn++;
+                                LOG_RESOURCE("SSBO-RANGE-OOB prog=%u point=%u off=%llu "
+                                             "range=%llu real=%llu",
+                                             program, point,
+                                             (unsigned long long)ssboOff,
+                                             (unsigned long long)ssboRange,
+                                             (unsigned long long)real);
+                                if (ssboOff >= real) { ssboRange = 0; }
+                                else { ssboRange = real - ssboOff; }
+                            }
+                        }
                     }
                 }
             }

@@ -136,6 +136,10 @@ VkFramebuffer get_or_create_framebuffer(VkRenderPass rp,
 VkRenderPass get_template_render_pass(const VkFormat* color_formats, int color_count,
                                       VkFormat depth_format, int samples);
 
+// GPU fault 诊断：backend_draw_*（全局 extern "C" 作用域）调用的帧 draw
+// 计数递增（实现见 CommandStream.cpp，供 commit_frame 的帧摘要记录）。
+void frame_draw_count_inc();
+
 } // namespace vk
 } // namespace mithril
 

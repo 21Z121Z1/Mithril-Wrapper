@@ -720,6 +720,10 @@ struct GLState {
     int32_t  currentBaseVertex = 0;
     uint32_t currentBaseInstance = 0;
 
+    // GPU fault 诊断：最近一次 glDrawElements 的索引类型（trace_draw 用它
+    // 计算索引越界检查的每索引字节数）。glDrawElements 入口处设置。
+    GLenum   drawIndexType = GL_UNSIGNED_SHORT;
+
     // ---- Pixel store ----
     PixelStoreState pixelStore;
 

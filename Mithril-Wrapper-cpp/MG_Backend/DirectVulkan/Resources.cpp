@@ -293,9 +293,17 @@ VkResult try_allocate_memory_with_gc(VkDevice device, const VkMemoryAllocateInfo
 bool create_buffer(BufferEntry& out, VkDeviceSize size,
                    VkBufferUsageFlags usage, const void* data, bool persistent) {
     Backend* b = backend();
+    // GPU Address Fault 防御（真机主菜单 page fault）：VkBuffer 逻辑 size
+    // 向上对齐到 256B。桌面 GL 驱动对 buffer 访问越界几字节不崩（读相邻
+    // 内存），而 Vulkan/Metal 的精确 size buffer 越界读 = GPU page fault
+    // （kIOGPUCommandBufferCallbackErrorPageFault）。MC/Sodium 的动态
+    // 顶点/索引 buffer 偶发轻微越界（覆盖超几字节），对齐后落在 padding
+    // 内不 fault。glBufferData 的原始 size 仍由 GL 层 Buffer.size 记录，
+    // trace_draw 的越界检查用原始 size，两套独立。
+    const VkDeviceSize paddedSize = (size + 255u) & ~(VkDeviceSize)255u;
     VkBufferCreateInfo ci{};
     ci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-    ci.size = size;
+    ci.size = paddedSize;
     ci.usage = usage;
     ci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     if (vkCreateBuffer(b->device, &ci, nullptr, &out.buffer) != VK_SUCCESS) return false;
@@ -347,7 +355,7 @@ bool create_buffer(BufferEntry& out, VkDeviceSize size,
             out.persistentlyMapped = true;
         }
     }
-    out.size = size;
+    out.size = paddedSize;
     return true;
 }
 
@@ -1130,11 +1138,34 @@ VkBuffer backend_get_or_create_buffer(GLuint name, const void* data, size_t size
             LOG_RESOURCE("buf ORPHAN name=%u size=%llu (inflight lastWrite=%llu)",
                          (unsigned)name, (unsigned long long)size,
                          (unsigned long long)it->second.lastWriteSerial);
-            mithril::vk::defer_destroy_buffer_entry(it->second);
+            // FIX (真机主菜单 GPU page fault 根因 - OOM 静默失败链):
+            // 原实现【先 defer 旧 buffer、后 create 新 buffer】。defer_destroy
+            // 把 tbl 里的 entry 直接置空（buffer=NULL）；若紧接着的
+            // vkCreateBuffer/vkAllocateMemory 因显存压力失败（create_buffer
+            // 静默返回 false，无日志），tbl[name] 就是空 entry —— 后续 draw
+            // 经 backend_get_buffer(name) 拿到 NULL，vkCmdBindVertexBuffers /
+            // vkCmdBindIndexBuffer 绑定 NULL buffer → MoltenVK/Metal GPU
+            // Address Fault（kIOGPUCommandBufferCallbackErrorPageFault）。
+            // 与症状完全吻合：主菜单（atlas 大纹理 + 每帧几十个小 buffer
+            // ORPHAN 风暴）显存压力升高后 ~1 秒 fault，而 loading 界面显存
+            // 压力低不 fault；且多轮 swapchain/renderpass 修复无效。
+            // 修复：先 create 新 buffer，成功后才 defer 旧的并替换。失败时
+            // 保留旧 buffer（数据可能过期但句柄有效，绝不返回 NULL）。
             mithril::vk::BufferEntry e;
             if (!mithril::vk::create_buffer(e, size, mithril::vk::kAllGlBufferUsage, data, false)) {
-                return VK_NULL_HANDLE;
+                static int orphanOomLog = 0;
+                if (orphanOomLog <= 8 || orphanOomLog % 50 == 0) {
+                    MITHRIL_LOG_ERROR("vk", "create_buffer FAILED (name=%u size=%llu) — "
+                                      "keeping OLD buffer handle to avoid NULL-bind "
+                                      "GPU fault", (unsigned)name,
+                                      (unsigned long long)size);
+                }
+                orphanOomLog++;
+                LOG_RESOURCE("buf CREATE-FAIL name=%u size=%llu keep-old",
+                             (unsigned)name, (unsigned long long)size);
+                return it->second.buffer;  // 旧 buffer 仍有效（未 defer）
             }
+            mithril::vk::defer_destroy_buffer_entry(it->second);
             mithril::vk::stamp_buffer_write(e);
             tbl[name] = e;
             // 注意：这里【不】调 invalidate_descriptor_memo()。backend_get_or_create_buffer
@@ -1161,7 +1192,9 @@ VkBuffer backend_get_or_create_buffer(GLuint name, const void* data, size_t size
         return it->second.buffer;
     }
     // Buffer 不存在或容量不足：orphan 旧的，创建新的
-    if (it != tbl.end()) mithril::vk::defer_destroy_buffer_entry(it->second);
+    // FIX (真机主菜单 GPU page fault 根因，同上方在飞分支): 先 create 成功
+    // 再 defer 旧的。原实现先 defer（置空 tbl 里的 entry），create 失败时
+    // 返回 NULL 且 tbl[name] 空 → draw 绑定 NULL buffer → GPU Address Fault。
     mithril::vk::BufferEntry e;
     /* GL buffer objects are untyped — the same name can be bound to
      * GL_ARRAY_BUFFER today and GL_SHADER_STORAGE_BUFFER tomorrow, and GL
@@ -1175,8 +1208,21 @@ VkBuffer backend_get_or_create_buffer(GLuint name, const void* data, size_t size
      * Both are spec violations that a validation layer rejects outright and
      * MoltenVK may turn into a dropped draw. */
     if (!mithril::vk::create_buffer(e, size, mithril::vk::kAllGlBufferUsage, data, false)) {
-        return VK_NULL_HANDLE;
+        if (it != tbl.end() && it->second.buffer != VK_NULL_HANDLE) {
+            static int growOomLog = 0;
+            if (growOomLog <= 8 || growOomLog % 50 == 0) {
+                MITHRIL_LOG_ERROR("vk", "create_buffer FAILED (grow name=%u size=%llu) — "
+                                  "keeping OLD buffer handle to avoid NULL-bind GPU fault",
+                                  (unsigned)name, (unsigned long long)size);
+            }
+            growOomLog++;
+            LOG_RESOURCE("buf CREATE-FAIL(name=%u size=%llu keep-old)",
+                         (unsigned)name, (unsigned long long)size);
+            return it->second.buffer;  // 旧 buffer 容量不足但句柄有效
+        }
+        return VK_NULL_HANDLE;  // 全新 buffer 且创建失败：无可保留，调用方兜底
     }
+    if (it != tbl.end()) mithril::vk::defer_destroy_buffer_entry(it->second);
     mithril::vk::stamp_buffer_write(e);
     tbl[name] = e;
     // 同理不在此全量 invalidate_descriptor_memo()（见上方在飞分支注释）：
@@ -1199,7 +1245,8 @@ VkBuffer backend_create_buffer_storage(GLuint name, VkDeviceSize size,
     if (!b->initialized || name == 0 || size == 0) return VK_NULL_HANDLE;
     auto& tbl = mithril::vk::buffer_table();
     auto it = tbl.find(name);
-    if (it != tbl.end()) mithril::vk::defer_destroy_buffer_entry(it->second);
+    // FIX (真机主菜单 GPU page fault 根因，同 backend_get_or_create_buffer):
+    // 先 create 成功再 defer 旧的，create 失败保留旧 handle，绝不置空 tbl。
     mithril::vk::BufferEntry e;
     VkBufferUsageFlags usage =
             VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
@@ -1207,8 +1254,21 @@ VkBuffer backend_create_buffer_storage(GLuint name, VkDeviceSize size,
             VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
             VK_BUFFER_USAGE_TRANSFER_DST_BIT | extra_usage;
     if (!mithril::vk::create_buffer(e, size, usage, nullptr, persistent)) {
+        if (it != tbl.end() && it->second.buffer != VK_NULL_HANDLE) {
+            static int storageOomLog = 0;
+            if (storageOomLog <= 8 || storageOomLog % 50 == 0) {
+                MITHRIL_LOG_ERROR("vk", "create_buffer_storage FAILED (name=%u size=%llu) — "
+                                  "keeping OLD buffer handle to avoid NULL-bind GPU fault",
+                                  (unsigned)name, (unsigned long long)size);
+            }
+            storageOomLog++;
+            LOG_RESOURCE("buf CREATE-FAIL(storage name=%u size=%llu keep-old)",
+                         (unsigned)name, (unsigned long long)size);
+            return it->second.buffer;
+        }
         return VK_NULL_HANDLE;
     }
+    if (it != tbl.end()) mithril::vk::defer_destroy_buffer_entry(it->second);
     (void)coherent;  // HOST_COHERENT is always requested by create_buffer
     mithril::vk::stamp_buffer_write(e);
     tbl[name] = e;

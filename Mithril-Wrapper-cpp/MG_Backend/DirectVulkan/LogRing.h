@@ -27,7 +27,10 @@ struct LogRing {
         uint64_t tick;   // 进程单调毫秒（相对 0，用于 fault 前后时序）
         char msg[192];
     };
-    static constexpr int kCap = 256;
+    // 256 条在 draw 密集时只覆盖 ~47ms（fault 帧信息被覆盖，导致多轮无法
+    // 定位）。扩容到 4096：每帧约 200-400 条资源记录，可回溯 fault 前
+    // 10-20 帧，覆盖"主菜单首帧 → fault"的完整 draw 序列。
+    static constexpr int kCap = 4096;
 
     Entry  buf[kCap];
     int    head = 0;

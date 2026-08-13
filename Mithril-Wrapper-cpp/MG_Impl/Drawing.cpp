@@ -469,15 +469,67 @@ static void trace_draw(const char* kind, int mode, int first, int count, int ins
     GLuint ib = 0;
     mithril::VertexArray* vao = mithril::state_get_vao(g_state->currentVAO);
     if (vao) ib = vao->elementArrayBuffer;
+    GLsizeiptr ib_size = 0;
+    if (ib) {
+        if (auto* b = mithril::state_get_buffer(ib)) ib_size = b->size;
+    }
+    // 采样器纹理（sampler unit，真正喂给 descriptor 的纹理）——image units
+    // 只反映 GL 4.2 image load/store，普通采样 draw 不更新它，容易误判
+    // "没绑纹理"。补记 sampler unit 0-3 的绑定。
+    GLuint stex[4] = {0, 0, 0, 0};
+    if (mithril::g_state) {
+        for (int u = 0; u < 4; ++u) stex[u] = mithril::g_state->boundTextureForUnit((GLuint)u);
+    }
     LOG_RESOURCE("draw %s prog=%u mode=%d first=%d count=%d inst=%d fbo=%u "
-                 "tex0=%u tex1=%u tex2=%u tex3=%u ib=%u vao=%u",
+                 "tex0=%u tex1=%u tex2=%u tex3=%u ib=%u ib_size=%lld vao=%u "
+                 "stex0=%u stex1=%u stex2=%u stex3=%u",
                  kind, (unsigned)g_state->currentProgram, mode, first, count, inst,
                  (unsigned)g_state->currentDrawFBO,
                  (unsigned)g_state->imageTextureUnits[0],
                  (unsigned)g_state->imageTextureUnits[1],
                  (unsigned)g_state->imageTextureUnits[2],
                  (unsigned)g_state->imageTextureUnits[3],
-                 (unsigned)ib, (unsigned)g_state->currentVAO);
+                 (unsigned)ib, (long long)ib_size, (unsigned)g_state->currentVAO,
+                 (unsigned)stex[0], (unsigned)stex[1], (unsigned)stex[2], (unsigned)stex[3]);
+    // 越界读检查（GPU Address Fault 高危）：索引 buffer 不够 count 个索引，
+    // 或顶点 attrib 覆盖范围超出 buffer —— 桌面 GL 读相邻内存不崩，Vulkan
+    // 精确 size 的 buffer 直接 GPU page fault。每次 draw 检查，越界即记录
+    // 到 LogRing（fault 后 dump 直接现形）。
+    if (vao) {
+        // 索引越界（仅 indexed draw）
+        if (kind[0] == 'e' && ib && ib_size > 0 && count > 0) {
+            size_t elem = 2;  // GL_UNSIGNED_SHORT（trace 的调用方已确定 type）
+            if (g_state->drawIndexType == GL_UNSIGNED_INT) elem = 4;
+            else if (g_state->drawIndexType == GL_UNSIGNED_BYTE) elem = 1;
+            if ((size_t)count * elem > (size_t)ib_size) {
+                LOG_RESOURCE("DRAW-OVERRUN ib prog=%u count=%d idxType=0x%x need=%zuB have=%lldB",
+                             (unsigned)g_state->currentProgram, count,
+                             (unsigned)g_state->drawIndexType, (size_t)count * elem,
+                             (long long)ib_size);
+            }
+        }
+        // 顶点 attrib 越界：前 2 个 enabled attrib，检查 (first+count) 顶点
+        // 覆盖范围是否超出其 buffer（stride 已知时）
+        int checked = 0;
+        for (int a = 0; a < mithril::kMaxVertexAttribs && checked < 2; ++a) {
+            const mithril::VertexAttrib& at = vao->attribs[a];
+            if (!at.enabled || !at.boundBuffer) continue;
+            auto* vb = mithril::state_get_buffer(at.boundBuffer);
+            if (!vb) continue;
+            checked++;
+            GLsizei stride = at.stride ? at.stride : (GLsizei)(at.size * 4);
+            if (stride <= 0) continue;
+            size_t offset = (size_t)(intptr_t)at.pointer;
+            size_t need = offset + (size_t)(first + count) * (size_t)stride;
+            if (need > (size_t)vb->size) {
+                LOG_RESOURCE("DRAW-OVERRUN vb prog=%u attr=%d buf=%u stride=%d "
+                             "off=%zu first+count=%d need=%zuB have=%lldB",
+                             (unsigned)g_state->currentProgram, a,
+                             (unsigned)at.boundBuffer, (int)stride, offset,
+                             first + count, need, (long long)vb->size);
+            }
+        }
+    }
 }
 
 void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
@@ -522,6 +574,7 @@ void glDrawArraysInstancedBaseInstance(GLenum mode, GLint first, GLsizei count,
 
 void glDrawElements(GLenum mode, GLsizei count, GLenum type, const void* indices) {
     MITHRIL_ENSURE_INIT();
+    g_state->drawIndexType = type;  // GPU fault 诊断：供 trace_draw 越界检查
     trace_draw("elements", (int)mode, 0, (int)count, 1);
     // GPU fault 诊断：索引类型（0=USHORT 1=UINT 2=UBYTE）——UINT8 依赖
     // VK_EXT_index_type_uint8，若扩展未启用则 vkCmdBindIndexBuffer 非法。
@@ -587,6 +640,7 @@ void glDrawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type,
 void glDrawElementsInstanced(GLenum mode, GLsizei count, GLenum type,
                              const void* indices, GLsizei primcount) {
     MITHRIL_ENSURE_INIT();
+    g_state->drawIndexType = type;  // GPU fault 诊断：供 trace_draw 越界检查
     trace_draw("elements_inst", (int)mode, 0, (int)count, (int)primcount);
     if (!prepare_draw(mode)) return;  // root cause AI — see glDrawArrays
     mithril::VertexArray* vao = mithril::state_get_vao(g_state->currentVAO);
