@@ -14,7 +14,7 @@ jobs:
   build-macos:
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
 
@@ -66,7 +66,7 @@ jobs:
              echo "codesign skipped (best-effort)"
 
       - name: Upload dylib
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: libmithril-macos-arm64
           path: ${{ steps.locate.outputs.path }}
@@ -76,7 +76,7 @@ jobs:
   build-ios:
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
 
@@ -148,7 +148,7 @@ jobs:
           codesign --verify --verbose=2 "${{ steps.locate_ios.outputs.path }}"
 
       - name: Upload iPhoneOS dylib
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: libmithril-iphoneos-arm64
           path: ${{ steps.locate_ios.outputs.path }}
@@ -158,7 +158,7 @@ jobs:
   test-linux:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
 
@@ -245,7 +245,7 @@ jobs:
           ls -la tests/render3d.ppm tests/render3d.png
 
       - name: Upload 3D render image (artifact)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: mithril-render3d-png
           path: |

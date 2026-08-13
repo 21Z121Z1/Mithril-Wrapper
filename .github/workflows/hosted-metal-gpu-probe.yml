@@ -22,7 +22,7 @@ jobs:
       MITHRIL_EXPECT_RENDERER: Mithril DirectMetal
       MITHRIL_LIBRARY: ./output/libmithril.dylib
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
 
@@ -101,7 +101,7 @@ jobs:
     name: iPhoneOS DirectMetal arm64 cross-build required
     runs-on: macos-26
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
 
@@ -143,7 +143,7 @@ jobs:
       MTL_DEBUG_LAYER: '0'
       MTL_SHADER_VALIDATION: '0'
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
 

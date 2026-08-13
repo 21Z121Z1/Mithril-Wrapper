@@ -18,7 +18,7 @@ jobs:
       MTL_DEBUG_LAYER: '0'
       MTL_SHADER_VALIDATION: '0'
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
 
@@ -62,7 +62,7 @@ jobs:
     name: Vulkan CTest semantic suite
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
 
