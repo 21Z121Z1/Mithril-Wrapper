@@ -854,6 +854,132 @@ int main(int argc, char** argv) {
         CHECK(getError() == GL_NO_ERROR, "multi-frame test leaves no error");
     }
 
+
+    /* ---- MC 26.2 startup shader compatibility ---------------------------
+     * Exact constructs captured from the A17 Pro bring-up.  These are valid
+     * desktop GLSL but previously triggered iOS-arm64 glslang swizzle/access-
+     * chain failures.  Compile and cross-stage link them through the public GL
+     * entry points so CI exercises the same Shader.cpp frontend as Minecraft. */
+    {
+        const char* mc262_vs =
+            "#version 330\n"
+            "layout(std140) uniform Projection { mat4 ProjMat; };\n"
+            "uniform sampler2D Sampler2;\n"
+            "in vec3 Position;\n"
+            "in ivec2 UV2;\n"
+            "out vec4 vertexColor;\n"
+            "vec4 projection_from_position(vec4 position) {\n"
+            "    vec4 projection = position * 0.5;\n"
+            "    projection.xy = vec2(projection.x + projection.w, projection.y + projection.w);\n"
+            "    projection.zw = position.zw;\n"
+            "    return projection;\n"
+            "}\n"
+            "float fog_cylindrical_distance(vec3 pos) {\n"
+            "    float distXZ = length(pos.xz);\n"
+            "    float distY = abs(pos.y);\n"
+            "    return max(distXZ, distY);\n"
+            "}\n"
+            "vec4 sample_lightmap(sampler2D lightMap, ivec2 uv) {\n"
+            "    return texture(lightMap, clamp((uv / 256.0) + 0.5 / 16.0, vec2(0.5 / 16.0), vec2(15.5 / 16.0)));\n"
+            "}\n"
+            "void main() {\n"
+            "    gl_Position = ProjMat * vec4(Position, 1.0);\n"
+            "    vec4 p = projection_from_position(gl_Position);\n"
+            "    float f = fog_cylindrical_distance(Position);\n"
+            "    vertexColor = sample_lightmap(Sampler2, UV2) + p * 0.0 + vec4(f * 0.0);\n"
+            "}\n";
+        const char* mc262_fs =
+            "#version 330\n"
+            "uniform sampler2D Sampler0;\n"
+            "uniform vec4 ColorModulator;\n"
+            "in vec4 vertexColor;\n"
+            "out vec4 fragColor;\n"
+            "vec4 apply_fog(vec4 inColor, vec4 fogColor, float fogValue) {\n"
+            "    return vec4(mix(inColor.rgb, fogColor.rgb, fogValue * fogColor.a), inColor.a);\n"
+            "}\n"
+            "vec4 mix_light(vec4 color, float lightAccum) {\n"
+            "    return vec4(color.rgb * lightAccum, color.a);\n"
+            "}\n"
+            "void main() {\n"
+            "    vec4 color = texture(Sampler0, vec2(0.5));\n"
+            "    vec4 overlayColor = vertexColor;\n"
+            "    color.rgb = mix(overlayColor.rgb, color.rgb, overlayColor.a);\n"
+            "    color = mix_light(color, 1.0);\n"
+            "    fragColor = vec4(color.rgb * 1.0, color.a);\n"
+            "    fragColor += vec4(ColorModulator.rgb * vertexColor.rgb, ColorModulator.a) * 0.0;\n"
+            "}\n";
+
+        GLuint mvs = createShader(GL_VERTEX_SHADER);
+        shaderSource(mvs, 1, &mc262_vs, NULL);
+        compileShader(mvs);
+        GLint vs_ok = 0;
+        getShaderiv(mvs, GL_COMPILE_STATUS, &vs_ok);
+        CHECK(vs_ok == GL_TRUE, "MC 26.2 startup vertex shader compiles through Mithril frontend");
+
+        GLuint mfs = createShader(GL_FRAGMENT_SHADER);
+        shaderSource(mfs, 1, &mc262_fs, NULL);
+        compileShader(mfs);
+        GLint fs_ok = 0;
+        getShaderiv(mfs, GL_COMPILE_STATUS, &fs_ok);
+        CHECK(fs_ok == GL_TRUE, "MC 26.2 startup fragment shader compiles through Mithril frontend");
+
+        GLuint mp = createProgram();
+        attachShader(mp, mvs);
+        attachShader(mp, mfs);
+        linkProgram(mp);
+        GLint link_ok = 0;
+        getProgramiv(mp, GL_LINK_STATUS, &link_ok);
+        CHECK(link_ok == GL_TRUE, "MC 26.2 startup shader pair cross-stage links");
+        deleteProgram(mp);
+        deleteShader(mfs);
+        deleteShader(mvs);
+    }
+
+    /* Remaining device-observed vector patterns: line NDC, texture-matrix,
+       repeated-channel sampling, and projected portal samples. */
+    {
+        const char* line_vs =
+            "#version 330\n"
+            "uniform vec2 ScreenSize;\n"
+            "uniform mat4 TextureMat;\n"
+            "in vec3 Position;\n"
+            "in vec2 UV0;\n"
+            "out vec2 texCoord0;\n"
+            "void main() {\n"
+            "    vec4 linePosStart = vec4(Position, 1.0);\n"
+            "    vec4 linePosEnd = linePosStart + vec4(0.1, 0.1, 0.0, 0.0);\n"
+            "    vec3 ndc1 = linePosStart.xyz / linePosStart.w;\n"
+            "    vec3 ndc2 = linePosEnd.xyz / linePosEnd.w;\n"
+            "    vec2 lineScreenDirection = normalize((ndc2.xy - ndc1.xy) * ScreenSize);\n"
+            "    texCoord0 = (TextureMat * vec4(UV0, 0.0, 1.0)).xy;\n"
+            "    gl_Position = linePosStart + vec4(lineScreenDirection * 0.0, 0.0, 0.0);\n"
+            "}\n";
+        GLuint s = createShader(GL_VERTEX_SHADER);
+        shaderSource(s, 1, &line_vs, NULL);
+        compileShader(s);
+        GLint ok = 0;
+        getShaderiv(s, GL_COMPILE_STATUS, &ok);
+        CHECK(ok == GL_TRUE, "MC 26.2 line/TextureMat vector patterns compile");
+        deleteShader(s);
+
+        const char* vec_fs =
+            "#version 330\n"
+            "uniform sampler2D Sampler0;\n"
+            "in vec2 texCoord0;\n"
+            "out vec4 fragColor;\n"
+            "void main() {\n"
+            "    vec4 texColor = texture(Sampler0, texCoord0).rrrr;\n"
+            "    fragColor = texColor;\n"
+            "}\n";
+        s = createShader(GL_FRAGMENT_SHADER);
+        shaderSource(s, 1, &vec_fs, NULL);
+        compileShader(s);
+        ok = 0;
+        getShaderiv(s, GL_COMPILE_STATUS, &ok);
+        CHECK(ok == GL_TRUE, "MC 26.2 repeated-channel sampler swizzle compiles");
+        deleteShader(s);
+    }
+
     dlclose(h);
 
     printf("\nRENDER SMOKE: %d/%d checks passed, %d failure(s)\n", checks - failures, checks, failures);

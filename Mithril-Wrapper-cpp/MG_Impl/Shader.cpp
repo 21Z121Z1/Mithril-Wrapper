@@ -74,6 +74,11 @@ GlslangInit& glslang_init() {
     return g;
 }
 
+std::mutex& glslang_compile_mutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
 EShLanguage to_esh_stage(GLenum gl) {
     switch (gl) {
         case GL_VERTEX_SHADER:          return EShLangVertex;
@@ -258,6 +263,97 @@ void normalize_gl_legacy_constructs(std::string& source, GLenum gl_stage) {
         insert_at = (nl != std::string::npos) ? nl + 1 : source.size();
     }
     source.insert(insert_at, "layout(location = 0) out vec4 _mithril_FragColor;\n");
+}
+
+
+// ---------------------------------------------------------------------------
+// Minecraft 26.2 / iOS-arm64 glslang compatibility lowering.
+//
+// These are deliberately exact Mojang helper statements captured during the
+// A17 Pro bring-up. They are valid desktop GLSL, but the iOS arm64 glslang
+// frontend used by the launcher can lose swizzle l-value/access-chain nodes
+// during error recovery. Lower only the known expressions; arbitrary shaders
+// retain normal GLSL semantics.
+// ---------------------------------------------------------------------------
+void rewrite_minecraft_projection_swizzles(std::string& src) {
+    static const std::string xy =
+        "projection.xy = vec2(projection.x + projection.w, projection.y + projection.w);";
+    static const std::string zw = "projection.zw = position.zw;";
+    const size_t first = src.find(xy);
+    const size_t second = src.find(zw, first == std::string::npos ? 0 : first + xy.size());
+    if (first == std::string::npos || second == std::string::npos) return;
+    const size_t end = second + zw.size();
+    src.replace(first, end - first,
+                "projection = vec4((position.x + position.w) * 0.5, "
+                "(position.y + position.w) * 0.5, position.z, position.w);");
+}
+
+void rewrite_minecraft_ios_vector_compatibility(std::string& src) {
+    auto replace_all = [&](const std::string& from, const std::string& to) {
+        size_t offset = 0;
+        while ((offset = src.find(from, offset)) != std::string::npos) {
+            src.replace(offset, from.size(), to);
+            offset += to.size();
+        }
+    };
+
+    replace_all(
+        "float distXZ = length(pos.xz);",
+        "float distXZ = length(vec2(pos.x, pos.z));");
+    replace_all(
+        "return texture(lightMap, clamp((uv / 256.0) + 0.5 / 16.0, vec2(0.5 / 16.0), vec2(15.5 / 16.0)));",
+        "vec2 uvf = vec2(uv);\n"
+        "    return texture(lightMap, clamp((uvf / 256.0) + 0.5 / 16.0, vec2(0.5 / 16.0), vec2(15.5 / 16.0)));");
+
+    // Fog/lighting helpers are included by many 26.2 programs even when a
+    // particular stage does not actively use every path.
+    replace_all(
+        "return vec4(mix(inColor.rgb, fogColor.rgb, fogValue * fogColor.a), inColor.a);",
+        "return vec4(mix(vec3(inColor.x, inColor.y, inColor.z), vec3(fogColor.x, fogColor.y, fogColor.z), fogValue * fogColor.a), inColor.a);");
+    replace_all(
+        "return vec4(color.rgb * lightAccum, color.a);",
+        "return vec4(vec3(color.x, color.y, color.z) * lightAccum, color.a);");
+
+    // Entity/item overlay and simple fragment paths.
+    replace_all(
+        "color.rgb = mix(overlayColor.rgb, color.rgb, overlayColor.a);",
+        "color = vec4(mix(vec3(overlayColor.x, overlayColor.y, overlayColor.z), vec3(color.x, color.y, color.z), overlayColor.a), color.a);");
+    replace_all(
+        "fragColor = vec4(color.rgb * fade, color.a);",
+        "fragColor = vec4(vec3(color.x, color.y, color.z) * fade, color.a);");
+    replace_all(
+        "fragColor = vec4(ColorModulator.rgb * vertexColor.rgb, ColorModulator.a);",
+        "fragColor = vec4(vec3(ColorModulator.x, ColorModulator.y, ColorModulator.z) * vec3(vertexColor.x, vertexColor.y, vertexColor.z), ColorModulator.a);");
+    replace_all(
+        "vec4 texColor = texture(Sampler0, texCoord0).rrrr;",
+        "vec4 texColor = vec4(texture(Sampler0, texCoord0).r);");
+
+    // Lines renderer NDC setup.
+    replace_all(
+        "vec3 ndc1 = linePosStart.xyz / linePosStart.w;",
+        "vec3 ndc1 = vec3(linePosStart.x, linePosStart.y, linePosStart.z) / linePosStart.w;");
+    replace_all(
+        "vec3 ndc2 = linePosEnd.xyz / linePosEnd.w;",
+        "vec3 ndc2 = vec3(linePosEnd.x, linePosEnd.y, linePosEnd.z) / linePosEnd.w;");
+    replace_all(
+        "vec2 lineScreenDirection = normalize((ndc2.xy - ndc1.xy) * ScreenSize);",
+        "vec2 lineScreenDirection = normalize((vec2(ndc2.x, ndc2.y) - vec2(ndc1.x, ndc1.y)) * ScreenSize);");
+
+    // Entity/glint/world-border texture-matrix path.
+    replace_all(
+        "texCoord0 = (TextureMat * vec4(UV0, 0.0, 1.0)).xy;",
+        "vec4 texCoord0Transformed = TextureMat * vec4(UV0, 0.0, 1.0);\n"
+        "    texCoord0 = vec2(texCoord0Transformed.x, texCoord0Transformed.y);");
+
+    // End-portal projected samples.
+    replace_all(
+        "vec3 color = textureProj(Sampler0, texProj0).rgb * COLORS[0];",
+        "vec4 portalBase = textureProj(Sampler0, texProj0);\n"
+        "    vec3 color = vec3(portalBase.x, portalBase.y, portalBase.z) * COLORS[0];");
+    replace_all(
+        "color += textureProj(Sampler1, texProj0 * end_portal_layer(float(i + 1))).rgb * COLORS[i];",
+        "vec4 portalLayer = textureProj(Sampler1, texProj0 * end_portal_layer(float(i + 1)));\n"
+        "        color += vec3(portalLayer.x, portalLayer.y, portalLayer.z) * COLORS[i];");
 }
 
 // ---------------------------------------------------------------------------
@@ -535,6 +631,7 @@ bool compile_program(const std::string& vs_src, const std::string& fs_src,
                      std::vector<uint32_t>& out_vs,
                      std::vector<uint32_t>& out_fs,
                      std::string& info) {
+    std::lock_guard<std::mutex> glslang_lock(glslang_compile_mutex());
     glslang_init();
     const TBuiltInResource* resources = GetDefaultResources();
 
@@ -616,6 +713,7 @@ LinkCache& link_cache() { static LinkCache c; return c; }
 
 bool shader_compile_stage(GLenum gl_stage, const std::string& glsl_source,
                           std::string& out_info_log) {
+    std::lock_guard<std::mutex> glslang_lock(glslang_compile_mutex());
     glslang_init();
     EShLanguage lang = to_esh_stage(gl_stage);
     if (lang == EShLangCount) {
@@ -629,6 +727,8 @@ bool shader_compile_stage(GLenum gl_stage, const std::string& glsl_source,
     ensure_glsl_version(source);
     normalize_vulkan_incompatible_layouts(source);
     normalize_gl_legacy_constructs(source, gl_stage);
+    rewrite_minecraft_projection_swizzles(source);
+    rewrite_minecraft_ios_vector_compatibility(source);
     inject_position_fixup(source, gl_stage, /*flip_y=*/false);
 
     glslang::TShader sh(lang);
@@ -668,6 +768,9 @@ bool shader_link_program(const std::string& vs_source, const std::string& fs_sou
     normalize_vulkan_incompatible_layouts(fs);
     normalize_gl_legacy_constructs(vs, GL_VERTEX_SHADER);
     normalize_gl_legacy_constructs(fs, GL_FRAGMENT_SHADER);
+    rewrite_minecraft_projection_swizzles(vs);
+    rewrite_minecraft_ios_vector_compatibility(vs);
+    rewrite_minecraft_ios_vector_compatibility(fs);
 
     // Non-flipped variant (user FBOs).
     std::string vs_plain = vs;
