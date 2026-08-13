@@ -1140,38 +1140,52 @@ GLboolean glIsSync(GLsync sync) {
 void glGetSynciv(GLsync sync, GLenum pname, GLsizei bufSize, GLsizei* length, GLint* values) {
     MITHRIL_ENSURE_INIT();
     if (length) *length = 0;
+
+    if (!sync) {
+        mithril::state_set_error(GL_INVALID_VALUE);
+        return;
+    }
     if (bufSize < 0) {
         mithril::state_set_error(GL_INVALID_VALUE);
         return;
     }
-    if (!sync || !values || bufSize == 0) return;
+    if (bufSize == 0) return;
+    if (!values) {
+        mithril::state_set_error(GL_INVALID_VALUE);
+        return;
+    }
+
     void* handle = reinterpret_cast<void*>(sync);
     auto it = g_state->syncObjects.find(handle);
     if (it == g_state->syncObjects.end()) {
         mithril::state_set_error(GL_INVALID_VALUE);
         return;
     }
-    mithril::Sync& s = it->second;
 
-    // submitSerial==0 is the canonical completed state. Refresh from the Vulkan
-    // completion watermark only while a real serial is outstanding.
-    if (s.submitSerial != 0 &&
-        s.submitSerial <= mithril::vk::backend_last_completed_serial()) {
-        s.submitSerial = 0;
-        s.signaled = true;
+    mithril::Sync& obj = it->second;
+    if (obj.submitSerial != 0 &&
+        obj.submitSerial <= mithril::vk::backend_last_completed_serial()) {
+        obj.submitSerial = 0;
+        obj.signaled = true;
     }
 
-    GLint v = 0;
-    switch (pname) {
-        case GL_OBJECT_TYPE:    v = GL_SYNC_FENCE; break;
-        case GL_SYNC_CONDITION: v = (GLint)s.condition; break;
-        case GL_SYNC_FLAGS:     v = (GLint)s.flags; break;
-        case GL_SYNC_STATUS:    v = (s.submitSerial == 0) ? GL_SIGNALED : GL_UNSIGNALED; break;
+    // Use the canonical GL enum values explicitly at this ABI boundary. The
+    // project ships multiple compatibility headers; keeping this switch tied
+    // to the specification values prevents a partial/minimal header from
+    // changing query dispatch while still exposing the named constants to
+    // callers in gl.h/glcorearb.h.
+    GLint result = 0;
+    switch ((uint32_t)pname) {
+        case 0x9112u: result = 0x9116; break; // GL_OBJECT_TYPE -> GL_SYNC_FENCE
+        case 0x9113u: result = (GLint)obj.condition; break; // GL_SYNC_CONDITION
+        case 0x9115u: result = (GLint)obj.flags; break;     // GL_SYNC_FLAGS
+        case 0x9114u: result = (obj.submitSerial == 0) ? 0x9119 : 0x9118; break;
         default:
             mithril::state_set_error(GL_INVALID_ENUM);
             return;
     }
-    values[0] = v;
+
+    values[0] = result;
     if (length) *length = 1;
 }
 
