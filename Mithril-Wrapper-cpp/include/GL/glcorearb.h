@@ -633,6 +633,30 @@ extern "C" {
 #define GL_SYNC_FLUSH_COMMANDS_BIT      0x00000001
 #define GL_TIMEOUT_IGNORED              ((GLuint64)-1)
 #define GL_FENCE_CONDITION              0x1184
+#ifndef GL_OBJECT_TYPE
+#define GL_OBJECT_TYPE                  0x9112
+#endif
+#ifndef GL_SYNC_CONDITION
+#define GL_SYNC_CONDITION               0x9113
+#endif
+#ifndef GL_SYNC_STATUS
+#define GL_SYNC_STATUS                  0x9114
+#endif
+#ifndef GL_SYNC_FLAGS
+#define GL_SYNC_FLAGS                   0x9115
+#endif
+#ifndef GL_SYNC_FENCE
+#define GL_SYNC_FENCE                   0x9116
+#endif
+#ifndef GL_SYNC_GPU_COMMANDS_COMPLETE
+#define GL_SYNC_GPU_COMMANDS_COMPLETE   0x9117
+#endif
+#ifndef GL_UNSIGNALED
+#define GL_UNSIGNALED                   0x9118
+#endif
+#ifndef GL_SIGNALED
+#define GL_SIGNALED                     0x9119
+#endif
 
 #define GL_TEXTURE0                     0x84C0
 #define GL_TEXTURE1                     0x84C1
@@ -907,6 +931,7 @@ GLAPI void GLAPIENTRY glDeleteSync(GLsync sync);
 GLAPI GLenum GLAPIENTRY glClientWaitSync(GLsync sync, GLbitfield flags, GLuint64 timeout);
 GLAPI void GLAPIENTRY glWaitSync(GLsync sync, GLbitfield flags, GLuint64 timeout);
 GLAPI GLboolean GLAPIENTRY glIsSync(GLsync sync);
+GLAPI void GLAPIENTRY glGetSynciv(GLsync sync, GLenum pname, GLsizei bufSize, GLsizei* length, GLint* values);
 
 /* KHR_debug entry points — no-op stubs, see gl/debug.cpp.
  * Advertised via GL_KHR_debug so hosts (LWJGL) dlsym them during init. */

@@ -109,6 +109,7 @@ typedef void      (*uniform4f_fn)(GLint, GLfloat, GLfloat, GLfloat, GLfloat);
 typedef GLsync    (*fenceSync_fn)(GLenum, GLbitfield);
 typedef GLenum    (*clientWaitSync_fn)(GLsync, GLbitfield, GLuint64);
 typedef void      (*deleteSync_fn)(GLsync);
+typedef GLboolean (*isSync_fn)(GLsync);
 typedef void      (*getSynciv_fn)(GLsync, GLenum, GLsizei, GLsizei*, GLint*);
 
 /* ---- 断言基础设施（Uniaball 风格） -------------------------------------- */
@@ -203,6 +204,7 @@ int main(int argc, char** argv) {
     fenceSync_fn          fenceSync          = NULL;
     clientWaitSync_fn     clientWaitSync     = NULL;
     deleteSync_fn         deleteSync         = NULL;
+    isSync_fn             isSync             = NULL;
     getSynciv_fn          getSynciv          = NULL;
 
     RESOLVE(genTextures, "glGenTextures");
@@ -258,6 +260,7 @@ int main(int argc, char** argv) {
     RESOLVE(fenceSync, "glFenceSync");
     RESOLVE(clientWaitSync, "glClientWaitSync");
     RESOLVE(deleteSync, "glDeleteSync");
+    RESOLVE(isSync, "glIsSync");
     RESOLVE(getSynciv, "glGetSynciv");
     if (failures) { printf("RENDER SMOKE FAILED (missing symbols)\n"); dlclose(h); return 1; }
 
@@ -418,14 +421,32 @@ int main(int argc, char** argv) {
         drawArrays(GL_TRIANGLES, 0, 3);  /* pending GPU work before fence */
         GLsync sync = fenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
         CHECK(sync != NULL, "glFenceSync created a real submission fence");
+        CHECK(sync != NULL && isSync(sync) == GL_TRUE,
+              "glIsSync recognizes the same fence handle before wait");
+
+        Dl_info syncInfo = {0};
+        int dladdrOk = dladdr((const void*)getSynciv, &syncInfo);
+        CHECK(dladdrOk != 0 && syncInfo.dli_fname && strstr(syncInfo.dli_fname, "libmithril"),
+              "glGetSynciv resolves to Mithril dylib (%s)",
+              (dladdrOk && syncInfo.dli_fname) ? syncInfo.dli_fname : "(unknown)");
+
+        GLint beforeStatus = -1;
+        GLsizei beforeLength = 0;
+        getSynciv(sync, GL_SYNC_STATUS, 1, &beforeLength, &beforeStatus);
+        CHECK(beforeLength == 1 && (beforeStatus == GL_UNSIGNALED || beforeStatus == GL_SIGNALED),
+              "glGetSynciv can query fence before wait (length=%d status=0x%x)",
+              (int)beforeLength, beforeStatus);
+
         GLenum wait = clientWaitSync(sync, GL_SYNC_FLUSH_COMMANDS_BIT, 1000000000ULL);
         CHECK(wait == GL_ALREADY_SIGNALED || wait == GL_CONDITION_SATISFIED,
-    "glClientWaitSync observes GPU completion (result=0x%x)", wait);
-        GLint status = GL_UNSIGNALED;
+              "glClientWaitSync observes GPU completion (result=0x%x)", wait);
+        CHECK(isSync(sync) == GL_TRUE, "glIsSync still recognizes fence after wait");
+        GLint status = -1;
         GLsizei length = 0;
         getSynciv(sync, GL_SYNC_STATUS, 1, &length, &status);
         CHECK(length == 1 && status == GL_SIGNALED,
-    "glGetSynciv reports GL_SIGNALED after wait (status=0x%x)", status);
+              "glGetSynciv reports GL_SIGNALED after wait (length=%d status=0x%x)",
+              (int)length, status);
         deleteSync(sync);
         CHECK(getError() == GL_NO_ERROR, "GLsync lifecycle leaves no error");
     }
