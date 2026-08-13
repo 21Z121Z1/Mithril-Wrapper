@@ -30,6 +30,10 @@ void glBeginQuery(GLenum target, GLuint id);
 void glEndQuery(GLenum target);
 void glGetQueryiv(GLenum target, GLenum pname, GLint* params);
 void glGetVertexAttribdv(GLuint index, GLenum pname, GLdouble* params);
+// DSA create functions delegate to these glGen* variants (defined in Stubs.cpp)
+void glGenProgramPipelines(GLsizei n, GLuint* pipelines);
+void glGenQueries(GLsizei n, GLuint* ids);
+void glGenTransformFeedbacks(GLsizei n, GLuint* ids);
 }
 
 // GL enums absent from the project's minimal glcorearb.h.
