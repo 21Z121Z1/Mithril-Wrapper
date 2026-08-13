@@ -18,11 +18,13 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
 #include <cstring>
 #include <exception>
+#include <iomanip>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -44,6 +46,23 @@ constexpr NSUInteger kInitialUploadCapacity = 1u << 20;
 constexpr size_t kMaxPipelineCacheEntries = 512;
 constexpr size_t kMaxClearPipelineCacheEntries = 64;
 constexpr size_t kMaxSamplerCacheEntries = 128;
+
+std::atomic<uint64_t> g_trace_draw_serial{0};
+std::atomic<uint64_t> g_trace_draw_reject_serial{0};
+std::atomic<uint64_t> g_trace_submit_serial{0};
+std::atomic<uint64_t> g_trace_framebuffer_serial{0};
+std::atomic<uint64_t> g_trace_blit_serial{0};
+std::atomic<uint64_t> g_trace_present_serial{0};
+std::atomic<uint64_t> g_trace_target_serial{0};
+std::atomic<uint64_t> g_trace_gui_diag_serial{0};
+
+void TraceDrawReject(const char* reason, uint64_t fbo, uint64_t program) {
+    const uint64_t serial = g_trace_draw_reject_serial.fetch_add(1);
+    if (serial >= 80) return;
+    ML_LOG_INFO("metal: TRACE DRAW_REJECT #%llu reason=%s fbo=%llu prog=%llu",
+                (unsigned long long)serial, reason,
+                (unsigned long long)fbo, (unsigned long long)program);
+}
 
 NSUInteger AlignUp(NSUInteger value, NSUInteger alignment) {
     return (value + alignment - 1) & ~(alignment - 1);
@@ -684,11 +703,21 @@ bool ResolveTarget(uint64_t fbo_id, ResolvedTarget* target) {
         return engine.color != nil;
     }
     auto found = engine.framebuffers.find(fbo_id);
-    if (found == engine.framebuffers.end() || !found->second.spec.width ||
-        !found->second.spec.height)
+    if (found == engine.framebuffers.end()) {
+        ML_LOG_ERROR("metal: ResolveTarget fbo=%llu failed: no native spec",
+                     (unsigned long long)fbo_id);
         return false;
-    target->width = found->second.spec.width;
-    target->height = found->second.spec.height;
+    }
+    const auto& spec = found->second.spec;
+    if (!spec.width || !spec.height) {
+        ML_LOG_ERROR("metal: ResolveTarget fbo=%llu failed: zero size "
+                     "colors=%zu depth=%d",
+                     (unsigned long long)fbo_id, spec.color.size(),
+                     spec.has_depth ? 1 : 0);
+        return false;
+    }
+    target->width = spec.width;
+    target->height = spec.height;
     bool sample_count_set = false;
     auto merge_sample_count = [&](id<MTLTexture> texture) {
         if (!texture) return true;
@@ -699,17 +728,33 @@ bool ResolveTarget(uint64_t fbo_id, ResolvedTarget* target) {
         return true;
     };
     bool has_attachment = false;
-    for (const auto& color : found->second.spec.color) {
+    size_t color_index = 0;
+    for (const auto& color : spec.color) {
         id<MTLTexture> texture = nil;
         AttachmentSelection selection;
         if (!color.is_texture && !color.rbo_id) {
             target->colors.push_back(nil);
             target->resolve_colors.push_back(nil);
             target->color_selections.push_back({});
+            ++color_index;
             continue;
         }
-        if (!ResolveAttachment(color, &texture, &selection)) return false;
-        if (!merge_sample_count(texture)) return false;
+        if (!ResolveAttachment(color, &texture, &selection)) {
+            ML_LOG_ERROR("metal: ResolveTarget fbo=%llu failed: color[%zu] "
+                         "unresolvable tex=%llu level=%u layer=%u rbo=%llu "
+                         "resident=%d",
+                         (unsigned long long)fbo_id, color_index,
+                         (unsigned long long)color.tex_id, color.level,
+                         color.layer, (unsigned long long)color.rbo_id,
+                         engine.textures.count(color.tex_id) ? 1 : 0);
+            return false;
+        }
+        if (!merge_sample_count(texture)) {
+            ML_LOG_ERROR("metal: ResolveTarget fbo=%llu failed: color[%zu] "
+                         "sample count mismatch",
+                         (unsigned long long)fbo_id, color_index);
+            return false;
+        }
         has_attachment = true;
         target->colors.push_back(texture);
         target->color_selections.push_back(selection);
@@ -720,20 +765,41 @@ bool ResolveTarget(uint64_t fbo_id, ResolvedTarget* target) {
                 resolve = renderbuffer->second.resolve;
         }
         target->resolve_colors.push_back(resolve);
+        ++color_index;
     }
-    if (found->second.spec.has_depth) {
+    if (spec.has_depth) {
         bool depth = false;
         bool has_stencil = false;
         id<MTLTexture> depth_texture = nil;
         AttachmentSelection depth_selection;
-        if (!ResolveAttachment(found->second.spec.depth, &depth_texture,
-                               &depth_selection, &depth, &has_stencil) || !depth)
+        if (!ResolveAttachment(spec.depth, &depth_texture, &depth_selection,
+                               &depth, &has_stencil) || !depth) {
+            ML_LOG_ERROR("metal: ResolveTarget fbo=%llu failed: depth "
+                         "unresolvable tex=%llu level=%u layer=%u rbo=%llu "
+                         "resident=%d",
+                         (unsigned long long)fbo_id,
+                         (unsigned long long)spec.depth.tex_id,
+                         spec.depth.level, spec.depth.layer,
+                         (unsigned long long)spec.depth.rbo_id,
+                         engine.textures.count(spec.depth.tex_id) ? 1 : 0);
             return false;
-        if (!merge_sample_count(depth_texture)) return false;
+        }
+        if (!merge_sample_count(depth_texture)) {
+            ML_LOG_ERROR("metal: ResolveTarget fbo=%llu failed: depth "
+                         "sample count mismatch",
+                         (unsigned long long)fbo_id);
+            return false;
+        }
         target->depth_stencil = depth_texture;
         target->depth_selection = depth_selection;
         target->has_stencil = has_stencil;
         has_attachment = true;
+    }
+    if (!has_attachment) {
+        ML_LOG_ERROR("metal: ResolveTarget fbo=%llu failed: no live attachment "
+                     "size=%ux%u colors=%zu depth=%d",
+                     (unsigned long long)fbo_id, spec.width, spec.height,
+                     spec.color.size(), spec.has_depth ? 1 : 0);
     }
     return has_attachment;
 }
@@ -1418,6 +1484,102 @@ NSUInteger PackUniforms(FrameContext& frame, NSUInteger* cursor,
     return offset;
 }
 
+std::string HexPrefix(const uint8_t* bytes, size_t size, size_t limit = 64) {
+    if (!bytes || !size) return "<empty>";
+    std::ostringstream out;
+    out << std::hex << std::setfill('0');
+    const size_t count = std::min(size, limit);
+    for (size_t i = 0; i < count; ++i) {
+        if (i) out << ' ';
+        out << std::setw(2) << static_cast<unsigned>(bytes[i]);
+    }
+    if (count < size) out << " ...";
+    return out.str();
+}
+
+std::string FloatPrefix(const uint8_t* bytes, size_t size, size_t limit = 8) {
+    if (!bytes || size < sizeof(float)) return "<empty>";
+    std::ostringstream out;
+    const size_t count = std::min(limit, size / sizeof(float));
+    for (size_t i = 0; i < count; ++i) {
+        float value = 0.0f;
+        std::memcpy(&value, bytes + i * sizeof(float), sizeof(value));
+        if (i) out << ',';
+        out << value;
+    }
+    if (count < size / sizeof(float)) out << ",...";
+    return out.str();
+}
+
+void TraceGuiInputs(const PendingDraw& pending, const Program& program,
+                    NSUInteger vertex_ubo, NSUInteger fragment_ubo,
+                    const FrameContext& frame) {
+    auto& engine = GetEngine();
+    if (engine.bound_draw_fbo != 3 || pending.params.vertex_stream.stride == 0)
+        return;
+    const uint64_t serial = g_trace_gui_diag_serial.fetch_add(1);
+    if (serial >= 24) return;
+    const auto& draw = pending.params;
+    const auto& vertex = draw.vertex_stream;
+    const uint8_t* vertex_bytes = vertex.data.empty()
+        ? nullptr : vertex.data.data();
+    const size_t vertex_size = vertex.data.size();
+    const uint8_t* vubo_bytes = nullptr;
+    size_t vubo_size = 0;
+    if (vertex_ubo != NSNotFound && frame.upload) {
+        vubo_bytes = static_cast<const uint8_t*>(frame.upload.contents) + vertex_ubo;
+        vubo_size = program.vertex.ubo_size;
+    }
+    const uint8_t* fubo_bytes = nullptr;
+    size_t fubo_size = 0;
+    if (fragment_ubo != NSNotFound && frame.upload) {
+        fubo_bytes = static_cast<const uint8_t*>(frame.upload.contents) + fragment_ubo;
+        fubo_size = program.fragment.ubo_size;
+    }
+    ML_LOG_INFO(
+        "metal: TRACE GUI_INPUT #%llu prog=%llu stride=%u vbytes=%zu "
+        "idx=%zu ub=%zu vubo=%lu/%u fubo=%lu/%u verts=%s vubo_bytes=%s "
+        "vubo_floats=%s fubo_bytes=%s fubo_floats=%s",
+        (unsigned long long)serial, (unsigned long long)draw.program,
+        vertex.stride, vertex_size, draw.indices.size(),
+        pending.uniform_buffers.size(), (unsigned long)vertex_ubo,
+        program.vertex.ubo_size, (unsigned long)fragment_ubo,
+        program.fragment.ubo_size,
+        HexPrefix(vertex_bytes, std::min(vertex_size, static_cast<size_t>(128)), 64).c_str(),
+        HexPrefix(vubo_bytes, vubo_size).c_str(),
+        FloatPrefix(vubo_bytes, vubo_size).c_str(),
+        HexPrefix(fubo_bytes, fubo_size).c_str(),
+        FloatPrefix(fubo_bytes, fubo_size).c_str());
+    if (serial == 0) {
+        const std::array<std::pair<const char*, const ShaderStage*>, 2> stages{{
+            {"vertex", &program.vertex}, {"fragment", &program.fragment}}};
+        for (const auto& stage : stages) {
+            std::ostringstream members;
+            for (const auto& member : stage.second->members) {
+                if (members.tellp() > 0) members << ';';
+                members << member.name << '@' << member.offset << '+' << member.size;
+            }
+            ML_LOG_INFO("metal: TRACE GUI_LAYOUT stage=%s ubo=%u members=%s",
+                        stage.first, stage.second->ubo_size, members.str().c_str());
+        }
+        for (const auto& binding : pending.uniform_buffers) {
+            const uint8_t* bytes = binding.buffer
+                ? static_cast<const uint8_t*>(binding.buffer.contents) + binding.offset
+                : nullptr;
+            const size_t available = binding.buffer
+                ? std::min<size_t>(binding.buffer.length - binding.offset, 128)
+                : 0;
+            ML_LOG_INFO(
+                "metal: TRACE GUI_BLOCK binding=%lu offset=%lu vertex=%d fragment=%d "
+                "bytes=%s floats=%s",
+                (unsigned long)binding.index, (unsigned long)binding.offset,
+                binding.vertex_stage, binding.fragment_stage,
+                HexPrefix(bytes, available, 64).c_str(),
+                FloatPrefix(bytes, available).c_str());
+        }
+    }
+}
+
 std::vector<uint32_t> ExpandTriangleFan(const backend::DrawParams& draw) {
     const uint32_t vertex_count = draw.vertex_stream.record_count
         ? draw.vertex_stream.record_count
@@ -1775,6 +1937,7 @@ bool EncodeDraws(
             frame, &cursor, program->second.vertex, draw, &uniform_memo);
         const NSUInteger fragment_ubo = PackUniforms(
             frame, &cursor, program->second.fragment, draw, &uniform_memo);
+        TraceGuiInputs(pending, program->second, vertex_ubo, fragment_ubo, frame);
 
         [encoder setRenderPipelineState:pipeline->pipeline];
         [encoder setDepthStencilState:pipeline->depth_stencil];
@@ -1922,7 +2085,17 @@ bool SubmitInternal(bool wait_for_completion, bool copy_for_readback,
                     void* tail_context = nullptr) {
     auto& engine = GetEngine();
     if (!engine.initialized) return false;
+    const uint64_t submit_serial = g_trace_submit_serial.fetch_add(1);
     const bool needs_render = engine.frame_dirty;
+    if (submit_serial < 120) {
+        ML_LOG_INFO(
+            "metal: TRACE SUBMIT #%llu fbo=%llu draws=%zu dirty=%d readback=%d "
+            "tail=%d size=%ux%u",
+            (unsigned long long)submit_serial,
+            (unsigned long long)engine.bound_draw_fbo, engine.draws.size(),
+            needs_render, copy_for_readback, tail_encoder != nullptr,
+            (unsigned)engine.width, (unsigned)engine.height);
+    }
     if (!needs_render && !copy_for_readback && !tail_encoder) {
         if (wait_for_completion && engine.last_submitted) {
             [engine.last_submitted waitUntilCompleted];
@@ -2088,7 +2261,15 @@ bool SubmitInternal(bool wait_for_completion, bool copy_for_readback,
             [encoder endEncoding];
             return false;
         }
-        if (!EncodeDraws(encoder, frame, query_offsets)) {
+        const uint64_t encoded_before = engine.binding_stats.draws_encoded;
+        const bool draws_encoded = EncodeDraws(encoder, frame, query_offsets);
+        if (submit_serial < 120) {
+            ML_LOG_INFO("metal: TRACE ENCODE submit=%llu ok=%d draws=%llu->%llu",
+                        (unsigned long long)submit_serial, draws_encoded,
+                        (unsigned long long)encoded_before,
+                        (unsigned long long)engine.binding_stats.draws_encoded);
+        }
+        if (!draws_encoded) {
             [encoder endEncoding];
             return false;
         }
@@ -2239,6 +2420,14 @@ bool Present() {
         return false;
     }
     @autoreleasepool {
+        const uint64_t present_serial = g_trace_present_serial.fetch_add(1);
+        if (present_serial < 80) {
+            ML_LOG_INFO("metal: TRACE PRESENT #%llu bound_fbo=%llu color=%ux%u",
+                        (unsigned long long)present_serial,
+                        (unsigned long long)engine.bound_draw_fbo,
+                        (unsigned)engine.color.width,
+                        (unsigned)engine.color.height);
+        }
         // Draws are recorded until submit, so resizing here re-targets the
         // complete pending GL frame without rendering an intermediate size.
         if (!SyncLayerTargetSize()) return false;
@@ -2356,21 +2545,34 @@ void DestroyBuffer(uint64_t lifetime_id) {
 
 bool Draw(const backend::DrawParams& params) {
     auto& engine = GetEngine();
-    if (!engine.initialized || !params.program || !params.vertex_stream.HasStorage())
+    if (!engine.initialized || !params.program || !params.vertex_stream.HasStorage()) {
+        TraceDrawReject("basic", engine.bound_draw_fbo, params.program);
         return false;
+    }
     auto program = engine.programs.find(params.program);
-    if (program == engine.programs.end()) return false;
+    if (program == engine.programs.end()) {
+        TraceDrawReject("program_missing", engine.bound_draw_fbo, params.program);
+        return false;
+    }
     ResolvedTarget draw_target;
-    if (!ResolveTarget(engine.bound_draw_fbo, &draw_target)) return false;
+    if (!ResolveTarget(engine.bound_draw_fbo, &draw_target)) {
+        TraceDrawReject("target", engine.bound_draw_fbo, params.program);
+        return false;
+    }
     const bool uses_sampled_images = program->second.vertex.uses_sampled_images ||
                                      program->second.fragment.uses_sampled_images;
-    if (uses_sampled_images && params.sampled_textures.empty()) return false;
+    if (uses_sampled_images && params.sampled_textures.empty()) {
+        TraceDrawReject("sampled_image_without_binding",
+                        engine.bound_draw_fbo, params.program);
+        return false;
+    }
     if (params.pipeline.polygon_mode == GL_POINT) {
         WarnUnsupported("GL_POINT polygon mode");
         return false;
     }
     if (params.pipeline.cull_test && params.pipeline.cull_face == GL_FRONT_AND_BACK) {
         WarnUnsupported("simultaneous front-and-back culling");
+        TraceDrawReject("front_and_back_cull", engine.bound_draw_fbo, params.program);
         return false;
     }
     PendingDraw pending;
@@ -2379,6 +2581,7 @@ bool Draw(const backend::DrawParams& params) {
         auto query = engine.occlusion_queries.find(params.occlusion_query);
         if (query == engine.occlusion_queries.end() || query->second->ended) {
             ML_LOG_ERROR("metal: draw references an invalid occlusion query");
+            TraceDrawReject("occlusion_query", engine.bound_draw_fbo, params.program);
             return false;
         }
         pending.occlusion = query->second;
@@ -2433,13 +2636,24 @@ bool Draw(const backend::DrawParams& params) {
                          (unsigned long long)bind.texture, bind.binding);
             return false;
         }
-        if (!HasCompleteMipChain(texture->second, bind.sampler)) {
-            ML_LOG_ERROR("metal: incomplete mip chain for sampled texture %llu",
-                         (unsigned long long)bind.texture);
-            return false;
+        backend::TexSamplerInfo sampler_info = bind.sampler;
+        if (!HasCompleteMipChain(texture->second, sampler_info)) {
+            // Minecraft's resource reload can bind a level-0 image while a
+            // mip chain is still being populated.  Rejecting the whole draw
+            // makes the DirectMetal surface stay black; Metal can represent
+            // the observable fallback by sampling the resident base level.
+            static bool logged_mip_fallback = false;
+            if (!logged_mip_fallback) {
+                ML_LOG_WARN("metal: incomplete mip chain; using resident base-level sampler");
+                logged_mip_fallback = true;
+            }
+            sampler_info.mip = backend::TexMipFilter::None;
+            sampler_info.min_lod = 0.0f;
+            sampler_info.max_lod = 0.0f;
+            sampler_info.lod_bias = 0.0f;
         }
         id<MTLSamplerState> sampler = GetOrCreateSampler(
-            bind.sampler, texture->second.levels);
+            sampler_info, texture->second.levels);
         if (!sampler) {
             ML_LOG_ERROR("metal: sampler state is not representable for binding %u",
                          bind.binding);
@@ -2453,6 +2667,32 @@ bool Draw(const backend::DrawParams& params) {
     if (pending.occlusion) ++pending.occlusion->pending_draws;
     engine.draws.push_back(std::move(pending));
     engine.frame_dirty = true;
+    const uint64_t serial = g_trace_draw_serial.fetch_add(1);
+    if (serial < 5000) {
+        const auto& pipeline = params.pipeline;
+        const auto& viewport = params.dynamic.viewport;
+        const auto& scissor = params.dynamic.scissor;
+        const uint64_t first_texture = params.sampled_textures.empty()
+            ? 0 : params.sampled_textures.front().texture;
+        ML_LOG_INFO(
+            "metal: TRACE DRAW #%llu fbo=%llu prog=%llu vbytes=%zu stride=%u "
+            "records=%u idx=%zu topo=%u tex=%zu tex0=%llu ub=%zu "
+            "blend=%d src=%x/%x dst=%x/%x depth=%d/%d scissor=%d "
+            "vp=%.0f,%.0f,%.0f,%.0f sc=%.0f,%.0f,%.0f,%.0f",
+            (unsigned long long)serial,
+            (unsigned long long)engine.bound_draw_fbo,
+            (unsigned long long)params.program,
+            params.vertex_stream.data.size(), params.vertex_stream.stride,
+            params.vertex_stream.record_count, params.indices.size(),
+            static_cast<unsigned>(params.topology),
+            params.sampled_textures.size(), (unsigned long long)first_texture,
+            params.uniform_buffers.size(), pipeline.blend_enable,
+            pipeline.blend_src_rgb, pipeline.blend_src_alpha,
+            pipeline.blend_dst_rgb, pipeline.blend_dst_alpha,
+            pipeline.depth_test, pipeline.depth_write, pipeline.scissor_test,
+            viewport[0], viewport[1], viewport[2], viewport[3],
+            scissor[0], scissor[1], scissor[2], scissor[3]);
+    }
     return true;
 }
 
@@ -2769,6 +3009,16 @@ void DestroyRenderbuffer(uint64_t id) {
 }
 void SetFramebuffer(uint64_t id, const backend::FboSpec& spec) {
     auto& engine = GetEngine();
+    const uint64_t target_serial = g_trace_target_serial.fetch_add(1);
+    if (target_serial < 240) {
+        ML_LOG_INFO("metal: TRACE TARGET #%llu fbo=%llu colors=%zu depth=%d "
+                    "size=%ux%u read=0x%x draws=%zu",
+                    (unsigned long long)target_serial,
+                    (unsigned long long)id, spec.color.size(),
+                    spec.has_depth ? 1 : 0, (unsigned)spec.width,
+                    (unsigned)spec.height, (unsigned)spec.read_buf,
+                    spec.draw_bufs.size());
+    }
     const std::string signature = FramebufferSignature(spec);
     auto existing = engine.framebuffers.find(id);
     if (existing != engine.framebuffers.end() &&
@@ -2783,6 +3033,13 @@ void SetFramebuffer(uint64_t id, const backend::FboSpec& spec) {
 void DestroyFramebuffer(uint64_t id) { GetEngine().framebuffers.erase(id); }
 void BindDrawFramebuffer(uint64_t id) {
     auto& engine = GetEngine();
+    const uint64_t serial = g_trace_framebuffer_serial.fetch_add(1);
+    if (serial < 240 && engine.bound_draw_fbo != id) {
+        ML_LOG_INFO("metal: TRACE BIND_DRAW #%llu %llu->%llu dirty=%d",
+                    (unsigned long long)serial,
+                    (unsigned long long)engine.bound_draw_fbo,
+                    (unsigned long long)id, engine.frame_dirty);
+    }
     if (engine.bound_draw_fbo != id && engine.frame_dirty)
         (void)SubmitInternal(false, false, nullptr);
     engine.bound_draw_fbo = id;
@@ -2804,6 +3061,14 @@ void BlitFramebuffer(uint64_t src_id, uint64_t dst_id,
                      GLint dx0, GLint dy0, GLint dx1, GLint dy1,
                      GLbitfield mask, GLenum filter) {
     auto& engine = GetEngine();
+    const uint64_t serial = g_trace_blit_serial.fetch_add(1);
+    if (serial < 120) {
+        ML_LOG_INFO("metal: TRACE BLIT #%llu src=%llu dst=%llu rect=%d,%d-%d,%d -> %d,%d-%d,%d mask=0x%x filter=0x%x dirty=%d",
+                    (unsigned long long)serial,
+                    (unsigned long long)src_id, (unsigned long long)dst_id,
+                    sx0, sy0, sx1, sy1, dx0, dy0, dx1, dy1,
+                    (unsigned)mask, (unsigned)filter, engine.frame_dirty);
+    }
     if (mask != GL_COLOR_BUFFER_BIT) {
         WarnUnsupported("depth/stencil or combined framebuffer blit");
         return;
@@ -2825,6 +3090,27 @@ void BlitFramebuffer(uint64_t src_id, uint64_t dst_id,
     ResolvedTarget destination;
     if (!ResolveTarget(src_id, &source) || !ResolveTarget(dst_id, &destination))
         return;
+    // Minecraft's window path renders into its own FBO before blitting into
+    // the EGL default framebuffer.  The CAMetalLayer can be created before
+    // that FBO has established the real drawable size, so the default target
+    // may still be the small bootstrap surface (512x512) when the first
+    // 2266x1488 window blit arrives.  Keep the default framebuffer coupled to
+    // the actual window blit dimensions before encoding the copy.
+    if (!dst_id && source.width > 0 && source.height > 0 &&
+        (source.width != engine.width || source.height != engine.height)) {
+        ML_LOG_INFO(
+            "metal: TRACE DEFAULT_RESIZE from=%ux%u to=%lux%lu src_fbo=%llu",
+            (unsigned)engine.width, (unsigned)engine.height,
+            (unsigned long)source.width, (unsigned long)source.height,
+            (unsigned long long)src_id);
+        if (engine.layer)
+            engine.layer.drawableSize =
+                CGSizeMake(source.width, source.height);
+        if (!SetTargetSize((uint32_t)source.width,
+                           (uint32_t)source.height))
+            return;
+        if (!ResolveTarget(dst_id, &destination)) return;
+    }
     if (source.samples != 1 || destination.samples != 1) {
         WarnUnsupported("multisample framebuffer blit");
         return;

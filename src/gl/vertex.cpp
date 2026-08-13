@@ -11,6 +11,8 @@
 #include <limits>
 #include <utility>
 
+#include <util/log.h>
+
 // Shared tables (declared extern in internal.h; the draw path reads
 // them through the header).
 std::unordered_map<GLuint, VAOData> g_vaos;
@@ -22,10 +24,39 @@ GLuint g_bound_vao = 0;
 GLuint g_bound_array_buffer = 0;
 GLuint g_bound_element_buffer = 0;
 GLuint g_bound_uniform_buffer = 0;
+GLuint g_bound_copy_read_buffer = 0;
+GLuint g_bound_copy_write_buffer = 0;
 GLuint g_bound_pixel_pack_buffer = 0;
 GLuint g_bound_pixel_unpack_buffer = 0;
 std::array<IndexedBufferBinding, kMaxUniformBufferBindings>
     g_uniform_buffer_bindings{};
+
+namespace {
+
+void TraceBufferMutation(const char* operation, GLenum target, GLuint id,
+                         GLintptr offset, GLsizeiptr length,
+                         const void* source) {
+    // GUI VBO 33 is the first persistent upload buffer used by Minecraft 26.2
+    // on the iPad path. Keep this trace narrowly scoped so a long-running
+    // world cannot flood latestlog.txt while we establish its write path.
+    if (id != 33) return;
+    const auto found = g_buffers.find(id);
+    if (found == g_buffers.end()) return;
+    const BufferData& buffer = found->second;
+    const uint8_t* bytes = buffer.data.empty() ? nullptr : buffer.data.data();
+    ML_LOG_INFO(
+        "TRACE BUFFER op=%s target=0x%x id=%u offset=%lld length=%lld "
+        "size=%zu defined=%d mapped=%d writable=%d source=%p first=%02x%02x%02x%02x%02x%02x%02x%02x",
+        operation, target, id, (long long)offset, (long long)length,
+        buffer.data.size(), buffer.defined, buffer.mapped,
+        buffer.map_writable, source,
+        bytes ? bytes[0] : 0, bytes ? bytes[1] : 0,
+        bytes ? bytes[2] : 0, bytes ? bytes[3] : 0,
+        bytes ? bytes[4] : 0, bytes ? bytes[5] : 0,
+        bytes ? bytes[6] : 0, bytes ? bytes[7] : 0);
+}
+
+} // namespace
 
 // program id -> selected-backend program handle (created lazily on first draw by the
 // draw path; erased by the shader-lifecycle path on glDeleteProgram).
@@ -228,6 +259,8 @@ void APIENTRY glDeleteBuffers(GLsizei n, const GLuint* buffers) {
         if (g_bound_array_buffer == buffers[i]) g_bound_array_buffer = 0;
         if (g_bound_element_buffer == buffers[i]) g_bound_element_buffer = 0;
         if (g_bound_uniform_buffer == buffers[i]) g_bound_uniform_buffer = 0;
+        if (g_bound_copy_read_buffer == buffers[i]) g_bound_copy_read_buffer = 0;
+        if (g_bound_copy_write_buffer == buffers[i]) g_bound_copy_write_buffer = 0;
         if (g_bound_pixel_pack_buffer == buffers[i])
             g_bound_pixel_pack_buffer = 0;
         if (g_bound_pixel_unpack_buffer == buffers[i])
@@ -248,6 +281,8 @@ void APIENTRY glBindBuffer(GLenum target, GLuint buffer) {
         case GL_ARRAY_BUFFER: g_bound_array_buffer = buffer; break;
         case GL_ELEMENT_ARRAY_BUFFER: g_bound_element_buffer = buffer; break;
         case GL_UNIFORM_BUFFER: g_bound_uniform_buffer = buffer; break;
+        case GL_COPY_READ_BUFFER: g_bound_copy_read_buffer = buffer; break;
+        case GL_COPY_WRITE_BUFFER: g_bound_copy_write_buffer = buffer; break;
         case GL_PIXEL_PACK_BUFFER: g_bound_pixel_pack_buffer = buffer; break;
         case GL_PIXEL_UNPACK_BUFFER: g_bound_pixel_unpack_buffer = buffer; break;
         default:
@@ -263,6 +298,8 @@ void APIENTRY glBufferData(GLenum target, GLsizeiptr size, const void* data, GLe
         case GL_ARRAY_BUFFER: bound = &g_bound_array_buffer; break;
         case GL_ELEMENT_ARRAY_BUFFER: bound = &g_bound_element_buffer; break;
         case GL_UNIFORM_BUFFER: bound = &g_bound_uniform_buffer; break;
+        case GL_COPY_READ_BUFFER: bound = &g_bound_copy_read_buffer; break;
+        case GL_COPY_WRITE_BUFFER: bound = &g_bound_copy_write_buffer; break;
         case GL_PIXEL_PACK_BUFFER: bound = &g_bound_pixel_pack_buffer; break;
         case GL_PIXEL_UNPACK_BUFFER: bound = &g_bound_pixel_unpack_buffer; break;
         default: PUSH_ERROR(GL_INVALID_ENUM); return;
@@ -278,6 +315,7 @@ void APIENTRY glBufferData(GLenum target, GLsizeiptr size, const void* data, GLe
     }
     ++it->second.content_version;
     it->second.defined = data != nullptr;
+    TraceBufferMutation("data", target, *bound, 0, size, data);
 }
 
 void APIENTRY glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, const void* data) {
@@ -286,6 +324,8 @@ void APIENTRY glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, c
         case GL_ARRAY_BUFFER: bound = &g_bound_array_buffer; break;
         case GL_ELEMENT_ARRAY_BUFFER: bound = &g_bound_element_buffer; break;
         case GL_UNIFORM_BUFFER: bound = &g_bound_uniform_buffer; break;
+        case GL_COPY_READ_BUFFER: bound = &g_bound_copy_read_buffer; break;
+        case GL_COPY_WRITE_BUFFER: bound = &g_bound_copy_write_buffer; break;
         case GL_PIXEL_PACK_BUFFER: bound = &g_bound_pixel_pack_buffer; break;
         case GL_PIXEL_UNPACK_BUFFER: bound = &g_bound_pixel_unpack_buffer; break;
         default: PUSH_ERROR(GL_INVALID_ENUM); return;
@@ -305,6 +345,7 @@ void APIENTRY glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, c
     std::memcpy(it->second.data.data() + offset, data, size);
     ++it->second.content_version;
     it->second.defined = true;
+    TraceBufferMutation("subdata", target, *bound, offset, size, data);
 }
 
 // ---- buffer queries / mapping (M3) -----------------------------------------
@@ -315,6 +356,8 @@ BufferData* BoundBufferForTarget(GLenum target, GLenum* error) {
         case GL_ARRAY_BUFFER: bound = &g_bound_array_buffer; break;
         case GL_ELEMENT_ARRAY_BUFFER: bound = &g_bound_element_buffer; break;
         case GL_UNIFORM_BUFFER: bound = &g_bound_uniform_buffer; break;
+        case GL_COPY_READ_BUFFER: bound = &g_bound_copy_read_buffer; break;
+        case GL_COPY_WRITE_BUFFER: bound = &g_bound_copy_write_buffer; break;
         case GL_PIXEL_PACK_BUFFER: bound = &g_bound_pixel_pack_buffer; break;
         case GL_PIXEL_UNPACK_BUFFER: bound = &g_bound_pixel_unpack_buffer; break;
         default: *error = GL_INVALID_ENUM; return nullptr;
@@ -434,6 +477,8 @@ void APIENTRY glCopyBufferSubData(GLenum readtarget, GLenum writetarget,
                  size);
     ++dst->content_version;
     dst->defined = true;
+    TraceBufferMutation("copy", writetarget, g_bound_copy_write_buffer,
+                        writeoffset, size, src->data.data() + readoffset);
 }
 
 void APIENTRY glGetBufferParameteriv(GLenum target, GLenum pname, GLint* params) {
@@ -499,6 +544,19 @@ void* APIENTRY glMapBuffer(GLenum target, GLenum access) {
         ++b->content_version;
         b->defined = true;
     }
+    GLuint id = 0;
+    switch (target) {
+        case GL_ARRAY_BUFFER: id = g_bound_array_buffer; break;
+        case GL_ELEMENT_ARRAY_BUFFER: id = g_bound_element_buffer; break;
+        case GL_UNIFORM_BUFFER: id = g_bound_uniform_buffer; break;
+        case GL_COPY_READ_BUFFER: id = g_bound_copy_read_buffer; break;
+        case GL_COPY_WRITE_BUFFER: id = g_bound_copy_write_buffer; break;
+        case GL_PIXEL_PACK_BUFFER: id = g_bound_pixel_pack_buffer; break;
+        case GL_PIXEL_UNPACK_BUFFER: id = g_bound_pixel_unpack_buffer; break;
+        default: break;
+    }
+    TraceBufferMutation("map", target, id, 0,
+                        static_cast<GLsizeiptr>(b->data.size()), nullptr);
     return b->data.data();
 }
 
@@ -517,6 +575,18 @@ void* APIENTRY glMapBufferRange(GLenum target, GLintptr offset, GLsizeiptr lengt
         ++b->content_version;
         b->defined = true;
     }
+    GLuint id = 0;
+    switch (target) {
+        case GL_ARRAY_BUFFER: id = g_bound_array_buffer; break;
+        case GL_ELEMENT_ARRAY_BUFFER: id = g_bound_element_buffer; break;
+        case GL_UNIFORM_BUFFER: id = g_bound_uniform_buffer; break;
+        case GL_COPY_READ_BUFFER: id = g_bound_copy_read_buffer; break;
+        case GL_COPY_WRITE_BUFFER: id = g_bound_copy_write_buffer; break;
+        case GL_PIXEL_PACK_BUFFER: id = g_bound_pixel_pack_buffer; break;
+        case GL_PIXEL_UNPACK_BUFFER: id = g_bound_pixel_unpack_buffer; break;
+        default: break;
+    }
+    TraceBufferMutation("map_range", target, id, offset, length, nullptr);
     return b->data.data() + offset;
 }
 
@@ -525,6 +595,18 @@ GLboolean APIENTRY glUnmapBuffer(GLenum target) {
     BufferData* b = BoundBufferForTarget(target, &err);
     if (err) { PUSH_ERROR(err); return GL_FALSE; }
     if (!b->mapped) { PUSH_ERROR(GL_INVALID_OPERATION); return GL_FALSE; }
+    GLuint id = 0;
+    switch (target) {
+        case GL_ARRAY_BUFFER: id = g_bound_array_buffer; break;
+        case GL_ELEMENT_ARRAY_BUFFER: id = g_bound_element_buffer; break;
+        case GL_UNIFORM_BUFFER: id = g_bound_uniform_buffer; break;
+        case GL_COPY_READ_BUFFER: id = g_bound_copy_read_buffer; break;
+        case GL_COPY_WRITE_BUFFER: id = g_bound_copy_write_buffer; break;
+        case GL_PIXEL_PACK_BUFFER: id = g_bound_pixel_pack_buffer; break;
+        case GL_PIXEL_UNPACK_BUFFER: id = g_bound_pixel_unpack_buffer; break;
+        default: break;
+    }
+    TraceBufferMutation("unmap", target, id, b->map_offset, 0, nullptr);
     b->mapped = false;
     b->map_writable = false;
     b->map_offset = 0;

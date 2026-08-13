@@ -116,6 +116,125 @@ void rewrite_desktop_builtins(std::string& src) {
     src.swap(out);
 }
 
+// Minecraft 26.2's projection include writes two disjoint vector swizzles:
+//
+//     projection.xy = ...;
+//     projection.zw = ...;
+//
+// The iOS arm64 glslang build can lose the swizzle l-value node during error
+// recovery and then reject otherwise valid stages with "l-value required".
+// These two writes are equivalent to one complete vec4 assignment, which is
+// also friendlier to the shared SPIR-V front end. Keep this narrowly scoped
+// to the exact helper text; arbitrary user shader swizzle assignments must
+// retain normal GLSL semantics.
+void rewrite_minecraft_projection_swizzles(std::string& src) {
+    static const std::string xy =
+        "projection.xy = vec2(projection.x + projection.w, projection.y + projection.w);";
+    static const std::string zw = "projection.zw = position.zw;";
+    const size_t first = src.find(xy);
+    const size_t second = src.find(zw, first == std::string::npos ? 0 : first + xy.size());
+    if (first == std::string::npos || second == std::string::npos) return;
+    const size_t end = second + zw.size();
+    src.replace(first, end - first,
+                "projection = vec4((position.x + position.w) * 0.5, "
+                "(position.y + position.w) * 0.5, position.z, position.w);");
+}
+
+// Two constructs in the 26.2 include shaders are valid desktop GLSL but
+// expose an iOS-arm64 glslang AST bug: a two-component swizzle used as a
+// function argument, and an implicit ivec2-to-vec2 conversion in division.
+// Lower only the exact Mojang helper statements; do not rewrite arbitrary
+// application shaders.
+void rewrite_minecraft_ios_vector_compatibility(std::string& src) {
+    auto replace_all = [&](const std::string& from, const std::string& to) {
+        size_t offset = 0;
+        while ((offset = src.find(from, offset)) != std::string::npos) {
+            src.replace(offset, from.size(), to);
+            offset += to.size();
+        }
+    };
+
+    static const std::string fog = "float distXZ = length(pos.xz);";
+    static const std::string fog_lowered =
+        "float distXZ = length(vec2(pos.x, pos.z));";
+    size_t pos = 0;
+    while ((pos = src.find(fog, pos)) != std::string::npos) {
+        src.replace(pos, fog.size(), fog_lowered);
+        pos += fog_lowered.size();
+    }
+
+    static const std::string lightmap =
+        "return texture(lightMap, clamp((uv / 256.0) + 0.5 / 16.0, "
+        "vec2(0.5 / 16.0), vec2(15.5 / 16.0)));";
+    static const std::string lightmap_lowered =
+        "vec2 uvf = vec2(uv);\n"
+        "    return texture(lightMap, clamp((uvf / 256.0) + 0.5 / 16.0, "
+        "vec2(0.5 / 16.0), vec2(15.5 / 16.0)));";
+    pos = 0;
+    while ((pos = src.find(lightmap, pos)) != std::string::npos) {
+        src.replace(pos, lightmap.size(), lightmap_lowered);
+        pos += lightmap_lowered.size();
+    }
+
+    // Fog and lighting includes are shared by most 26.2 programs.  Lower
+    // their three-component reads as well; otherwise even a shader that does
+    // not use the corresponding feature still carries the problematic AST.
+    replace_all(
+        "return vec4(mix(inColor.rgb, fogColor.rgb, fogValue * fogColor.a), inColor.a);",
+        "return vec4(mix(vec3(inColor.x, inColor.y, inColor.z), "
+        "vec3(fogColor.x, fogColor.y, fogColor.z), fogValue * fogColor.a), inColor.a);");
+    replace_all(
+        "return vec4(color.rgb * lightAccum, color.a);",
+        "return vec4(vec3(color.x, color.y, color.z) * lightAccum, color.a);");
+
+    // Entity/item overlay path: preserve the l-value semantics while avoiding
+    // a compound rgb swizzle assignment.
+    replace_all(
+        "color.rgb = mix(overlayColor.rgb, color.rgb, overlayColor.a);",
+        "color = vec4(mix(vec3(overlayColor.x, overlayColor.y, overlayColor.z), "
+        "vec3(color.x, color.y, color.z), overlayColor.a), color.a);");
+    replace_all(
+        "fragColor = vec4(color.rgb * fade, color.a);",
+        "fragColor = vec4(vec3(color.x, color.y, color.z) * fade, color.a);");
+    replace_all(
+        "fragColor = vec4(ColorModulator.rgb * vertexColor.rgb, ColorModulator.a);",
+        "fragColor = vec4(vec3(ColorModulator.x, ColorModulator.y, ColorModulator.z) * "
+        "vec3(vertexColor.x, vertexColor.y, vertexColor.z), ColorModulator.a);");
+    replace_all(
+        "vec4 texColor = texture(Sampler0, texCoord0).rrrr;",
+        "vec4 texColor = vec4(texture(Sampler0, texCoord0).r);");
+
+    // Lines renderer: expand the two vector swizzles used for NDC setup.
+    replace_all(
+        "vec3 ndc1 = linePosStart.xyz / linePosStart.w;",
+        "vec3 ndc1 = vec3(linePosStart.x, linePosStart.y, linePosStart.z) / linePosStart.w;");
+    replace_all(
+        "vec3 ndc2 = linePosEnd.xyz / linePosEnd.w;",
+        "vec3 ndc2 = vec3(linePosEnd.x, linePosEnd.y, linePosEnd.z) / linePosEnd.w;");
+    replace_all(
+        "vec2 lineScreenDirection = normalize((ndc2.xy - ndc1.xy) * ScreenSize);",
+        "vec2 lineScreenDirection = normalize((vec2(ndc2.x, ndc2.y) - "
+        "vec2(ndc1.x, ndc1.y)) * ScreenSize);");
+
+    // The texture-matrix path is repeated in entity, glint, and world-border
+    // vertex shaders.  Materialize the matrix result before selecting x/y.
+    replace_all(
+        "texCoord0 = (TextureMat * vec4(UV0, 0.0, 1.0)).xy;",
+        "vec4 texCoord0Transformed = TextureMat * vec4(UV0, 0.0, 1.0);\n"
+        "    texCoord0 = vec2(texCoord0Transformed.x, texCoord0Transformed.y);");
+
+    // End-portal samples use rgb swizzles on textureProj results.  Keep one
+    // sample per expression and lower the component selection explicitly.
+    replace_all(
+        "vec3 color = textureProj(Sampler0, texProj0).rgb * COLORS[0];",
+        "vec4 portalBase = textureProj(Sampler0, texProj0);\n"
+        "    vec3 color = vec3(portalBase.x, portalBase.y, portalBase.z) * COLORS[0];");
+    replace_all(
+        "color += textureProj(Sampler1, texProj0 * end_portal_layer(float(i + 1))).rgb * COLORS[i];",
+        "vec4 portalLayer = textureProj(Sampler1, texProj0 * end_portal_layer(float(i + 1)));\n"
+        "        color += vec3(portalLayer.x, portalLayer.y, portalLayer.z) * COLORS[i];");
+}
+
 bool is_opaque_glsl_type(const std::string& name) {
     if (name.find("sampler") != std::string::npos) return true;
     if (name.find("image") != std::string::npos) return true;
@@ -388,11 +507,42 @@ uint64_t fnv1a(const std::string& s) {
     return h;
 }
 
+void LogSourceChunks(const char* label, uint64_t digest,
+                     const std::string& source) {
+    static unsigned sequence = 0;
+    const unsigned current = ++sequence;
+    constexpr size_t kChunk = 260;
+    for (size_t offset = 0; offset < source.size(); offset += kChunk) {
+        std::string escaped = source.substr(offset, kChunk);
+        for (size_t i = 0; i < escaped.size(); ++i) {
+            switch (escaped[i]) {
+                case '\\': escaped.replace(i, 1, "\\\\"); ++i; break;
+                case '\n': escaped.replace(i, 1, "\\n"); ++i; break;
+                case '\r': escaped.replace(i, 1, "\\r"); ++i; break;
+                case '\t': escaped.replace(i, 1, "\\t"); ++i; break;
+                default: break;
+            }
+        }
+        ML_LOG_INFO("TRACE GLSL %s seq=%u off=%zu hash=%016llx %s",
+                    label, current, offset,
+                    (unsigned long long)digest, escaped.c_str());
+    }
+}
+
 struct Cache {
     std::mutex mu;
     std::unordered_map<uint64_t, std::vector<uint32_t>> entries;
 };
 Cache& cache() { static Cache c; return c; }
+
+// glslang's parser/IO mapper has process-global state in this vendored build.
+// Minecraft 26.2 can precompile several pipelines from different executor
+// threads, so serialize the complete glslang transaction even though Mithril's
+// shader cache itself is concurrent.
+std::mutex& glslang_compile_mutex() {
+    static std::mutex m;
+    return m;
+}
 
 } // namespace
 
@@ -441,6 +591,11 @@ std::vector<UniformBlockDeclaration> DiscoverUniformBlocks(
 
 bool CompileStage(GLenum stage, const std::string& src,
                   std::vector<uint32_t>& spirv, std::string& info) {
+    // Keep the guard across the whole stage transaction.  In addition to the
+    // parser/linker calls, this protects InitializeProcess and the cache-miss
+    // window: several Minecraft executor threads can otherwise enter the
+    // vendored glslang state between the initial lookup and parse().
+    std::lock_guard<std::mutex> glslang_lock(glslang_compile_mutex());
     glslang_init();
     EShLanguage esh_stage = to_esh_stage(stage);
     if (esh_stage == EShLangCount) { info = "unsupported shader stage"; return false; }
@@ -466,6 +621,8 @@ bool CompileStage(GLenum stage, const std::string& src,
     std::string source = src;
     ensure_glsl_version(source);
     rewrite_desktop_builtins(source);
+    rewrite_minecraft_projection_swizzles(source);
+    rewrite_minecraft_ios_vector_compatibility(source);
 
     // wrap_loose_uniforms uses regex that can throw on pathological input;
     // fall back to unwrapped source (glslang auto-wrap path) rather than crash.
@@ -494,6 +651,7 @@ bool CompileStage(GLenum stage, const std::string& src,
     if (version < 330) version = 330;
 
     auto compile_once = [&](const std::string& src2, std::string& err) -> bool {
+        const uint64_t source_digest = fnv1a(src2);
         glslang::TShader shader(esh_stage);
         const char* s = src2.c_str();
         shader.setStrings(&s, 1);
@@ -508,14 +666,52 @@ bool CompileStage(GLenum stage, const std::string& src,
         if (!shader.parse(GetDefaultResources(), version, true, messages)) {
             err = shader.getInfoLog();
             err += shader.getInfoDebugLog();
+            ML_LOG_WARN("TRACE GLSL parse failure stage=0x%x bytes=%zu hash=%016llx first=%.*s last=%.*s",
+                        (unsigned)stage, src2.size(),
+                        (unsigned long long)source_digest, 160, src2.c_str(),
+                        160, src2.size() > 160 ? src2.c_str() + src2.size() - 160 : src2.c_str());
+            if (src2.size() >= 2800 && src2.size() <= 3300)
+                LogSourceChunks("parse-source", source_digest, src2);
             return false;
+        }
+        // glslang can keep parsing after a semantic error (notably the
+        // malformed l-value/swizzle trees seen in Minecraft 26.2).  Do not
+        // hand such an intermediate tree to the SPIR-V backend: it is not a
+        // valid input and some backend paths assume every access chain has a
+        // materialized result.
+        std::string parse_info = shader.getInfoLog();
+        parse_info += shader.getInfoDebugLog();
+        if (!parse_info.empty()) {
+            ML_LOG_WARN("TRACE GLSL parse diagnostics stage=0x%x: %s",
+                        (unsigned)stage, parse_info.c_str());
+            if (parse_info.find("ERROR:") != std::string::npos) {
+                ML_LOG_WARN("TRACE GLSL rejected source stage=0x%x:\n%s",
+                            (unsigned)stage, src2.c_str());
+                err = parse_info;
+                return false;
+            }
         }
         glslang::TProgram program;
         program.addShader(&shader);
         if (!program.link(messages)) {
             err = program.getInfoLog();
             err += program.getInfoDebugLog();
+            ML_LOG_WARN("TRACE GLSL link failure stage=0x%x bytes=%zu hash=%016llx",
+                        (unsigned)stage, src2.size(),
+                        (unsigned long long)source_digest);
             return false;
+        }
+        std::string link_info = program.getInfoLog();
+        link_info += program.getInfoDebugLog();
+        if (!link_info.empty()) {
+            ML_LOG_WARN("TRACE GLSL link diagnostics stage=0x%x: %s",
+                        (unsigned)stage, link_info.c_str());
+            if (link_info.find("ERROR:") != std::string::npos) {
+                ML_LOG_WARN("TRACE GLSL rejected linked source stage=0x%x:\n%s",
+                            (unsigned)stage, src2.c_str());
+                err = link_info;
+                return false;
+            }
         }
         if (!program.mapIO()) {
             err = "glslang mapIO failed: ";
@@ -528,8 +724,23 @@ bool CompileStage(GLenum stage, const std::string& src,
         glslang::SpvOptions spv_opts;
         spv_opts.disableOptimizer = false;
         std::vector<uint32_t> out;
-        glslang::GlslangToSpv(*inter, out, &spv_opts);
-        if (out.empty()) { err = "SPIR-V generation produced no words"; return false; }
+        spv::SpvBuildLogger spv_logger;
+        glslang::GlslangToSpv(*inter, out, &spv_logger, &spv_opts);
+        const std::string spv_info = spv_logger.getAllMessages();
+        if (!spv_info.empty()) {
+            ML_LOG_WARN("TRACE GLSL SPIR-V diagnostics stage=0x%x: %s",
+                        (unsigned)stage, spv_info.c_str());
+        }
+        if (out.empty()) {
+            err = "SPIR-V generation produced no words";
+            if (!spv_info.empty()) {
+                err += ": ";
+                err += spv_info;
+            }
+            ML_LOG_WARN("TRACE GLSL rejected SPIR-V source stage=0x%x:\n%s",
+                        (unsigned)stage, src2.c_str());
+            return false;
+        }
         spirv = std::move(out);
         return true;
     };

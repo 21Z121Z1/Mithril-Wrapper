@@ -44,6 +44,7 @@ PresentationTransferMode g_present_transfer_mode =
     PresentationTransferMode::Unknown;
 id<MTLBuffer> g_buffered_present_source = nil;
 NSUInteger g_buffered_present_row_bytes = 0;
+uint64_t g_trace_apple_present_serial = 0;
 
 struct PreparedPresentationSource {
     id<MTLTexture> texture = nil;
@@ -574,8 +575,20 @@ bool EnsurePresentationTransferMode() {
 PreparedPresentationSource SelectPresentationSource(
     id<MTLCommandBuffer> command) {
     auto& engine = GetEngine();
-    if (g_present_transfer_mode == PresentationTransferMode::Direct)
+    if (g_present_transfer_mode == PresentationTransferMode::Direct) {
+        if (g_trace_apple_present_serial < 80) {
+            ML_LOG_INFO(
+                "metal: TRACE APPLE_SOURCE #%llu mode=direct bound_fbo=%llu "
+                "dirty=%d draws=%zu color=%lux%lu format=%lu",
+                (unsigned long long)g_trace_apple_present_serial,
+                (unsigned long long)engine.bound_draw_fbo,
+                engine.frame_dirty ? 1 : 0, engine.draws.size(),
+                (unsigned long)engine.color.width,
+                (unsigned long)engine.color.height,
+                (unsigned long)engine.color.pixelFormat);
+        }
         return {engine.color, nil, 0};
+    }
     if (g_present_transfer_mode != PresentationTransferMode::BufferCopy ||
         !command || !engine.color)
         return {};
@@ -696,6 +709,20 @@ bool Present() {
     }
 
     @autoreleasepool {
+        const uint64_t present_serial = g_trace_apple_present_serial++;
+        if (present_serial < 80) {
+            ML_LOG_INFO(
+                "metal: TRACE APPLE_PRESENT #%llu bound_fbo=%llu dirty=%d "
+                "draws=%zu engine=%ux%u color=%lux%lu drawable=%lux%lu",
+                (unsigned long long)present_serial,
+                (unsigned long long)engine.bound_draw_fbo,
+                engine.frame_dirty ? 1 : 0, engine.draws.size(),
+                (unsigned)engine.width, (unsigned)engine.height,
+                (unsigned long)engine.color.width,
+                (unsigned long)engine.color.height,
+                (unsigned long)engine.layer.drawableSize.width,
+                (unsigned long)engine.layer.drawableSize.height);
+        }
         // Draws are recorded until submit, so resizing here re-targets the
         // complete pending GL frame without rendering an intermediate size.
         if (!SyncLayerTargetSize()) return false;

@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <util/log.h>
 
 namespace s = mithril::state;
 namespace v = mithril::backend;
@@ -53,6 +54,7 @@ static std::unordered_map<GLuint, FbState> g_framebuffers;
 static GLuint g_bound_draw_fbo = 0, g_bound_read_fbo = 0;   // 0 => default
 static GLuint g_bound_rbo = 0;
 static GLuint g_next_rbo = 1, g_next_fbo = 1;
+static unsigned g_debug_fbo_pushes = 0;
 
 // Live entry for a framebuffer id (null for the default / unknown ids).
 static FbState* FboGet(GLuint id) {
@@ -179,10 +181,24 @@ static void PushVkFramebuffer(GLuint id) {
     FbState* f = FboGet(id);
     if (!f || !f->dirty) return;
 
+    // Keep a bounded trace for every FBO.  The menu path uses several
+    // intermediate targets (notably FBO 3) before the final default-framebuffer
+    // blit; tracing only FBO 2 made a missing composite indistinguishable from
+    // a shader/UI failure.
+    const bool trace = g_debug_fbo_pushes < 240;
+    if (trace) {
+        ++g_debug_fbo_pushes;
+        ML_LOG_INFO("metal: TRACE FBO push id=%u n_color=%d has_depth=%d "
+                    "read=0x%x n_draw=%d",
+                    id, f->n_color, f->has_depth ? 1 : 0,
+                    (unsigned)f->read_buf, f->n_draw);
+    }
+
     v::FboSpec spec;
     GLsizei fw = 0, fh = 0, framebuffer_samples = 0;
     bool have_attachment = false;
     bool attachments_match = true;
+    bool have_color_attachment = false;
 
     auto merge_attachment = [&](const Attach& attachment,
                                 bool expect_depth) -> bool {
@@ -206,16 +222,91 @@ static void PushVkFramebuffer(GLuint id) {
     for (int i = 0; i < f->n_color; ++i) {
         v::FboAttach color;
         if (!f->color[i].present) {
+            if (trace) ML_LOG_INFO("metal: TRACE FBO color[%d] absent", i);
             spec.color.push_back(color);
             continue;
+        }
+        if (trace) {
+            const Attach& attachment = f->color[i];
+            GLsizei width = 0, height = 0, samples = 0;
+            bool depth = false;
+            const bool dimensions = AttachDimensions(attachment, &width, &height);
+            const bool sample_count = AttachSampleCount(attachment, &samples);
+            const bool depth_kind = AttachIsDepth(attachment, &depth);
+            if (attachment.is_texture) {
+                auto texture = g_textures.find(attachment.tex_id);
+                if (texture != g_textures.end()) {
+                    ML_LOG_INFO("metal: TRACE FBO color[%d] tex=%u level=%d "
+                                "layer=%d image=%d size=%ux%u mip=%zu "
+                                "dims=%d %dx%d samples=%d/%d depth=%d/%d",
+                                i, attachment.tex_id, attachment.level,
+                                attachment.layer, texture->second.has_image ? 1 : 0,
+                                texture->second.width, texture->second.height,
+                                texture->second.mip.size(), dimensions ? 1 : 0,
+                                width, height, sample_count ? 1 : 0, samples,
+                                depth_kind ? 1 : 0, depth ? 1 : 0);
+                } else {
+                    ML_LOG_INFO("metal: TRACE FBO color[%d] tex=%u missing",
+                                i, attachment.tex_id);
+                }
+            } else {
+                auto renderbuffer = g_renderbuffers.find(attachment.rbo_id);
+                ML_LOG_INFO("metal: TRACE FBO color[%d] rbo=%u defined=%d "
+                            "size=%dx%d dims=%d %dx%d samples=%d/%d depth=%d/%d",
+                            i, attachment.rbo_id,
+                            renderbuffer != g_renderbuffers.end() &&
+                                renderbuffer->second.defined ? 1 : 0,
+                            renderbuffer != g_renderbuffers.end() ?
+                                renderbuffer->second.width : 0,
+                            renderbuffer != g_renderbuffers.end() ?
+                                renderbuffer->second.height : 0,
+                            dimensions ? 1 : 0, width, height,
+                            sample_count ? 1 : 0, samples,
+                            depth_kind ? 1 : 0, depth ? 1 : 0);
+            }
         }
         if (!FillAttach(f->color[i], &color) ||
             !merge_attachment(f->color[i], false))
             attachments_match = false;
+        else
+            have_color_attachment = true;
         spec.color.push_back(color);
     }
 
     if (f->has_depth && f->depth.present) {
+        if (trace) {
+            GLsizei width = 0, height = 0, samples = 0;
+            bool depth = false;
+            const bool dimensions = AttachDimensions(f->depth, &width, &height);
+            const bool sample_count = AttachSampleCount(f->depth, &samples);
+            const bool depth_kind = AttachIsDepth(f->depth, &depth);
+            if (f->depth.is_texture) {
+                auto texture = g_textures.find(f->depth.tex_id);
+                ML_LOG_INFO("metal: TRACE FBO depth tex=%u image=%d size=%ux%u "
+                            "dims=%d %dx%d samples=%d/%d depth=%d/%d",
+                            f->depth.tex_id,
+                            texture != g_textures.end() && texture->second.has_image ? 1 : 0,
+                            texture != g_textures.end() ? texture->second.width : 0,
+                            texture != g_textures.end() ? texture->second.height : 0,
+                            dimensions ? 1 : 0, width, height,
+                            sample_count ? 1 : 0, samples,
+                            depth_kind ? 1 : 0, depth ? 1 : 0);
+            } else {
+                auto renderbuffer = g_renderbuffers.find(f->depth.rbo_id);
+                ML_LOG_INFO("metal: TRACE FBO depth rbo=%u defined=%d size=%dx%d "
+                            "dims=%d %dx%d samples=%d/%d depth=%d/%d",
+                            f->depth.rbo_id,
+                            renderbuffer != g_renderbuffers.end() &&
+                                renderbuffer->second.defined ? 1 : 0,
+                            renderbuffer != g_renderbuffers.end() ?
+                                renderbuffer->second.width : 0,
+                            renderbuffer != g_renderbuffers.end() ?
+                                renderbuffer->second.height : 0,
+                            dimensions ? 1 : 0, width, height,
+                            sample_count ? 1 : 0, samples,
+                            depth_kind ? 1 : 0, depth ? 1 : 0);
+            }
+        }
         if (FillAttach(f->depth, &spec.depth) &&
             merge_attachment(f->depth, true)) {
             spec.has_depth = true;
@@ -233,7 +324,14 @@ static void PushVkFramebuffer(GLuint id) {
     }
 
     const bool complete = have_attachment && attachments_match && selectors_valid;
-    if (complete) {
+    // A depth-only framebuffer is a valid render target when its draw/read
+    // selectors are GL_NONE.  Some Minecraft passes transiently leave the
+    // stale color selector in place while replacing the depth image; retain
+    // the real depth dimensions so the Metal backend can still encode that
+    // depth-only pass instead of turning it into a zero-sized target.
+    const bool depth_only_target = have_attachment && attachments_match &&
+        f->has_depth && !have_color_attachment;
+    if (complete || depth_only_target) {
         spec.width = fw;
         spec.height = fh;
     }
@@ -242,6 +340,12 @@ static void PushVkFramebuffer(GLuint id) {
     f->complete = complete;
     f->width = have_attachment ? fw : 0;
     f->height = have_attachment ? fh : 0;
+    if (trace)
+        ML_LOG_INFO("metal: TRACE FBO result id=%u complete=%d have=%d match=%d "
+                    "selectors=%d spec=%ux%u resolved=%dx%d",
+                    id, complete ? 1 : 0, have_attachment ? 1 : 0,
+                    attachments_match ? 1 : 0, selectors_valid ? 1 : 0,
+                    spec.width, spec.height, f->width, f->height);
     f->dirty = false;
 }
 

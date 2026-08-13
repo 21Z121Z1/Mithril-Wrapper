@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <functional>
 #include <limits>
 #include <string>
 #include <unordered_map>
@@ -78,6 +79,30 @@ void RegisterUniformLocations(sh::Program& program) {
                 static_cast<GLuint>(uniform_index);
             refs[location] = {uniform_index, element};
         }
+    }
+}
+
+void LogShaderSourceForDebug(GLuint shader, GLenum stage,
+                             const std::string& source) {
+    static unsigned sequence = 0;
+    const unsigned current = ++sequence;
+    ML_LOG_INFO("TRACE SHADER begin seq=%u id=%u stage=0x%x len=%zu hash=%llu",
+                current, shader, (unsigned)stage, source.size(),
+                (unsigned long long)std::hash<std::string>{}(source));
+    constexpr size_t kChunk = 900;
+    for (size_t offset = 0; offset < source.size(); offset += kChunk) {
+        std::string escaped = source.substr(offset, kChunk);
+        for (size_t i = 0; i < escaped.size(); ++i) {
+            switch (escaped[i]) {
+                case '\\': escaped.replace(i, 1, "\\\\"); ++i; break;
+                case '\n': escaped.replace(i, 1, "\\n"); ++i; break;
+                case '\r': escaped.replace(i, 1, "\\r"); ++i; break;
+                case '\t': escaped.replace(i, 1, "\\t"); ++i; break;
+                default: break;
+            }
+        }
+        ML_LOG_INFO("TRACE SHADER source seq=%u off=%zu %s",
+                    current, offset, escaped.c_str());
     }
 }
 
@@ -327,7 +352,10 @@ void APIENTRY glCompileShader(GLuint shader) {
         s->compiled = true;
         s->spirv = std::move(spirv);
         s->info_log.clear();
-        ML_LOG_DEBUG("glCompileShader(%u): ok, %zu SPIR-V words", shader, s->spirv.size());
+        ML_LOG_INFO("TRACE GLSL compiled id=%u stage=0x%x bytes=%zu hash=%llu words=%zu",
+                    shader, (unsigned)s->type, s->source.size(),
+                    (unsigned long long)std::hash<std::string>{}(s->source),
+                    s->spirv.size());
     } else {
         s->info_log = info;
         ML_LOG_WARN("glCompileShader(%u): %s", shader, info.c_str());
@@ -454,6 +482,8 @@ void APIENTRY glLinkProgram(GLuint program) {
     p->linked = false;
     p->info_log.clear();
     bool have_vs = false, have_fs = false;
+    GLuint vertex_shader_id = 0;
+    GLuint fragment_shader_id = 0;
     std::string vertex_source, fragment_source;
     std::unordered_map<std::string, sh::UniformBlockDeclaration>
         block_declarations;
@@ -469,10 +499,12 @@ void APIENTRY glLinkProgram(GLuint program) {
         if (s->type == GL_VERTEX_SHADER) {
             p->vertex_spirv = s->spirv;
             vertex_source = s->source;
+            vertex_shader_id = sid;
             have_vs = true;
         } else if (s->type == GL_FRAGMENT_SHADER) {
             p->fragment_spirv = s->spirv;
             fragment_source = s->source;
+            fragment_shader_id = sid;
             have_fs = true;
         }
         for (const auto& declaration : sh::DiscoverUniformBlocks(s->source)) {
@@ -522,6 +554,12 @@ void APIENTRY glLinkProgram(GLuint program) {
         ML_LOG_WARN("glLinkProgram(%u): %s", program, p->info_log.c_str());
         return;
     }
+    if (!sh::AlignStageInterfaceLocations(
+            p->vertex_spirv, p->fragment_spirv, reflection_error)) {
+        p->info_log = "link failed: " + reflection_error;
+        ML_LOG_WARN("glLinkProgram(%u): %s", program, p->info_log.c_str());
+        return;
+    }
     if (!sh::ReflectProgram(*p, reflection_error)) {
         p->info_log = "link failed: " + reflection_error;
         ML_LOG_WARN("glLinkProgram(%u): %s", program, p->info_log.c_str());
@@ -555,6 +593,14 @@ void APIENTRY glLinkProgram(GLuint program) {
                  "%zu uniform blocks",
                  program, p->vertex_spirv.size(), p->fragment_spirv.size(),
                  p->uniforms.size(), p->uniform_blocks.size());
+    ML_LOG_INFO("TRACE GLSL linked gl=%u vs=%u fs=%u vs_bytes=%zu vs_hash=%llu "
+                "fs_bytes=%zu fs_hash=%llu uniforms=%zu blocks=%zu",
+                program, vertex_shader_id, fragment_shader_id,
+                vertex_source.size(),
+                (unsigned long long)std::hash<std::string>{}(vertex_source),
+                fragment_source.size(),
+                (unsigned long long)std::hash<std::string>{}(fragment_source),
+                p->uniforms.size(), p->uniform_blocks.size());
 }
 
 void APIENTRY glGetProgramiv(GLuint program, GLenum pname, GLint* params) {

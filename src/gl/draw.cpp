@@ -14,6 +14,7 @@
 
 namespace {
 namespace sh = mithril::shader;
+uint64_t g_gui_vao_trace_serial = 0;
 float HalfToFloat(uint16_t h) {
     uint32_t sign = (uint32_t)(h & 0x8000u) << 16;
     uint32_t exp = (h >> 10) & 0x1Fu;
@@ -184,7 +185,12 @@ uint64_t CreateBackendProgram(sh::Program* prog) {
     auto it = g_backend_programs.find(prog->id);
     if (it != g_backend_programs.end()) return it->second;
     uint64_t handle = v::CreateProgram(prog->vertex_spirv, prog->fragment_spirv);
-    if (handle) g_backend_programs.emplace(prog->id, handle);
+    if (handle) {
+        g_backend_programs.emplace(prog->id, handle);
+        ML_LOG_INFO("TRACE BACKEND PROGRAM gl=%u native=%llu vs_words=%zu fs_words=%zu",
+                    prog->id, (unsigned long long)handle,
+                    prog->vertex_spirv.size(), prog->fragment_spirv.size());
+    }
     return handle;
 }
 
@@ -501,8 +507,32 @@ void DrawCommon(GLenum mode, const std::vector<uint32_t>& idx, GLint first,
             m = std::max(m, i);
             has_vertex = true;
         }
-        if (!has_vertex) return;
+    if (!has_vertex) return;
         v_count = (GLsizei)(m + 1);
+    }
+
+    if ((prog->id == 3 || prog->id == 7) && g_gui_vao_trace_serial < 8) {
+        ++g_gui_vao_trace_serial;
+        for (GLuint slot : vertex_slots) {
+            const AttribData& a = vao.attribs[slot];
+            const auto bit = g_buffers.find(a.buffer);
+            const BufferData* buffer = bit == g_buffers.end() ? nullptr : &bit->second;
+            const uint8_t* bytes = buffer && !buffer->data.empty()
+                ? buffer->data.data() : nullptr;
+            GLfloat fetched[4]{};
+            const bool fetched_ok = FetchAttribRow(a, row_base, fetched);
+            ML_LOG_INFO(
+                "TRACE GUI_VAO gl=%u row=%d slot=%u buf=%u size=%zu defined=%d "
+                "attr_size=%d type=0x%x normalized=%d stride=%d offset=%lld "
+                "pointer=%d fetch=%d values=%.4f,%.4f,%.4f,%.4f first=%02x%02x%02x%02x",
+                prog->id, row_base, slot, a.buffer,
+                buffer ? buffer->data.size() : 0,
+                buffer ? buffer->defined : 0, a.size, a.type, a.normalized,
+                a.stride, (long long)a.offset, a.is_pointer, fetched_ok,
+                fetched[0], fetched[1], fetched[2], fetched[3],
+                bytes ? bytes[0] : 0, bytes ? bytes[1] : 0,
+                bytes ? bytes[2] : 0, bytes ? bytes[3] : 0);
+        }
     }
 
     v::VertexStream vstream;
