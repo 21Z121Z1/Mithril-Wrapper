@@ -24,6 +24,9 @@ replacement = '''#define GL_WAIT_FAILED                  0x911D
 #ifndef GL_SYNC_FLAGS
 #define GL_SYNC_FLAGS                   0x9115
 #endif
+#ifndef GL_SYNC_FENCE
+#define GL_SYNC_FENCE                   0x9116
+#endif
 #ifndef GL_SYNC_GPU_COMMANDS_COMPLETE
 #define GL_SYNC_GPU_COMMANDS_COMPLETE   0x9117
 #endif
@@ -32,9 +35,6 @@ replacement = '''#define GL_WAIT_FAILED                  0x911D
 #endif
 #ifndef GL_SIGNALED
 #define GL_SIGNALED                     0x9119
-#endif
-#ifndef GL_SYNC_FENCE
-#define GL_SYNC_FENCE                   0x9116
 #endif
 '''
 if s.count(anchor) != 1:
@@ -53,32 +53,32 @@ p.write_text(s.replace(anchor, replacement, 1))
 # Runtime smoke diagnostics: prove symbol ownership and same-handle visibility.
 p = Path('tests/render_smoke.c')
 s = p.read_text()
-s = s.replace(
-    'typedef void      (*deleteSync_fn)(GLsync);\ntypedef void      (*getSynciv_fn)(GLsync, GLenum, GLsizei, GLsizei*, GLint*);\n',
-    'typedef void      (*deleteSync_fn)(GLsync);\ntypedef GLboolean (*isSync_fn)(GLsync);\ntypedef void      (*getSynciv_fn)(GLsync, GLenum, GLsizei, GLsizei*, GLint*);\n',
-    1)
-s = s.replace(
-    '    deleteSync_fn         deleteSync         = NULL;\n    getSynciv_fn          getSynciv          = NULL;\n',
-    '    deleteSync_fn         deleteSync         = NULL;\n    isSync_fn             isSync             = NULL;\n    getSynciv_fn          getSynciv          = NULL;\n',
-    1)
-s = s.replace(
-    '    RESOLVE(deleteSync, "glDeleteSync");\n    RESOLVE(getSynciv, "glGetSynciv");\n',
-    '    RESOLVE(deleteSync, "glDeleteSync");\n    RESOLVE(isSync, "glIsSync");\n    RESOLVE(getSynciv, "glGetSynciv");\n',
-    1)
-old = '''        GLsync sync = fenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
-        CHECK(sync != NULL, "glFenceSync created a real submission fence");
-        GLenum wait = clientWaitSync(sync, GL_SYNC_FLUSH_COMMANDS_BIT, 1000000000ULL);
-        CHECK(wait == GL_ALREADY_SIGNALED || wait == GL_CONDITION_SATISFIED,
-              "glClientWaitSync observes GPU completion (result=0x%x)", wait);
-        GLint status = GL_UNSIGNALED;
-        GLsizei length = 0;
-        getSynciv(sync, GL_SYNC_STATUS, 1, &length, &status);
-        CHECK(length == 1 && status == GL_SIGNALED,
-              "glGetSynciv reports GL_SIGNALED after wait (status=0x%x)", status);
-        deleteSync(sync);
-        CHECK(getError() == GL_NO_ERROR, "GLsync lifecycle leaves no error");
-'''
-new = '''        GLsync sync = fenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+if 'typedef GLboolean (*isSync_fn)(GLsync);' not in s:
+    s = s.replace(
+        'typedef void      (*deleteSync_fn)(GLsync);\ntypedef void      (*getSynciv_fn)(GLsync, GLenum, GLsizei, GLsizei*, GLint*);\n',
+        'typedef void      (*deleteSync_fn)(GLsync);\ntypedef GLboolean (*isSync_fn)(GLsync);\ntypedef void      (*getSynciv_fn)(GLsync, GLenum, GLsizei, GLsizei*, GLint*);\n',
+        1)
+    s = s.replace(
+        '    deleteSync_fn         deleteSync         = NULL;\n    getSynciv_fn          getSynciv          = NULL;\n',
+        '    deleteSync_fn         deleteSync         = NULL;\n    isSync_fn             isSync             = NULL;\n    getSynciv_fn          getSynciv          = NULL;\n',
+        1)
+    s = s.replace(
+        '    RESOLVE(deleteSync, "glDeleteSync");\n    RESOLVE(getSynciv, "glGetSynciv");\n',
+        '    RESOLVE(deleteSync, "glDeleteSync");\n    RESOLVE(isSync, "glIsSync");\n    RESOLVE(getSynciv, "glGetSynciv");\n',
+        1)
+
+start_marker = '    /* ---- GLsync: fence maps to real Vulkan submit serial ---------------- */\n'
+end_marker = '    /* ---- persistent coherent VBO: Sodium upload-ring semantics ----------- */\n'
+start = s.find(start_marker)
+end = s.find(end_marker, start + len(start_marker))
+if start < 0 or end < 0:
+    raise SystemExit(f'GLsync structural markers missing: start={start} end={end}')
+new_block = r'''    /* ---- GLsync: fence maps to real Vulkan submit serial ---------------- */
+    {
+        useProgram(prog);
+        bindVertexArray(vao);
+        drawArrays(GL_TRIANGLES, 0, 3);  /* pending GPU work before fence */
+        GLsync sync = fenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
         CHECK(sync != NULL, "glFenceSync created a real submission fence");
         CHECK(sync != NULL && isSync(sync) == GL_TRUE,
               "glIsSync recognizes the same fence handle before wait");
@@ -108,7 +108,8 @@ new = '''        GLsync sync = fenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
               (int)length, status);
         deleteSync(sync);
         CHECK(getError() == GL_NO_ERROR, "GLsync lifecycle leaves no error");
+    }
+
 '''
-if s.count(old) != 1:
-    raise SystemExit(f'render sync block matches={s.count(old)}')
-p.write_text(s.replace(old, new, 1))
+s = s[:start] + new_block + s[end:]
+p.write_text(s)
