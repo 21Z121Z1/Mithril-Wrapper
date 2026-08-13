@@ -3091,23 +3091,29 @@ void BlitFramebuffer(uint64_t src_id, uint64_t dst_id,
     if (!ResolveTarget(src_id, &source) || !ResolveTarget(dst_id, &destination))
         return;
     // Minecraft's window path renders into its own FBO before blitting into
-    // the EGL default framebuffer.  The CAMetalLayer can be created before
-    // that FBO has established the real drawable size, so the default target
-    // may still be the small bootstrap surface (512x512) when the first
-    // 2266x1488 window blit arrives.  Keep the default framebuffer coupled to
-    // the actual window blit dimensions before encoding the copy.
-    if (!dst_id && source.width > 0 && source.height > 0 &&
-        (source.width != engine.width || source.height != engine.height)) {
+    // the EGL default framebuffer. The CAMetalLayer can still have its small
+    // bootstrap extent when the first full-window blit arrives, so grow the
+    // default target to contain that producer. A framebuffer blit is not a
+    // surface-resize operation, however: a later small offscreen blit must not
+    // shrink the default framebuffer. Real surface shrinkage remains owned by
+    // SyncLayerTargetSize() at presentation time.
+    const bool full_source_blit = sx0 == 0 && sy0 == 0 && dx0 == 0 && dy0 == 0 &&
+        static_cast<NSUInteger>(source_width) == source.width &&
+        static_cast<NSUInteger>(source_height) == source.height;
+    if (!dst_id && full_source_blit &&
+        (source.width > engine.width || source.height > engine.height)) {
+        const NSUInteger target_width = std::max(engine.width, source.width);
+        const NSUInteger target_height = std::max(engine.height, source.height);
         ML_LOG_INFO(
             "metal: TRACE DEFAULT_RESIZE from=%ux%u to=%lux%lu src_fbo=%llu",
             (unsigned)engine.width, (unsigned)engine.height,
-            (unsigned long)source.width, (unsigned long)source.height,
+            (unsigned long)target_width, (unsigned long)target_height,
             (unsigned long long)src_id);
         if (engine.layer)
             engine.layer.drawableSize =
-                CGSizeMake(source.width, source.height);
-        if (!SetTargetSize((uint32_t)source.width,
-                           (uint32_t)source.height))
+                CGSizeMake(target_width, target_height);
+        if (!SetTargetSize((uint32_t)target_width,
+                           (uint32_t)target_height))
             return;
         if (!ResolveTarget(dst_id, &destination)) return;
     }

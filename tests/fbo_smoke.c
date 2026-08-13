@@ -1032,6 +1032,18 @@ int main(void) {
               "FBO-to-default blit preserves the top green row "
               "(r=%d g=%d b=%d)", px[0], px[1], px[2]);
 
+        /* A partial-size blit updates pixels; it must not redefine the
+           default framebuffer's window extent. Clear/read outside the 32x32
+           blit rectangle to catch an accidental target shrink directly. */
+        bindFramebuffer(GL_FRAMEBUFFER, 0);
+        clearColor(1, 0, 1, 1);
+        clear(GL_COLOR_BUFFER_BIT);
+        finish();
+        readPixels(256, 256, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        CHECK(px_match(px, 255, 0, 255, 255),
+              "small FBO blit preserves the default framebuffer extent "
+              "(r=%d g=%d b=%d)", px[0], px[1], px[2]);
+
         bindFramebuffer(GL_FRAMEBUFFER, 0);
         deleteFramebuffers(1, &fboA);
         deleteFramebuffers(1, &fboB);
