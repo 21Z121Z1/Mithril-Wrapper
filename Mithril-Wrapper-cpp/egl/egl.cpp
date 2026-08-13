@@ -1003,6 +1003,19 @@ EGLBoolean eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
     // so layout barriers + per-image renderFinished signaling work next frame.
     if (s->swapchain_state && t_currentDraw == s) {
         install_surface_on_state(s);
+        // FIX (首帧冻结 / viewport-drawable 失同步): swapchain 可能刚被
+        // rebuild 成新尺寸（eglDefaultWidth/Height 已更新），但 state.viewportW/H
+        // 可能仍是旧值。下一帧 prepare_draw 用 viewportW/H 做 Vulkan Y-flip，
+        // 与 render area 错位 → 只显示 clear color。在这里同步 viewport 到
+        // surface 尺寸（与 install_surface_on_state 保持一致），下一帧的
+        // prepare_draw 进一步用 eglDefaultWidth/Height 覆盖，确保 render area
+        // 与 viewport 完全匹配。
+        if (t_currentCtx && g_state->eglDefaultWidth > 0 && g_state->eglDefaultHeight > 0) {
+            t_currentCtx->state->viewportX = 0;
+            t_currentCtx->state->viewportY = 0;
+            t_currentCtx->state->viewportW = g_state->eglDefaultWidth;
+            t_currentCtx->state->viewportH = g_state->eglDefaultHeight;
+        }
     }
     return EGL_TRUE;
 }

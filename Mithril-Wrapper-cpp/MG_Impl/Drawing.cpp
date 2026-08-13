@@ -286,8 +286,25 @@ static bool prepare_draw(GLenum mode) {
     // the upcoming draw. The set is built per-draw from Program.uniforms +
     // g_state->boundTextures by DescriptorSet.cpp.
     backend_bind_program_descriptors(prog->id);
-    backend_set_viewport(g_state->viewportX, g_state->viewportY,
-                         g_state->viewportW, g_state->viewportH,
+
+    // FIX (首帧冻结 / 红屏根因 — default render target 与 drawable 尺寸失同步):
+    // 渲染到 FBO 0 (on-screen drawable) 时，render area 由 eglDefaultWidth/Height
+    // 决定 (=collect_draw_fbo_attachments 的 w/h)，但 viewport 用的仍是
+    // state.viewportW/H。如果二者不一致（MC 在 eglMakeCurrent 之后调了 glViewport
+    // 改变尺寸、或 drawableSize 在 swapchain 创建后改变），viewport 和 render area
+    // 错位 → Vulkan viewport Y-flip 计算错误 → 画面只显示 clear color (红/黑)。
+    // 修复：FBO 0 时强制 viewport = eglDefaultWidth/Height，保证 viewport 与
+    // render area 完全一致（即"presentation target 跟随 framebuffer resize"）。
+    int vpX = g_state->viewportX, vpY = g_state->viewportY;
+    int vpW = g_state->viewportW, vpH = g_state->viewportH;
+    if (is_default_fbo && g_state->eglDefaultColor != VK_NULL_HANDLE) {
+        if (g_state->eglDefaultWidth > 0 && g_state->eglDefaultHeight > 0) {
+            vpX = 0; vpY = 0;
+            vpW = g_state->eglDefaultWidth;
+            vpH = g_state->eglDefaultHeight;
+        }
+    }
+    backend_set_viewport(vpX, vpY, vpW, vpH,
                          g_state->depthNear, g_state->depthFar);
     // FIX (root cause G): ALWAYS set the scissor. VK_DYNAMIC_STATE_SCISSOR is
     // a dynamic state (Pipeline.cpp), so it MUST be set via vkCmdSetScissor
@@ -295,11 +312,12 @@ static bool prepare_draw(GLenum mode) {
     // call entirely, leaving the dynamic scissor at its undefined default
     // (0,0,0,0) — which clips ALL pixels → black screen. MobileGL always
     // sets a scissor (full viewport when GL_SCISSOR_TEST is off).
+    // Use the same vpW/vpH as the viewport so scissor matches the render area.
     if (g_state->scissorTest) {
         backend_set_scissor(g_state->scissorX, g_state->scissorY,
                             g_state->scissorW, g_state->scissorH);
     } else {
-        backend_set_scissor(0, 0, g_state->viewportW, g_state->viewportH);
+        backend_set_scissor(0, 0, vpW, vpH);
     }
     // FIX (root cause H + Y-flip winding fix): ALWAYS set cull mode.
     // VK_DYNAMIC_STATE_CULL_MODE is dynamic; skipping the call when cullFace is
