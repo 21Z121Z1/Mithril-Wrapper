@@ -654,6 +654,7 @@ struct GLState {
     GLuint      currentRenderbuffer = 0;
     GLuint      currentTransformFeedback = 0;  // TF 0 = default
     GLuint      currentProgramPipeline = 0;    // ProgramPipeline 0 = default (use glUseProgram)
+    std::unordered_map<GLuint, ProgramPipeline> programPipelines;
 
     // ---- EGL-backed default framebuffer ----
     VkImageView eglDefaultColor = VK_NULL_HANDLE;
