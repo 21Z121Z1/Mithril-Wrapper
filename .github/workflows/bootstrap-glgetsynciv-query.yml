@@ -1,0 +1,29 @@
+name: Bootstrap glGetSynciv query fix
+
+on:
+  push:
+    branches:
+      - fix/mobilegl-style-mc262-startup-preflight
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/mobilegl-style-mc262-startup-preflight
+      - name: Apply strict GLsync query fix
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/fix_glgetsynciv_query.py
+          git diff --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Mithril-Wrapper-cpp/MG_Impl/Drawing.cpp
+          git rm .github/scripts/fix_glgetsynciv_query.py
+          git commit -m 'fix: make glGetSynciv query path deterministic'
+          git push origin HEAD:fix/mobilegl-style-mc262-startup-preflight
