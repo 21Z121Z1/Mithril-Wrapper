@@ -1,0 +1,37 @@
+name: Bootstrap sync smoke enum fix
+
+on:
+  push:
+    branches:
+      - fix/mobilegl-style-mc262-startup-preflight
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/mobilegl-style-mc262-startup-preflight
+      - name: Add missing sync constants to standalone smoke
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('tests/render_smoke.c')
+          s = p.read_text()
+          marker = '''#ifndef GL_INVALID_INDEX\n#define GL_INVALID_INDEX 0xFFFFFFFFu\n#endif\n'''
+          insert = marker + '''\n#ifndef GL_SYNC_GPU_COMMANDS_COMPLETE\n#define GL_SYNC_GPU_COMMANDS_COMPLETE 0x9117\n#endif\n#ifndef GL_UNSIGNALED\n#define GL_UNSIGNALED 0x9118\n#endif\n#ifndef GL_SIGNALED\n#define GL_SIGNALED 0x9119\n#endif\n#ifndef GL_SYNC_STATUS\n#define GL_SYNC_STATUS 0x9114\n#endif\n'''
+          if s.count(marker) != 1:
+              raise SystemExit('render_smoke GL_INVALID_INDEX marker mismatch')
+          p.write_text(s.replace(marker, insert, 1))
+          PY
+          git diff --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add tests/render_smoke.c
+          git commit -m 'test: define standalone GL sync constants'
+          git push origin HEAD:fix/mobilegl-style-mc262-startup-preflight
