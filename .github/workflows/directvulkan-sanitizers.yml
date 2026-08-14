@@ -1,0 +1,56 @@
+name: DirectVulkan sanitizer runtime
+
+on:
+  push:
+    branches:
+      - codex/directvulkan-overnight-recovery-20260814
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux-lavapipe-asan-ubsan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Install Vulkan software stack
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build clang libvulkan-dev mesa-vulkan-drivers
+
+      - name: Build Mithril with AddressSanitizer and UndefinedBehaviorSanitizer
+        run: |
+          SAN='-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all'
+          cmake -S . -B build-sanitize -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -DCMAKE_C_FLAGS="$SAN -Wno-error" \
+            -DCMAKE_CXX_FLAGS="$SAN -Wno-error" \
+            -DCMAKE_SHARED_LINKER_FLAGS='-fsanitize=address,undefined'
+          cmake --build build-sanitize --target mithril -j2
+
+      - name: Build sanitizer smoke drivers
+        run: |
+          SAN='-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all'
+          clang -D_GNU_SOURCE -std=c11 -O0 -g $SAN -IMithril-Wrapper-cpp/include -o tests/render_smoke_asan tests/render_smoke.c -ldl
+          clang -D_GNU_SOURCE -std=c11 -O0 -g $SAN -IMithril-Wrapper-cpp/include -o tests/overnight_regression_smoke_asan tests/overnight_regression_smoke.c -ldl
+
+      - name: Run sanitizer render lanes
+        env:
+          MITHRIL_DEBUG: '0'
+          VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+          ASAN_OPTIONS: detect_leaks=0:halt_on_error=1:allocator_may_return_null=0
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: |
+          set -euo pipefail
+          LIB=$(find build-sanitize -name 'libmithril.so' -type f | head -1)
+          test -n "$LIB"
+          ./tests/render_smoke_asan "$LIB"
+          ./tests/overnight_regression_smoke_asan "$LIB"
+          git diff --check 1e7f6b7a1941dcc6e4cef5b5e20359291f9924cb..HEAD
