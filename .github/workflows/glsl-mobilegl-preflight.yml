@@ -76,8 +76,19 @@ jobs:
           export MITHRIL_DEBUG=1
           /tmp/mc_gui_smoke "$DYLIB" --egl
 
-      - name: Verify clean source tree
+      - name: Verify tests did not mutate tracked source
         run: |
           set -euo pipefail
           git diff --check
-          test -z "$(git status --short)"
+          git diff --exit-code
+          git diff --cached --exit-code
+          git submodule foreach --recursive 'git diff --check && git diff --exit-code && git diff --cached --exit-code'
+
+          # Out-of-tree CMake output is expected. Any other untracked source
+          # file is not: surface it explicitly rather than treating all build
+          # products as a source mutation.
+          unexpected_untracked="$(git ls-files --others --exclude-standard | grep -v '^build-preflight/' || true)"
+          if [ -n "$unexpected_untracked" ]; then
+            printf 'Unexpected untracked files after validation:\n%s\n' "$unexpected_untracked"
+            exit 1
+          fi
