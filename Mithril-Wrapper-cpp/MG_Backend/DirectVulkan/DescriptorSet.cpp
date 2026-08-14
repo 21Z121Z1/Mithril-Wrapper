@@ -116,7 +116,10 @@ static VkDescriptorPool create_program_pool(const ProgramResources& pr, uint32_t
 
     VkDescriptorPoolCreateInfo dpci{};
     dpci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    dpci.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+    // Sets are recycled by cursor and pools are destroyed wholesale. Enabling
+    // individual frees only selects MoltenVK's freeable argument-buffer
+    // allocator, a path with known overlapping-range GPU page faults.
+    dpci.flags = 0;
     dpci.maxSets = maxSets;
     dpci.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
     dpci.pPoolSizes = poolSizes.data();
@@ -265,9 +268,7 @@ void ensure_program_layouts(GLuint program,
 
     // ---- VkDescriptorPool (one per frame-in-flight slot) ----
     // maxSets=1024, descriptors per type sized per-set (see create_program_pool),
-    // PER SLOT. Created with FREE_DESCRIPTOR_SET_BIT so individual sets CAN be
-    // freed (useful if a layout is ever destroyed while cached sets survive);
-    // in practice we never free individual sets — the pool is destroyed
+    // PER SLOT. Sets are never individually freed; the pool is destroyed
     // wholesale on program deletion. Per-slot pools prevent the UAF where a
     // shared pool reset invalidated descriptor sets still referenced by an
     // in-flight command buffer on another slot.

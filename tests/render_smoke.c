@@ -229,6 +229,12 @@ int main(int argc, char** argv) {
           "GL version %d.%d (backend-up, glGetIntegerv un-hijacked)", major, minor);
     const char* ver = (const char*)getString(GL_VERSION);
     CHECK(ver && strstr(ver, "4.6"), "glGetString(GL_VERSION): %s", ver ? ver : "(null)");
+    const char* mvkArgBuffers = getenv("MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS");
+    const char* mvkActiveCmds = getenv("MVK_CONFIG_MAX_ACTIVE_METAL_COMMAND_BUFFERS_PER_QUEUE");
+    CHECK(mvkArgBuffers && strcmp(mvkArgBuffers, "0") == 0,
+          "MoltenVK argument buffers disabled for stable descriptor binding");
+    CHECK(mvkActiveCmds && strcmp(mvkActiveCmds, "2") == 0,
+          "MoltenVK active Metal command buffers limited to two");
     if (getError() != GL_NO_ERROR) { printf("FAIL: GL error before setup\n"); ++failures; }
 
     /* ---- 离屏 FBO：RGBA8 纹理作为 color attachment ------------------------ */
