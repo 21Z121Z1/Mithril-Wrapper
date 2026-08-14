@@ -29,19 +29,19 @@ jobs:
 
       - name: Build Mithril with AddressSanitizer and UndefinedBehaviorSanitizer
         run: |
-          SAN='-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all'
+          SAN='-fsanitize=address,undefined -shared-libsan -fno-omit-frame-pointer -fno-sanitize-recover=all'
           cmake -S . -B build-sanitize -G Ninja \
             -DCMAKE_BUILD_TYPE=Debug \
             -DCMAKE_C_COMPILER=clang \
             -DCMAKE_CXX_COMPILER=clang++ \
             -DCMAKE_C_FLAGS="$SAN -Wno-error" \
             -DCMAKE_CXX_FLAGS="$SAN -Wno-error" \
-            -DCMAKE_SHARED_LINKER_FLAGS='-fsanitize=address,undefined'
+            -DCMAKE_SHARED_LINKER_FLAGS="$SAN"
           cmake --build build-sanitize --target mithril -j2
 
       - name: Build sanitizer smoke drivers
         run: |
-          SAN='-fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-recover=all'
+          SAN='-fsanitize=address,undefined -shared-libsan -fno-omit-frame-pointer -fno-sanitize-recover=all'
           clang -D_GNU_SOURCE -std=c11 -O0 -g $SAN -IMithril-Wrapper-cpp/include -o tests/render_smoke_asan tests/render_smoke.c -ldl
           clang -D_GNU_SOURCE -std=c11 -O0 -g $SAN -IMithril-Wrapper-cpp/include -o tests/overnight_regression_smoke_asan tests/overnight_regression_smoke.c -ldl
 
@@ -54,11 +54,13 @@ jobs:
           ICD=$(find /usr/share/vulkan/icd.d -maxdepth 1 -type f -name 'lvp_icd*.json' | head -1)
           test -f "$ICD"
           echo "VK_ICD_FILENAMES=$ICD" >> "$GITHUB_ENV"
+          ASAN_SO=$(clang -print-file-name=libclang_rt.asan-x86_64.so)
+          test -f "$ASAN_SO"
+          SAN_DIR=$(dirname "$ASAN_SO")
+          echo "LD_LIBRARY_PATH=$SAN_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+          echo "LD_PRELOAD=$ASAN_SO" >> "$GITHUB_ENV"
           file "$LIB"
           ldd -r "$LIB" 2>&1 | tee /tmp/mithril-sanitizer-ldd-r.txt
-          # ldd -r does not run inside the ASan-instrumented test executable, so
-          # __asan*/__ubsan* references in the instrumented .so are expected here.
-          # Vulkan entry points and dynamic-library dependencies must still close.
           ! grep -E 'undefined symbol: vk|=> not found' /tmp/mithril-sanitizer-ldd-r.txt
 
       - name: Run sanitizer render lanes
