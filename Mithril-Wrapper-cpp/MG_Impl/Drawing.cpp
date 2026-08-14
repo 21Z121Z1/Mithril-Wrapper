@@ -50,6 +50,10 @@
 #include "Framebuffer.h"
 #include "../MG_Backend/DirectVulkan/LogRing.h"  // draw 路径打点（GPU fault 诊断）
 
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
+
 #include <algorithm>
 #include <cstring>
 
@@ -325,14 +329,13 @@ static bool prepare_draw(GLenum mode) {
     // culls geometry incorrectly. When cullFace is off, explicitly set
     // VK_CULL_MODE_NONE.
     //
-    // Y-flip winding adjustment (deep reference: MobileGL
-    // ConvertCullFaceModeToVkEnum + VulkanRenderer frontFace=CLOCKWISE):
-    // When the vertex Y is flipped (default framebuffer), triangle winding
-    // inverts (CCW→CW, CW→CCW). To keep the GL-intended faces visible:
-    //   - Swap the cull mode: GL_FRONT→VK_BACK, GL_BACK→VK_FRONT
-    //   - Hardcode frontFace to CLOCKWISE (the inverted winding makes GL's
-    //     CCW triangles appear as CW in Vulkan). MobileGL does the same.
-    // User FBOs (no Y flip) keep the original cull mode and frontFace.
+    // The positive-height Vulkan viewport maps GL's bottom-origin window
+    // coordinates into Vulkan's top-origin framebuffer, reversing the
+    // window-space winding for both user FBOs and the default framebuffer.
+    // Keep cullMode expressed in GL terms and compensate exactly once through
+    // frontFace below. The default framebuffer's vertex shader Y flip is part
+    // of preserving its presentation orientation; it does not justify
+    // treating user-FBO winding as a separate semantic.
     if (g_state->cullFace) {
         // FIX (Root Cause K - Y翻转面剔除双重补偿):
         // Vulkan 面剔除由两个独立状态控制：frontFace（定义正面缠绕方向）+ cullMode（剔除哪面）。
@@ -354,10 +357,19 @@ static bool prepare_draw(GLenum mode) {
             vk_cull = 3;  // VK_CULL_MODE_FRONT_AND_BACK
         }
         backend_set_cull_mode(vk_cull);
-        // Y 翻转使缠绕反转：GL-CCW → Vulkan-CW。设 frontFace=CW 补偿（仅默认帧缓冲）。
-        // 用户 FBO 无 Y 翻转，frontFace 按 GL 值映射（CCW→1, CW→0）。
-        backend_set_front_face(is_default_fbo ? 0 /*CW*/ :
-                               (g_state->frontFace == GL_CCW ? 1 : 0));
+        // The positive-height viewport reverses GL window-space winding on
+        // the iOS MoltenVK surface path, including user FBOs.  Native macOS
+        // headless/offscreen MoltenVK uses the existing user-FBO orientation;
+        // keep that distinction at the platform/backend boundary rather than
+        // keying it on Minecraft programs or transient object IDs.
+        bool invert_front_face = is_default_fbo;
+#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+        invert_front_face = true;
+#endif
+        backend_set_front_face(
+            invert_front_face ?
+                (g_state->frontFace == GL_CCW ? 0 /*CW*/ : 1 /*CCW*/) :
+                (g_state->frontFace == GL_CCW ? 1 /*CCW*/ : 0 /*CW*/));
     } else {
         backend_set_cull_mode(0);  // VK_CULL_MODE_NONE
     }

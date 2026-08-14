@@ -1590,4 +1590,15 @@ int backend_device_limit(int which, int fallback) {
     }
 }
 
+float backend_device_max_sampler_anisotropy(float fallback) {
+    mithril::vk::Backend* b = mithril::vk::backend();
+    if (!b || !b->initialized) return fallback;
+
+    // VkPhysicalDeviceLimits is the authoritative device limit. A value below
+    // one is not a legal GL anisotropy limit; retain the no-anisotropy floor
+    // until Vulkan supplies a usable value.
+    const float value = b->props.limits.maxSamplerAnisotropy;
+    return value >= 1.0f ? value : fallback;
+}
+
 } // extern "C"

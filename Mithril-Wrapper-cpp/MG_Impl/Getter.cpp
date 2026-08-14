@@ -25,6 +25,7 @@
 #include <cstdio>
 #include <sstream>
 #include <cstring>
+#include <cmath>
 
 /* ---- Mithril custom enums (mirror MobileGlues' GL_SETTINGS_MG / GL_BACKEND_GETTER_MG) ---- */
 #define MITHRIL_BACKEND_GETTER  0x0401
@@ -34,6 +35,9 @@
  * glcorearb.h we ship; define it here (standard GL value = 0x00000001). */
 #ifndef GL_CONTEXT_FLAG_FORWARD_COMPATIBLE_BIT
 #define GL_CONTEXT_FLAG_FORWARD_COMPATIBLE_BIT 0x00000001
+#endif
+#ifndef GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT
+#define GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT 0x84FF
 #endif
 
 /* ---- GPU info (Vulkan backend) ----
@@ -276,6 +280,10 @@ void glGetIntegerv(GLenum pname, GLint* params) {
             break;
         case GL_MAX_RENDERBUFFER_SIZE:
             *params = backend_device_limit(MITHRIL_LIMIT_MAX_RENDERBUFFER_SIZE, 16384); break;
+        case GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT:
+            *params = (GLint)std::lround(
+                backend_device_max_sampler_anisotropy(1.0f));
+            break;
         case GL_MAX_ELEMENTS_VERTICES:        *params = 1 << 24; break;
         case GL_MAX_ELEMENTS_INDICES:         *params = 1 << 24; break;
         case GL_SUBPIXEL_BITS:                *params = 4; break;
@@ -459,6 +467,9 @@ void glGetFloatv(GLenum pname, GLfloat* params) {
         case GL_POLYGON_OFFSET_UNITS:  *params = g_state->polygonOffsetUnits;  return;
         case GL_BLEND_COLOR:
             for (int i = 0; i < 4; ++i) params[i] = g_state->blendColor[i];
+            return;
+        case GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT:
+            *params = backend_device_max_sampler_anisotropy(1.0f);
             return;
         default:
             for (int i = 0; i < 4; ++i) params[i] = (GLfloat)ip[i];
