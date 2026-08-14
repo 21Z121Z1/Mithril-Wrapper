@@ -409,7 +409,7 @@ GitHub Actions 工作流 [`.github/workflows/build.yml`](.github/workflows/build
 - **EternityQwQ**
 - **yitenchen123**
 - **Uniaball**
-
+- **q3cc**
 ## 许可
 
 详见 [LICENSE](LICENSE)。
