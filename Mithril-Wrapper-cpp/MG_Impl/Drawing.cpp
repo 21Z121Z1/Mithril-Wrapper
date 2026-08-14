@@ -348,41 +348,6 @@ static bool prepare_draw(GLenum mode) {
         backend_set_cull_mode(0);  // VK_CULL_MODE_NONE
     }
 
-    // Bounded physical probe for the missing Minecraft GUI/HUD.  The GUI
-    // program is identified from its shader semantic rather than a numeric
-    // program id.  Keep this probe separate from the general winding fix:
-    // if GUI pixels appear only with culling disabled, the evidence points to
-    // a GUI raster-state mismatch rather than a texture, descriptor, or
-    // presentation failure.  This is diagnostic only and must not survive
-    // acceptance of a production fix.
-    bool is_gui_program = false;
-    for (GLuint sid : prog->attachedShaders) {
-        mithril::Shader* sh = mithril::state_get_shader(sid);
-        if (sh && sh->source.find("#define IS_GUI") != std::string::npos) {
-            is_gui_program = true;
-            break;
-        }
-    }
-    mithril::vk::Backend* guiProbeBackend = mithril::vk::backend();
-    static int guiCullProbe = 0;
-    if (is_gui_program && g_state->currentDrawFBO == 3 &&
-        guiProbeBackend && guiProbeBackend->frameGeneration >= 35 &&
-        guiCullProbe < 48) {
-        MITHRIL_LOG_WARN(
-            "guidiag",
-            "GUI CULL PROBE #%d prog=%u fbo=%u mode=0x%x "
-            "cullFace=%d cullMode=0x%x frontFace=0x%x viewport=%d,%d %dx%d "
-            "depthTest=%d blend=%d — forced VK_CULL_MODE_NONE",
-            guiCullProbe + 1, (unsigned)prog->id,
-            (unsigned)g_state->currentDrawFBO, (unsigned)mode,
-            g_state->cullFace ? 1 : 0, (unsigned)g_state->cullMode,
-            (unsigned)g_state->frontFace, (int)g_state->viewportX,
-            (int)g_state->viewportY, (int)g_state->viewportW,
-            (int)g_state->viewportH, g_state->depthTest ? 1 : 0,
-            g_state->blends[0].enabled ? 1 : 0);
-        backend_set_cull_mode(0);
-        ++guiCullProbe;
-    }
     backend_set_color_write_mask(
         g_state->colorMask[0][0], g_state->colorMask[0][1],
         g_state->colorMask[0][2], g_state->colorMask[0][3]);
