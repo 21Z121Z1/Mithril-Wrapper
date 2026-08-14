@@ -3,7 +3,7 @@ name: Vulkan hardening validation
 on:
   push:
     branches:
-      - fix/mobilegl-style-mc262-startup-preflight
+      - 'fix/**'
   workflow_dispatch:
 
 permissions:
@@ -49,6 +49,15 @@ jobs:
             -IMithril-Wrapper-cpp/include \
             -o tests/render_smoke tests/render_smoke.c -ldl
           ./tests/render_smoke "$DYLIB"
+
+      - name: Run synthetic Minecraft GUI smoke
+        run: |
+          DYLIB=$(find build -name 'libmithril.dylib' -type f | head -1)
+          export DYLD_LIBRARY_PATH="$(brew --prefix)/lib"
+          clang -std=c11 -O0 -Wall -Wextra \
+            -IMithril-Wrapper-cpp/include \
+            -o tests/mc_gui_smoke tests/mc_gui_smoke.c -ldl
+          ./tests/mc_gui_smoke "$DYLIB"
 
       - name: Run EGL fence-sync smoke
         run: |

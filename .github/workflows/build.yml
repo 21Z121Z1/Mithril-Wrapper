@@ -187,7 +187,7 @@ jobs:
           # contains MoltenVK-linked code by checking for an indirect symbol.
           otool -L "$DYLIB" | head -20
 
-      - name: Compile-check + contract-check GL smoke tests (gl_smoke.c + render_smoke.c)
+      - name: Compile-check + contract-check GL smoke tests
         run: |
           # 参照 Uniaball/Mithril-Wrapper 的 test 集成：测试文件必须始终可编译，
           # 且其断言的 GL 符号必须存在于 dylib 导出表（否则 dlopen 冒烟会失败）。
@@ -198,7 +198,9 @@ jobs:
             -IMithril-Wrapper-cpp/include tests/gl_smoke.c
           clang -std=c11 -fsyntax-only -Wall -Wextra \
             -IMithril-Wrapper-cpp/include tests/render_smoke.c
-          echo "syntax OK (gl_smoke.c + render_smoke.c)"
+          clang -std=c11 -fsyntax-only -Wall -Wextra \
+            -IMithril-Wrapper-cpp/include tests/mc_gui_smoke.c
+          echo "syntax OK (gl_smoke.c + render_smoke.c + mc_gui_smoke.c)"
           # 2) 契约断言：测试 dlopen 依赖的 GL 符号必须在导出表中
           NM_OUT=$(nm -gU "$DYLIB")
           missing=0
@@ -207,6 +209,8 @@ jobs:
                      glDisable glIsEnabled glEnablei glDisablei glIsEnabledi \
                      glClearColor glClear glDepthMask glColorMask glBlendFunc \
                      glCullFace glFrontFace glDepthFunc glFinish glFlush \
+                     glPixelStorei glBufferSubData glFenceSync glClientWaitSync \
+                     glDeleteSync \
                      glGenTextures glTexImage2D glTexStorage2D glTexSubImage2D \
                      glTexParameteri glGenerateMipmap glDrawArrays glDrawElements \
                      glGenFramebuffers glBindFramebuffer glFramebufferTexture2D \
@@ -329,3 +333,12 @@ jobs:
           set -e
           echo "=== render_smoke exit: $rc ==="
           [ "$rc" -eq 0 ]
+
+      - name: Run synthetic Minecraft GUI smoke (real GPU contract)
+        run: |
+          DYLIB=$(find build -name 'libmithril.dylib' -type f | head -1)
+          export DYLD_LIBRARY_PATH="$(brew --prefix)/lib"
+          clang -std=c11 -O0 -Wall -Wextra \
+            -IMithril-Wrapper-cpp/include \
+            -o tests/mc_gui_smoke tests/mc_gui_smoke.c -ldl
+          ./tests/mc_gui_smoke "$DYLIB"
