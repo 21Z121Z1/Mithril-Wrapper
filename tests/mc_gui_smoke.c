@@ -21,6 +21,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <EGL/egl.h>
 #include <GL/glcorearb.h>
 
 #ifndef GL_INVALID_INDEX
@@ -185,6 +186,77 @@ static void* open_mithril(int argc, char** argv) {
     return NULL;
 }
 
+static int setup_egl_context(void* handle) {
+    EGLDisplay (*getDisplay)(EGLNativeDisplayType) = NULL;
+    EGLBoolean (*initialize)(EGLDisplay, EGLint*, EGLint*) = NULL;
+    EGLBoolean (*bindAPI)(EGLenum) = NULL;
+    EGLBoolean (*getConfigs)(EGLDisplay, EGLConfig*, EGLint, EGLint*) = NULL;
+    EGLContext (*createContext)(EGLDisplay, EGLConfig, EGLContext,
+                                const EGLint*) = NULL;
+    EGLSurface (*createPbuffer)(EGLDisplay, EGLConfig, const EGLint*) = NULL;
+    EGLBoolean (*makeCurrent)(EGLDisplay, EGLSurface, EGLSurface,
+                              EGLContext) = NULL;
+
+#define LOAD_EGL(field, type, symbol) do { \
+    field = (type)dlsym(handle, symbol); \
+    if (!field) { \
+        fprintf(stderr, "missing EGL symbol %s\n", symbol); \
+        return 0; \
+    } \
+} while (0)
+    LOAD_EGL(getDisplay, EGLDisplay (*)(EGLNativeDisplayType), "eglGetDisplay");
+    LOAD_EGL(initialize, EGLBoolean (*)(EGLDisplay, EGLint*, EGLint*),
+             "eglInitialize");
+    LOAD_EGL(bindAPI, EGLBoolean (*)(EGLenum), "eglBindAPI");
+    LOAD_EGL(getConfigs, EGLBoolean (*)(EGLDisplay, EGLConfig*, EGLint, EGLint*),
+             "eglGetConfigs");
+    LOAD_EGL(createContext,
+             EGLContext (*)(EGLDisplay, EGLConfig, EGLContext, const EGLint*),
+             "eglCreateContext");
+    LOAD_EGL(createPbuffer,
+             EGLSurface (*)(EGLDisplay, EGLConfig, const EGLint*),
+             "eglCreatePbufferSurface");
+    LOAD_EGL(makeCurrent,
+             EGLBoolean (*)(EGLDisplay, EGLSurface, EGLSurface, EGLContext),
+             "eglMakeCurrent");
+#undef LOAD_EGL
+
+    EGLDisplay display = getDisplay(EGL_DEFAULT_DISPLAY);
+    EGLint major = 0, minor = 0;
+    if (display == EGL_NO_DISPLAY || !initialize(display, &major, &minor) ||
+        !bindAPI(EGL_OPENGL_API)) {
+        fprintf(stderr, "EGL initialization failed\n");
+        return 0;
+    }
+    EGLConfig config = NULL;
+    EGLint config_count = 0;
+    if (!getConfigs(display, &config, 1, &config_count) || config_count <= 0 ||
+        !config) {
+        fprintf(stderr, "EGL config query failed\n");
+        return 0;
+    }
+    const EGLint context_attrs[] = {
+        EGL_CONTEXT_MAJOR_VERSION, 3,
+        EGL_CONTEXT_MINOR_VERSION, 3,
+        EGL_NONE,
+    };
+    EGLContext context = createContext(display, config, EGL_NO_CONTEXT,
+                                       context_attrs);
+    const EGLint pbuffer_attrs[] = {
+        EGL_WIDTH, 378,
+        EGL_HEIGHT, 248,
+        EGL_NONE,
+    };
+    EGLSurface surface = createPbuffer(display, config, pbuffer_attrs);
+    if (context == EGL_NO_CONTEXT || surface == EGL_NO_SURFACE ||
+        !makeCurrent(display, surface, surface, context)) {
+        fprintf(stderr, "EGL context/surface setup failed\n");
+        return 0;
+    }
+    printf("EGL context active: %d.%d (pbuffer path)\n", major, minor);
+    return 1;
+}
+
 #define LOAD(field, type, symbol) do { \
     api->field = (type)dlsym(handle, symbol); \
     if (!api->field) { printf("FAIL: missing symbol %s\n", symbol); ++failures; } \
@@ -298,19 +370,14 @@ typedef struct Vertex {
     GLfloat x, y, u, v;
 } Vertex;
 
-static void make_quad(Api* api, GLuint* vao, GLuint* vbo, GLuint* ebo) {
-    static const Vertex vertices[4] = {
-        {-0.72f, -0.65f, 0.0f, 0.0f},
-        { 0.72f, -0.65f, 1.0f, 0.0f},
-        { 0.72f,  0.65f, 1.0f, 1.0f},
-        {-0.72f,  0.65f, 0.0f, 1.0f},
-    };
+static void make_quad_from_vertices(Api* api, GLuint* vao, GLuint* vbo,
+                                    GLuint* ebo, const Vertex vertices[4]) {
     static const GLushort indices[6] = {0, 1, 2, 0, 2, 3};
     api->genVertexArrays(1, vao);
     api->bindVertexArray(*vao);
     api->genBuffers(1, vbo);
     api->bindBuffer(GL_ARRAY_BUFFER, *vbo);
-    api->bufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
+    api->bufferData(GL_ARRAY_BUFFER, sizeof(Vertex) * 4, vertices, GL_STATIC_DRAW);
     api->vertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex),
                              (const void*)0);
     api->vertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex),
@@ -321,6 +388,29 @@ static void make_quad(Api* api, GLuint* vao, GLuint* vbo, GLuint* ebo) {
     api->bindBuffer(GL_ELEMENT_ARRAY_BUFFER, *ebo);
     api->bufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indices), indices,
                     GL_STATIC_DRAW);
+}
+
+static void make_quad(Api* api, GLuint* vao, GLuint* vbo, GLuint* ebo) {
+    static const Vertex vertices[4] = {
+        {-0.72f, -0.65f, 0.0f, 0.0f},
+        { 0.72f, -0.65f, 1.0f, 0.0f},
+        { 0.72f,  0.65f, 1.0f, 1.0f},
+        {-0.72f,  0.65f, 0.0f, 1.0f},
+    };
+    make_quad_from_vertices(api, vao, vbo, ebo, vertices);
+}
+
+static void make_logical_quad(Api* api, GLuint* vao, GLuint* vbo, GLuint* ebo) {
+    /* Minecraft GUI vertices use a top-left logical origin.  The projection
+     * below maps this rectangle into GL clip space while retaining the
+     * indexed position/UV layout used by the menu draw path. */
+    static const Vertex vertices[4] = {
+        { 64.0f,  48.0f, 0.0f, 0.0f},
+        {314.0f,  48.0f, 1.0f, 0.0f},
+        {314.0f, 200.0f, 1.0f, 1.0f},
+        { 64.0f, 200.0f, 0.0f, 1.0f},
+    };
+    make_quad_from_vertices(api, vao, vbo, ebo, vertices);
 }
 
 static void clear_target(Api* api) {
@@ -346,6 +436,8 @@ static const char* solid_fs =
     "#version 330 core\n"
     "out vec4 fragColor;\n"
     "void main(){ fragColor=vec4(0.92,0.08,0.03,1.0); }\n";
+
+static void identity(GLfloat matrix[16]);
 
 static void front_face_regression(Api* api, GLuint fbo, GLuint vao, GLuint ebo,
                                   GLuint solid_program) {
@@ -389,6 +481,81 @@ static void front_face_regression(Api* api, GLuint fbo, GLuint vao, GLuint ebo,
     CHECK(!nonblack(px), "user FBO GL_CCW + GL_FRONT culls CCW quad "
           "(rgba=%u,%u,%u,%u)", px[0], px[1], px[2], px[3]);
     api->cullFace(GL_BACK);
+}
+
+static void logical_projection_front_face_regression(
+    Api* api, GLuint fbo, GLuint vao, GLuint ebo, GLuint projection_program,
+    GLuint projection_buffer) {
+    (void)ebo;
+    GLuint projection_index = api->getUniformBlockIndex(projection_program,
+                                                         "Projection");
+    CHECK(projection_index != GL_INVALID_INDEX,
+          "logical GUI shader exposes named Projection block (index=%u)",
+          projection_index);
+    if (projection_index != GL_INVALID_INDEX)
+        api->uniformBlockBinding(projection_program, projection_index, 1);
+
+    /* A top-left logical GUI projection is the common Minecraft menu shape:
+     * y=0 is the top edge and y=height is the bottom edge.  This exercises a
+     * real non-identity matrix, a positive-height viewport, and the GL
+     * bottom-origin -> Vulkan top-origin conversion instead of only testing
+     * direct NDC vertices with an identity transform. */
+    GLfloat projection[16];
+    identity(projection);
+    projection[0] = 2.0f / 378.0f;
+    projection[5] = -2.0f / 248.0f;
+    projection[12] = -1.0f;
+    projection[13] = 1.0f;
+    api->bindBuffer(GL_UNIFORM_BUFFER, projection_buffer);
+    api->bufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(projection), projection);
+    api->bindBufferBase(GL_UNIFORM_BUFFER, 1, projection_buffer);
+
+    api->bindFramebuffer(GL_FRAMEBUFFER, fbo);
+    api->bindVertexArray(vao);
+    api->useProgram(projection_program);
+    api->viewport(17, 23, 341, 201);
+    api->scissor(17, 23, 341, 201);
+    api->enable(GL_SCISSOR_TEST);
+    api->disable(GL_BLEND);
+    api->disable(GL_DEPTH_TEST);
+    api->enable(GL_CULL_FACE);
+    api->cullFace(GL_BACK);
+
+    /* The logical top-left -> top-right -> bottom-right -> bottom-left order
+     * is clockwise after this projection, so GL_CW is the observable front
+     * face.  The inverse state must cull exactly the same pixels. */
+    api->frontFace(GL_CW);
+    clear_target(api);
+    api->drawElements(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, (const void*)0);
+    unsigned char px[4];
+    read_center(api, px);
+    CHECK(nonblack(px),
+          "logical GUI projection + GL_CW + GL_BACK keeps quad visible "
+          "(rgba=%u,%u,%u,%u)", px[0], px[1], px[2], px[3]);
+
+    api->frontFace(GL_CCW);
+    clear_target(api);
+    api->drawElements(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, (const void*)0);
+    read_center(api, px);
+    CHECK(!nonblack(px),
+          "logical GUI projection + GL_CCW + GL_BACK culls quad "
+          "(rgba=%u,%u,%u,%u)", px[0], px[1], px[2], px[3]);
+
+    api->frontFace(GL_CCW);
+    api->cullFace(GL_FRONT);
+    clear_target(api);
+    api->drawElements(GL_TRIANGLES, 6, GL_UNSIGNED_SHORT, (const void*)0);
+    read_center(api, px);
+    CHECK(nonblack(px),
+          "logical GUI projection + GL_CCW + GL_FRONT keeps quad visible "
+          "(rgba=%u,%u,%u,%u)", px[0], px[1], px[2], px[3]);
+    api->cullFace(GL_BACK);
+
+    /* The following GUI/descriptor checks intentionally reuse this UBO.  Put
+     * its projection back to identity so those checks do not inherit the
+     * logical-coordinate probe's matrix. */
+    identity(projection);
+    api->bufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(projection), projection);
 }
 
 static GLuint make_atlas(Api* api, const unsigned char pixels[16]) {
@@ -618,10 +785,12 @@ static void descriptor_stress(Api* api, GLuint fbo, GLuint vao, GLuint gui_progr
         GLsync fence = api->fenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
         GLenum wait = fence ? api->clientWaitSync(
             fence, GL_SYNC_FLUSH_COMMANDS_BIT, 1000000000ULL) : GL_TIMEOUT_EXPIRED;
-        CHECK(frame != 0 || fence != NULL, "descriptor stress creates a GPU fence");
-        CHECK(frame != 0 || wait == GL_ALREADY_SIGNALED ||
+        CHECK(fence != NULL, "descriptor stress frame %d creates a GPU fence",
+              frame);
+        CHECK(wait == GL_ALREADY_SIGNALED ||
               wait == GL_CONDITION_SATISFIED,
-              "descriptor stress fence completes (result=0x%x)", wait);
+              "descriptor stress frame %d fence completes (result=0x%x)",
+              frame, wait);
         if (fence) api->deleteSync(fence);
         if ((frame % 16) == 0) {
             unsigned char px[4];
@@ -635,6 +804,10 @@ static void descriptor_stress(Api* api, GLuint fbo, GLuint vao, GLuint gui_progr
 int main(int argc, char** argv) {
     void* handle = open_mithril(argc, argv);
     if (!handle) return 2;
+    if (argc > 2 && strcmp(argv[2], "--egl") == 0 &&
+        !setup_egl_context(handle)) {
+        return 2;
+    }
     Api api;
     load_api(handle, &api);
     if (failures) {
@@ -661,8 +834,17 @@ int main(int argc, char** argv) {
     if (!make_target(&api, &fbo, &color)) return 1;
     GLuint vao = 0, vbo = 0, ebo = 0;
     make_quad(&api, &vao, &vbo, &ebo);
+    GLuint logical_vao = 0, logical_vbo = 0, logical_ebo = 0;
+    make_logical_quad(&api, &logical_vao, &logical_vbo, &logical_ebo);
 
     GLuint solid_program = make_program(&api, solid_vs, solid_fs, "solid");
+    const char* logical_projection_vs =
+        "#version 330 core\n"
+        "layout(location=0) in vec2 aPos;\n"
+        "layout(std140) uniform Projection { mat4 projection; };\n"
+        "void main(){ gl_Position=projection*vec4(aPos,0.0,1.0); }\n";
+    GLuint logical_projection_program = make_program(
+        &api, logical_projection_vs, solid_fs, "logical-projection");
     const char* sampler_vs =
         "#version 330 core\n"
         "layout(location=0) in vec2 aPos;\n"
@@ -690,7 +872,8 @@ int main(int argc, char** argv) {
         "void main(){ float keep=projectionBlock.projection[0][0]*0.000001; "
         "fragColor=texture(atlas,vUV)*tint+vec4(keep); }\n";
     GLuint gui_program = make_program(&api, gui_vs, gui_fs, "gui");
-    if (!solid_program || !sampler_program || !gui_program) return 1;
+    if (!solid_program || !logical_projection_program || !sampler_program ||
+        !gui_program) return 1;
 
     GLuint dynamic_buffer = 0, projection_buffer = 0;
     make_ubo(&api, &dynamic_buffer, &projection_buffer);
@@ -701,6 +884,9 @@ int main(int argc, char** argv) {
     GLuint atlas = make_atlas(&api, atlas_pixels);
 
     front_face_regression(&api, fbo, vao, ebo, solid_program);
+    logical_projection_front_face_regression(
+        &api, fbo, logical_vao, logical_ebo, logical_projection_program,
+        projection_buffer);
     pbo_regression(&api, fbo, vao, ebo, sampler_program);
     gui_regression(&api, fbo, vao, ebo, gui_program, atlas, dynamic_buffer);
     descriptor_stress(&api, fbo, vao, gui_program, atlas, dynamic_buffer);
