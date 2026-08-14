@@ -347,12 +347,23 @@ bool create_buffer(BufferEntry& out, VkDeviceSize size,
                 vkUnmapMemory(b->device, out.memory);
             }
         }
-    } else if (persistent) {
-        // glBufferStorage with a NULL data pointer + MAP_PERSISTENT: keep the
-        // mapping live so the app can write through glMapBufferRange later.
-        if (vkMapMemory(b->device, out.memory, 0, size, 0, &dst) == VK_SUCCESS) {
-            out.mapped = dst;
-            out.persistentlyMapped = true;
+    } else {
+        // FIX (GPU Address Fault 根因 — 未初始化 buffer 内容):
+        // data==nullptr 时（DRAW-VB-GROW 扩展 buffer、glBufferData 首次创建等），
+        // buffer 内存内容是未初始化的（垃圾值）。GPU 读取这些垃圾顶点/索引数据时，
+        // 垃圾索引值可能指向 vertex buffer 之外的地址 → GPU Address Fault
+        // (kIOGPUCommandBufferCallbackErrorPageFault) → VK_ERROR_DEVICE_LOST。
+        //
+        // 修复：zero-initialize buffer 内容。GPU 读到零值索引/顶点不会越界，
+        // 后续 glBufferData 会上传正确数据覆盖零值区域。
+        if (vkMapMemory(b->device, out.memory, 0, size, 0, &dst) == VK_SUCCESS && dst) {
+            std::memset(dst, 0, (size_t)size);
+            if (persistent) {
+                out.mapped = dst;
+                out.persistentlyMapped = true;
+            } else {
+                vkUnmapMemory(b->device, out.memory);
+            }
         }
     }
     out.size = paddedSize;
