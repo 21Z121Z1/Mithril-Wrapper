@@ -345,7 +345,13 @@ if(APPLE)
     endif()
     target_compile_definitions(${PROJECT_NAME} PRIVATE MITHRIL_VULKAN=1)
 else()
-    target_link_libraries(${PROJECT_NAME} PRIVATE ${CMAKE_DL_LIBS})
+    # Headless/Linux DirectVulkan calls the Vulkan C API directly. Shared-library
+    # linkers allow unresolved symbols by default, so linking only libdl produces
+    # a libmithril.so that builds successfully but fails at dlopen() with unresolved
+    # vk* entry points. Bind the standard Vulkan loader explicitly; Apple continues
+    # to get those symbols from MoltenVK above.
+    find_package(Vulkan REQUIRED)
+    target_link_libraries(${PROJECT_NAME} PRIVATE Vulkan::Vulkan ${CMAKE_DL_LIBS})
 endif()
 
 # VK_ENABLE_BETA_EXTENSIONS: vulkan_core.h only includes vulkan_beta.h (which
