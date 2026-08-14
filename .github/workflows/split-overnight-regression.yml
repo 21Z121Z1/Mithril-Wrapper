@@ -52,7 +52,7 @@ jobs:
               '    printf("OVERNIGHT REGRESSION: %d checks, %d failures\\n",checks,failures);\n', 'ubo')
           s = s.replace('    dlclose(h); return failures ? 1 : 0;\n}',
                         '    dlclose(h); return failures ? 1 : 0;\n#undef RUN_CASE\n}\n')
-          p.write_text(s)
+          p.write_text(s.rstrip() + '\n')
           PY
 
       - name: Split triage workflow into four named regression steps
@@ -65,7 +65,7 @@ jobs:
           new = '''      - name: Overnight regression - Mithril GL symbol ownership\n        env:\n          MITHRIL_DEBUG: '1'\n          MITHRIL_OVERNIGHT_CASE: symbol\n        run: ./tests/overnight_regression_smoke_triage "$MITHRIL_LIB"\n\n      - name: Overnight regression - user-FBO front-face mapping\n        env:\n          MITHRIL_DEBUG: '1'\n          MITHRIL_OVERNIGHT_CASE: frontface\n        run: ./tests/overnight_regression_smoke_triage "$MITHRIL_LIB"\n\n      - name: Overnight regression - PBO offset texture upload\n        env:\n          MITHRIL_DEBUG: '1'\n          MITHRIL_OVERNIGHT_CASE: pbo\n        run: ./tests/overnight_regression_smoke_triage "$MITHRIL_LIB"\n\n      - name: Overnight regression - cross-stage shared UBO\n        env:\n          MITHRIL_DEBUG: '1'\n          MITHRIL_OVERNIGHT_CASE: ubo\n        run: ./tests/overnight_regression_smoke_triage "$MITHRIL_LIB"\n'''
           if s.count(old) != 1:
               raise SystemExit(f'triage step marker mismatch: {s.count(old)}')
-          p.write_text(s.replace(old, new))
+          p.write_text(s.replace(old, new).rstrip() + '\n')
           PY
           git diff --check
 
