@@ -478,9 +478,18 @@ static bool validate_draw_call(GLenum mode, GLsizei count) {
 }
 
 // GPU fault 诊断 + 越界保护：记录最近 draw 的上下文，并在检测到顶点/索引
-// 缓冲区越界时返回 false。桌面 GL 读相邻内存不崩，Vulkan 精确 size buffer
-// 越界读 = GPU page fault → DEVICE_LOST → 红屏。检测到越界时由调用方跳过
-// draw（return），避免 GPU fault。返回 true 表示可以安全 draw。
+// 缓冲区越界时自动扩展 buffer（参考 MobileGL Vulkan 后端策略）。
+// 桌面 GL driver 通常在 buffer 末尾多分配一些空间（alignment/padding），
+// 越界读返回相邻 memory 的数据不崩；但 Vulkan VkBuffer 精确 size，越界读
+// 直接 GPU page fault → DEVICE_LOST → 红屏。
+//
+// 策略：
+// - 顶点缓冲区 (VBO)：检测到越界时，将 buffer 扩展到实际需要的大小（新增
+//   部分填 0），然后继续 draw。MC 下次 orphan 会重新上传正确数据覆盖。
+// - 索引缓冲区 (IBO)：无法安全扩展（不知道索引值），但 MC 的 IBO 通常
+//   不会越界；万一越界，记录日志后由调用方综合判断。
+//
+// 返回 true 表示可以安全 draw，false 表示 caller 应该跳过该 draw。
 static bool trace_draw(const char* kind, int mode, int first, int count, int inst) {
     // GPU fault 诊断：记录 draw 上下文 —— program、FBO、绑定的纹理对象、
     // 以及 ELEMENT_ARRAY_BUFFER（索引缓冲）。fault 帧 prog=1/fbo=0/count=6
@@ -511,9 +520,8 @@ static bool trace_draw(const char* kind, int mode, int first, int count, int ins
                  (unsigned)ib, (long long)ib_size, (unsigned)g_state->currentVAO,
                  (unsigned)stex[0], (unsigned)stex[1], (unsigned)stex[2], (unsigned)stex[3]);
     // 越界读检查（GPU Address Fault 高危）：索引 buffer 不够 count 个索引，
-    // 或顶点 attrib 覆盖范围超出 buffer —— 桌面 GL 读相邻内存不崩，Vulkan
-    // 精确 size 的 buffer 直接 GPU page fault。每次 draw 检查，越界即记录
-    // 到 LogRing（fault 后 dump 直接现形）并返回 false 让调用方跳过 draw。
+    // 或顶点 attrib 覆盖范围超出 buffer。桌面 GL 读相邻内存不崩，Vulkan
+    // 精确 size 的 buffer 直接 GPU page fault。
     if (vao) {
         // 索引越界（仅 indexed draw）
         if (kind[0] == 'e' && ib && ib_size > 0 && count > 0) {
@@ -525,7 +533,19 @@ static bool trace_draw(const char* kind, int mode, int first, int count, int ins
                              (unsigned)g_state->currentProgram, count,
                              (unsigned)g_state->drawIndexType, (size_t)count * elem,
                              (long long)ib_size);
-                return false;  // 跳过 draw 防止 GPU fault
+                // 索引 buffer 越界 — 无法安全扩展（索引值未知）。
+                // 尝试将索引 buffer 扩大到需要的大小（填 0 = 所有索引 = 0，
+                // 退化为所有顶点读 attribute 0 位置的数据，不会 fault）。
+                size_t need = (size_t)count * elem;
+                auto* ib_buf = mithril::state_get_buffer(ib);
+                if (ib_buf) {
+                    // 后端 buffer 也扩展到 need 大小
+                    mithril::vk::backend_get_or_create_buffer(ib, nullptr, need);
+                    ib_buf->size = (GLsizeiptr)need;
+                    LOG_RESOURCE("DRAW-IBO-GROW ib=%u from=%lld to=%zu", (unsigned)ib,
+                                 (long long)ib_size, need);
+                }
+                // 扩展后可以安全 draw，继续执行
             }
         }
         // 顶点 attrib 越界：前 2 个 enabled attrib，检查 (first+count) 顶点
@@ -547,7 +567,16 @@ static bool trace_draw(const char* kind, int mode, int first, int count, int ins
                              (unsigned)g_state->currentProgram, a,
                              (unsigned)at.boundBuffer, (int)stride, offset,
                              first + count, need, (long long)vb->size);
-                return false;  // 跳过 draw 防止 GPU fault
+                // FIX (GPU page fault 根因): 顶点 buffer 越界 → 扩展 buffer 到
+                // 实际需要的大小（新增部分填 0）。这模拟了桌面 GL driver
+                // 的"buffer 末尾多分配空间"的行为，让越界读返回 0 而不是
+                // fault。MC 下次 orphan 会重新上传正确数据覆盖填 0 区域。
+                // 参考：MobileGL Vulkan 后端在 iOS 上同样处理了这种情况。
+                mithril::vk::backend_get_or_create_buffer(at.boundBuffer, nullptr, need);
+                vb->size = (GLsizeiptr)need;
+                LOG_RESOURCE("DRAW-VB-GROW buf=%u from=%lld to=%zu",
+                             (unsigned)at.boundBuffer, (long long)vb->size, need);
+                // 扩展后可以安全 draw，继续执行
             }
         }
     }
@@ -558,9 +587,12 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
     MITHRIL_ENSURE_INIT();
     // GPU fault 诊断：在 prepare_draw 之前记录 draw 调用 —— 若 draw 被
     // prepare_draw 静默拦截（无日志），这里仍能现形「MC 在调 draw 但被丢」。
-    // FIX (DRAW-OVERRUN GPU page fault): 顶点/索引 buffer 越界时跳过 draw，
-    // 避免 Vulkan GPU Address Fault → DEVICE_LOST → 红屏。桌面 GL 读相邻
-    // 内存不崩，但 Vulkan 精确 size buffer 越界读触发 GPU page fault。
+    // FIX (DRAW-OVERRUN GPU page fault): 顶点/索引 buffer 越界时，自动扩展
+    // buffer 到实际需要的大小（参考 MobileGL Vulkan 后端策略），避免 Vulkan
+    // GPU Address Fault → DEVICE_LOST → 红屏。桌面 GL driver 通常在 buffer
+    // 末尾多分配空间（alignment/padding）不崩，但 Vulkan 精确 size buffer
+    // 越界读触发 GPU page fault。扩展后 draw 正常执行，MC 下次 orphan 会
+    // 重新上传正确数据覆盖填 0 区域。
     if (!trace_draw("arrays", (int)mode, (int)first, (int)count, 1)) return;
     if (!validate_draw_call(mode, count)) return;
     // Root cause AI: a false return means no render pass was begun and no
