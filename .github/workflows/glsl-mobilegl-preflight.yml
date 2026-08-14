@@ -1,0 +1,145 @@
+name: GLSL MobileGL preflight closure
+
+on:
+  push:
+    branches:
+      - refactor/glsl-mobilegl-preflight-20260814
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: glsl-mobilegl-preflight-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  port-and-validate:
+    runs-on: macos-26
+    timeout-minutes: 90
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Fetch proven device-debug fixes
+        run: |
+          git fetch origin fix/directvulkan-mc262-gui-closure codex/directvulkan-overnight-recovery-20260814
+
+      - name: Port only fixes missing from upstream MobileGL-style branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Apply the three isolated compatibility fixes as real three-way
+          # cherry-picks, but keep them in one pending worktree change. This
+          # deliberately avoids merging the divergent DirectVulkan branch.
+          if ! grep -q 'sharedUboBindings' Mithril-Wrapper-cpp/MG_Impl/Shader.cpp; then
+            git cherry-pick --no-commit b42e729abbd3321aca9d0a378a52bab6877a056c
+          fi
+          if ! grep -q 'resolve_unpack_pixels' Mithril-Wrapper-cpp/MG_Impl/Texture.cpp; then
+            git cherry-pick --no-commit 9624b43cab95371799212fa08de1a9403e5a7858
+          fi
+          if ! grep -q 'backend_device_max_sampler_anisotropy' Mithril-Wrapper-cpp/MG_Impl/Getter.cpp; then
+            git cherry-pick --no-commit ef9a4d03aab8152e4b0afe7e3e7174a536ad2979
+          fi
+
+          # Port only the iOS winding hunk from the GUI-closure commit. The
+          # rest of that commit belongs to the older divergent branch and is
+          # intentionally not merged wholesale.
+          if ! grep -q 'TARGET_OS_IPHONE' Mithril-Wrapper-cpp/MG_Impl/Drawing.cpp; then
+            git diff 83295493a082e02ca6618cc7e3e4a44c259cea87^ 83295493a082e02ca6618cc7e3e4a44c259cea87 -- \
+              Mithril-Wrapper-cpp/MG_Impl/Drawing.cpp > /tmp/ios-winding.patch
+            git apply --3way /tmp/ios-winding.patch
+          fi
+
+          # Bring forward the two focused regression programs. They exercise
+          # the exact device failures from the 2026-08-14 rollout: symbol
+          # ownership, user-FBO winding, PBO offsets, cross-stage UBOs, and
+          # the synthetic Minecraft GUI/EGL render path.
+          if [ ! -f tests/overnight_regression_smoke.c ]; then
+            git show d5de244f35d0af62473106b2ea122d58d4a025d0:tests/overnight_regression_smoke.c > tests/overnight_regression_smoke.c
+          fi
+          if [ ! -f tests/mc_gui_smoke.c ]; then
+            git show 83295493a082e02ca6618cc7e3e4a44c259cea87:tests/mc_gui_smoke.c > tests/mc_gui_smoke.c
+          fi
+
+          git diff --check
+          git status --short
+
+      - name: Install Vulkan loader and MoltenVK
+        run: brew install vulkan-loader molten-vk
+
+      - name: Configure native macOS build
+        run: |
+          cmake -S . -B build-preflight \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_C_FLAGS='-Wno-error' \
+            -DCMAKE_CXX_FLAGS='-Wno-error'
+
+      - name: Build native Mithril
+        run: cmake --build build-preflight --config RelWithDebInfo --target mithril -j$(sysctl -n hw.ncpu)
+
+      - name: Run existing real-GPU render smoke
+        run: |
+          set -euo pipefail
+          DYLIB=$(find build-preflight -name 'libmithril.dylib' -type f | head -1)
+          test -n "$DYLIB"
+          export DYLD_LIBRARY_PATH="$(brew --prefix)/lib"
+          export MITHRIL_DEBUG=1
+          clang -std=c11 -O0 -Wall -Wextra -IMithril-Wrapper-cpp/include \
+            -o /tmp/render_smoke tests/render_smoke.c -ldl
+          /tmp/render_smoke "$DYLIB"
+
+      - name: Run overnight regression smoke
+        run: |
+          set -euo pipefail
+          DYLIB=$(find build-preflight -name 'libmithril.dylib' -type f | head -1)
+          export DYLD_LIBRARY_PATH="$(brew --prefix)/lib"
+          export MITHRIL_DEBUG=1
+          clang -std=c11 -O0 -Wall -Wextra -IMithril-Wrapper-cpp/include \
+            -o /tmp/overnight_regression_smoke tests/overnight_regression_smoke.c -ldl
+          /tmp/overnight_regression_smoke "$DYLIB"
+
+      - name: Run synthetic Minecraft GUI smoke headless and EGL
+        run: |
+          set -euo pipefail
+          DYLIB=$(find build-preflight -name 'libmithril.dylib' -type f | head -1)
+          export DYLD_LIBRARY_PATH="$(brew --prefix)/lib"
+          export MITHRIL_DEBUG=1
+          clang -std=c11 -O0 -Wall -Wextra -IMithril-Wrapper-cpp/include \
+            -o /tmp/mc_gui_smoke tests/mc_gui_smoke.c -ldl
+          /tmp/mc_gui_smoke "$DYLIB"
+          /tmp/mc_gui_smoke "$DYLIB" --egl
+
+      - name: Verify port invariants
+        run: |
+          set -euo pipefail
+          grep -q 'sharedUboBindings' Mithril-Wrapper-cpp/MG_Impl/Shader.cpp
+          grep -q 'type_description->type_name' Mithril-Wrapper-cpp/MG_Impl/Shader.cpp
+          grep -q 'resolve_unpack_pixels' Mithril-Wrapper-cpp/MG_Impl/Texture.cpp
+          grep -q 'backend_device_max_sampler_anisotropy' Mithril-Wrapper-cpp/MG_Impl/Getter.cpp
+          grep -q 'TARGET_OS_IPHONE' Mithril-Wrapper-cpp/MG_Impl/Drawing.cpp
+          git diff --check
+
+      - name: Commit validated port if needed
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet && git diff --cached --quiet && [ -z "$(git ls-files --others --exclude-standard)" ]; then
+            echo 'No uncommitted port changes; this is the post-port validation run.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Mithril-Wrapper-cpp/MG_Impl/Shader.cpp \
+                  Mithril-Wrapper-cpp/MG_Impl/Texture.cpp \
+                  Mithril-Wrapper-cpp/MG_Impl/Getter.cpp \
+                  Mithril-Wrapper-cpp/MG_Impl/Drawing.cpp \
+                  Mithril-Wrapper-cpp/MG_Backend/Backend.h \
+                  Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Device.cpp \
+                  tests/overnight_regression_smoke.c tests/mc_gui_smoke.c
+          git diff --cached --check
+          git commit -m 'fix: port proven Minecraft 26.2 preflight regressions'
+          git push origin HEAD:refactor/glsl-mobilegl-preflight-20260814
