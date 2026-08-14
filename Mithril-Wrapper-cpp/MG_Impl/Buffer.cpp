@@ -137,7 +137,14 @@ void glBufferData(GLenum target, GLsizeiptr size, const void* data, GLenum usage
         alloc_size = (alloc_size + 255) & ~(size_t)255;
     }
     b->size  = size;
-    b->allocSize = (GLsizeiptr)alloc_size;  // 实际分配大小（含 padding），用于越界检查
+    // FIX (分配风暴): MC 每帧调 glBufferData 走 orphan-rename 流式上传，
+    // 每次都把 allocSize 重置回原始大小 → trace_draw 检测到越界 → auto-grow
+    // 再扩展 → 新的 VkBuffer 分配 → 上一帧的旧 buffer 还没 GPU 完成就被
+    // defer_destroy → 每帧反复 alloc/free → 最终 OOM → DEVICE_LOST 红屏。
+    // 解决：allocSize 只增不减 —— 一旦 auto-grow 扩展过就永远保持较大容量，
+    // glBufferData 只把新数据写进现有（足够大的）buffer，不再 shrink。
+    if ((size_t)b->allocSize > alloc_size) alloc_size = (size_t)b->allocSize;
+    b->allocSize = (GLsizeiptr)alloc_size;
     b->usage = usage;
     b->immutable = false;  // glBufferData resets immutable flag
     b->storageFlags = 0;
@@ -170,6 +177,9 @@ void glBufferStorage(GLenum target, GLsizeiptr size, const void* data, GLbitfiel
     b->data.assign((size_t)size, 0);
     if (data && size > 0) std::memcpy(b->data.data(), data, (size_t)size);
 
+    // allocSize 只增不减（同 glBufferData）
+    if ((size_t)b->allocSize < (size_t)size) b->allocSize = size;
+
     // If GL_MAP_PERSISTENT_BIT is set, create a persistently-mapped VkBuffer.
     // The backend create_buffer (Resources.cpp) handles vkMapMemory + persistent
     // mapping when persistent=true and data != NULL or data == NULL with persistent.
@@ -178,13 +188,13 @@ void glBufferStorage(GLenum target, GLsizeiptr size, const void* data, GLbitfiel
     if (persistent) {
         // Use backend_create_buffer_storage for persistent mapping (GL 4.4 path).
         // Upload initial data via glBufferSubData after creation.
-        backend_create_buffer_storage(b->id, (VkDeviceSize)size, 0, persistent, coherent);
+        backend_create_buffer_storage(b->id, (VkDeviceSize)b->allocSize, 0, persistent, coherent);
         if (data && size > 0) {
             backend_buffer_upload(b->id, 0, data, (size_t)size);
         }
     } else {
         // Non-persistent: use regular glBufferData path
-        backend_get_or_create_buffer(b->id, data && size ? b->data.data() : nullptr, (size_t)size);
+        backend_get_or_create_buffer(b->id, data && size ? b->data.data() : nullptr, (size_t)b->allocSize);
     }
 }
 
