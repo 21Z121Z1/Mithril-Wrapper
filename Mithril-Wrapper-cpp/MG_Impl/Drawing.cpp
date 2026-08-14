@@ -550,6 +550,12 @@ static bool trace_draw(const char* kind, int mode, int first, int count, int ins
         }
         // 顶点 attrib 越界：前 2 个 enabled attrib，检查 (first+count) 顶点
         // 覆盖范围是否超出其 buffer（stride 已知时）
+        // Indexed draw count is an index count, not a vertex count. Using it
+        // below as first+count produced false VBO overruns for ordinary indexed
+        // batches and repeatedly recreated the same buffers in one frame. The
+        // index-buffer byte range was checked above; without decoding the index
+        // values there is no valid vertex range to infer here.
+        if (kind[0] == 'e') return true;
         int checked = 0;
         for (int a = 0; a < mithril::kMaxVertexAttribs && checked < 2; ++a) {
             const mithril::VertexAttrib& at = vao->attribs[a];

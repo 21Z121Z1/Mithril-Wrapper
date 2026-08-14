@@ -23,16 +23,10 @@ struct BufferEntry {
     // MAP_PERSISTENT). In that case `mapped` is valid for the buffer's whole
     // lifetime and glMapBufferRange returns a slice of it directly.
     bool           persistentlyMapped = false;
-    // FIX (GPU page fault 根因 - buffer 覆写竞争): monotonic serial of the
-    // vkQueueSubmit that will carry this buffer's most recent CPU-side write.
-    // A buffer is "possibly in flight" while lastWriteSerial > completedSerial
-    // (see Backend::submitSerial / completedSerial in Device.h). In-place
-    // writes (glBufferData / glBufferSubData / map-flush) into an in-flight
-    // buffer race the GPU's vertex/index fetches — the GPU can read torn
-    // indices and fault (kIOGPUCommandBufferCallbackErrorPageFault). The
-    // write paths in Resources.cpp consult this field and switch to
-    // orphan-rename / staged GPU copy (MobileGL's IsResourceBusy pattern)
-    // when the buffer may still be in use.
+    // Submit serial associated with the most recently scheduled upload. Buffer
+    // updates no longer use this as a safety test: current-command-buffer reads
+    // are not represented by a write serial, so all updates to existing storage
+    // are ordered through staged copies in Resources.cpp.
     uint64_t       lastWriteSerial = 0;
 };
 

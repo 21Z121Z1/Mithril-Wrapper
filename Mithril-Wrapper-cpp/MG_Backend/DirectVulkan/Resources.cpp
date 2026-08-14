@@ -24,25 +24,12 @@ std::unordered_map<GLuint, TextureEntry>& texture_table() { static std::unordere
 std::unordered_map<GLuint, SamplerEntry>& sampler_table() { static std::unordered_map<GLuint, SamplerEntry> t; return t; }
 
 // ===========================================================================
-// FIX (GPU page fault 根因 - buffer 覆写竞争, P0):
-// CPU 侧覆写一个 GPU 仍在读取的 buffer（顶点/索引缓冲）会让 GPU 读到撕裂
-// 的数据 —— 撕裂的索引值把顶点取址带到 buffer 之外 → GPU Address Fault
-// (kIOGPUCommandBufferCallbackErrorPageFault)。Minecraft 每帧都会更新 VBO，
-// 首帧安全（无在飞工作），第二帧起上一帧的 command buffer 还在执行时 CPU
-// 就开始覆写 → 确定性崩溃，与线上症状完全吻合。
-//
-// 修复（深度对照 MobileGL VkBufferManager::IsResourceBusy / OnRespecify /
-// OnSubData / StagedRangeCopy, VkBufferManager.cpp:200-427）:
-//   - glBufferData（整块重指定，GL 有 discard 语义）: buffer 可能在飞时
-//     orphan-rename（旧存储延迟销毁 + 全新分配），空闲时才原地更新。
-//   - glBufferSubData / map-flush（部分写入）: 在飞时走 staged GPU copy
-//     （数据先进 per-frame staging arena，再 vkCmdCopyBuffer 到目标），
-//     保持 GL 帧内顺序且绝不覆写 GPU 正在取的字节。
-//
-// 在飞判定复用现有 submitSerial/completedSerial 水位线（Device.cpp 的
-// refresh_completed_serials）：buffer 的最后一次写入将由第 N 次
-// vkQueueSubmit 携带（lastWriteSerial = submitSerial+1），当且仅当
-// completedSerial >= N（该次提交已在 GPU 完成）时才允许原地写入。
+// CPU writes to mapped vertex/index storage are unsafe once a recorded or
+// submitted draw can reference that allocation. A write-serial heuristic is
+// insufficient because it does not track reads already recorded in the current
+// command buffer. Existing allocations therefore receive both full and partial
+// updates through stage_buffer_range_copy. The queue barriers preserve GL call
+// order without the VkBuffer allocation/free storm caused by orphan-renaming.
 // ===========================================================================
 
 // GL buffer 对象无类型 —— 同一个名字今天绑 GL_ARRAY_BUFFER，明天绑
@@ -54,12 +41,6 @@ static constexpr VkBufferUsageFlags kAllGlBufferUsage =
     VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
     VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
     VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-
-// 该 buffer 是否可能仍被 GPU 引用（其最近一次 CPU 写入尚未完成在飞）。
-// 非阻塞：backend_last_completed_serial() 内部只做 vkGetFenceStatus 轮询。
-static inline bool buffer_maybe_inflight(const BufferEntry& e) {
-    return e.lastWriteSerial > backend_last_completed_serial();
-}
 
 // 标记一次 CPU 写入：它将被"下一次 vkQueueSubmit"携带。
 static inline void stamp_buffer_write(BufferEntry& e) {
@@ -1136,82 +1117,61 @@ VkBuffer backend_get_or_create_buffer(GLuint name, const void* data, size_t size
     if (!b->initialized || name == 0 || size == 0) return VK_NULL_HANDLE;
     auto& tbl = mithril::vk::buffer_table();
     auto it = tbl.find(name);
-    // FIX (显存碎片化/持续增长): 当 buffer 已存在且大小足够时，优先原地更新
-    // （vkMapMemory + memcpy），而不是 orphan 旧 buffer 重新分配。
-    // 原实现要求 !data 才复用，但 glBufferData 和 UBO 更新都传 data != nullptr，
-    // 导致每次调用都走 orphan 路径（destroy + realloc），每帧产生上百次
-    // vkCreateBuffer/vkAllocateMemory 和延迟销毁，在 iPhone SE 3 等显存紧张
-    // 设备上导致 VK_ERROR_OUT_OF_DEVICE_MEMORY。
-    //
-    // FIX (GPU page fault 根因 - 覆写竞争): 原地更新必须加"在飞"检查。
-    // 若 GPU 仍在读取该 buffer（上一次写入的提交未完成），原地 memcpy 会让
-    // GPU 读到撕裂的顶点/索引数据 → GPU Address Fault。在飞时改为
-    // orphan-rename（MobileGL OnRespecify 的 busy 分支）：glBufferData 有
-    // discard 语义，无需拷贝旧内容，直接换新存储。空闲时才走快速原地路径。
+    // Reuse a large-enough allocation, but preserve GL command ordering. A
+    // recorded draw only stores the VkBuffer handle; changing its mapped memory
+    // before queue execution makes every earlier draw observe the last upload
+    // and races any previous submission still reading that allocation. Record a
+    // staged copy instead. This keeps one destination allocation (no orphan
+    // churn) while the transfer barriers in stage_buffer_range_copy serialize
+    // draw A -> upload B -> draw B on the Vulkan queue.
     if (it != tbl.end() && it->second.size >= (VkDeviceSize)size) {
-        // FIX (GPU Address Fault 根因 — 覆写竞争 + 撕裂索引越界):
-        // MC 每帧对同一 buffer 调 glBufferData 上传相同大小数据。若直接原地
-        // 覆写 (map + memcpy + unmap)，GPU 可能读到半新半旧数据（撕裂），
-        // 撕裂的索引值把顶点取址带到 buffer 之外 → GPU page fault。
-        //
-        // 两条路径（参照 MobileGL VkBufferManager OnRespecify busy 分支）：
-        //   A. GPU 空闲（不在飞）：原地覆写（最快，零分配）
-        //   B. GPU 在飞：orphan 路径（分配新 VkBuffer，旧的延迟销毁）
-        //
-        // 原实现的问题：orphan recycling 风暴（每帧都 alloc/free 即使大小不变）。
-        // 本修复通过正确区分空闲/在飞状态避免：仅在真正需要时才 orphan。
-        if (data && size > 0 && mithril::vk::buffer_maybe_inflight(it->second)) {
-            // ---- 路径 B: GPU 还在读这个 buffer → orphan（换新 buffer）----
-            LOG_RESOURCE("buf ORPHAN name=%u size=%llu (inflight lastWrite=%llu)",
-                         (unsigned)name, (unsigned long long)size,
-                         (unsigned long long)it->second.lastWriteSerial);
-            // FIX (OOM 安全链): 先 create 成功再 defer 旧的。若 create 失败，
-            // 保留旧 buffer（容量足够但句柄有效），绝不返回 NULL。
-            mithril::vk::BufferEntry e;
-            if (!mithril::vk::create_buffer(e, size, mithril::vk::kAllGlBufferUsage, data, false)) {
-                static int orphanOomLog = 0;
-                if (orphanOomLog <= 8 || orphanOomLog % 50 == 0) {
-                    MITHRIL_LOG_ERROR("vk", "create_buffer FAILED (orphan name=%u size=%llu) — "
-                                      "keeping OLD buffer handle to avoid NULL-bind fault",
-                                      (unsigned)name, (unsigned long long)size);
-                }
-                orphanOomLog++;
-                LOG_RESOURCE("buf CREATE-FAIL(orphan name=%u size=%llu keep-old)",
-                             (unsigned)name, (unsigned long long)size);
-                return it->second.buffer;  // 旧 buffer 未 defer（仍有效）
-            }
-            mithril::vk::defer_destroy_buffer_entry(it->second);
-            mithril::vk::stamp_buffer_write(e);
-            tbl[name] = e;
-            return e.buffer;
-        }
-        // ---- 路径 A: GPU 已读完这个 buffer → 原地覆写（安全）----
         if (data && size > 0) {
+            if (mithril::vk::stage_buffer_range_copy(it->second, 0, data,
+                                                     (VkDeviceSize)size)) {
+                LOG_RESOURCE("buf STAGED name=%u size=%llu (cap=%llu)",
+                             (unsigned)name, (unsigned long long)size,
+                             (unsigned long long)it->second.size);
+                mithril::vk::stamp_buffer_write(it->second);
+                return it->second.buffer;
+            }
+
+            // If staging allocation or command recording fails, flush and wait
+            // before touching mapped memory. Device idle proves that neither a
+            // submitted draw nor one from the just-flushed command buffer can
+            // still read this allocation.
+            mithril::vk::safe_device_wait_idle();
             void* dst = nullptr;
             if (vkMapMemory(b->device, it->second.memory, 0, size, 0, &dst) == VK_SUCCESS && dst) {
                 std::memcpy(dst, data, size);
                 vkUnmapMemory(b->device, it->second.memory);
+            } else {
+                MITHRIL_LOG_ERROR("vk", "buffer upload FAILED after staging fallback "
+                                  "(name=%u size=%llu) — keeping existing contents",
+                                  (unsigned)name, (unsigned long long)size);
+                return it->second.buffer;
             }
         }
-        LOG_RESOURCE("buf INPLACE name=%u size=%llu (cap=%llu)",
+        LOG_RESOURCE("buf INPLACE-IDLE name=%u size=%llu (cap=%llu)",
                      (unsigned)name, (unsigned long long)size,
                      (unsigned long long)it->second.size);
         mithril::vk::stamp_buffer_write(it->second);
         return it->second.buffer;
     }
-    // Buffer 不存在或容量不足：grow（先 create 成功再 defer 旧的）
-    // FIX (同上 OOM 安全链): 先 create 成功再 defer 旧的。
+    // Buffer 不存在或容量不足：orphan 旧的，创建新的
+    // FIX (真机主菜单 GPU page fault 根因，同上方在飞分支): 先 create 成功
+    // 再 defer 旧的。原实现先 defer（置空 tbl 里的 entry），create 失败时
+    // 返回 NULL 且 tbl[name] 空 → draw 绑定 NULL buffer → GPU Address Fault。
     mithril::vk::BufferEntry e;
     if (!mithril::vk::create_buffer(e, size, mithril::vk::kAllGlBufferUsage, data, false)) {
         if (it != tbl.end() && it->second.buffer != VK_NULL_HANDLE) {
             static int growOomLog = 0;
             if (growOomLog <= 8 || growOomLog % 50 == 0) {
                 MITHRIL_LOG_ERROR("vk", "create_buffer FAILED (grow name=%u size=%llu) — "
-                                  "keeping OLD buffer handle to avoid NULL-bind fault",
+                                  "keeping OLD buffer handle to avoid NULL-bind GPU fault",
                                   (unsigned)name, (unsigned long long)size);
             }
             growOomLog++;
-            LOG_RESOURCE("buf CREATE-FAIL(grow name=%u size=%llu keep-old)",
+            LOG_RESOURCE("buf CREATE-FAIL(name=%u size=%llu keep-old)",
                          (unsigned)name, (unsigned long long)size);
             return it->second.buffer;  // 旧 buffer 容量不足但句柄有效
         }
@@ -1277,69 +1237,30 @@ void backend_buffer_upload(GLuint name, GLintptr offset, const void* data, size_
     auto& tbl = mithril::vk::buffer_table();
     auto it = tbl.find(name);
     if (it == tbl.end()) return;
-    if (data && size > 0 && mithril::vk::buffer_maybe_inflight(it->second)) {
-        // FIX (GPU page fault 根因 - 覆写竞争): glBufferSubData /
-        // glMapBufferRange-flush 在 buffer 可能在飞时改为 staged GPU copy
-        // （MobileGL OnSubData / OnFlushMappedRange 的 busy 分支），保持
-        // GL 帧内顺序，绝不原地覆写 GPU 正在取的字节。
-        //
-        // FIX (GPU page fault 剩余根因 - 危险回退): 原实现当 staging 失败时
-        // （arena 溢出 + 临时 staging 分配在 VRAM 压力下 OOM）会【回退到原地
-        // vkMapMemory + memcpy】。这在 buffer_maybe_inflight==true 时是真实的
-        // UAF：GPU 仍在异步读取该 buffer（世界区块网格 ring buffer 每帧被写、
-        // 上一帧数据仍在被 chunk 渲染读取），原地覆写会让 MoltenVK/Metal 对
-        // 同一地址执行"先读旧值再被覆盖"的竞争，GPU 在 Metal 异步编码/执行
-        // 时读到撕裂甚至已释放的内存 → kIOGPUCommandBufferCallbackErrorPageFault。
-        // 此路径在世界加载（Sodium 批量上传区块网格 + VRAM 压力下 staging 分配
-        // 失败）时恰好触发，且无任何日志告警 —— 与线上症状完全吻合。
-        //
-        // 修复：buffer 可能在飞且 staging 失败时，【不静默丢弃】。静默丢弃会让
-        // GPU 继续读旧/未初始化的顶点数据 —— 对于 chunk 网格 / 全屏 quad 这类
-        // 关键缓冲，缺数据可能让 GPU 在 vkQueueSubmit 执行期间引用无效内容，
-        // 直接 kIOGPUCommandBufferCallbackErrorPageFault。参照 MobileGL
-        // OnSubData / OnFlushMappedRange 的 busy 分支：staging 失败时强制
-        // vkDeviceWaitIdle（让本 buffer 之前所有提交都完成、脱离在飞），再
-        // 安全原地写入 —— 数据必达 GPU，且绝不覆写仍在飞的字节。
-        if (!mithril::vk::stage_buffer_range_copy(it->second,
-                                                  (VkDeviceSize)offset, data,
-                                                  (VkDeviceSize)size)) {
-            // FIX (staging 失败回退 - MobileGL OnSubData busy 分支):
-            // 先强制同步：safe_device_wait_idle 提交当前录制的命令缓冲并等待
-            // 全部完成，刷新 completedSerial 水位线，使本 buffer 不再在飞。
-            // 与 Device.cpp 1498 注释的坑不同：这里【不 drain disposal queue】，
-            // 只等 idle，因此不会释放被描述符引用的资源，无 UAF。代价是本次
-            // mid-frame 同步（罕见：仅当 staging arena 溢出且临时 staging 分配
-            // 在显存压力下 OOM），对性能影响可忽略。
-            mithril::vk::safe_device_wait_idle();
-            if (!mithril::vk::buffer_maybe_inflight(it->second)) {
-                // 已脱离在飞：安全原地写入，数据必达 GPU。
-                void* dst = nullptr;
-                vkMapMemory(b->device, it->second.memory, (VkDeviceSize)offset,
-                            (VkDeviceSize)size, 0, &dst);
-                if (dst) { std::memcpy(dst, data, (size_t)size); vkUnmapMemory(b->device, it->second.memory); }
-                mithril::vk::stamp_buffer_write(it->second);
-                return;
-            }
-            // 极端兜底（idle 后仍异常在飞）：丢弃并告警，绝不原地覆写。
-            static int uploadDropCount = 0;
-            uploadDropCount++;
-            if (uploadDropCount <= 5 || uploadDropCount % 200 == 0) {
-                MITHRIL_LOG_WARN("vk", "backend_buffer_upload: buffer %u (offset %lld, "
-                                  "%zu bytes) still in flight after safe_device_wait_idle "
-                                  "and staging FAILED — DROPPING upload (drop #%d)",
-                                  name, (long long)offset, size, uploadDropCount);
-            }
-            return;
-        }
+    if (!data || size == 0) return;
+
+    // lastWriteSerial cannot prove that the current command buffer has not
+    // already read this allocation. Always record partial writes in queue order
+    // so draw A -> SubData -> draw B has two stable snapshots.
+    if (mithril::vk::stage_buffer_range_copy(it->second,
+                                             (VkDeviceSize)offset, data,
+                                             (VkDeviceSize)size)) {
         mithril::vk::stamp_buffer_write(it->second);
         return;
     }
-    // Buffer 不在飞：可以安全原地更新。
+
+    // Rare overflow/OOM fallback: submit all recorded reads and wait before a
+    // host write. Never fall back to an unsynchronized memcpy.
+    mithril::vk::safe_device_wait_idle();
     void* dst = nullptr;
-    if (data && size > 0) {
-        vkMapMemory(b->device, it->second.memory, offset, size, 0, &dst);
-        if (dst) { std::memcpy(dst, data, size); vkUnmapMemory(b->device, it->second.memory); }
+    if (vkMapMemory(b->device, it->second.memory, offset, size, 0, &dst) != VK_SUCCESS || !dst) {
+        MITHRIL_LOG_ERROR("vk", "partial buffer upload FAILED after staging fallback "
+                          "(name=%u offset=%lld size=%zu) — keeping existing contents",
+                          name, (long long)offset, size);
+        return;
     }
+    std::memcpy(dst, data, size);
+    vkUnmapMemory(b->device, it->second.memory);
     mithril::vk::stamp_buffer_write(it->second);
 }
 

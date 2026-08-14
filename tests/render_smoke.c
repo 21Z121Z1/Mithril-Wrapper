@@ -338,6 +338,40 @@ int main(int argc, char** argv) {
           px[0], px[1], px[2], px[3]);
     CHECK(getError() == GL_NO_ERROR, "glReadPixels leaves no error");
 
+    /* ---- Same command buffer: each glBufferData needs a draw-time snapshot --
+     * A draw records only the VkBuffer handle. If the second upload writes the
+     * mapped allocation directly, both queued draws see rightQuad and the left
+     * half stays black. That host write can also race an older GPU submission. */
+    const GLfloat leftQuad[12] = {
+        -1.0f, -1.0f,  0.0f, -1.0f,  0.0f,  1.0f,
+        -1.0f, -1.0f,  0.0f,  1.0f, -1.0f,  1.0f,
+    };
+    const GLfloat rightQuad[12] = {
+         0.0f, -1.0f,  1.0f, -1.0f,  1.0f,  1.0f,
+         0.0f, -1.0f,  1.0f,  1.0f,  0.0f,  1.0f,
+    };
+    clearColor(0.0f, 0.0f, 0.0f, 0.0f);
+    clear(GL_COLOR_BUFFER_BIT);
+    bindBuffer(GL_ARRAY_BUFFER, vbo);
+    bufferData(GL_ARRAY_BUFFER, sizeof(leftQuad), leftQuad, GL_STREAM_DRAW);
+    drawArrays(GL_TRIANGLES, 0, 6);
+    bufferData(GL_ARRAY_BUFFER, sizeof(rightQuad), rightQuad, GL_STREAM_DRAW);
+    drawArrays(GL_TRIANGLES, 0, 6);
+    finish();
+    unsigned char leftPx[4] = {0,0,0,0};
+    unsigned char rightPx[4] = {0,0,0,0};
+    readPixels(R / 4, C / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, leftPx);
+    readPixels((3 * R) / 4, C / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, rightPx);
+    CHECK(leftPx[0] > 128 && leftPx[3] > 128 &&
+          rightPx[0] > 128 && rightPx[3] > 128,
+          "same-frame buffer respecify preserves both draws: left=(%d,%d,%d,%d) right=(%d,%d,%d,%d)",
+          leftPx[0], leftPx[1], leftPx[2], leftPx[3],
+          rightPx[0], rightPx[1], rightPx[2], rightPx[3]);
+    CHECK(getError() == GL_NO_ERROR, "same-frame buffer respecify leaves no error");
+
+    /* Later discriminants reuse this VAO as a full-screen sampling triangle. */
+    bufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_STATIC_DRAW);
+
     /* =====================================================================
      * 扩展测试：贴图采样 + mipmap + 动态 UBO + 多帧 glFinish 稳定性
      * =====================================================================

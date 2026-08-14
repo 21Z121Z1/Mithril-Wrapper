@@ -148,7 +148,9 @@ void glBufferData(GLenum target, GLsizeiptr size, const void* data, GLenum usage
     b->usage = usage;
     b->immutable = false;  // glBufferData resets immutable flag
     b->storageFlags = 0;
-    b->data.assign((size_t)size, 0);
+    // The backend upload covers alloc_size bytes. Keep the CPU shadow equally
+    // large so alignment padding is initialized and never read past the vector.
+    b->data.assign(alloc_size, 0);
     if (data && size > 0) std::memcpy(b->data.data(), data, (size_t)size);
     b->mapped = nullptr;
     // Recreate the VkBuffer (allocates + uploads).
@@ -174,11 +176,10 @@ void glBufferStorage(GLenum target, GLsizeiptr size, const void* data, GLbitfiel
     b->usage = GL_STATIC_DRAW;  // not used for immutable buffers
     b->immutable = true;
     b->storageFlags = flags;
-    b->data.assign((size_t)size, 0);
-    if (data && size > 0) std::memcpy(b->data.data(), data, (size_t)size);
-
     // allocSize 只增不减（同 glBufferData）
     if ((size_t)b->allocSize < (size_t)size) b->allocSize = size;
+    b->data.assign((size_t)b->allocSize, 0);
+    if (data && size > 0) std::memcpy(b->data.data(), data, (size_t)size);
 
     // If GL_MAP_PERSISTENT_BIT is set, create a persistently-mapped VkBuffer.
     // The backend create_buffer (Resources.cpp) handles vkMapMemory + persistent
