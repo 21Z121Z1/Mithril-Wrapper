@@ -116,10 +116,7 @@ static VkDescriptorPool create_program_pool(const ProgramResources& pr, uint32_t
 
     VkDescriptorPoolCreateInfo dpci{};
     dpci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    // Sets are recycled by cursor and pools are destroyed wholesale. Enabling
-    // individual frees only selects MoltenVK's freeable argument-buffer
-    // allocator, a path with known overlapping-range GPU page faults.
-    dpci.flags = 0;
+    dpci.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
     dpci.maxSets = maxSets;
     dpci.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
     dpci.pPoolSizes = poolSizes.data();
@@ -268,7 +265,9 @@ void ensure_program_layouts(GLuint program,
 
     // ---- VkDescriptorPool (one per frame-in-flight slot) ----
     // maxSets=1024, descriptors per type sized per-set (see create_program_pool),
-    // PER SLOT. Sets are never individually freed; the pool is destroyed
+    // PER SLOT. Created with FREE_DESCRIPTOR_SET_BIT so individual sets CAN be
+    // freed (useful if a layout is ever destroyed while cached sets survive);
+    // in practice we never free individual sets — the pool is destroyed
     // wholesale on program deletion. Per-slot pools prevent the UAF where a
     // shared pool reset invalidated descriptor sets still referenced by an
     // in-flight command buffer on another slot.
@@ -364,8 +363,14 @@ DefaultTexture& default_texture() {
     }
     vkBindImageMemory(b->device, dt.image, dt.memory, 0);
 
-    // Transition UNDEFINED -> SHADER_READ_ONLY_OPTIMAL and clear to black.
-    // Use a one-shot command buffer on the graphics queue.
+    // FIX (根因 R — 纯红屏): 原实现只在注释里写「clear to black」，
+    // 实际从未调用 vkCmdClearColorImage，默认 1x1 纹理内容是内存垃圾。
+    // 垃圾值若为 (1,0,0,1) 红色，所有未绑定正确纹理的采样器都会采样到红色
+    // → 全屏/大片区域纯红。修复：显式 clear 为不透明黑 (0,0,0,1)。
+    //
+    // 步骤：
+    //   1. UNDEFINED -> TRANSFER_DST_OPTIMAL + vkCmdClearColorImage(black)
+    //   2. TRANSFER_DST_OPTIMAL -> SHADER_READ_ONLY_OPTIMAL
     VkCommandBuffer cb = VK_NULL_HANDLE;
     VkCommandBufferAllocateInfo cai{};
     cai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
@@ -378,63 +383,42 @@ DefaultTexture& default_texture() {
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(cb, &bi);
 
-    // FIX: actually clear the image to opaque black (0,0,0,1).
-    // The old code only transitioned UNDEFINED -> SHADER_READ_ONLY_OPTIMAL
-    // without clearing, so the default texture had UNDEFINED content.
-    // When a sampler binding fell back to this texture, it sampled garbage.
-    //
-    // Step 1: UNDEFINED -> TRANSFER_DST_OPTIMAL
-    VkImageMemoryBarrier b1{};
-    b1.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    b1.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    b1.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    b1.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    b1.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    b1.image = dt.image;
-    b1.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    b1.subresourceRange.baseMipLevel = 0;
-    b1.subresourceRange.levelCount = 1;
-    b1.subresourceRange.baseArrayLayer = 0;
-    b1.subresourceRange.layerCount = 1;
-    b1.srcAccessMask = 0;
-    b1.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
-                         0, nullptr, 0, nullptr, 1, &b1);
-
-    // Step 2: clear to opaque black
-    VkClearColorValue clearBlack{};
-    clearBlack.float32[0] = 0.0f;
-    clearBlack.float32[1] = 0.0f;
-    clearBlack.float32[2] = 0.0f;
-    clearBlack.float32[3] = 1.0f;
-    VkImageSubresourceRange clearRange{};
-    clearRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    clearRange.baseMipLevel = 0;
-    clearRange.levelCount = 1;
-    clearRange.baseArrayLayer = 0;
-    clearRange.layerCount = 1;
-    vkCmdClearColorImage(cb, dt.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                         &clearBlack, 1, &clearRange);
-
-    // Step 3: TRANSFER_DST_OPTIMAL -> SHADER_READ_ONLY_OPTIMAL
-    VkImageMemoryBarrier b2{};
-    b2.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    b2.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    b2.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    b2.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    b2.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    b2.image = dt.image;
-    b2.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    b2.subresourceRange.baseMipLevel = 0;
-    b2.subresourceRange.levelCount = 1;
-    b2.subresourceRange.baseArrayLayer = 0;
-    b2.subresourceRange.layerCount = 1;
-    b2.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    b2.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
-                         0, nullptr, 0, nullptr, 1, &b2);
+    // Step 1a: UNDEFINED -> TRANSFER_DST_OPTIMAL
+    {
+        VkImageMemoryBarrier b2{};
+        b2.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        b2.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        b2.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        b2.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b2.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b2.image = dt.image;
+        b2.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        b2.subresourceRange.baseMipLevel = 0;
+        b2.subresourceRange.levelCount = 1;
+        b2.subresourceRange.baseArrayLayer = 0;
+        b2.subresourceRange.layerCount = 1;
+        b2.srcAccessMask = 0;
+        b2.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+                             0, nullptr, 0, nullptr, 1, &b2);
+    }
+    // Step 1b: Clear to opaque black (0,0,0,1)
+    {
+        VkClearColorValue clearVal{};
+        clearVal.float32[0] = 0.0f;  // R
+        clearVal.float32[1] = 0.0f;  // G
+        clearVal.float32[2] = 0.0f;  // B
+        clearVal.float32[3] = 1.0f;  // A
+        VkImageSubresourceRange range{};
+        range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        range.baseMipLevel = 0;
+        range.levelCount = 1;
+        range.baseArrayLayer = 0;
+        range.layerCount = 1;
+        vkCmdClearColorImage(cb, dt.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                             &clearVal, 1, &range);
+    }
     vkEndCommandBuffer(cb);
     VkSubmitInfo si{};
     si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -443,6 +427,35 @@ DefaultTexture& default_texture() {
     VkFence fence;
     VkFenceCreateInfo fci{};
     fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    vkCreateFence(b->device, &fci, nullptr, &fence);
+    vkQueueSubmit(b->graphicsQueue, 1, &si, fence);
+    vkWaitForFences(b->device, 1, &fence, VK_TRUE, UINT64_MAX);
+    vkDestroyFence(b->device, fence, nullptr);
+    vkFreeCommandBuffers(b->device, b->commandPool, 1, &cb);
+
+    // Step 2: TRANSFER_DST_OPTIMAL -> SHADER_READ_ONLY_OPTIMAL
+    if (vkAllocateCommandBuffers(b->device, &cai, &cb) != VK_SUCCESS) return dt;
+    vkBeginCommandBuffer(cb, &bi);
+    {
+        VkImageMemoryBarrier b2{};
+        b2.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        b2.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        b2.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        b2.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b2.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b2.image = dt.image;
+        b2.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        b2.subresourceRange.baseMipLevel = 0;
+        b2.subresourceRange.levelCount = 1;
+        b2.subresourceRange.baseArrayLayer = 0;
+        b2.subresourceRange.layerCount = 1;
+        b2.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        b2.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
+                             0, nullptr, 0, nullptr, 1, &b2);
+    }
+    vkEndCommandBuffer(cb);
     vkCreateFence(b->device, &fci, nullptr, &fence);
     vkQueueSubmit(b->graphicsQueue, 1, &si, fence);
     vkWaitForFences(b->device, 1, &fence, VK_TRUE, UINT64_MAX);
@@ -707,13 +720,17 @@ void bind_program_descriptors(GLuint program, VkPipelineBindPoint bindPoint) {
         pr.setCursor[slot] = 0;
         pr.lastFrameGen[slot] = b->frameGeneration;
         pr.lastFlushGen[slot] = b->flushGeneration;
-        /* The slot fence wait (or safe_device_wait_idle for a flush boundary)
-         * guarantees that no submitted command buffer still uses these sets.
-         * Keep the handles and rewind only the cursor: clearing allocatedSets
-         * here loses ownership without freeing/resetting the pool, forcing one
-         * fresh allocation per draw every generation until the pool exhausts.
-         *
-         * The cached sets this slot owns are about to be handed out again and
+        // FIX (mid-frame flush stale-set cache - mirror invalidate_descriptor_memo):
+        // a safe_device_wait_idle() flush submits the current buffer, re-begins the
+        // SAME slot, and (via drain_disposal_queues_except / the pre-vkCreateImage GC
+        // and delete_program_resources paths) can FREE resources that previously-
+        // allocated sets in this slot's cache still reference. Reusing such a set
+        // (setCursor already rewound to 0 above) relies on the rewrite to refresh
+        // it — which is skipped on a bail path (incomplete-set guard, DescriptorSet
+        // ~1299). Drop the whole per-slot set cache so the next bind allocates a
+        // BRAND-NEW set rewritten from current, still-valid resources.
+        pr.allocatedSets[slot].clear();
+        /* The cached sets this slot owns are about to be handed out again and
          * REWRITTEN by this frame's draws, so every memo entry naming one is
          * now a promise we can no longer keep. Dropping the memo here is what
          * makes the reuse below sound: within a frame the cursor only moves
@@ -1577,18 +1594,34 @@ void invalidate_descriptor_memo() {
     for (auto& kv : tbl) {
         ProgramResources& pr = kv.second;
         for (int i = 0; i < kMaxFramesInFlight; ++i) {
-            // A memo hit must never return a set that still names the old
-            // resource. Keep both allocatedSets and setCursor unchanged here:
-            // invalidation can occur in the middle of command-buffer recording,
-            // so rewinding the cursor could select and overwrite a set already
-            // referenced by an earlier draw. The next memo miss advances from
-            // the current cursor and fully writes a different set before binding
-            // it. At the next fence-gated generation boundary the cursor can be
-            // safely rewound and all allocated handles become reusable again.
+            // Clear the memo entries so a cached set referencing a just-destroyed
+            // resource is never returned by bind_program_descriptors' memo hit.
+            //
+            // FIX (GPU page fault / stale-set reuse): previously we deliberately
+            // did NOT touch setCursor/allocatedSets, relying on the setCursor
+            // reuse path (bind_program_descriptors line ~1166) to REWRITE a
+            // reused set with fresh descriptors. That is only sound if the
+            // rewrite is guaranteed to run. It is NOT: the rewrite can be
+            // skipped when a uniform-arena upload fails (early return) or when
+            // an incomplete-set guard bails out (DescriptorSet.cpp ~1299). In
+            // those cases a reused set retains a descriptor pointing at the
+            // just-deferred-destroyed VkImageView. The view is still alive now
+            // (it sits in disposalQueue until the slot fence signals), but the
+            // set is then submitted and, once the disposal drain frees the
+            // view, the next submit that reuses/re-records that descriptor reads
+            // freed memory -> kIOGPUCommandBufferCallbackErrorPageFault at a
+            // scene transition where textures are re-specified.
+            //
+            // Fix (mirrors reset_all_descriptor_pools): drop the whole per-slot
+            // set cache so the next bind allocates a BRAND-NEW set that is fully
+            // written from the current, still-valid resources. A set that may
+            // reference a destroyed view is never reused or re-bound.
             for (int j = 0; j < kDescriptorMemoSize; ++j) {
                 pr.descMemo[i][j] = DescriptorMemoEntry{};
             }
             pr.descMemoNext[i] = 0;
+            pr.allocatedSets[i].clear();
+            pr.setCursor[i] = 0;
         }
     }
     // The memo-cleared program may be bound again before the next draw; make
