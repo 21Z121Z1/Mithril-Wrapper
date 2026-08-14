@@ -36,7 +36,7 @@ jobs:
       - name: Compile smoke programs
         run: |
           clang -std=c11 -O0 -g -Wall -Wextra -IMithril-Wrapper-cpp/include -o tests/gl_smoke tests/gl_smoke.c -ldl
-          clang -std=c11 -O0 -g -Wall -Wextra -IMithril-Wrapper-cpp/include -o tests/render_smoke tests/render_smoke.c -ldl
+          clang -D_GNU_SOURCE -std=c11 -O0 -g -Wall -Wextra -IMithril-Wrapper-cpp/include -o tests/render_smoke tests/render_smoke.c -ldl
           clang -std=c11 -O0 -g -Wall -Wextra -IMithril-Wrapper-cpp/include -o tests/egl_sync_smoke tests/egl_sync_smoke.c -ldl
 
       - name: Run complete GL to Vulkan draw/readback smokes on lavapipe
