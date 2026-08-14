@@ -640,14 +640,7 @@ bool init_device() {
     //   Deep reference: MobileGL GetShaderTransformFlags applies PositionYFlip
     //   only when currentDrawFBO->IsDefaultFramebuffer(), never globally.
     //
-    // MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS=0:
-    //   MoltenVK 1.4.x defaults to Metal argument buffers. On pre-Metal-3 iOS
-    //   GPUs this path has known descriptor-pool lifetime/addressing failures
-    //   that surface as kIOGPUCommandBufferCallbackErrorPageFault. Mithril uses
-    //   small, fixed descriptor layouts, so discrete resource indexes cover its
-    //   requirements without the unstable GPU-address indirection.
-    //
-    // MVK_CONFIG_MAX_ACTIVE_METAL_COMMAND_BUFFERS_PER_QUEUE=2:
+    // MVK_CONFIG_SUBMIT_COMMAND_BUFFERS_PER_QUEUE=2 (深度参考 MobileGL 缺口):
     //   限制每个 queue 同时未完成的 command buffer 数量。MoltenVK 默认
     //   是 64（即允许 64 个 command buffer 并发编码），每个 command buffer
     //   都会预分配 Metal 资源（编码器、IOSurface 引用等）。在 iPhone SE 3
@@ -663,8 +656,7 @@ bool init_device() {
     setenv("MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS", "0", 1);
     setenv("MVK_CONFIG_RESUME_LOST_DEVICE", "1", 1);
     setenv("MVK_CONFIG_SHADER_CONVERSION_FLIP_VERTEX_Y", "0", 1);
-    setenv("MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS", "0", 1);
-    setenv("MVK_CONFIG_MAX_ACTIVE_METAL_COMMAND_BUFFERS_PER_QUEUE", "2", 1);
+    setenv("MVK_CONFIG_SUBMIT_COMMAND_BUFFERS_PER_QUEUE", "2", 1);
     // MVK_CONFIG_FAST_MATH_ENABLED=1: MoltenVK 用 fast-math 编译 MSL。
     // 真机 GPU Address Fault（kIOGPUCommandBufferCallbackErrorPageFault）
     // 在 A11 + iOS 16 上偶发于特定 shader 模式（如带 mip bias 的采样、

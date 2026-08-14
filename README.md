@@ -1,9 +1,9 @@
 # Mithril-Wrapper
 
-> OpenGL 4.6 Core Profile → Vulkan 1.2 (via MoltenVK) → Metal 翻译层，让依赖桌面
+> OpenGL 3.3 Core Profile → Vulkan 1.2 (via MoltenVK) → Metal 翻译层，让依赖桌面
 > OpenGL 的应用能在仅有 Metal 后端的 iOS 上运行。
 
-Mithril-Wrapper 把宿主程序发出的 **OpenGL 4.6 Core Profile** 调用实时翻译成
+Mithril-Wrapper 把宿主程序发出的 **OpenGL 3.3 Core Profile** 调用实时翻译成
 **Vulkan 1.2** 调用，再由 **MoltenVK**（静态链接）将 Vulkan 调用交叉翻译为
 **Metal** 调用。库自带一套基于 **Vulkan + CAMetalLayer** 的 **EGL 1.5** 实现，
 让 LWJGL 3 / PojavLauncher / Amethyst-iOS 这类靠 `eglCreateContext` 等 EGL 入口
@@ -23,12 +23,12 @@ GLSL 源码  ──glslang──▶  SPIR-V  ──vkCreateShaderModule──▶
 
 ## 功能概览
 
-- 对外暴露一整套 `extern "C"` 的 OpenGL 4.6 Core 入口（`glDraw*`、
+- 对外暴露一整套 `extern "C"` 的 OpenGL 3.3 Core 入口（`glDraw*`、
   `glBindBuffer`、`glTexImage2D`、`glUniform*`、`glGetString*` 等），
   可作为动态库 `libmithril.dylib` 被 `dlopen` 注入。
 - `glGetString(GL_VERSION)` 返回
-  `4.6 §bMithril-Wrapper§r 1.0 (Vulkan 1.2 / MoltenVK)`，
-  `glGetIntegerv(GL_MAJOR_VERSION/GL_MINOR_VERSION)` 返回 `4 / 6`，
+  `3.3 §bMithril-Wrapper§r 1.0 (Vulkan 1.2 / MoltenVK)`，
+  `glGetIntegerv(GL_MAJOR_VERSION/GL_MINOR_VERSION)` 返回 `3 / 3`，
   `GL_CONTEXT_PROFILE_MASK` 返回 `GL_CONTEXT_CORE_PROFILE_BIT`。
 - **自带 EGL 1.5（Vulkan 后端）**：`egl/egl.cpp` 导出 ~44 个 `egl*` 入口
   （EGL 1.5 全套：`eglGetDisplay` / `eglInitialize` / `eglChooseConfig` /
@@ -98,7 +98,7 @@ Edition 的现代渲染管线。
 
 ## 架构分层
 
-### MG_Impl/ — OpenGL 4.6 Core Profile 入口点
+### MG_Impl/ — OpenGL 3.3 Core Profile 入口点
 
 GL 调用的具体实现层。每个 `gl*` 函数通过 `MG_Backend/Backend.h` 定义的 C API
 调用 Vulkan 后端。主要文件：
@@ -242,7 +242,7 @@ SPIRV-Cross **仅用于 SPIR-V 反射**（非翻译）。`DescriptorSet.cpp` 在
 ├── .github/workflows/
 │   └── build.yml                  # CI：macOS arm64 交叉编译 iOS dylib
 ├── Mithril-Wrapper-cpp/           # 源码根（参考 MobileGlues 的布局）
-│   ├── MG_Impl/                   # OpenGL 4.6 Core Profile 实现（Vulkan 后端）
+│   ├── MG_Impl/                   # OpenGL 3.3 Core Profile 实现（Vulkan 后端）
 │   │   ├── includes.h             #   全局内部头
 │   │   ├── init.cpp  gl.cpp  Getter.cpp  Program.cpp  Shader.cpp
 │   │   ├── Buffer.cpp  Texture.cpp  Framebuffer.cpp  Drawing.cpp
@@ -350,7 +350,7 @@ cmake --build build-ios -j
 
 
 构建产物是单个共享库（`libmithril.dylib`），可注入到目标进程的 OpenGL / EGL
-加载路径中。该库同时导出 `gl*`（OpenGL 4.6 Core，~850 个入口）与 `egl*`（EGL 1.5，~44 个入口）
+加载路径中。该库同时导出 `gl*`（OpenGL 3.3 Core）与 `egl*`（EGL 1.5，~44 个入口）
 符号，宿主启动器只需 `dlopen("@rpath/libmithril.dylib", RTLD_NOW)` 即可同时拿到
 两套入口。MoltenVK 静态链接进 dylib（仅 Apple 构建），所以**不需要在目标设备上
 额外安装 Vulkan ICD 或 `VK_ICD_FILENAMES`**。
@@ -409,7 +409,7 @@ GitHub Actions 工作流 [`.github/workflows/build.yml`](.github/workflows/build
 - **EternityQwQ**
 - **yitenchen123**
 - **Uniaball**
-- **q3cc**
+
 ## 许可
 
 详见 [LICENSE](LICENSE)。

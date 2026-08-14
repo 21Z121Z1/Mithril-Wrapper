@@ -736,12 +736,22 @@ bool get_fallback_spirv(GLenum gl_stage, bool flip_y,
         // is bound at binding 0 causes a GPU page fault
         // (kIOGPUCommandBufferCallbackErrorPageFault) on Metal/MoltenVK →
         // VK_ERROR_DEVICE_LOST → permanent device death.
-        // Output a fixed degenerate position so all triangles collapse to a
-        // single point (nothing drawn, but no crash).
-        (void)flip_y;  // no position to flip
+        //
+        // FIX (纯红屏根因 — fallback VS 退化三角形):
+        // 旧代码输出固定位置 vec4(0,0,0.5,1)，所有三角形退化为一个点 → 无片元
+        // 被光栅化 → fragment shader 的灰色输出从不执行 → 屏幕只显示 clear color
+        // (Minecraft 加载屏红色) → 纯红屏。
+        // 修复：用 gl_VertexID 生成一个覆盖全屏的大三角形，无需顶点缓冲。
+        // 这样 fragment shader 的灰色输出覆盖整个屏幕，证明渲染管线工作正常，
+        // 同时避免绑定未绑定的顶点属性导致的 GPU page fault。
+        // flip_y 由 inject_position_fixup 在 link 阶段处理（Y 翻转包裹 main），
+        // 这里生成标准 NDC 三角形即可。
+        (void)flip_y;
         source = "#version 330\n"
                  "void main() {\n"
-                 "    gl_Position = vec4(0.0, 0.0, 0.5, 1.0);\n"
+                 "    vec2 p = vec2(float((gl_VertexID & 1) << 2) - 1.0,\n"
+                 "                 float((gl_VertexID & 2) << 1) - 1.0);\n"
+                 "    gl_Position = vec4(p, 0.0, 1.0);\n"
                  "}\n";
     } else if (gl_stage == GL_FRAGMENT_SHADER) {
         source = "#version 330\n"
@@ -771,8 +781,14 @@ bool get_fallback_spirv(GLenum gl_stage, bool flip_y,
         return false;
     }
 
-    out_spirv = (gl_stage == GL_VERTEX_SHADER) ? linkOut.vertexSpirvFlipped
-                                               : linkOut.fragmentSpirv;
+    // FIX (fallback VS flip_y 选择 bug): 旧代码对 VS 总是返回 vertexSpirvFlipped，
+    // 忽略 flip_y 参数。当用户 FBO (flip_y=false) 调用时，会错误地使用 Y 翻转
+    // 变体，导致顶点 Y 坐标不必要的翻转。现在根据 flip_y 选择正确变体。
+    if (gl_stage == GL_VERTEX_SHADER) {
+        out_spirv = flip_y ? linkOut.vertexSpirvFlipped : linkOut.vertexSpirv;
+    } else {
+        out_spirv = linkOut.fragmentSpirv;
+    }
     std::lock_guard<std::mutex> lk(fallback_mu);
     fallback_cache[key] = out_spirv;
     return true;

@@ -143,8 +143,9 @@ void glColor4f(GLfloat, GLfloat, GLfloat, GLfloat) {}
 void glColor4ub(GLubyte, GLubyte, GLubyte, GLubyte) {}
 void glTexCoord2f(GLfloat, GLfloat) {}
 void glTexCoord4f(GLfloat, GLfloat, GLfloat, GLfloat) {}
-// glRasterPos* and glWindowPos* are implemented in GL46_Compat.cpp
-// (GL 4.6 Core Profile full implementation)
+void glRasterPos2i(GLint, GLint) {}
+void glRasterPos3f(GLfloat, GLfloat, GLfloat) {}
+void glWindowPos2i(GLint, GLint) {}
 
 /* ---- Lighting / material / fog ---- */
 void glShadeModel(GLenum) {}
@@ -204,8 +205,9 @@ void glEvalPoint1(GLint) {}
 void glEvalPoint2(GLint, GLint) {}
 
 /* ---- Rect ---- */
-// glRect* are implemented in GL46_Compat.cpp
-// (GL 4.6 Core Profile full implementation)
+void glRectd(GLdouble, GLdouble, GLdouble, GLdouble) {}
+void glRectf(GLfloat, GLfloat, GLfloat, GLfloat) {}
+void glRecti(GLint, GLint, GLint, GLint) {}
 
 /* ---- Attrib stack ---- */
 void glPushAttrib(GLbitfield) {}

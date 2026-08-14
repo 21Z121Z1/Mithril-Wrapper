@@ -115,40 +115,8 @@ static bool prepare_draw(GLenum mode) {
     // render into textures sampled by GL shaders (GL Y-up), so they use the
     // non-flipped variant. Deep reference: MobileGL GetShaderTransformFlags.
     bool is_default_fbo = (g_state->currentDrawFBO == 0);
-
-    // FIX (红屏直接根因): Select the Y-flipped vertex SPIR-V for default
-    // framebuffer (FBO 0) and non-flipped for user FBOs. If the Y-flipped
-    // variant is empty (Y-flipped shader translation failed), fall back to
-    // the non-flipped variant instead of skipping the draw. Skipping the
-    // draw leaves only glClearColor visible (red screen). Using non-flipped
-    // produces incorrect Y orientation (upside-down) but the draw runs and
-    // content is visible.
-    //
-    // Program.cpp also has a fallback that copies vertexSpirv to
-    // vertexSpirvYFlipped when the latter is empty after link, but this
-    // runtime check catches cases where the program was linked before that
-    // fix or where the fallback was not applied.
-    const std::vector<uint32_t>* vs_spirv_ptr;
-    if (is_default_fbo) {
-        if (!prog->vertexSpirvYFlipped.empty()) {
-            vs_spirv_ptr = &prog->vertexSpirvYFlipped;
-        } else if (!prog->vertexSpirv.empty()) {
-            static GLuint last_fallback_warned = 0;
-            if (last_fallback_warned != prog->id) {
-                last_fallback_warned = prog->id;
-                MITHRIL_LOG_WARN("gl", "prepare_draw: program %u has empty "
-                                  "vertexSpirvYFlipped for FBO 0 — falling back "
-                                  "to non-flipped SPIR-V (Y orientation wrong, "
-                                  "but draw will not be skipped)", prog->id);
-            }
-            vs_spirv_ptr = &prog->vertexSpirv;
-        } else {
-            vs_spirv_ptr = &prog->vertexSpirvYFlipped; // empty — will be caught below
-        }
-    } else {
-        vs_spirv_ptr = &prog->vertexSpirv;
-    }
-    const std::vector<uint32_t>& vs_spirv = *vs_spirv_ptr;
+    const std::vector<uint32_t>& vs_spirv = is_default_fbo
+        ? prog->vertexSpirvYFlipped : prog->vertexSpirv;
 
     // Defensive: skip draws whose shader translation produced no SPIR-V
     // (e.g. glslang failed on an unrecognised construct). Issuing the draw

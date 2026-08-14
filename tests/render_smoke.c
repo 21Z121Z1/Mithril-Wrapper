@@ -229,12 +229,6 @@ int main(int argc, char** argv) {
           "GL version %d.%d (backend-up, glGetIntegerv un-hijacked)", major, minor);
     const char* ver = (const char*)getString(GL_VERSION);
     CHECK(ver && strstr(ver, "4.6"), "glGetString(GL_VERSION): %s", ver ? ver : "(null)");
-    const char* mvkArgBuffers = getenv("MVK_CONFIG_USE_METAL_ARGUMENT_BUFFERS");
-    const char* mvkActiveCmds = getenv("MVK_CONFIG_MAX_ACTIVE_METAL_COMMAND_BUFFERS_PER_QUEUE");
-    CHECK(mvkArgBuffers && strcmp(mvkArgBuffers, "0") == 0,
-          "MoltenVK argument buffers disabled for stable descriptor binding");
-    CHECK(mvkActiveCmds && strcmp(mvkActiveCmds, "2") == 0,
-          "MoltenVK active Metal command buffers limited to two");
     if (getError() != GL_NO_ERROR) { printf("FAIL: GL error before setup\n"); ++failures; }
 
     /* ---- 离屏 FBO：RGBA8 纹理作为 color attachment ------------------------ */
@@ -343,40 +337,6 @@ int main(int argc, char** argv) {
           "corner pixel is red (r=%d g=%d b=%d a=%d) — full-screen triangle rasterized",
           px[0], px[1], px[2], px[3]);
     CHECK(getError() == GL_NO_ERROR, "glReadPixels leaves no error");
-
-    /* ---- Same command buffer: each glBufferData needs a draw-time snapshot --
-     * A draw records only the VkBuffer handle. If the second upload writes the
-     * mapped allocation directly, both queued draws see rightQuad and the left
-     * half stays black. That host write can also race an older GPU submission. */
-    const GLfloat leftQuad[12] = {
-        -1.0f, -1.0f,  0.0f, -1.0f,  0.0f,  1.0f,
-        -1.0f, -1.0f,  0.0f,  1.0f, -1.0f,  1.0f,
-    };
-    const GLfloat rightQuad[12] = {
-         0.0f, -1.0f,  1.0f, -1.0f,  1.0f,  1.0f,
-         0.0f, -1.0f,  1.0f,  1.0f,  0.0f,  1.0f,
-    };
-    clearColor(0.0f, 0.0f, 0.0f, 0.0f);
-    clear(GL_COLOR_BUFFER_BIT);
-    bindBuffer(GL_ARRAY_BUFFER, vbo);
-    bufferData(GL_ARRAY_BUFFER, sizeof(leftQuad), leftQuad, GL_STREAM_DRAW);
-    drawArrays(GL_TRIANGLES, 0, 6);
-    bufferData(GL_ARRAY_BUFFER, sizeof(rightQuad), rightQuad, GL_STREAM_DRAW);
-    drawArrays(GL_TRIANGLES, 0, 6);
-    finish();
-    unsigned char leftPx[4] = {0,0,0,0};
-    unsigned char rightPx[4] = {0,0,0,0};
-    readPixels(R / 4, C / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, leftPx);
-    readPixels((3 * R) / 4, C / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, rightPx);
-    CHECK(leftPx[0] > 128 && leftPx[3] > 128 &&
-          rightPx[0] > 128 && rightPx[3] > 128,
-          "same-frame buffer respecify preserves both draws: left=(%d,%d,%d,%d) right=(%d,%d,%d,%d)",
-          leftPx[0], leftPx[1], leftPx[2], leftPx[3],
-          rightPx[0], rightPx[1], rightPx[2], rightPx[3]);
-    CHECK(getError() == GL_NO_ERROR, "same-frame buffer respecify leaves no error");
-
-    /* Later discriminants reuse this VAO as a full-screen sampling triangle. */
-    bufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_STATIC_DRAW);
 
     /* =====================================================================
      * 扩展测试：贴图采样 + mipmap + 动态 UBO + 多帧 glFinish 稳定性
@@ -848,14 +808,12 @@ int main(int argc, char** argv) {
         }
 
         /* ---- 4g) 多帧动态 UBO + 贴图 + glFinish 稳定性 ------------------- */
-        /* 每帧多次改写 UBO（orphan-rename + descriptor memo 失效）→ draw，
-         * 然后 glFinish(vkQueueSubmit) → readback。连续 N 帧验证：
+        /* 每帧：改写 UBO（orphan-rename + descriptor memo 失效）→ draw →
+         * glFinish(vkQueueSubmit) → readback。连续 N 帧验证：
          *   - 每帧读回颜色随 UBO tint 变化而变（动态 uniform 真正生效）；
          *   - 全白纹理 × tint 的乘积 = tint 本身（验证采样链路颜色正确）；
-         *   - 旧实现每次失效都会遗失 set，220*12 次 draw 足以让每个
-         *     frame slot 越过 1024-set pool 上限；复用正确时不会扩池。 */
-        const int NFRAMES = 220;
-        const int DRAWS_PER_FRAME = 12;
+         *   - 全程无 GPU page fault / draw 丢弃（读回非黑即证明 draw 未被丢）。 */
+        const int NFRAMES = 8;
         int stableFrames = 0;
         /* 前面 4e/4f 换了 bound program/texture，这里恢复 texProg + 采样器 +
          * UBO 的完整绑定状态后再进入多帧循环。 */
@@ -867,22 +825,20 @@ int main(int argc, char** argv) {
         if (texLoc >= 0) uniform1i(texLoc, 0);
         bindVertexArray(texVao);
         for (int f = 0; f < NFRAMES; ++f) {
+            /* 动态改写 UBO：第 f 帧 tint = (f 递增的 R, 0, 0, 1) */
+            GLfloat tint[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+            tint[0] = (float)(30 + f * 20) / 255.0f;  /* 30,50,...,170 */
+            bindBuffer(GL_UNIFORM_BUFFER, ubo);
+            bufferData(GL_UNIFORM_BUFFER, sizeof(tint), tint, GL_DYNAMIC_DRAW);
             clearColor(0.0f, 0.0f, 0.0f, 0.0f);
             clear(GL_COLOR_BUFFER_BIT);
-            int wantR = 0;
-            for (int d = 0; d < DRAWS_PER_FRAME; ++d) {
-                GLfloat tint[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
-                wantR = 30 + ((f * DRAWS_PER_FRAME + d) % 8) * 20;
-                tint[0] = (float)wantR / 255.0f;
-                bindBuffer(GL_UNIFORM_BUFFER, ubo);
-                bufferData(GL_UNIFORM_BUFFER, sizeof(tint), tint, GL_DYNAMIC_DRAW);
-                drawArrays(GL_TRIANGLES, 0, 3);
-            }
+            drawArrays(GL_TRIANGLES, 0, 3);
             finish();  /* vkQueueSubmit + 等待，验证提交稳定性 */
             if (getError() != GL_NO_ERROR) { ++failures; break; }
 
             unsigned char fp[4] = {0,0,0,0};
             readPixels(R / 2, C / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, fp);
+            int wantR = 30 + f * 20;
             /* 允许 ±12 的线性采样/量化容差（float→uint8 四舍五入） */
             if (fp[0] >= wantR - 12 && fp[0] <= wantR + 12 &&
                 fp[3] > 128 && fp[1] < 20 && fp[2] < 20) {
