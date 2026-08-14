@@ -540,7 +540,7 @@ static bool trace_draw(const char* kind, int mode, int first, int count, int ins
                 auto* ib_buf = mithril::state_get_buffer(ib);
                 if (ib_buf) {
                     // 后端 buffer 也扩展到 need 大小
-                    mithril::vk::backend_get_or_create_buffer(ib, nullptr, need);
+                    backend_get_or_create_buffer(ib, nullptr, need);
                     ib_buf->size = (GLsizeiptr)need;
                     LOG_RESOURCE("DRAW-IBO-GROW ib=%u from=%lld to=%zu", (unsigned)ib,
                                  (long long)ib_size, need);
@@ -572,7 +572,7 @@ static bool trace_draw(const char* kind, int mode, int first, int count, int ins
                 // 的"buffer 末尾多分配空间"的行为，让越界读返回 0 而不是
                 // fault。MC 下次 orphan 会重新上传正确数据覆盖填 0 区域。
                 // 参考：MobileGL Vulkan 后端在 iOS 上同样处理了这种情况。
-                mithril::vk::backend_get_or_create_buffer(at.boundBuffer, nullptr, need);
+                backend_get_or_create_buffer(at.boundBuffer, nullptr, need);
                 vb->size = (GLsizeiptr)need;
                 LOG_RESOURCE("DRAW-VB-GROW buf=%u from=%lld to=%zu",
                              (unsigned)at.boundBuffer, (long long)vb->size, need);
@@ -825,7 +825,7 @@ void glMultiDrawArrays(GLenum mode, const GLint* first, const GLsizei* count, GL
                                      (int)i, a, (unsigned)at.boundBuffer, (int)stride, offset,
                                      (int)first[i] + count[i], need, (long long)vb->size);
                         // Auto-grow buffer 到实际需要大小（新增填 0）
-                        mithril::vk::backend_get_or_create_buffer(at.boundBuffer, nullptr, need);
+                        backend_get_or_create_buffer(at.boundBuffer, nullptr, need);
                         vb->size = (GLsizeiptr)need;
                         LOG_RESOURCE("DRAW-VB-GROW multidraw_arrays buf=%u from=%lld to=%zu",
                                      (unsigned)at.boundBuffer, (long long)vb->size, need);
@@ -876,7 +876,7 @@ void glMultiDrawElements(GLenum mode, const GLsizei* count, GLenum type,
                                      (int)i, a, (unsigned)at.boundBuffer, (int)stride, offset,
                                      (int)count[i], need, (long long)vb->size);
                         // Auto-grow buffer 到实际需要大小（新增填 0）
-                        mithril::vk::backend_get_or_create_buffer(at.boundBuffer, nullptr, need);
+                        backend_get_or_create_buffer(at.boundBuffer, nullptr, need);
                         vb->size = (GLsizeiptr)need;
                         LOG_RESOURCE("DRAW-VB-GROW multidraw_elem buf=%u from=%lld to=%zu",
                                      (unsigned)at.boundBuffer, (long long)vb->size, need);
@@ -938,7 +938,7 @@ void glMultiDrawElementsBaseVertex(GLenum mode, const GLsizei* count, GLenum typ
                                          (int)i, a, (unsigned)at.boundBuffer, (int)stride2, offset,
                                          (int)count[i], need, (long long)vb->size);
                             // Auto-grow buffer 到实际需要大小（新增填 0）
-                            mithril::vk::backend_get_or_create_buffer(at.boundBuffer, nullptr, need);
+                            backend_get_or_create_buffer(at.boundBuffer, nullptr, need);
                             vb->size = (GLsizeiptr)need;
                             LOG_RESOURCE("DRAW-VB-GROW multidraw_bv buf=%u from=%lld to=%zu",
                                          (unsigned)at.boundBuffer, (long long)vb->size, need);
