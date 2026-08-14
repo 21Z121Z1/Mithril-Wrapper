@@ -1,0 +1,46 @@
+name: Repair Linux Vulkan loader linkage
+
+on:
+  push:
+    branches:
+      - codex/directvulkan-overnight-recovery-20260814
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/directvulkan-overnight-recovery-20260814
+          fetch-depth: 0
+
+      - name: Link non-Apple DirectVulkan builds to the Vulkan loader
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('CMakeLists.txt')
+          s = p.read_text()
+          old = '''else()\n    target_link_libraries(${PROJECT_NAME} PRIVATE ${CMAKE_DL_LIBS})\nendif()\n\n# VK_ENABLE_BETA_EXTENSIONS'''
+          new = '''else()\n    # Headless/Linux DirectVulkan calls the Vulkan C API directly. Shared-library\n    # linkers allow unresolved symbols by default, so linking only libdl produces\n    # a libmithril.so that builds successfully but fails at dlopen() with unresolved\n    # vk* entry points. Bind the standard Vulkan loader explicitly; Apple continues\n    # to get those symbols from MoltenVK above.\n    find_package(Vulkan REQUIRED)\n    target_link_libraries(${PROJECT_NAME} PRIVATE Vulkan::Vulkan ${CMAKE_DL_LIBS})\nendif()\n\n# VK_ENABLE_BETA_EXTENSIONS'''
+          if s.count(old) != 1:
+              raise SystemExit(f'expected one non-Apple link marker, found {s.count(old)}')
+          p.write_text(s.replace(old, new))
+          PY
+          git diff --check
+          grep -q 'find_package(Vulkan REQUIRED)' CMakeLists.txt
+          grep -q 'Vulkan::Vulkan' CMakeLists.txt
+
+      - name: Commit build-system fix
+        run: |
+          set -euo pipefail
+          rm .github/workflows/fix-linux-vulkan-link.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          git commit -m 'fix: link Linux DirectVulkan against Vulkan loader'
+          git push origin HEAD:codex/directvulkan-overnight-recovery-20260814
