@@ -378,9 +378,49 @@ DefaultTexture& default_texture() {
     bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(cb, &bi);
 
+    // FIX: actually clear the image to opaque black (0,0,0,1).
+    // The old code only transitioned UNDEFINED -> SHADER_READ_ONLY_OPTIMAL
+    // without clearing, so the default texture had UNDEFINED content.
+    // When a sampler binding fell back to this texture, it sampled garbage.
+    //
+    // Step 1: UNDEFINED -> TRANSFER_DST_OPTIMAL
+    VkImageMemoryBarrier b1{};
+    b1.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    b1.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    b1.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    b1.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b1.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    b1.image = dt.image;
+    b1.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    b1.subresourceRange.baseMipLevel = 0;
+    b1.subresourceRange.levelCount = 1;
+    b1.subresourceRange.baseArrayLayer = 0;
+    b1.subresourceRange.layerCount = 1;
+    b1.srcAccessMask = 0;
+    b1.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+                         0, nullptr, 0, nullptr, 1, &b1);
+
+    // Step 2: clear to opaque black
+    VkClearColorValue clearBlack{};
+    clearBlack.float32[0] = 0.0f;
+    clearBlack.float32[1] = 0.0f;
+    clearBlack.float32[2] = 0.0f;
+    clearBlack.float32[3] = 1.0f;
+    VkImageSubresourceRange clearRange{};
+    clearRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    clearRange.baseMipLevel = 0;
+    clearRange.levelCount = 1;
+    clearRange.baseArrayLayer = 0;
+    clearRange.layerCount = 1;
+    vkCmdClearColorImage(cb, dt.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                         &clearBlack, 1, &clearRange);
+
+    // Step 3: TRANSFER_DST_OPTIMAL -> SHADER_READ_ONLY_OPTIMAL
     VkImageMemoryBarrier b2{};
     b2.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    b2.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    b2.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     b2.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     b2.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     b2.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -390,9 +430,9 @@ DefaultTexture& default_texture() {
     b2.subresourceRange.levelCount = 1;
     b2.subresourceRange.baseArrayLayer = 0;
     b2.subresourceRange.layerCount = 1;
-    b2.srcAccessMask = 0;
+    b2.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
     b2.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT,
                          VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
                          0, nullptr, 0, nullptr, 1, &b2);
     vkEndCommandBuffer(cb);

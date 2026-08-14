@@ -247,6 +247,30 @@ void glLinkProgram(GLuint program) {
     p->linked = true;
     p->infoLog.clear();
 
+    // FIX (红屏直接根因): Ensure vertexSpirvYFlipped is non-empty for default
+    // framebuffer (FBO 0) draws. When Y-flipped vertex shader translation fails
+    // (glslang rejects a construct that the non-flipped variant tolerates),
+    // vertexSpirvYFlipped could be empty while vertexSpirv is not. Drawing.cpp's
+    // prepare_draw selects vertexSpirvYFlipped for FBO 0 and skips the draw if
+    // empty, leaving only glClearColor (red) visible — the "pure red background +
+    // missing Mojang text" symptom.
+    //
+    // Fallback: use the non-flipped SPIR-V. This produces incorrect Y orientation
+    // (upside-down) but the draw runs and the pipeline is valid, so the screen
+    // shows content instead of pure clear-color. The correct fix is making the
+    // Y-flipped compilation succeed (the inject_position_fixup wrapper is
+    // syntactically safe — it renames main and appends a wrapper — so failures
+    // here indicate the original shader has constructs glslang rejects in the
+    // flipped variant only, which is rare but possible with complex #include /
+    // #define patterns that interact with the wrapper function name).
+    if (p->vertexSpirvYFlipped.empty() && !p->vertexSpirv.empty()) {
+        p->vertexSpirvYFlipped = p->vertexSpirv;
+        MITHRIL_LOG_WARN("program", "vertexSpirvYFlipped was empty for program %u, "
+                          "falling back to non-flipped variant (%zu words) — "
+                          "Y orientation will be wrong but draws will not be skipped",
+                          program, p->vertexSpirv.size());
+    }
+
     // GPU fault 诊断：link 成功时记录 program 身份（shader 源首行摘要），
     // 便于 LogRing dump 里的 prog=N 对应到具体 MC shader（fault 帧是
     // prog=1 + fbo=0 + count=6 全屏 quad —— 需要知道它是什么 shader）。

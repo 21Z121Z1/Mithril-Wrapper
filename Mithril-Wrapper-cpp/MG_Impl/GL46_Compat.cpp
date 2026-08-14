@@ -2725,4 +2725,190 @@ void glNamedFramebufferParameteri(GLuint framebuffer, GLenum pname, GLint param)
     (void)framebuffer; (void)pname; (void)param;
 }
 
+/* ================================================================== */
+/* OpenGL 4.6 Core Profile — Missing function implementations         */
+/* ================================================================== */
+
+/* ---- DSA Framebuffer draw/read buffer (GL 4.5 Core) ---- */
+/* These delegate to the non-DSA variants via bind-call-restore. */
+
+void glFramebufferDrawBuffer(GLuint framebuffer, GLenum buf) {
+    MITHRIL_ENSURE_INIT();
+    GLuint prev = g_state->currentDrawFBO;
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, framebuffer);
+    glDrawBuffer(buf);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, prev);
+}
+
+void glFramebufferDrawBuffers(GLuint framebuffer, GLsizei n, const GLenum* bufs) {
+    MITHRIL_ENSURE_INIT();
+    GLuint prev = g_state->currentDrawFBO;
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, framebuffer);
+    glDrawBuffers(n, bufs);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, prev);
+}
+
+void glFramebufferReadBuffer(GLuint framebuffer, GLenum src) {
+    MITHRIL_ENSURE_INIT();
+    GLuint prev = g_state->currentReadFBO;
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, framebuffer);
+    glReadBuffer(src);
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, prev);
+}
+
+/* ---- Texture environment/coordinate queries (GL 1.x-3.x compat stubs) ---- */
+
+void glGetTexEnvfv(GLenum target, GLenum pname, GLfloat* params) {
+    MITHRIL_ENSURE_INIT();
+    if (params) *params = 0.0f;
+}
+
+void glGetTexEnviv(GLenum target, GLenum pname, GLint* params) {
+    MITHRIL_ENSURE_INIT();
+    if (params) *params = 0;
+}
+
+void glGetTexGendv(GLenum coord, GLenum pname, GLdouble* params) {
+    MITHRIL_ENSURE_INIT();
+    if (params) *params = 0.0;
+}
+
+void glGetTexGenfv(GLenum coord, GLenum pname, GLfloat* params) {
+    MITHRIL_ENSURE_INIT();
+    if (params) *params = 0.0f;
+}
+
+void glGetTexGeniv(GLenum coord, GLenum pname, GLint* params) {
+    MITHRIL_ENSURE_INIT();
+    if (params) *params = 0;
+}
+
+void glTexGendv(GLenum coord, GLenum pname, const GLdouble* params) {
+    MITHRIL_ENSURE_INIT(); (void)coord; (void)pname; (void)params;
+}
+
+/* ---- Packed vertex attribute functions (GL 3.3 Core) ---- */
+
+void glVertexP2ui(GLenum t, GLuint v) { MITHRIL_ENSURE_INIT(); (void)t; (void)v; }
+void glVertexP2uiv(GLenum t, const GLuint* v) { MITHRIL_ENSURE_INIT(); (void)t; (void)v; }
+void glVertexP3ui(GLenum t, GLuint v) { MITHRIL_ENSURE_INIT(); (void)t; (void)v; }
+void glVertexP3uiv(GLenum t, const GLuint* v) { MITHRIL_ENSURE_INIT(); (void)t; (void)v; }
+void glVertexP4ui(GLenum t, GLuint v) { MITHRIL_ENSURE_INIT(); (void)t; (void)v; }
+void glVertexP4uiv(GLenum t, const GLuint* v) { MITHRIL_ENSURE_INIT(); (void)t; (void)v; }
+void glColorP3ui(GLenum t, GLuint v) { MITHRIL_ENSURE_INIT(); (void)t; (void)v; }
+void glColorP3uiv(GLenum t, const GLuint* v) { MITHRIL_ENSURE_INIT(); (void)t; (void)v; }
+void glColorP4ui(GLenum t, GLuint v) { MITHRIL_ENSURE_INIT(); (void)t; (void)v; }
+void glColorP4uiv(GLenum t, const GLuint* v) { MITHRIL_ENSURE_INIT(); (void)t; (void)v; }
+void glNormalP3ui(GLenum t, GLuint v) { MITHRIL_ENSURE_INIT(); (void)t; (void)v; }
+void glNormalP3uiv(GLenum t, const GLuint* v) { MITHRIL_ENSURE_INIT(); (void)t; (void)v; }
+void glMultiTexCoordP1ui(GLenum tx, GLenum t, GLuint v) { MITHRIL_ENSURE_INIT(); (void)tx; (void)t; (void)v; }
+void glMultiTexCoordP1uiv(GLenum tx, GLenum t, const GLuint* v) { MITHRIL_ENSURE_INIT(); (void)tx; (void)t; (void)v; }
+void glMultiTexCoordP2ui(GLenum tx, GLenum t, GLuint v) { MITHRIL_ENSURE_INIT(); (void)tx; (void)t; (void)v; }
+void glMultiTexCoordP2uiv(GLenum tx, GLenum t, const GLuint* v) { MITHRIL_ENSURE_INIT(); (void)tx; (void)t; (void)v; }
+void glMultiTexCoordP3ui(GLenum tx, GLenum t, GLuint v) { MITHRIL_ENSURE_INIT(); (void)tx; (void)t; (void)v; }
+void glMultiTexCoordP3uiv(GLenum tx, GLenum t, const GLuint* v) { MITHRIL_ENSURE_INIT(); (void)tx; (void)t; (void)v; }
+void glMultiTexCoordP4ui(GLenum tx, GLenum t, GLuint v) { MITHRIL_ENSURE_INIT(); (void)tx; (void)t; (void)v; }
+void glMultiTexCoordP4uiv(GLenum tx, GLenum t, const GLuint* v) { MITHRIL_ENSURE_INIT(); (void)tx; (void)t; (void)v; }
+void glTexCoordP1ui(GLenum t, GLuint v) { MITHRIL_ENSURE_INIT(); (void)t; (void)v; }
+void glTexCoordP1uiv(GLenum t, const GLuint* v) { MITHRIL_ENSURE_INIT(); (void)t; (void)v; }
+void glTexCoordP2ui(GLenum t, GLuint v) { MITHRIL_ENSURE_INIT(); (void)t; (void)v; }
+void glTexCoordP2uiv(GLenum t, const GLuint* v) { MITHRIL_ENSURE_INIT(); (void)t; (void)v; }
+void glTexCoordP3ui(GLenum t, GLuint v) { MITHRIL_ENSURE_INIT(); (void)t; (void)v; }
+void glTexCoordP3uiv(GLenum t, const GLuint* v) { MITHRIL_ENSURE_INIT(); (void)t; (void)v; }
+void glTexCoordP4ui(GLenum t, GLuint v) { MITHRIL_ENSURE_INIT(); (void)t; (void)v; }
+void glTexCoordP4uiv(GLenum t, const GLuint* v) { MITHRIL_ENSURE_INIT(); (void)t; (void)v; }
+void glSecondaryColorP3ui(GLenum t, GLuint v) { MITHRIL_ENSURE_INIT(); (void)t; (void)v; }
+void glSecondaryColorP3uiv(GLenum t, const GLuint* v) { MITHRIL_ENSURE_INIT(); (void)t; (void)v; }
+void glSecondaryColorPointer(GLint s, GLenum t, GLsizei st, const void* p) { MITHRIL_ENSURE_INIT(); (void)s; (void)t; (void)st; (void)p; }
+
+/* ---- Deprecated GL 1.x-3.x stubs (symbol presence for dlsym) ---- */
+
+void glFogCoordf(GLfloat c) { MITHRIL_ENSURE_INIT(); (void)c; }
+void glFogCoordfv(const GLfloat* c) { MITHRIL_ENSURE_INIT(); (void)c; }
+void glFogCoordd(GLdouble c) { MITHRIL_ENSURE_INIT(); (void)c; }
+void glFogCoorddv(const GLdouble* c) { MITHRIL_ENSURE_INIT(); (void)c; }
+void glFogCoordPointer(GLenum t, GLsizei s, const void* p) { MITHRIL_ENSURE_INIT(); (void)t; (void)s; (void)p; }
+void glIndexd(GLdouble c) { MITHRIL_ENSURE_INIT(); (void)c; }
+void glIndexdv(const GLdouble* c) { MITHRIL_ENSURE_INIT(); (void)c; }
+void glIndexf(GLfloat c) { MITHRIL_ENSURE_INIT(); (void)c; }
+void glIndexfv(const GLfloat* c) { MITHRIL_ENSURE_INIT(); (void)c; }
+void glIndexi(GLint c) { MITHRIL_ENSURE_INIT(); (void)c; }
+void glIndexiv(const GLint* c) { MITHRIL_ENSURE_INIT(); (void)c; }
+void glIndexs(GLshort c) { MITHRIL_ENSURE_INIT(); (void)c; }
+void glIndexsv(const GLshort* c) { MITHRIL_ENSURE_INIT(); (void)c; }
+void glIndexub(GLubyte c) { MITHRIL_ENSURE_INIT(); (void)c; }
+void glIndexubv(const GLubyte* c) { MITHRIL_ENSURE_INIT(); (void)c; }
+void glLightModeli(GLenum p, GLint v) { MITHRIL_ENSURE_INIT(); (void)p; (void)v; }
+void glLightModeliv(GLenum p, const GLint* v) { MITHRIL_ENSURE_INIT(); (void)p; (void)v; }
+void glLighti(GLenum l, GLenum p, GLint v) { MITHRIL_ENSURE_INIT(); (void)l; (void)p; (void)v; }
+void glLightiv(GLenum l, GLenum p, const GLint* v) { MITHRIL_ENSURE_INIT(); (void)l; (void)p; (void)v; }
+void glMaterialiv(GLenum f, GLenum p, const GLint* v) { MITHRIL_ENSURE_INIT(); (void)f; (void)p; (void)v; }
+void glLoadTransposeMatrixd(const GLdouble* m) { MITHRIL_ENSURE_INIT(); (void)m; }
+void glLoadTransposeMatrixf(const GLfloat* m) { MITHRIL_ENSURE_INIT(); (void)m; }
+void glMultTransposeMatrixd(const GLdouble* m) { MITHRIL_ENSURE_INIT(); (void)m; }
+void glMultTransposeMatrixf(const GLfloat* m) { MITHRIL_ENSURE_INIT(); (void)m; }
+void glMap1f(GLenum t, GLfloat a, GLfloat b, GLint s, GLint o, const GLfloat* p) { MITHRIL_ENSURE_INIT(); (void)t; (void)a; (void)b; (void)s; (void)o; (void)p; }
+void glMap2f(GLenum t, GLfloat a, GLfloat b, GLint s, GLint o, GLfloat c, GLfloat d, GLint e, GLint f, const GLfloat* p) { MITHRIL_ENSURE_INIT(); (void)t; (void)a; (void)b; (void)s; (void)o; (void)c; (void)d; (void)e; (void)f; (void)p; }
+void glMapGrid1f(GLint n, GLfloat a, GLfloat b) { MITHRIL_ENSURE_INIT(); (void)n; (void)a; (void)b; }
+void glMapGrid2f(GLint n, GLfloat a, GLfloat b, GLint v, GLfloat c, GLfloat d) { MITHRIL_ENSURE_INIT(); (void)n; (void)a; (void)b; (void)v; (void)c; (void)d; }
+void glEvalCoord1f(GLfloat u) { MITHRIL_ENSURE_INIT(); (void)u; }
+void glEvalCoord1fv(const GLfloat* u) { MITHRIL_ENSURE_INIT(); (void)u; }
+void glEvalCoord1dv(const GLdouble* u) { MITHRIL_ENSURE_INIT(); (void)u; }
+void glEvalCoord2f(GLfloat u, GLfloat v) { MITHRIL_ENSURE_INIT(); (void)u; (void)v; }
+void glEvalCoord2fv(const GLfloat* u) { MITHRIL_ENSURE_INIT(); (void)u; }
+void glEvalCoord2dv(const GLdouble* u) { MITHRIL_ENSURE_INIT(); (void)u; }
+void glRasterPos2d(GLdouble x, GLdouble y) { MITHRIL_ENSURE_INIT(); (void)x; (void)y; }
+void glRasterPos2dv(const GLdouble* v) { MITHRIL_ENSURE_INIT(); (void)v; }
+void glRasterPos2f(GLfloat x, GLfloat y) { MITHRIL_ENSURE_INIT(); (void)x; (void)y; }
+void glRasterPos2fv(const GLfloat* v) { MITHRIL_ENSURE_INIT(); (void)v; }
+void glRasterPos2i(GLint x, GLint y) { MITHRIL_ENSURE_INIT(); (void)x; (void)y; }
+void glRasterPos2iv(const GLint* v) { MITHRIL_ENSURE_INIT(); (void)v; }
+void glRasterPos2s(GLshort x, GLshort y) { MITHRIL_ENSURE_INIT(); (void)x; (void)y; }
+void glRasterPos2sv(const GLshort* v) { MITHRIL_ENSURE_INIT(); (void)v; }
+void glRasterPos3d(GLdouble x, GLdouble y, GLdouble z) { MITHRIL_ENSURE_INIT(); (void)x; (void)y; (void)z; }
+void glRasterPos3dv(const GLdouble* v) { MITHRIL_ENSURE_INIT(); (void)v; }
+void glRasterPos3f(GLfloat x, GLfloat y, GLfloat z) { MITHRIL_ENSURE_INIT(); (void)x; (void)y; (void)z; }
+void glRasterPos3fv(const GLfloat* v) { MITHRIL_ENSURE_INIT(); (void)v; }
+void glRasterPos3i(GLint x, GLint y, GLint z) { MITHRIL_ENSURE_INIT(); (void)x; (void)y; (void)z; }
+void glRasterPos3iv(const GLint* v) { MITHRIL_ENSURE_INIT(); (void)v; }
+void glRasterPos3s(GLshort x, GLshort y, GLshort z) { MITHRIL_ENSURE_INIT(); (void)x; (void)y; (void)z; }
+void glRasterPos3sv(const GLshort* v) { MITHRIL_ENSURE_INIT(); (void)v; }
+void glRasterPos4d(GLdouble x, GLdouble y, GLdouble z, GLdouble w) { MITHRIL_ENSURE_INIT(); (void)x; (void)y; (void)z; (void)w; }
+void glRasterPos4dv(const GLdouble* v) { MITHRIL_ENSURE_INIT(); (void)v; }
+void glRasterPos4f(GLfloat x, GLfloat y, GLfloat z, GLfloat w) { MITHRIL_ENSURE_INIT(); (void)x; (void)y; (void)z; (void)w; }
+void glRasterPos4fv(const GLfloat* v) { MITHRIL_ENSURE_INIT(); (void)v; }
+void glRasterPos4i(GLint x, GLint y, GLint z, GLint w) { MITHRIL_ENSURE_INIT(); (void)x; (void)y; (void)z; (void)w; }
+void glRasterPos4iv(const GLint* v) { MITHRIL_ENSURE_INIT(); (void)v; }
+void glRasterPos4s(GLshort x, GLshort y, GLshort z, GLshort w) { MITHRIL_ENSURE_INIT(); (void)x; (void)y; (void)z; (void)w; }
+void glRasterPos4sv(const GLshort* v) { MITHRIL_ENSURE_INIT(); (void)v; }
+void glRectd(GLdouble x1, GLdouble y1, GLdouble x2, GLdouble y2) { MITHRIL_ENSURE_INIT(); (void)x1; (void)y1; (void)x2; (void)y2; }
+void glRectdv(const GLdouble* v1, const GLdouble* v2) { MITHRIL_ENSURE_INIT(); (void)v1; (void)v2; }
+void glRectf(GLfloat x1, GLfloat y1, GLfloat x2, GLfloat y2) { MITHRIL_ENSURE_INIT(); (void)x1; (void)y1; (void)x2; (void)y2; }
+void glRectfv(const GLfloat* v1, const GLfloat* v2) { MITHRIL_ENSURE_INIT(); (void)v1; (void)v2; }
+void glRecti(GLint x1, GLint y1, GLint x2, GLint y2) { MITHRIL_ENSURE_INIT(); (void)x1; (void)y1; (void)x2; (void)y2; }
+void glRectiv(const GLint* v1, const GLint* v2) { MITHRIL_ENSURE_INIT(); (void)v1; (void)v2; }
+void glRects(GLshort x1, GLshort y1, GLshort x2, GLshort y2) { MITHRIL_ENSURE_INIT(); (void)x1; (void)y1; (void)x2; (void)y2; }
+void glRectsv(const GLshort* v1, const GLshort* v2) { MITHRIL_ENSURE_INIT(); (void)v1; (void)v2; }
+void glWindowPos2d(GLdouble x, GLdouble y) { MITHRIL_ENSURE_INIT(); (void)x; (void)y; }
+void glWindowPos2dv(const GLdouble* v) { MITHRIL_ENSURE_INIT(); (void)v; }
+void glWindowPos2f(GLfloat x, GLfloat y) { MITHRIL_ENSURE_INIT(); (void)x; (void)y; }
+void glWindowPos2fv(const GLfloat* v) { MITHRIL_ENSURE_INIT(); (void)v; }
+void glWindowPos2i(GLint x, GLint y) { MITHRIL_ENSURE_INIT(); (void)x; (void)y; }
+void glWindowPos2iv(const GLint* v) { MITHRIL_ENSURE_INIT(); (void)v; }
+void glWindowPos2s(GLshort x, GLshort y) { MITHRIL_ENSURE_INIT(); (void)x; (void)y; }
+void glWindowPos2sv(const GLshort* v) { MITHRIL_ENSURE_INIT(); (void)v; }
+void glWindowPos3d(GLdouble x, GLdouble y, GLdouble z) { MITHRIL_ENSURE_INIT(); (void)x; (void)y; (void)z; }
+void glWindowPos3dv(const GLdouble* v) { MITHRIL_ENSURE_INIT(); (void)v; }
+void glWindowPos3f(GLfloat x, GLfloat y, GLfloat z) { MITHRIL_ENSURE_INIT(); (void)x; (void)y; (void)z; }
+void glWindowPos3fv(const GLfloat* v) { MITHRIL_ENSURE_INIT(); (void)v; }
+void glWindowPos3i(GLint x, GLint y, GLint z) { MITHRIL_ENSURE_INIT(); (void)x; (void)y; (void)z; }
+void glWindowPos3iv(const GLint* v) { MITHRIL_ENSURE_INIT(); (void)v; }
+void glWindowPos3s(GLshort x, GLshort y, GLshort z) { MITHRIL_ENSURE_INIT(); (void)x; (void)y; (void)z; }
+void glWindowPos3sv(const GLshort* v) { MITHRIL_ENSURE_INIT(); (void)v; }
+
+/* ---- Extension function (GL_ARB_sparse_texture) ---- */
+void glTexturePageCommitmentExt(GLuint t, GLint l, GLint x, GLint y, GLint z, GLsizei w, GLsizei h, GLsizei d, GLboolean c) {
+    MITHRIL_ENSURE_INIT(); (void)t; (void)l; (void)x; (void)y; (void)z; (void)w; (void)h; (void)d; (void)c;
+}
+
 } /* extern "C" */
