@@ -121,14 +121,31 @@ void glBufferData(GLenum target, GLsizeiptr size, const void* data, GLenum usage
     mithril::Buffer* b = bound_buffer_for_target(target);
     if (!b) { mithril::state_set_error(GL_INVALID_OPERATION); return; }
     b->size  = size;
+    b->allocSize = (GLsizeiptr)alloc_size;  // 实际分配大小（含 padding），用于越界检查
     b->usage = usage;
     b->immutable = false;  // glBufferData resets immutable flag
     b->storageFlags = 0;
     b->data.assign((size_t)size, 0);
     if (data && size > 0) std::memcpy(b->data.data(), data, (size_t)size);
     b->mapped = nullptr;
+    // FIX (GPU OOM from per-draw auto-grow buffer storm):
+    // MC 频繁创建小子节 buffer (48B/80B/96B...)，每个 attrib draw 越界时
+    // auto-grow 触发大量 VkBuffer 分配 → GPU OOM → DEVICE_LOST。
+    // 创建时将 VkBuffer 大小向上取整到 256 字节（保留 b->size 为逻辑大小
+    // 不变，glGetParameter 仍返回原始 size），让桌面 GL driver 常用的
+    // alignment/padding 行为在 Vulkan 端复现，吸收小的越界读。
+    // 参考：Desktop GL driver 通常按 64/128/256B 对齐分配；MobileGL 内部
+    //也有类似 padding 策略，故 MC 在 iOS 上跑时不触发越界风暴。
+    size_t alloc_size = (size_t)size;
+    if (alloc_size < 256) {
+        // 小子节 buffer 统一 padding 到 256B（MC 大量 48/80/96B buffer）
+        alloc_size = 256;
+    } else {
+        // 已足够大：按 256B 对齐（匹配常见 driver alignment）
+        alloc_size = (alloc_size + 255) & ~(size_t)255;
+    }
     // Recreate the VkBuffer (allocates + uploads).
-    backend_get_or_create_buffer(b->id, data && size ? b->data.data() : nullptr, (size_t)size);
+    backend_get_or_create_buffer(b->id, data && size ? b->data.data() : nullptr, alloc_size);
 }
 
 // GL 4.4 ARB_buffer_storage — immutable storage with persistent mapping.

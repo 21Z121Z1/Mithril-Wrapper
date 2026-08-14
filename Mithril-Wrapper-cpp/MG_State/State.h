@@ -269,10 +269,14 @@ struct VertexArray {
 
 // ---- Buffer ----
 struct Buffer {
-    GLuint       id = 0;
-    GLenum       lastTarget = GL_ARRAY_BUFFER;
-    GLsizeiptr   size = 0;
-    GLenum       usage = GL_STATIC_DRAW;
+GLuint       id = 0;
+GLenum       lastTarget = GL_ARRAY_BUFFER;
+GLsizeiptr   size = 0;
+// FIX (GPU OOM): alloc_size 是实际 VkBuffer 分配大小（含 padding），
+// size 是 MC 请求的逻辑大小。glGetParameter 返回 size，overrun 检查
+// 用 alloc_size 判断实际可安全读取范围。
+GLsizeiptr   allocSize = 0;
+GLenum       usage = GL_STATIC_DRAW;
     std::vector<uint8_t> data;
     void*        mapped = nullptr;
     GLbitfield   mapAccess = 0;
