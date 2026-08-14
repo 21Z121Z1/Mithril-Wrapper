@@ -16,6 +16,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          fetch-depth: 0
 
       - name: Install Vulkan software stack
         run: |
@@ -38,6 +39,9 @@ jobs:
           clang -std=c11 -O0 -g -Wall -Wextra -IMithril-Wrapper-cpp/include -o tests/gl_smoke tests/gl_smoke.c -ldl
           clang -D_GNU_SOURCE -std=c11 -O0 -g -Wall -Wextra -IMithril-Wrapper-cpp/include -o tests/render_smoke tests/render_smoke.c -ldl
           clang -std=c11 -O0 -g -Wall -Wextra -IMithril-Wrapper-cpp/include -o tests/egl_sync_smoke tests/egl_sync_smoke.c -ldl
+          if test -f tests/overnight_regression_smoke.c; then
+            clang -D_GNU_SOURCE -std=c11 -O0 -g -Wall -Wextra -IMithril-Wrapper-cpp/include -o tests/overnight_regression_smoke tests/overnight_regression_smoke.c -ldl
+          fi
 
       - name: Run complete GL to Vulkan draw/readback smokes on lavapipe
         env:
@@ -51,6 +55,7 @@ jobs:
           ./tests/gl_smoke "$LIB"
           ./tests/render_smoke "$LIB"
           ./tests/egl_sync_smoke "$LIB"
+          if test -x tests/overnight_regression_smoke; then ./tests/overnight_regression_smoke "$LIB"; fi
 
       - name: Validate recovered invariants
         run: |
@@ -66,6 +71,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          fetch-depth: 0
 
       - name: Install Vulkan loader and MoltenVK
         run: brew install vulkan-loader molten-vk
@@ -99,6 +105,9 @@ jobs:
           clang++ -std=c++17 -fobjc-arc -O0 -Wall -Wextra \
             -framework Foundation -framework QuartzCore -framework Metal \
             -o tests/surface_metal_smoke tests/surface_metal_smoke.mm -ldl
+          if test -f tests/overnight_regression_smoke.c; then
+            clang -std=c11 -O0 -Wall -Wextra -IMithril-Wrapper-cpp/include -o tests/overnight_regression_smoke tests/overnight_regression_smoke.c -ldl
+          fi
 
       - name: Run host state and real-GPU smokes
         env:
@@ -111,6 +120,7 @@ jobs:
           ./tests/render_smoke "$DYLIB"
           ./tests/egl_sync_smoke "$DYLIB"
           ./tests/surface_metal_smoke "$DYLIB"
+          if test -x tests/overnight_regression_smoke; then ./tests/overnight_regression_smoke "$DYLIB"; fi
 
       - name: Source integrity checks
         run: |
@@ -125,6 +135,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          fetch-depth: 0
 
       - name: Fetch iOS toolchain and MoltenVK 1.4.2
         run: |
