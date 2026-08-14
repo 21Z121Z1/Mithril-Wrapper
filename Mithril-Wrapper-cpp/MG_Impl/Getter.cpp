@@ -55,7 +55,7 @@ extern "C" const char* mithril_get_settings_dump(void);
 /* ---- Strings ---- */
 // Vendor string lists the project developers (mirrors MobileGlues' pattern of
 // putting the maintainer names in GL_VENDOR).
-static const char* kVendor   = "EternityQwQ, yitenchen123";
+static const char* kVendor   = "EternityQwQ, yitenchen123, Uniaball, q3cc";
 #if defined(__APPLE__)
 // GL_RENDERER is built on first query from the live VkPhysicalDevice (see
 // Getter_gpu.mm). Falls back to the static string if Vulkan is unavailable.
