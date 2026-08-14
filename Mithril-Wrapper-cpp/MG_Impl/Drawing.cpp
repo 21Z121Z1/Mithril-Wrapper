@@ -801,16 +801,15 @@ void glMultiDrawArrays(GLenum mode, const GLint* first, const GLsizei* count, GL
     if (!first || !count || drawcount <= 0) return;
     if (!prepare_draw(mode)) return;  // root cause AI — 一次 SetupDraw
     // FIX (DRAW-OVERRUN GPU page fault): 逐 sub-draw 检查顶点 buffer 越界，
-    // 越界则跳过该 sub-draw 防止 GPU Address Fault。
+    // 越界时自动扩展 buffer 到实际需要的大小（填 0），防止 GPU Address Fault。
+    // 与单 draw 路径的 trace_draw auto-grow 策略一致。
     for (GLsizei i = 0; i < drawcount; ++i) {
         if (count[i] <= 0) continue;
-        // 快速越界检查：与前 2 个 enabled attrib 的 buffer 大小比较
         if (g_state->currentVAO) {
             mithril::VertexArray* vao = mithril::state_get_vao(g_state->currentVAO);
             if (vao) {
                 int checked = 0;
-                bool overrun = false;
-                for (int a = 0; a < mithril::kMaxVertexAttribs && checked < 2 && !overrun; ++a) {
+                for (int a = 0; a < mithril::kMaxVertexAttribs && checked < 2; ++a) {
                     const mithril::VertexAttrib& at = vao->attribs[a];
                     if (!at.enabled || !at.boundBuffer) continue;
                     auto* vb = mithril::state_get_buffer(at.boundBuffer);
@@ -821,13 +820,17 @@ void glMultiDrawArrays(GLenum mode, const GLint* first, const GLsizei* count, GL
                     size_t offset = (size_t)(intptr_t)at.pointer;
                     size_t need = offset + (size_t)((int)first[i] + count[i]) * (size_t)stride;
                     if (need > (size_t)vb->size) {
-                        LOG_RESOURCE("DRAW-OVERRUN multidraw_arrays i=%d attr=%d buf=%u stride=%d off=%zu first+count=%d need=%zuB have=%lldB",
+                        LOG_RESOURCE("DRAW-OVERRUN multidraw_arrays i=%d attr=%d buf=%u stride=%d "
+                                     "off=%zu first+count=%d need=%zuB have=%lldB",
                                      (int)i, a, (unsigned)at.boundBuffer, (int)stride, offset,
                                      (int)first[i] + count[i], need, (long long)vb->size);
-                        overrun = true;
+                        // Auto-grow buffer 到实际需要大小（新增填 0）
+                        mithril::vk::backend_get_or_create_buffer(at.boundBuffer, nullptr, need);
+                        vb->size = (GLsizeiptr)need;
+                        LOG_RESOURCE("DRAW-VB-GROW multidraw_arrays buf=%u from=%lld to=%zu",
+                                     (unsigned)at.boundBuffer, (long long)vb->size, need);
                     }
                 }
-                if (overrun) continue;  // 跳过越界的 sub-draw
             }
         }
         backend_draw_arrays((int)mode, (int)first[i], (int)count[i]);
@@ -851,12 +854,13 @@ void glMultiDrawElements(GLenum mode, const GLsizei* count, GLenum type,
         // VBO 路径：indices[i] 是 offset，零拷贝
         for (GLsizei i = 0; i < drawcount; ++i) {
             if (count[i] <= 0) continue;
-            // FIX (DRAW-OVERRUN GPU page fault): 检查顶点 buffer 越界
-            bool overrun = false;
+            // FIX (DRAW-OVERRUN GPU page fault): 检查顶点 buffer 越界，
+            // 越界时自动扩展 buffer（而非跳过 sub-draw）
+            bool need_draw = true;
             mithril::VertexArray* vao2 = mithril::state_get_vao(g_state->currentVAO);
             if (vao2) {
                 int checked = 0;
-                for (int a = 0; a < mithril::kMaxVertexAttribs && checked < 2 && !overrun; ++a) {
+                for (int a = 0; a < mithril::kMaxVertexAttribs && checked < 2; ++a) {
                     const mithril::VertexAttrib& at = vao2->attribs[a];
                     if (!at.enabled || !at.boundBuffer) continue;
                     auto* vb = mithril::state_get_buffer(at.boundBuffer);
@@ -867,14 +871,19 @@ void glMultiDrawElements(GLenum mode, const GLsizei* count, GLenum type,
                     size_t offset = (size_t)(intptr_t)at.pointer;
                     size_t need = offset + (size_t)count[i] * (size_t)stride;
                     if (need > (size_t)vb->size) {
-                        LOG_RESOURCE("DRAW-OVERRUN multidraw_elem i=%d attr=%d buf=%u stride=%d off=%zu count=%d need=%zuB have=%lldB",
+                        LOG_RESOURCE("DRAW-OVERRUN multidraw_elem i=%d attr=%d buf=%u stride=%d "
+                                     "off=%zu count=%d need=%zuB have=%lldB",
                                      (int)i, a, (unsigned)at.boundBuffer, (int)stride, offset,
                                      (int)count[i], need, (long long)vb->size);
-                        overrun = true;
+                        // Auto-grow buffer 到实际需要大小（新增填 0）
+                        mithril::vk::backend_get_or_create_buffer(at.boundBuffer, nullptr, need);
+                        vb->size = (GLsizeiptr)need;
+                        LOG_RESOURCE("DRAW-VB-GROW multidraw_elem buf=%u from=%lld to=%zu",
+                                     (unsigned)at.boundBuffer, (long long)vb->size, need);
                     }
                 }
             }
-            if (!overrun)
+            if (need_draw)
                 backend_draw_indexed((int)mode, (int)count[i], idx_type, ib,
                                      (VkDeviceSize)(intptr_t)indices[i]);
         }
@@ -907,13 +916,13 @@ void glMultiDrawElementsBaseVertex(GLenum mode, const GLsizei* count, GLenum typ
     if (ib != VK_NULL_HANDLE && basevertex) {
         for (GLsizei i = 0; i < drawcount; ++i) {
             if (count[i] <= 0) continue;
-            // FIX (DRAW-OVERRUN GPU page fault): 检查顶点 buffer 越界
+            // FIX (DRAW-OVERRUN GPU page fault): 检查顶点 buffer 越界，
+            // 越界时自动扩展 buffer（而非跳过 sub-draw）
             if (g_state->currentVAO) {
                 mithril::VertexArray* vao3 = mithril::state_get_vao(g_state->currentVAO);
                 if (vao3) {
                     int checked = 0;
-                    bool overrun = false;
-                    for (int a = 0; a < mithril::kMaxVertexAttribs && checked < 2 && !overrun; ++a) {
+                    for (int a = 0; a < mithril::kMaxVertexAttribs && checked < 2; ++a) {
                         const mithril::VertexAttrib& at = vao3->attribs[a];
                         if (!at.enabled || !at.boundBuffer) continue;
                         auto* vb = mithril::state_get_buffer(at.boundBuffer);
@@ -924,10 +933,17 @@ void glMultiDrawElementsBaseVertex(GLenum mode, const GLsizei* count, GLenum typ
                         size_t offset = (size_t)(intptr_t)at.pointer;
                         size_t need = offset + (size_t)count[i] * (size_t)stride2;
                         if (need > (size_t)vb->size) {
-                            overrun = true;
+                            LOG_RESOURCE("DRAW-OVERRUN multidraw_bv i=%d attr=%d buf=%u stride=%d "
+                                         "off=%zu count=%d need=%zuB have=%lldB",
+                                         (int)i, a, (unsigned)at.boundBuffer, (int)stride2, offset,
+                                         (int)count[i], need, (long long)vb->size);
+                            // Auto-grow buffer 到实际需要大小（新增填 0）
+                            mithril::vk::backend_get_or_create_buffer(at.boundBuffer, nullptr, need);
+                            vb->size = (GLsizeiptr)need;
+                            LOG_RESOURCE("DRAW-VB-GROW multidraw_bv buf=%u from=%lld to=%zu",
+                                         (unsigned)at.boundBuffer, (long long)vb->size, need);
                         }
                     }
-                    if (overrun) continue;
                 }
             }
             g_state->currentBaseVertex = basevertex[i];
