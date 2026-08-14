@@ -278,6 +278,20 @@ void install_surface_on_state(EglSurface* s) {
         g_state->eglDefaultColorFormat  = backend_swapchain_color_format(s->swapchain_state);
         g_state->eglDefaultDepthImage   = backend_swapchain_current_depth_image(s->swapchain_state);
         g_state->eglDefaultDepthFormat  = backend_swapchain_depth_format(s->swapchain_state);
+        static int installDiag = 0;
+        if (installDiag < 48) {
+            MITHRIL_LOG_WARN("egl", "install #%d state=%p surface=%p swapchain=%p "
+                              "colorView=0x%llx colorImage=0x%llx colorFmt=%d "
+                              "depthView=0x%llx depthImage=0x%llx",
+                              installDiag + 1, (void*)g_state, (void*)s,
+                              s->swapchain_state,
+                              (unsigned long long)(uintptr_t)color,
+                              (unsigned long long)(uintptr_t)g_state->eglDefaultColorImage,
+                              (int)g_state->eglDefaultColorFormat,
+                              (unsigned long long)(uintptr_t)depth,
+                              (unsigned long long)(uintptr_t)g_state->eglDefaultDepthImage);
+            ++installDiag;
+        }
         // FIX (IOSurfaceBindAccel SIGSEGV): Use the ACTUAL drawable size from
         // the native window (CAMetalLayer.drawableSize), NOT the swapchain's
         // creation-time size (s->width). On MoltenVK/iOS, the swapchain image
@@ -670,6 +684,9 @@ EGLContext eglCreateContext(EGLDisplay dpy, EGLConfig config,
         std::lock_guard<std::mutex> lk(g_ctxMutex);
         sh->refcount.fetch_add(1);
     }
+    MITHRIL_LOG_WARN("egl", "eglCreateContext ctx=%p share=%p clientAPI=0x%x version=%d.%d",
+                     (void*)ctx, (void*)share_context, (unsigned)t_boundAPI,
+                     (int)ctx->majorVer, (int)ctx->minorVer);
     return (EGLContext)ctx;
 }
 
@@ -702,6 +719,9 @@ EGLBoolean eglMakeCurrent(EGLDisplay dpy, EGLSurface draw, EGLSurface read,
                           EGLContext ctx) {
     clear_error();
     if (!valid_display(dpy)) { set_error(EGL_BAD_DISPLAY); return EGL_FALSE; }
+
+    MITHRIL_LOG_WARN("egl", "eglMakeCurrent enter ctx=%p draw=%p read=%p",
+                     (void*)ctx, (void*)draw, (void*)read);
 
     // Detach case: ctx == EGL_NO_CONTEXT and draw/read == EGL_NO_SURFACE.
     if (ctx == EGL_NO_CONTEXT) {
@@ -754,6 +774,8 @@ EGLBoolean eglMakeCurrent(EGLDisplay dpy, EGLSurface draw, EGLSurface read,
     t_currentCtx  = c;
     t_currentDraw = d;
     t_currentRead = r ? r : d;
+    MITHRIL_LOG_WARN("egl", "eglMakeCurrent success ctx=%p current=%p draw=%p",
+                     (void*)ctx, (void*)t_currentCtx, (void*)t_currentDraw);
     return EGL_TRUE;
 }
 

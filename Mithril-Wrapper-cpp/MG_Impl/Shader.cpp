@@ -26,8 +26,10 @@
 //      pattern, including its dead-input handling).
 //   4. The SPIR-V is post-processed by SPIRV-Reflect:
 //      remap_descriptor_bindings() reassigns every descriptor binding
-//      deterministically across BOTH stages keyed by (kind, name) — the
-//      exact algorithm MobileGL's RemapDescriptorBindingsForVulkan uses.
+//      deterministically across BOTH stages. Application-declared uniform
+//      blocks with the same name keep one cross-stage binding (GL's shared
+//      uniform-block namespace); the synthetic mithril_GlobalBlock remains
+//      stage-local because its per-stage layouts are intentionally distinct.
 //      This guarantees VS/FS can never collide on a binding and every
 //      emitted resource (even an inactive sampler) carries a valid Binding
 //      decoration.
@@ -460,14 +462,17 @@ private:
 //   - bindings are walked in (set, binding, spirv_id) order, VS first then
 //     FS, and reassigned 0, 1, 2, ... across BOTH stages (the same walk
 //     order MobileGL's RemapDescriptorBindingsForVulkan uses);
-//   - each stage keeps its own block bindings. In particular the vertex and
-//     fragment mithril_GlobalBlock are SEPARATE bindings: the two blocks
-//     carry disjoint member sets with independent std140 offsets (both start
-//     at 0), so folding them into one descriptor would make the fragment
-//     stage read matrix bytes where a colour belongs. Keeping them separate
-//     matches the semantics of the old per-stage 64-slot offset scheme,
-//     without the hack: each block gets its own backing store and there is
-//     no cross-stage collision possible by construction;
+//   - application-declared uniform blocks with the same name share one
+//     binding across stages, as required by the GL uniform-block namespace.
+//     Otherwise a VS declaration of (for example) DynamicTransforms and the
+//     identically named FS declaration become two unrelated Vulkan UBOs; the
+//     GL binding point then resolves to whichever duplicate happened to be
+//     inserted last, and one stage reads the other stage's bytes;
+//   - the vertex and fragment mithril_GlobalBlock remain SEPARATE bindings:
+//     those synthetic blocks carry disjoint member sets with independent
+//     std140 offsets (both start at 0), so folding them into one descriptor
+//     would make the fragment stage read matrix bytes where a colour belongs.
+//     Keeping them separate matches the per-stage uniform-arena semantics;
 //   - every binding is moved to descriptor set 0, and missing Binding
 //     decorations (inactive samplers) are written by SPIRV-Reflect;
 //   - all variants of one program must be remapped with the same key map so
@@ -484,6 +489,8 @@ static bool remap_descriptor_bindings(
     std::vector<std::vector<uint32_t>*> modules = {&vs, &fs};
     std::vector<SpvReflectShaderModule> reflectModules;
     reflectModules.reserve(2);
+    std::unordered_map<std::string, uint32_t> sharedUboBindings;
+    static unsigned remapDiagCount = 0;
 
     for (auto* spv : modules) {
         if (spv->empty()) continue;
@@ -522,7 +529,53 @@ static bool remap_descriptor_bindings(
         std::vector<std::pair<uint32_t, uint32_t>> plan;  // (spirv_id, binding)
         plan.reserve(bindings.size());
         for (auto* binding : bindings) {
-            plan.emplace_back(binding->spirv_id, nextBinding++);
+            // OpenGL has one uniform-block binding namespace for the linked
+            // program: a block declared with the same name in VS and FS is
+            // one interface and glUniformBlockBinding applies to both stages.
+            // glslang, however, auto-assigns descriptors per TShader, so the
+            // two declarations can arrive here with different source
+            // bindings. Reuse a deterministic binding for named application
+            // UBOs across stages. The synthetic global block is deliberately
+            // excluded: its VS/FS members are packed independently and are
+            // consumed from separate uniform-arena slices.
+            const char* reflectedName = binding->name;
+            // glslang may omit OpName for the descriptor variable while still
+            // retaining the GLSL uniform-block name on the block type.  This
+            // is the form emitted by Minecraft's DynamicTransforms and
+            // Projection blocks, and it is what SPIRV-Cross later exposes as
+            // DescriptorBinding::name.  Use it as the cross-stage identity
+            // when the descriptor variable name is absent.
+            if ((!reflectedName || reflectedName[0] == '\0') &&
+                binding->type_description && binding->type_description->type_name) {
+                reflectedName = binding->type_description->type_name;
+            }
+            const bool namedUbo =
+                binding->descriptor_type == SPV_REFLECT_DESCRIPTOR_TYPE_UNIFORM_BUFFER &&
+                reflectedName != nullptr && reflectedName[0] != '\0' &&
+                std::strcmp(reflectedName, kGlobalBlockName) != 0;
+            uint32_t assigned = 0;
+            if (namedUbo) {
+                const std::string name(reflectedName);
+                auto it = sharedUboBindings.find(name);
+                if (it != sharedUboBindings.end()) {
+                    assigned = it->second;
+                } else {
+                    assigned = nextBinding++;
+                    sharedUboBindings.emplace(name, assigned);
+                }
+            } else {
+                assigned = nextBinding++;
+            }
+            if (remapDiagCount < 96) {
+                MITHRIL_LOG_WARN(
+                    "remapdiag",
+                    "module=%s id=%u srcSet=%u srcBinding=%u type=0x%x name=%s assigned=%u",
+                    spv == &vs ? "vs" : "fs", binding->spirv_id, binding->set,
+                    binding->binding, (unsigned)binding->descriptor_type,
+                    reflectedName ? reflectedName : "<unnamed>", assigned);
+                ++remapDiagCount;
+            }
+            plan.emplace_back(binding->spirv_id, assigned);
         }
 
         for (const auto& [targetId, assigned] : plan) {

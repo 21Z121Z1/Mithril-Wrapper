@@ -49,6 +49,7 @@
 #include "includes.h"
 #include "Framebuffer.h"
 #include "../MG_Backend/DirectVulkan/LogRing.h"  // draw 路径打点（GPU fault 诊断）
+#include "../MG_Backend/DirectVulkan/CommandStream.h"  // bounded draw-state diagnostics
 #include "../MG_Backend/DirectVulkan/Device.h"   // real GLsync submission serials
 
 #include <algorithm>
@@ -251,7 +252,10 @@ static bool prepare_draw(GLenum mode) {
     // call — see the root cause AI comment on this function. Note that the
     // render pass has NOT been begun at this point (that happens below), so
     // a draw issued here would be recorded outside any render-pass instance.
-    if (pipeline == VK_NULL_HANDLE) return false;
+    if (pipeline == VK_NULL_HANDLE) {
+        log_prepare_draw_miss("graphics pipeline creation failed", prog->id);
+        return false;
+    }
 
     // FIX (root cause Y, CRITICAL): Register user-FBO attachment tex_ids so
     // begin_render_pass can barrier their images to attachment-optimal and
@@ -306,26 +310,22 @@ static bool prepare_draw(GLenum mode) {
     // culls geometry incorrectly. When cullFace is off, explicitly set
     // VK_CULL_MODE_NONE.
     //
-    // Y-flip winding adjustment (deep reference: MobileGL
-    // ConvertCullFaceModeToVkEnum + VulkanRenderer frontFace=CLOCKWISE):
-    // When the vertex Y is flipped (default framebuffer), triangle winding
-    // inverts (CCW→CW, CW→CCW). To keep the GL-intended faces visible:
-    //   - Swap the cull mode: GL_FRONT→VK_BACK, GL_BACK→VK_FRONT
-    //   - Hardcode frontFace to CLOCKWISE (the inverted winding makes GL's
-    //     CCW triangles appear as CW in Vulkan). MobileGL does the same.
-    // User FBOs (no Y flip) keep the original cull mode and frontFace.
+    // Winding adjustment for the positive-height Vulkan viewport (deep
+    // reference: MobileGL's frontFace=CLOCKWISE path): the GL bottom-origin
+    // viewport is mapped to Vulkan's top-origin framebuffer, so the
+    // window-space orientation is reversed.  Keep cullMode expressed as the
+    // GL semantic (front/back) and invert only the Vulkan frontFace selector
+    // below.  This applies to user FBOs as well as the default framebuffer;
+    // treating user FBOs as unflipped was the physical black-panorama bug.
     if (g_state->cullFace) {
-        // FIX (Root Cause K - Y翻转面剔除双重补偿):
+        // FIX (Root Cause K - positive-viewport winding compensation):
         // Vulkan 面剔除由两个独立状态控制：frontFace（定义正面缠绕方向）+ cullMode（剔除哪面）。
-        // Y 翻转（gl_Position.y = -y）反转缠绕：GL-CCW → Vulkan-CW。
+        // 当前 positive-height viewport 的 GL→Vulkan 原点映射反转缠绕：GL-CCW → Vulkan-CW。
         // 正确补偿（二选一，不可同时）：
         //   方案A: frontFace=CW（GL-CCW→Vulkan-CW="正面"），不交换 cull mode（GL_BACK→VK_BACK 剔除 GL-背面）
         //   方案B: frontFace=CCW（GL-CCW→Vulkan-CW="背面"），交换 cull mode（GL_BACK→VK_FRONT 剔除 GL-背面）
-        // 旧代码同时执行 A+B → 双重补偿：frontFace=CW 使 GL-正面=Vulkan-正面，再交换 cull=VK_FRONT
-        // 剔除 Vulkan-正面=GL-正面 → 所有正面几何被剔除，只剩 clear color（红色）→ 红屏。
-        // 修复：采用方案A，仅 frontFace=CW 补偿，cull mode 直接按 GL 值映射不交换。
-        // 参考 MobileGL VulkanRenderer ConvertCullFaceModeToVkEnum：不交换 cull mode，
-        // 仅通过 frontFace=CLOCKWISE 补偿 Y 翻转。
+        // 这里采用方案A；物理 probe 已证明旧的 user-FBO frontFace=CCW
+        // 会把 panorama 的有效三角形全部归为 VK_BACK 并剔除。
         int vk_cull = 0;
         if (g_state->cullMode == GL_FRONT) {
             vk_cull = 1;  // VK_CULL_MODE_FRONT_BIT
@@ -335,12 +335,53 @@ static bool prepare_draw(GLenum mode) {
             vk_cull = 3;  // VK_CULL_MODE_FRONT_AND_BACK
         }
         backend_set_cull_mode(vk_cull);
-        // Y 翻转使缠绕反转：GL-CCW → Vulkan-CW。设 frontFace=CW 补偿（仅默认帧缓冲）。
-        // 用户 FBO 无 Y 翻转，frontFace 按 GL 值映射（CCW→1, CW→0）。
-        backend_set_front_face(is_default_fbo ? 0 /*CW*/ :
-                               (g_state->frontFace == GL_CCW ? 1 : 0));
+        // The viewport is positive-height and maps the GL bottom-origin
+        // rectangle into Vulkan's top-origin framebuffer.  That mapping
+        // reverses the window-space winding for both user FBOs and the
+        // default framebuffer (the latter also uses the Y-flipped vertex
+        // shader to preserve the visible image orientation).  Keep GL's
+        // front-face meaning by inverting the Vulkan front-face selector.
+        // With the default GL_CCW state this is VK_FRONT_FACE_CLOCKWISE;
+        // GL_CW remains the exact inverse.
+        backend_set_front_face(g_state->frontFace == GL_CCW ? 0 /*CW*/ : 1 /*CCW*/);
     } else {
         backend_set_cull_mode(0);  // VK_CULL_MODE_NONE
+    }
+
+    // Bounded physical probe for the missing Minecraft GUI/HUD.  The GUI
+    // program is identified from its shader semantic rather than a numeric
+    // program id.  Keep this probe separate from the general winding fix:
+    // if GUI pixels appear only with culling disabled, the evidence points to
+    // a GUI raster-state mismatch rather than a texture, descriptor, or
+    // presentation failure.  This is diagnostic only and must not survive
+    // acceptance of a production fix.
+    bool is_gui_program = false;
+    for (GLuint sid : prog->attachedShaders) {
+        mithril::Shader* sh = mithril::state_get_shader(sid);
+        if (sh && sh->source.find("#define IS_GUI") != std::string::npos) {
+            is_gui_program = true;
+            break;
+        }
+    }
+    mithril::vk::Backend* guiProbeBackend = mithril::vk::backend();
+    static int guiCullProbe = 0;
+    if (is_gui_program && g_state->currentDrawFBO == 3 &&
+        guiProbeBackend && guiProbeBackend->frameGeneration >= 35 &&
+        guiCullProbe < 48) {
+        MITHRIL_LOG_WARN(
+            "guidiag",
+            "GUI CULL PROBE #%d prog=%u fbo=%u mode=0x%x "
+            "cullFace=%d cullMode=0x%x frontFace=0x%x viewport=%d,%d %dx%d "
+            "depthTest=%d blend=%d — forced VK_CULL_MODE_NONE",
+            guiCullProbe + 1, (unsigned)prog->id,
+            (unsigned)g_state->currentDrawFBO, (unsigned)mode,
+            g_state->cullFace ? 1 : 0, (unsigned)g_state->cullMode,
+            (unsigned)g_state->frontFace, (int)g_state->viewportX,
+            (int)g_state->viewportY, (int)g_state->viewportW,
+            (int)g_state->viewportH, g_state->depthTest ? 1 : 0,
+            g_state->blends[0].enabled ? 1 : 0);
+        backend_set_cull_mode(0);
+        ++guiCullProbe;
     }
     backend_set_color_write_mask(
         g_state->colorMask[0][0], g_state->colorMask[0][1],
@@ -364,6 +405,100 @@ static bool prepare_draw(GLenum mode) {
         backend_set_blend_color(
             g_state->blendColor[0], g_state->blendColor[1],
             g_state->blendColor[2], g_state->blendColor[3]);
+    }
+
+    // Bounded physical-device diagnostic: frame submission can be perfectly
+    // healthy while the attachment remains black if the GL draw state is
+    // degenerate (zero viewport/scissor, wrong FBO, or an unbound descriptor
+    // set). Keep this separate from LOG_RESOURCE, which is only dumped on a
+    // submit failure and therefore cannot explain a clean black frame.
+    static int prepareDiag = 0;
+    if (prepareDiag < 24) {
+        MITHRIL_LOG_WARN("drawdiag",
+                         "prepared #%d prog=%u fbo=%u default=%d colors=%d "
+                         "size=%dx%d color0=%llx depth=%llx colorTex=%u depthTex=%u pipeline=%llx "
+                         "pass=%d desc=%d viewport=%d,%d %dx%d scissor=%d,%d %dx%d "
+                         "scissorTest=%d depthTest=%d blend=%d",
+                         prepareDiag + 1, (unsigned)prog->id,
+                         (unsigned)g_state->currentDrawFBO, (int)is_default_fbo,
+                         color_count, w, h,
+                         (unsigned long long)(uintptr_t)colors[0],
+                         (unsigned long long)(uintptr_t)depth_view,
+                         (unsigned)(fbo ? fbo->colors[0].texture : 0),
+                         (unsigned)(fbo ? fbo->depth.texture : 0),
+                         (unsigned long long)(uintptr_t)pipeline,
+                         mithril::vk::render_pass_active() ? 1 : 0,
+                         mithril::vk::descriptors_bound() ? 1 : 0,
+                         (int)g_state->viewportX, (int)g_state->viewportY,
+                         (int)g_state->viewportW, (int)g_state->viewportH,
+                         (int)g_state->scissorX, (int)g_state->scissorY,
+                         (int)g_state->scissorW, (int)g_state->scissorH,
+                         g_state->scissorTest ? 1 : 0,
+                         g_state->depthTest ? 1 : 0,
+                         g_state->blends[0].enabled ? 1 : 0);
+        ++prepareDiag;
+    }
+
+    static int worldPrepareDiag = 0;
+    if (worldPrepareDiag < 128 &&
+        (g_state->currentDrawFBO == 17 ||
+         (g_state->currentDrawFBO == 3 && prog->id >= 40))) {
+        MITHRIL_LOG_WARN(
+            "drawdiag",
+            "world-prepared #%d prog=%u fbo=%u colorTex=%u depthTex=%u "
+            "pipeline=%llx pass=%d desc=%d depthTest=%d depthMask=%d "
+            "depthFunc=0x%x blend=%d cull=%d colorMask=%d%d%d%d "
+            "vsWords=%zu fsWords=%zu",
+            worldPrepareDiag + 1, (unsigned)prog->id,
+            (unsigned)g_state->currentDrawFBO,
+            (unsigned)(fbo ? fbo->colors[0].texture : 0),
+            (unsigned)(fbo ? fbo->depth.texture : 0),
+            (unsigned long long)(uintptr_t)pipeline,
+            mithril::vk::render_pass_active() ? 1 : 0,
+            mithril::vk::descriptors_bound() ? 1 : 0,
+            g_state->depthTest ? 1 : 0, g_state->depthMask ? 1 : 0,
+            (unsigned)g_state->depthFunc,
+            g_state->blends[0].enabled ? 1 : 0,
+            g_state->cullFace ? 1 : 0,
+            g_state->colorMask[0][0] ? 1 : 0,
+            g_state->colorMask[0][1] ? 1 : 0,
+            g_state->colorMask[0][2] ? 1 : 0,
+            g_state->colorMask[0][3] ? 1 : 0,
+            prog->vertexSpirv.size(), prog->fragmentSpirv.size());
+        ++worldPrepareDiag;
+    }
+
+    // Bounded physical diagnosis for the first world/post-process programs.
+    // Keep the GL state at the actual draw boundary so a black target can be
+    // separated from a Vulkan submit problem: Minecraft 26.2 commonly uses
+    // reversed-Z (clear=0 + GL_GREATER), and a stale depth/color-mask state
+    // would otherwise look like a healthy but empty render pass.
+    static int worldStateDiag = 0;
+    if (worldStateDiag < 64 &&
+        (g_state->currentDrawFBO == 17 ||
+         (g_state->currentDrawFBO == 3 && prog->id >= 40))) {
+        MITHRIL_LOG_WARN("drawdiag",
+                         "world-state #%d prog=%u fbo=%u default=%d "
+                         "depthTest=%d depthMask=%d depthFunc=0x%x "
+                         "depthRange=%.3f..%.3f colorMask=%d%d%d%d "
+                         "blend=%d cull=%d clip=0x%x/0x%x viewport=%d,%d %dx%d",
+                         worldStateDiag + 1, (unsigned)prog->id,
+                         (unsigned)g_state->currentDrawFBO,
+                         (int)is_default_fbo, g_state->depthTest ? 1 : 0,
+                         g_state->depthMask ? 1 : 0,
+                         (unsigned)g_state->depthFunc,
+                         g_state->depthNear, g_state->depthFar,
+                         g_state->colorMask[0][0] ? 1 : 0,
+                         g_state->colorMask[0][1] ? 1 : 0,
+                         g_state->colorMask[0][2] ? 1 : 0,
+                         g_state->colorMask[0][3] ? 1 : 0,
+                         g_state->blends[0].enabled ? 1 : 0,
+                         g_state->cullFace ? 1 : 0,
+                         (unsigned)g_state->clipOrigin,
+                         (unsigned)g_state->clipDepthMode,
+                         g_state->viewportX, g_state->viewportY,
+                         g_state->viewportW, g_state->viewportH);
+        ++worldStateDiag;
     }
 
     // Bind vertex buffers — one VkBuffer per enabled attribute, at index
@@ -478,6 +613,349 @@ static void trace_draw(const char* kind, int mode, int first, int count, int ins
     GLuint stex[4] = {0, 0, 0, 0};
     if (mithril::g_state) {
         for (int u = 0; u < 4; ++u) stex[u] = mithril::g_state->boundTextureForUnit((GLuint)u);
+    }
+    // The first black main-FBO draw is a samplerCube program.  Capture the
+    // actual vertex/UBO state for that draw so an all-zero attachment can be
+    // distinguished from a bad cube upload or descriptor selection.  Program
+    // IDs are not stable across runs, therefore identify it from the linked
+    // shader source rather than a numeric ID.
+    mithril::Program* traceProgram =
+        mithril::state_get_program(g_state->currentProgram);
+    bool traceCubeProgram = false;
+    bool traceGuiProgram = false;
+    if (traceProgram) {
+        for (GLuint sid : traceProgram->attachedShaders) {
+            mithril::Shader* sh = mithril::state_get_shader(sid);
+            if (sh && sh->source.find("samplerCube") != std::string::npos) {
+                traceCubeProgram = true;
+            }
+            if (sh && sh->source.find("#define IS_GUI") != std::string::npos) {
+                traceGuiProgram = true;
+            }
+        }
+    }
+    mithril::vk::Backend* traceBackend = mithril::vk::backend();
+    static int cubeStateDiag = 0;
+    if (traceCubeProgram && g_state->currentDrawFBO == 3 && traceBackend &&
+        traceBackend->frameGeneration >= 35 && cubeStateDiag < 8) {
+        MITHRIL_LOG_WARN(
+            "cubediag",
+            "draw-state #%d prog=%u fbo=%u vao=%u mode=0x%x count=%d "
+            "viewport=%d,%d %dx%d scissor=%d,%d %dx%d cullFace=%d "
+            "cullMode=0x%x frontFace=0x%x depthTest=%d blend=%d",
+            cubeStateDiag + 1, (unsigned)g_state->currentProgram,
+            (unsigned)g_state->currentDrawFBO, (unsigned)g_state->currentVAO,
+            (unsigned)mode, count, (int)g_state->viewportX,
+            (int)g_state->viewportY, (int)g_state->viewportW,
+            (int)g_state->viewportH, (int)g_state->scissorX,
+            (int)g_state->scissorY, (int)g_state->scissorW,
+            (int)g_state->scissorH, g_state->cullFace ? 1 : 0,
+            (unsigned)g_state->cullMode, (unsigned)g_state->frontFace,
+            g_state->depthTest ? 1 : 0, g_state->blends[0].enabled ? 1 : 0);
+
+        mithril::VertexArray* cubeVao =
+            mithril::state_get_vao(g_state->currentVAO);
+        if (!cubeVao) cubeVao = mithril::state_get_vao(0);
+        if (cubeVao) {
+            for (int loc = 0; loc < 4; ++loc) {
+                const mithril::VertexAttrib& at = cubeVao->attribs[loc];
+                if (!at.enabled) continue;
+                mithril::Buffer* vb =
+                    at.boundBuffer ? mithril::state_get_buffer(at.boundBuffer) : nullptr;
+                float f0[4] = {};
+                if (vb && !vb->data.empty()) {
+                    const size_t off = (size_t)(intptr_t)at.pointer;
+                    if (off + sizeof(f0) <= vb->data.size()) {
+                        std::memcpy(f0, vb->data.data() + off, sizeof(f0));
+                    }
+                }
+                MITHRIL_LOG_WARN(
+                    "cubediag",
+                    "attrib loc=%d enabled=%d buf=%u size=%d type=0x%x "
+                    "stride=%d offset=%lld bufferSize=%lld dataBytes=%zu "
+                    "p0=%g,%g,%g,%g",
+                    loc, at.enabled ? 1 : 0, (unsigned)at.boundBuffer,
+                    (int)at.size, (unsigned)at.type, (int)at.stride,
+                    (long long)(intptr_t)at.pointer,
+                    (long long)(vb ? vb->size : 0), vb ? vb->data.size() : 0,
+                    f0[0], f0[1], f0[2], f0[3]);
+            }
+            const GLuint cubeIb = cubeVao->elementArrayBuffer;
+            mithril::Buffer* ibBuffer = cubeIb ? mithril::state_get_buffer(cubeIb) : nullptr;
+            if (ibBuffer && ibBuffer->data.size() >= 12) {
+                unsigned idx[6] = {};
+                const size_t elem = g_state->drawIndexType == GL_UNSIGNED_INT
+                    ? 4 : g_state->drawIndexType == GL_UNSIGNED_BYTE ? 1 : 2;
+                for (size_t i = 0; i < 6; ++i) {
+                    const size_t off = i * elem;
+                    if (off + elem > ibBuffer->data.size()) break;
+                    if (elem == 4) {
+                        uint32_t v = 0;
+                        std::memcpy(&v, ibBuffer->data.data() + off, 4);
+                        idx[i] = v;
+                    } else if (elem == 2) {
+                        uint16_t v = 0;
+                        std::memcpy(&v, ibBuffer->data.data() + off, 2);
+                        idx[i] = v;
+                    } else {
+                        idx[i] = ibBuffer->data[off];
+                    }
+                }
+                MITHRIL_LOG_WARN("cubediag",
+                                 "index buf=%u type=0x%x size=%lld first=%u,%u,%u,%u,%u,%u",
+                                 (unsigned)cubeIb, (unsigned)g_state->drawIndexType,
+                                 (long long)ibBuffer->size,
+                                 idx[0], idx[1], idx[2], idx[3], idx[4], idx[5]);
+            }
+            const mithril::VertexAttrib& position = cubeVao->attribs[0];
+            mithril::Buffer* positionBuffer = position.boundBuffer
+                ? mithril::state_get_buffer(position.boundBuffer) : nullptr;
+            if (positionBuffer && positionBuffer->data.size() >= 4 * 3 * sizeof(float)) {
+                float p[4][3] = {};
+                const size_t stride = position.stride ? (size_t)position.stride : 3 * sizeof(float);
+                const size_t base = (size_t)(intptr_t)position.pointer;
+                for (int i = 0; i < 4; ++i) {
+                    const size_t off = base + (size_t)i * stride;
+                    if (off + sizeof(p[i]) <= positionBuffer->data.size()) {
+                        std::memcpy(p[i], positionBuffer->data.data() + off, sizeof(p[i]));
+                    }
+                }
+                MITHRIL_LOG_WARN("cubediag",
+                                 "position-verts buf=%u stride=%zu p0=%g,%g,%g "
+                                 "p1=%g,%g,%g p2=%g,%g,%g p3=%g,%g,%g",
+                                 (unsigned)position.boundBuffer, stride,
+                                 p[0][0], p[0][1], p[0][2],
+                                 p[1][0], p[1][1], p[1][2],
+                                 p[2][0], p[2][1], p[2][2],
+                                 p[3][0], p[3][1], p[3][2]);
+            }
+        }
+        if (traceProgram) {
+            for (const auto& block : traceProgram->uboBackingStore) {
+                const auto& bytes = block.second;
+                float f[4] = {};
+                if (!bytes.empty()) {
+                    std::memcpy(f, bytes.data(), std::min(bytes.size(), sizeof(f)));
+                }
+                uint64_t hash = 1469598103934665603ULL;
+                for (uint8_t byte : bytes) {
+                    hash ^= byte;
+                    hash *= 1099511628211ULL;
+                }
+                const char* blockName = "?";
+                auto blockIt = traceProgram->blockIndexForDescriptor.find(block.first);
+                if (blockIt != traceProgram->blockIndexForDescriptor.end() &&
+                    blockIt->second < traceProgram->blockInfos.size()) {
+                    blockName = traceProgram->blockInfos[blockIt->second].name.c_str();
+                }
+                MITHRIL_LOG_WARN(
+                    "cubediag",
+                    "ubo binding=%u name=%s bytes=%zu hash=%016llx "
+                    "f0=%g,%g,%g,%g",
+                    (unsigned)block.first, blockName, bytes.size(),
+                    (unsigned long long)hash, f[0], f[1], f[2], f[3]);
+            }
+        }
+        ++cubeStateDiag;
+    }
+
+    // Bounded physical diagnosis for Minecraft's GUI/HUD program.  The GUI
+    // draw is known to reach FBO 3 with a valid atlas view, but the pixels are
+    // absent from the presented frame.  Capture the actual vertex bytes and
+    // UBO values at the draw boundary so an off-screen transform, zero color,
+    // or malformed index stream can be separated from later composition.
+    static int guiStateDiag = 0;
+    if (traceGuiProgram && g_state->currentDrawFBO == 3 && traceBackend &&
+        traceBackend->frameGeneration >= 35 && guiStateDiag < 8) {
+        MITHRIL_LOG_WARN(
+            "guidiag",
+            "draw-state #%d prog=%u fbo=%u vao=%u mode=0x%x count=%d "
+            "viewport=%d,%d %dx%d scissor=%d,%d %dx%d cullFace=%d "
+            "cullMode=0x%x frontFace=0x%x depthTest=%d blend=%d",
+            guiStateDiag + 1, (unsigned)g_state->currentProgram,
+            (unsigned)g_state->currentDrawFBO, (unsigned)g_state->currentVAO,
+            (unsigned)mode, count, (int)g_state->viewportX,
+            (int)g_state->viewportY, (int)g_state->viewportW,
+            (int)g_state->viewportH, (int)g_state->scissorX,
+            (int)g_state->scissorY, (int)g_state->scissorW,
+            (int)g_state->scissorH, g_state->cullFace ? 1 : 0,
+            (unsigned)g_state->cullMode, (unsigned)g_state->frontFace,
+            g_state->depthTest ? 1 : 0, g_state->blends[0].enabled ? 1 : 0);
+
+        mithril::VertexArray* guiVao =
+            mithril::state_get_vao(g_state->currentVAO);
+        if (!guiVao) guiVao = mithril::state_get_vao(0);
+        if (guiVao) {
+            for (int loc = 0; loc < 3; ++loc) {
+                const mithril::VertexAttrib& at = guiVao->attribs[loc];
+                if (!at.enabled) continue;
+                mithril::Buffer* vb = at.boundBuffer
+                    ? mithril::state_get_buffer(at.boundBuffer) : nullptr;
+                MITHRIL_LOG_WARN(
+                    "guidiag",
+                    "attrib loc=%d enabled=%d buf=%u size=%d type=0x%x "
+                    "normalized=%d integer=%d stride=%d offset=%lld "
+                    "bufferSize=%lld dataBytes=%zu",
+                    loc, at.enabled ? 1 : 0, (unsigned)at.boundBuffer,
+                    (int)at.size, (unsigned)at.type, at.normalized ? 1 : 0,
+                    at.integer ? 1 : 0, (int)at.stride,
+                    (long long)(intptr_t)at.pointer,
+                    (long long)(vb ? vb->size : 0), vb ? vb->data.size() : 0);
+                if (vb && !vb->data.empty()) {
+                    const size_t stride = at.stride ? (size_t)at.stride : 16;
+                    const size_t base = (size_t)(intptr_t)at.pointer;
+                    uint8_t bytes[16] = {};
+                    if (base < vb->data.size()) {
+                        const size_t n = std::min(sizeof(bytes),
+                                                  vb->data.size() - base);
+                        std::memcpy(bytes, vb->data.data() + base, n);
+                    }
+                    MITHRIL_LOG_WARN(
+                        "guidiag",
+                        "attrib-first loc=%d stride=%zu raw="
+                        "%02x%02x%02x%02x%02x%02x%02x%02x"
+                        "%02x%02x%02x%02x%02x%02x%02x%02x",
+                        loc, stride, bytes[0], bytes[1], bytes[2], bytes[3],
+                        bytes[4], bytes[5], bytes[6], bytes[7], bytes[8],
+                        bytes[9], bytes[10], bytes[11], bytes[12], bytes[13],
+                        bytes[14], bytes[15]);
+                    if (loc == 0 && stride >= 3 * sizeof(float)) {
+                        float p[4][3] = {};
+                        for (int i = 0; i < 4; ++i) {
+                            const size_t off = base + (size_t)i * stride;
+                            if (off + sizeof(p[i]) <= vb->data.size()) {
+                                std::memcpy(p[i], vb->data.data() + off,
+                                            sizeof(p[i]));
+                            }
+                        }
+                        MITHRIL_LOG_WARN(
+                            "guidiag",
+                            "position-verts buf=%u stride=%zu "
+                            "p0=%g,%g,%g p1=%g,%g,%g "
+                            "p2=%g,%g,%g p3=%g,%g,%g",
+                            (unsigned)at.boundBuffer, stride,
+                            p[0][0], p[0][1], p[0][2],
+                            p[1][0], p[1][1], p[1][2],
+                            p[2][0], p[2][1], p[2][2],
+                            p[3][0], p[3][1], p[3][2]);
+                    }
+                }
+            }
+            const GLuint guiIb = guiVao->elementArrayBuffer;
+            mithril::Buffer* ibBuffer = guiIb
+                ? mithril::state_get_buffer(guiIb) : nullptr;
+            if (ibBuffer && !ibBuffer->data.empty()) {
+                unsigned idx[6] = {};
+                const size_t elem = g_state->drawIndexType == GL_UNSIGNED_INT
+                    ? 4 : g_state->drawIndexType == GL_UNSIGNED_BYTE ? 1 : 2;
+                for (size_t i = 0; i < 6; ++i) {
+                    const size_t off = i * elem;
+                    if (off + elem > ibBuffer->data.size()) break;
+                    if (elem == 4) {
+                        uint32_t v = 0;
+                        std::memcpy(&v, ibBuffer->data.data() + off, 4);
+                        idx[i] = v;
+                    } else if (elem == 2) {
+                        uint16_t v = 0;
+                        std::memcpy(&v, ibBuffer->data.data() + off, 2);
+                        idx[i] = v;
+                    } else {
+                        idx[i] = ibBuffer->data[off];
+                    }
+                }
+                MITHRIL_LOG_WARN(
+                    "guidiag",
+                    "index buf=%u type=0x%x size=%lld first=%u,%u,%u,%u,%u,%u",
+                    (unsigned)guiIb, (unsigned)g_state->drawIndexType,
+                    (long long)ibBuffer->size, idx[0], idx[1], idx[2],
+                    idx[3], idx[4], idx[5]);
+            }
+        }
+        for (const auto& block : traceProgram->uboBackingStore) {
+            const auto& bytes = block.second;
+            float f[4] = {};
+            if (!bytes.empty()) {
+                std::memcpy(f, bytes.data(), std::min(bytes.size(), sizeof(f)));
+            }
+            const char* blockName = "?";
+            auto blockIt = traceProgram->blockIndexForDescriptor.find(block.first);
+            if (blockIt != traceProgram->blockIndexForDescriptor.end() &&
+                blockIt->second < traceProgram->blockInfos.size()) {
+                blockName = traceProgram->blockInfos[blockIt->second].name.c_str();
+            }
+            MITHRIL_LOG_WARN(
+                "guidiag",
+                "ubo binding=%u name=%s bytes=%zu f0=%g,%g,%g,%g",
+                (unsigned)block.first, blockName, bytes.size(),
+                f[0], f[1], f[2], f[3]);
+        }
+        ++guiStateDiag;
+    }
+    static int drawDiag = 0;
+    const int callNumber = ++drawDiag;
+    const bool sampleCall =
+        callNumber <= 24 || callNumber == 32 || callNumber == 40 ||
+        callNumber == 48 || callNumber == 64 || callNumber == 96 ||
+        callNumber == 128 || callNumber == 160 || callNumber == 192 ||
+        callNumber == 256 || callNumber == 384 || callNumber == 512 ||
+        callNumber == 768 || callNumber == 1024 || callNumber == 1536 ||
+        callNumber == 2048 || callNumber == 4096 || callNumber == 8192;
+    if (sampleCall) {
+        mithril::vk::Backend* b = mithril::vk::backend();
+        MITHRIL_LOG_WARN("drawdiag",
+                         "call #%d kind=%s mode=0x%x first=%d count=%d inst=%d "
+                         "prog=%u fbo=%u vao=%u ib=%u ibSize=%lld "
+                         "samplers=%u,%u,%u,%u viewport=%d,%d %dx%d "
+                         "frameGen=%llu slot=%d pass=%d desc=%d",
+                         callNumber, kind, (unsigned)mode, first, count, inst,
+                         (unsigned)g_state->currentProgram,
+                         (unsigned)g_state->currentDrawFBO,
+                         (unsigned)g_state->currentVAO, (unsigned)ib,
+                         (long long)ib_size,
+                         (unsigned)stex[0], (unsigned)stex[1],
+                         (unsigned)stex[2], (unsigned)stex[3],
+                         (int)g_state->viewportX, (int)g_state->viewportY,
+                         (int)g_state->viewportW, (int)g_state->viewportH,
+                         (unsigned long long)(b ? b->frameGeneration : 0),
+                         b ? b->currentFrame : -1,
+                         mithril::vk::render_pass_active() ? 1 : 0,
+                         mithril::vk::descriptors_bound() ? 1 : 0);
+    }
+    // The first world transition uses newly-created programs and FBO 17, so
+    // it falls outside the long-running texture-upload sample points above.
+    // Capture only that bounded slice to prove whether Minecraft is issuing
+    // real geometry draws when the colour attachment turns black.
+    static int worldCallDiag = 0;
+    mithril::vk::Backend* worldBackend = mithril::vk::backend();
+    const uint64_t worldFrameGen = worldBackend ? worldBackend->frameGeneration : 0;
+    // The first black-frame draw is a main-FBO call (program 84 in the current
+    // 26.2 trace).  Restrict this slice to FBO 3/17 so auxiliary panorama or
+    // shadow draws cannot consume the bounded budget before that call.  This
+    // is instrumentation only: it does not alter draw state or submission.
+    if (worldCallDiag < 192 &&
+        ((g_state->currentDrawFBO == 17) ||
+         (g_state->currentDrawFBO == 3 && worldFrameGen >= 35))) {
+        mithril::vk::Backend* b = worldBackend;
+        MITHRIL_LOG_WARN(
+            "drawdiag",
+            "world-call #%d kind=%s mode=0x%x first=%d count=%d inst=%d "
+            "prog=%u fbo=%u vao=%u ib=%u ibSize=%lld "
+            "samplers=%u,%u,%u,%u viewport=%d,%d %dx%d "
+            "frameGen=%llu slot=%d pass=%d desc=%d",
+            worldCallDiag + 1, kind, (unsigned)mode, first, count, inst,
+            (unsigned)g_state->currentProgram,
+            (unsigned)g_state->currentDrawFBO,
+            (unsigned)g_state->currentVAO, (unsigned)ib,
+            (long long)ib_size,
+            (unsigned)stex[0], (unsigned)stex[1],
+            (unsigned)stex[2], (unsigned)stex[3],
+            (int)g_state->viewportX, (int)g_state->viewportY,
+            (int)g_state->viewportW, (int)g_state->viewportH,
+            (unsigned long long)(b ? b->frameGeneration : 0),
+            b ? b->currentFrame : -1,
+            mithril::vk::render_pass_active() ? 1 : 0,
+            mithril::vk::descriptors_bound() ? 1 : 0);
+        ++worldCallDiag;
     }
     LOG_RESOURCE("draw %s prog=%u mode=%d first=%d count=%d inst=%d fbo=%u "
                  "tex0=%u tex1=%u tex2=%u tex3=%u ib=%u ib_size=%lld vao=%u "
@@ -738,8 +1216,37 @@ void glDrawElementsBaseVertexBaseInstance(GLenum mode, GLsizei count, GLenum typ
  *      反而多一次上传 + 同步开销；真正的 GPU-side MultiDraw 由
  *      glMultiDraw*Indirect（见下）覆盖，那条路径数据本就在 GPU buffer。
  * ========================================================================= */
+static void trace_multi_draw(const char* kind, GLenum mode, int drawcount, int stride) {
+    static int multiDiag = 0;
+    const int callNumber = ++multiDiag;
+    const bool sampleCall =
+        callNumber <= 24 || callNumber == 32 || callNumber == 40 ||
+        callNumber == 48 || callNumber == 64 || callNumber == 96 ||
+        callNumber == 128 || callNumber == 160 || callNumber == 192 ||
+        callNumber == 256 || callNumber == 384 || callNumber == 512 ||
+        callNumber == 768 || callNumber == 1024 || callNumber == 1536 ||
+        callNumber == 2048 || callNumber == 4096;
+    if (!sampleCall) return;
+    mithril::vk::Backend* b = mithril::vk::backend();
+    MITHRIL_LOG_WARN("multidiag",
+                     "call #%d kind=%s mode=0x%x drawcount=%d stride=%d "
+                     "prog=%u fbo=%u vao=%u viewport=%d,%d %dx%d "
+                     "frameGen=%llu slot=%d pass=%d desc=%d",
+                     callNumber, kind, (unsigned)mode, drawcount, stride,
+                     (unsigned)g_state->currentProgram,
+                     (unsigned)g_state->currentDrawFBO,
+                     (unsigned)g_state->currentVAO,
+                     (int)g_state->viewportX, (int)g_state->viewportY,
+                     (int)g_state->viewportW, (int)g_state->viewportH,
+                     (unsigned long long)(b ? b->frameGeneration : 0),
+                     b ? b->currentFrame : -1,
+                     mithril::vk::render_pass_active() ? 1 : 0,
+                     mithril::vk::descriptors_bound() ? 1 : 0);
+}
+
 void glMultiDrawArrays(GLenum mode, const GLint* first, const GLsizei* count, GLsizei drawcount) {
     MITHRIL_ENSURE_INIT();
+    trace_multi_draw("arrays", mode, (int)drawcount, 0);
     if (!first || !count || drawcount <= 0) return;
     if (!prepare_draw(mode)) return;  // root cause AI — 一次 SetupDraw
     for (GLsizei i = 0; i < drawcount; ++i) {
@@ -751,6 +1258,7 @@ void glMultiDrawArrays(GLenum mode, const GLint* first, const GLsizei* count, GL
 void glMultiDrawElements(GLenum mode, const GLsizei* count, GLenum type,
                          const void* const* indices, GLsizei drawcount) {
     MITHRIL_ENSURE_INIT();
+    trace_multi_draw("elements", mode, (int)drawcount, 0);
     if (!count || !indices || drawcount <= 0) return;
     // 解析索引缓冲一次（所有 sub-draw 共享同一 GL_ELEMENT_ARRAY_BUFFER，
     // 仅 offset 不同）。客户端指针路径逐 sub-draw staging。
@@ -786,6 +1294,7 @@ void glMultiDrawElementsBaseVertex(GLenum mode, const GLsizei* count, GLenum typ
                                    const void* const* indices, GLsizei drawcount,
                                    const GLint* basevertex) {
     MITHRIL_ENSURE_INIT();
+    trace_multi_draw("elements_basevertex", mode, (int)drawcount, 0);
     if (!count || !indices || drawcount <= 0) return;
     mithril::VertexArray* vao = mithril::state_get_vao(g_state->currentVAO);
     GLuint ib_name = vao ? vao->elementArrayBuffer : 0;
@@ -860,6 +1369,7 @@ void glDrawElementsIndirect(GLenum mode, GLenum type, const void* indirect) {
 void glMultiDrawArraysIndirect(GLenum mode, const void* indirect,
                                GLsizei drawcount, GLsizei stride) {
     MITHRIL_ENSURE_INIT();
+    trace_multi_draw("arrays_indirect", mode, (int)drawcount, (int)stride);
     if (drawcount <= 0) return;
     GLuint buf_name = g_state->bufferBindings[(int)mithril::BufferTarget::DrawIndirect].name;
     VkBuffer indirect_buf = backend_get_buffer(buf_name);
@@ -874,6 +1384,7 @@ void glMultiDrawArraysIndirect(GLenum mode, const void* indirect,
 void glMultiDrawElementsIndirect(GLenum mode, GLenum type, const void* indirect,
                                  GLsizei drawcount, GLsizei stride) {
     MITHRIL_ENSURE_INIT();
+    trace_multi_draw("elements_indirect", mode, (int)drawcount, (int)stride);
     if (drawcount <= 0) return;
     GLuint buf_name = g_state->bufferBindings[(int)mithril::BufferTarget::DrawIndirect].name;
     VkBuffer indirect_buf = backend_get_buffer(buf_name);
@@ -909,6 +1420,7 @@ void glMultiDrawArraysIndirectCount(GLenum mode, const void* indirect,
                                     GLintptr drawcount, GLint maxdrawcount,
                                     GLsizei stride) {
     MITHRIL_ENSURE_INIT();
+    trace_multi_draw("arrays_indirect_count", mode, (int)maxdrawcount, (int)stride);
     if (maxdrawcount <= 0) return;
     GLuint buf_name = g_state->bufferBindings[(int)mithril::BufferTarget::DrawIndirect].name;
     VkBuffer indirect_buf = backend_get_buffer(buf_name);
@@ -929,6 +1441,7 @@ void glMultiDrawElementsIndirectCount(GLenum mode, GLenum type,
                                       const void* indirect, GLintptr drawcount,
                                       GLint maxdrawcount, GLsizei stride) {
     MITHRIL_ENSURE_INIT();
+    trace_multi_draw("elements_indirect_count", mode, (int)maxdrawcount, (int)stride);
     if (maxdrawcount <= 0) return;
     GLuint buf_name = g_state->bufferBindings[(int)mithril::BufferTarget::DrawIndirect].name;
     VkBuffer indirect_buf = backend_get_buffer(buf_name);

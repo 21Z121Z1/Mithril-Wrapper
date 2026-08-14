@@ -77,7 +77,10 @@ extern "C" const char* mithril_get_gpu_renderer_string(void) {
     // MoltenVK on iOS always presents unified memory; we keep the original
     // "(Unified Memory)" suffix from the Metal-backend string for F3 screen
     // continuity (mods / users grep for it).
-    cached = gpuName + " | " + api + " | Mithril-Wrapper (Unified Memory"
+    // Keep the GL facade visible to Minecraft, but make the real backend
+    // chain explicit in F3/crash diagnostics.  F3 is not a Vulkan query; it
+    // only receives GL_RENDERER, so the backend name must be carried here.
+    cached = gpuName + " | DirectVulkan -> " + api + " -> Metal | Mithril-Wrapper (Unified Memory"
            + vramBuf + ")";
     return cached.c_str();
 }

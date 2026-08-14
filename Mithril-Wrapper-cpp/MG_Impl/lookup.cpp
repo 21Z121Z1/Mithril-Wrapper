@@ -26,9 +26,34 @@ extern "C" {
  */
 static void* lookup_symbol(const char* name) {
     if (!name) return nullptr;
-    // dlsym(RTLD_DEFAULT) searches the global symbol table incl. this dylib
-    // (we compile with -fvisibility=default and the GL symbols are extern "C").
-    void* p = dlsym(RTLD_DEFAULT, name);
+    void* p = nullptr;
+#if defined(__APPLE__)
+    // RTLD_DEFAULT is not an ownership-preserving lookup: iOS may already
+    // have OpenGLES loaded, and its same-named glGetString/glGetError symbols
+    // can win the global search. Resolve against the image that owns this
+    // resolver instead, so EGL/LWJGL always receive Mithril entry points.
+    static void* selfHandle = []() -> void* {
+        Dl_info info = {};
+        const void* resolver = reinterpret_cast<const void*>(
+            reinterpret_cast<uintptr_t>(&lookup_symbol));
+        if (!dladdr(resolver, &info) || !info.dli_fname) return nullptr;
+        return dlopen(info.dli_fname, RTLD_NOW | RTLD_LOCAL);
+    }();
+    if (selfHandle) p = dlsym(selfHandle, name);
+#else
+    p = dlsym(RTLD_DEFAULT, name);
+#endif
+#if defined(__APPLE__)
+    if (strcmp(name, "glGetError") == 0 ||
+        strcmp(name, "glGetString") == 0 ||
+        strcmp(name, "glGetIntegerv") == 0 ||
+        strcmp(name, "glGetStringi") == 0) {
+        Dl_info info = {};
+        const char* image = (p && dladdr(p, &info) && info.dli_fname)
+            ? info.dli_fname : "<unknown>";
+        MITHRIL_LOG_WARN("lookup", "name=%s p=%p image=%s", name, p, image);
+    }
+#endif
     if (p) return p;
     // Some hosts probe for glX* entry points. We don't implement them, but
     // returning a generic no-op stub would mislead the caller into thinking

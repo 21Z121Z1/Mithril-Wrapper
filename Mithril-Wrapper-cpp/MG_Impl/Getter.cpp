@@ -25,6 +25,7 @@
 #include <cstdio>
 #include <sstream>
 #include <cstring>
+#include <cmath>
 
 /* ---- Mithril custom enums (mirror MobileGlues' GL_SETTINGS_MG / GL_BACKEND_GETTER_MG) ---- */
 #define MITHRIL_BACKEND_GETTER  0x0401
@@ -34,6 +35,12 @@
  * glcorearb.h we ship; define it here (standard GL value = 0x00000001). */
 #ifndef GL_CONTEXT_FLAG_FORWARD_COMPATIBLE_BIT
 #define GL_CONTEXT_FLAG_FORWARD_COMPATIBLE_BIT 0x00000001
+#endif
+
+/* Some core-profile GL headers expose the EXT_texture_filter_anisotropic
+ * enum without the extension suffix. Both names have the same value. */
+#ifndef GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT
+#define GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT 0x84FF
 #endif
 
 /* ---- GPU info (Vulkan backend) ----
@@ -277,6 +284,12 @@ void glGetIntegerv(GLenum pname, GLint* params) {
             break;
         case GL_MAX_RENDERBUFFER_SIZE:
             *params = backend_device_limit(MITHRIL_LIMIT_MAX_RENDERBUFFER_SIZE, 16384); break;
+        case GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT:
+            // This extension is advertised above. Return the real Vulkan
+            // limit instead of falling through to GL_INVALID_ENUM/zero.
+            *params = (GLint)std::lround(
+                backend_device_max_sampler_anisotropy(1.0f));
+            break;
         case GL_MAX_ELEMENTS_VERTICES:        *params = 1 << 24; break;
         case GL_MAX_ELEMENTS_INDICES:         *params = 1 << 24; break;
         case GL_SUBPIXEL_BITS:                *params = 4; break;
@@ -461,6 +474,11 @@ void glGetFloatv(GLenum pname, GLfloat* params) {
         case GL_BLEND_COLOR:
             for (int i = 0; i < 4; ++i) params[i] = g_state->blendColor[i];
             return;
+        case GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT:
+            // The GL float query must preserve the VkPhysicalDeviceLimits
+            // value; the integer query above is only the rounded GL view.
+            *params = backend_device_max_sampler_anisotropy(1.0f);
+            return;
         default:
             for (int i = 0; i < 4; ++i) params[i] = (GLfloat)ip[i];
             return;
@@ -523,14 +541,20 @@ void glGetIntegeri_v(GLenum pname, GLuint index, GLint* params) {
 
 const GLubyte* glGetString(GLenum name) {
     MITHRIL_ENSURE_INIT();
+    MITHRIL_LOG_WARN("gl", "glGetString name=0x%x state=%p egl=%d",
+                     (unsigned)name, (void*)::mithril::g_state,
+                     ::mithril::g_eglInitialized ? 1 : 0);
     switch (name) {
         case GL_VENDOR:                   return (const GLubyte*)kVendor;
-        case GL_RENDERER:
+        case GL_RENDERER: {
 #if defined(__APPLE__)
-            return (const GLubyte*)mithril_get_gpu_renderer_string();
+            const char* renderer = mithril_get_gpu_renderer_string();
 #else
-            return (const GLubyte*)kRenderer;
+            const char* renderer = kRenderer;
 #endif
+            MITHRIL_LOG_WARN("gl", "GL_RENDERER=%s", renderer ? renderer : "<null>");
+            return (const GLubyte*)renderer;
+        }
         case GL_VERSION:                  return (const GLubyte*)kVersion;
         case GL_SHADING_LANGUAGE_VERSION: return (const GLubyte*)kShadingLangVer;
         case GL_EXTENSIONS: {

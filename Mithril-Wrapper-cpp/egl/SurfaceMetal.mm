@@ -110,6 +110,27 @@ extern "C" void* surface_create(void* native_window, int* out_w, int* out_h) {
         mtlLayer.drawableSize = CGSizeMake(bounds.width * scale, bounds.height * scale);
     }
 
+    // Bounded physical-device observability: the Vulkan swapchain can submit
+    // and present successfully while the host view is still backed by a
+    // differently sized/hidden layer. Record the exact layer that MoltenVK
+    // receives so a black screenshot can be separated from a bad transfer.
+    MITHRIL_LOG_WARN("egl", "SurfaceMetal: layer=%p class=%s name=%s parent=%p "
+                     "bounds=%.0fx%.0f frame=%.0fx%.0f drawable=%.0fx%.0f "
+                     "scale=%.2f hidden=%d opacity=%.2f opaque=%d fbOnly=%d "
+                     "maxDrawables=%lu device=%p",
+                     mtlLayer,
+                     NSStringFromClass([mtlLayer class]).UTF8String ?: "(null)",
+                     mtlLayer.name.UTF8String ?: "(null)",
+                     mtlLayer.superlayer,
+                     mtlLayer.bounds.size.width, mtlLayer.bounds.size.height,
+                     mtlLayer.frame.size.width, mtlLayer.frame.size.height,
+                     mtlLayer.drawableSize.width, mtlLayer.drawableSize.height,
+                     mtlLayer.contentsScale,
+                     mtlLayer.hidden ? 1 : 0, mtlLayer.opacity,
+                     mtlLayer.opaque ? 1 : 0, mtlLayer.framebufferOnly ? 1 : 0,
+                     (unsigned long)mtlLayer.maximumDrawableCount,
+                     mtlLayer.device);
+
     if (out_w) *out_w = (int)mtlLayer.drawableSize.width;
     if (out_h) *out_h = (int)mtlLayer.drawableSize.height;
     return (__bridge void*)mtlLayer;

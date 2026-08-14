@@ -143,6 +143,11 @@ VkRenderPass get_template_render_pass(const VkFormat* color_formats, int color_c
 // 计数递增（实现见 CommandStream.cpp，供 commit_frame 的帧摘要记录）。
 void frame_draw_count_inc();
 
+// Mark a command recorded by an image operation that bypasses the draw
+// helpers (for example an inline FBO->swapchain blit) so commit_frame() does
+// not discard the command buffer as empty.
+void mark_commands_recorded();
+
 } // namespace vk
 } // namespace mithril
 

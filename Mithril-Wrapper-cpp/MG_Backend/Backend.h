@@ -405,6 +405,16 @@ void        backend_generate_mipmaps(GLuint name);
 int         backend_read_pixels(int x, int y, int w, int h,
                                 GLenum format, GLenum type, void* out_pixels);
 
+/* Diagnostic-only explicit image readback. The caller owns the output buffer;
+ * the image is restored to `layout` before returning. */
+int         backend_debug_read_image(VkImage image, VkFormat format,
+                                     VkImageLayout layout,
+                                     int w, int h, void* out_pixels);
+int         backend_debug_read_image_layer(VkImage image, VkFormat format,
+                                           VkImageLayout layout,
+                                           uint32_t base_layer,
+                                           int w, int h, void* out_pixels);
+
 /*
  * Blit a rectangular region from the source texture to the destination
  * texture, with optional colour/depth/stencil mask and linear/nearest
@@ -445,6 +455,34 @@ void        backend_blit_texture(GLuint src_name, GLuint dst_name,
  */
 void        backend_blit_images(VkImage src_image, VkFormat src_format,
                                 VkImage dst_image, VkFormat dst_format,
+                                int srcX0, int srcY0, int srcX1, int srcY1,
+                                int dstX0, int dstY0, int dstX1, int dstY1,
+                                GLbitfield mask, GLenum filter,
+                                int is_dst_default_fbo, int dst_height);
+
+/* Same operation with explicit image layouts.  glBlitFramebuffer can be
+ * called after the frame command buffer has been committed, at which point a
+ * user-FBO source is SHADER_READ_ONLY_OPTIMAL and a swapchain destination is
+ * PRESENT_SRC_KHR.  The legacy wrapper above remains for callers that really
+ * have attachment-optimal images. */
+void        backend_blit_images_with_layouts(
+                                VkImage src_image, VkFormat src_format,
+                                VkImageLayout src_initial, VkImageLayout src_final,
+                                VkImage dst_image, VkFormat dst_format,
+                                VkImageLayout dst_initial, VkImageLayout dst_final,
+                                int srcX0, int srcY0, int srcX1, int srcY1,
+                                int dstX0, int dstY0, int dstX1, int dstY1,
+                                GLbitfield mask, GLenum filter,
+                                int is_dst_default_fbo, int dst_height);
+
+/* Same operation recorded into the current per-frame command buffer. This is
+ * used for FBO->default-framebuffer presentation so the blit and the render
+ * commands share one submit/present synchronization edge. */
+void        backend_record_blit_images_with_layouts(
+                                VkImage src_image, VkFormat src_format,
+                                VkImageLayout src_initial, VkImageLayout src_final,
+                                VkImage dst_image, VkFormat dst_format,
+                                VkImageLayout dst_initial, VkImageLayout dst_final,
                                 int srcX0, int srcY0, int srcX1, int srcY1,
                                 int dstX0, int dstY0, int dstX1, int dstY1,
                                 GLbitfield mask, GLenum filter,
@@ -677,6 +715,11 @@ VkFormat    backend_swapchain_depth_format(void* swapchain_state);
 #define MITHRIL_LIMIT_MAX_COMPUTE_WG_SIZE_X       20
 
 int backend_device_limit(int which, int fallback);
+
+/* EXT_texture_filter_anisotropic exposes a floating-point limit. Keep this
+ * separate from backend_device_limit so glGetFloatv does not lose precision
+ * by routing the Vulkan value through GLint. */
+float backend_device_max_sampler_anisotropy(float fallback);
 
 #ifdef __cplusplus
 }

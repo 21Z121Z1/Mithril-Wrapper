@@ -603,8 +603,39 @@ void record_layout_barrier(VkCommandBuffer cb, VkImage image, VkFormat format,
 
 // GPU fault 诊断：backend_draw_*（全局 extern "C" 作用域，看不到匿名
 // namespace 的 encoder()）通过此函数递增本帧 draw 计数，供 commit_frame
-// 的帧摘要记录使用。
-void frame_draw_count_inc() { encoder().frameDrawCount++; }
+// 的帧摘要记录使用。黑屏转折点附近也采样少量真实 draw 状态；这能区分
+// “GL 仍在发 draw 但状态/资源无效”与“上游已经只清黑、不再产生有效 draw”。
+void frame_draw_count_inc() {
+    EncoderState& e = encoder();
+    const int drawNumber = ++e.frameDrawCount;
+    const bool sample = drawNumber <= 3 || drawNumber == 16 ||
+                        drawNumber == 128 || drawNumber == 512 ||
+                        drawNumber == 1024 || drawNumber == 2048 ||
+                        drawNumber == 3072 || drawNumber == 3800 ||
+                        drawNumber == 3809 || drawNumber == 4096 ||
+                        drawNumber == 8192;
+    if (!sample) return;
+    Backend* b = backend();
+    MITHRIL_LOG_WARN("drawsample",
+                     "draw #%d frameGen=%llu slot=%d fbo=%u prog=%u vao=%u "
+                     "pass=%d desc=%d viewport=%d,%d %dx%d scissor=%d,%d %dx%d",
+                     drawNumber, (unsigned long long)(b ? b->frameGeneration : 0),
+                     b ? b->currentFrame : -1,
+                     g_state ? (unsigned)g_state->currentDrawFBO : 0,
+                     g_state ? (unsigned)g_state->currentProgram : 0,
+                     g_state ? (unsigned)g_state->currentVAO : 0,
+                     e.passActive ? 1 : 0, e.descriptorsBound ? 1 : 0,
+                     g_state ? (int)g_state->viewportX : 0,
+                     g_state ? (int)g_state->viewportY : 0,
+                     g_state ? (int)g_state->viewportW : 0,
+                     g_state ? (int)g_state->viewportH : 0,
+                     g_state ? (int)g_state->scissorX : 0,
+                     g_state ? (int)g_state->scissorY : 0,
+                     g_state ? (int)g_state->scissorW : 0,
+                     g_state ? (int)g_state->scissorH : 0);
+}
+
+void mark_commands_recorded() { encoder().hasCommands = true; }
 
 // Public render-pass cache API (declared in CommandStream.h; used by
 // Pipeline.cpp to build pipelines against the compatible template pass).
@@ -1693,6 +1724,31 @@ void commit_frame() {
         return;
     }
 
+    // Temporary bounded presentation trace for physical-device diagnosis. This
+    // distinguishes a static black drawable caused by missing submits from a
+    // successful submit/present of an all-black attachment.
+    static int framePresentationDiag = 0;
+    static int frameDecisionDiag = 0;
+    const int decisionNumber = ++frameDecisionDiag;
+    // Keep the original startup window and add sparse later samples so a
+    // clear-only transition can be correlated with draw production without
+    // turning the physical-device log into an unbounded frame trace.
+    const bool emitDecisionDiag =
+        decisionNumber <= 24 || decisionNumber == 32 || decisionNumber == 40 ||
+        decisionNumber == 48 || decisionNumber == 50 || decisionNumber == 52 ||
+        decisionNumber == 56 || decisionNumber == 60 || decisionNumber == 64 ||
+        decisionNumber == 80 || decisionNumber == 100;
+    if (emitDecisionDiag) {
+        MITHRIL_LOG_WARN("frame", "commit decision #%d slot=%d img=%d draws=%d cmds=%d "
+                          "layout=%d waitAcquire=%d transition=%d frameGen=%llu",
+                          decisionNumber, b->currentFrame,
+                          sc ? sc->currentImage : -1, e.frameDrawCount,
+                          hasCommands ? 1 : 0, sc ? (int)sc->currentColorLayout : -1,
+                          needsImageAvailableWait ? 1 : 0,
+                          needsLayoutTransition ? 1 : 0,
+                          (unsigned long long)b->frameGeneration);
+    }
+
     // FIX (root cause S): If we are about to present but NO draw commands were
     // recorded this frame (hasCommands=false), the swapchain image was never
     // used as a render target. On MoltenVK/iOS, the IOSurface backing the
@@ -2021,6 +2077,16 @@ void commit_frame() {
         on_command_buffer_boundary();
         e.hasCommands = false;
         return;
+    }
+
+    const bool emitPresentationDiag = framePresentationDiag < 24;
+    if (emitPresentationDiag) {
+        MITHRIL_LOG_WARN("frame", "queue submit #%d success slot=%d img=%d "
+                          "signalPresent=%d",
+                          framePresentationDiag + 1, b->currentFrame,
+                          sc ? sc->currentImage : -1,
+                          signalSemaphore != VK_NULL_HANDLE ? 1 : 0);
+        framePresentationDiag++;
     }
 
     // Success: a clean submit clears the consecutive-failure counter (only
@@ -2481,6 +2547,33 @@ void backend_set_vertex_buffer(int slot, VkBuffer buffer, VkDeviceSize offset) {
     mithril::vk::Backend* b = mithril::vk::backend();
     // FIX (VK_NOT_READY storm): guard against non-recording command buffer.
     if (!b->commandBuffer || !b->commandBufferRecording || !buffer) return;
+    static int vertexBindDiag = 0;
+    bool cubeProgram = false;
+    if (mithril::g_state && mithril::g_state->currentDrawFBO == 3) {
+        mithril::Program* p =
+            mithril::state_get_program(mithril::g_state->currentProgram);
+        if (p) {
+            for (GLuint shaderId : p->attachedShaders) {
+                mithril::Shader* s = mithril::state_get_shader(shaderId);
+                if (s && s->source.find("samplerCube") != std::string::npos) {
+                    cubeProgram = true;
+                    break;
+                }
+            }
+        }
+    }
+    if (cubeProgram && b->frameGeneration >= 35 && vertexBindDiag < 64) {
+        MITHRIL_LOG_WARN(
+            "vtxdiag",
+            "bind #%d frameGen=%llu program=%u fbo=%u slot=%d buffer=0x%llx "
+            "offset=%llu",
+            vertexBindDiag + 1, (unsigned long long)b->frameGeneration,
+            (unsigned)mithril::g_state->currentProgram,
+            (unsigned)mithril::g_state->currentDrawFBO, slot,
+            (unsigned long long)(uintptr_t)buffer,
+            (unsigned long long)offset);
+        ++vertexBindDiag;
+    }
     VkDeviceSize offsets[1] = { offset };
     vkCmdBindVertexBuffers(b->commandBuffer, (uint32_t)slot, 1, &buffer, offsets);
 }
@@ -2607,6 +2700,36 @@ void backend_set_depth_test(int enabled, int write_mask, int compare_func) {
         case 0x206: op = VK_COMPARE_OP_GREATER_OR_EQUAL; break;
         case 0x207: op = VK_COMPARE_OP_ALWAYS; break;
         default: op = VK_COMPARE_OP_LESS; break;
+    }
+    // Bounded physical diagnosis for Minecraft's reversed-Z path.  A clear
+    // depth of 0.0 is valid when the client uses GL_GREATER; the important
+    // question is whether the EXT dynamic-state entry point is available and
+    // receives that compare op before the world draw.  Keep this separate
+    // from submit diagnostics: a clean submit can still produce an empty
+    // color target when the static LESS template remains active.
+    static int depthDiag = 0;
+    if (depthDiag < 32) {
+        MITHRIL_LOG_WARN("depthdiag",
+                         "set_depth_test #%d enabled=%d write=%d glFunc=0x%x vkOp=%d "
+                         "ptrs(test=%d write=%d compare=%d)",
+                         depthDiag + 1, enabled, write_mask,
+                         (unsigned)compare_func, (int)op,
+                         e.depthTestEnable != nullptr ? 1 : 0,
+                         e.depthWriteEnable != nullptr ? 1 : 0,
+                         e.depthCompareOp != nullptr ? 1 : 0);
+        ++depthDiag;
+    }
+    static int specialDepthDiag = 0;
+    if ((enabled || compare_func != 0x201) && specialDepthDiag < 64) {
+        MITHRIL_LOG_WARN("depthdiag",
+                         "special #%d enabled=%d write=%d glFunc=0x%x vkOp=%d "
+                         "ptrs(test=%d write=%d compare=%d)",
+                         specialDepthDiag + 1, enabled, write_mask,
+                         (unsigned)compare_func, (int)op,
+                         e.depthTestEnable != nullptr ? 1 : 0,
+                         e.depthWriteEnable != nullptr ? 1 : 0,
+                         e.depthCompareOp != nullptr ? 1 : 0);
+        ++specialDepthDiag;
     }
     if (e.depthCompareOp) e.depthCompareOp(b->commandBuffer, op);
 }

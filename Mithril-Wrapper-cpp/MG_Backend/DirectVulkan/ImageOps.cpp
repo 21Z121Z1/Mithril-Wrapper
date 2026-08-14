@@ -18,6 +18,8 @@
 // records + submits + waits on a dedicated fence, then frees the buffer.
 #include "Device.h"
 #include "Resources.h"
+#include "CommandStream.h"
+#include "Swapchain.h"
 #include "LogRing.h"   // mipmap 资源操作打点（GPU fault dump）
 #include "../Backend.h"
 #include "../../MG_State/State.h"
@@ -68,24 +70,50 @@ bool begin_one_shot(OneShotCtx& c) {
     return true;
 }
 
-void end_one_shot(OneShotCtx& c) {
+bool end_one_shot(OneShotCtx& c,
+                  VkSemaphore wait_semaphore = VK_NULL_HANDLE,
+                  VkSemaphore signal_semaphore = VK_NULL_HANDLE) {
     Backend* b = backend();
     if (!c.ok) {
         if (c.fence) { vkDestroyFence(b->device, c.fence, nullptr); c.fence = VK_NULL_HANDLE; }
         if (c.cmd)   { vkFreeCommandBuffers(b->device, b->commandPool, 1, &c.cmd); c.cmd = VK_NULL_HANDLE; }
-        return;
+        return false;
     }
-    vkEndCommandBuffer(c.cmd);
+    if (vkEndCommandBuffer(c.cmd) != VK_SUCCESS) {
+        vkDestroyFence(b->device, c.fence, nullptr);
+        vkFreeCommandBuffers(b->device, b->commandPool, 1, &c.cmd);
+        c.fence = VK_NULL_HANDLE;
+        c.cmd = VK_NULL_HANDLE;
+        return false;
+    }
     VkSubmitInfo si{};
     si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     si.commandBufferCount = 1;
     si.pCommandBuffers = &c.cmd;
-    vkQueueSubmit(b->graphicsQueue, 1, &si, c.fence);
-    vkWaitForFences(b->device, 1, &c.fence, VK_TRUE, UINT64_MAX);
+    VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+    if (wait_semaphore != VK_NULL_HANDLE) {
+        si.waitSemaphoreCount = 1;
+        si.pWaitSemaphores = &wait_semaphore;
+        si.pWaitDstStageMask = &wait_stage;
+    }
+    if (signal_semaphore != VK_NULL_HANDLE) {
+        si.signalSemaphoreCount = 1;
+        si.pSignalSemaphores = &signal_semaphore;
+    }
+    const VkResult submit_result = vkQueueSubmit(b->graphicsQueue, 1, &si, c.fence);
+    if (submit_result != VK_SUCCESS ||
+        vkWaitForFences(b->device, 1, &c.fence, VK_TRUE, UINT64_MAX) != VK_SUCCESS) {
+        vkDestroyFence(b->device, c.fence, nullptr);
+        vkFreeCommandBuffers(b->device, b->commandPool, 1, &c.cmd);
+        c.fence = VK_NULL_HANDLE;
+        c.cmd = VK_NULL_HANDLE;
+        return false;
+    }
     vkDestroyFence(b->device, c.fence, nullptr);
     vkFreeCommandBuffers(b->device, b->commandPool, 1, &c.cmd);
     c.cmd = VK_NULL_HANDLE;
     c.fence = VK_NULL_HANDLE;
+    return true;
 }
 
 // aspect_for_format is declared in Resources.h and defined in Resources.cpp;
@@ -989,6 +1017,97 @@ int read_pixels(int x, int y, int w, int h, GLenum format, GLenum type, void* ou
     return 1;
 }
 
+int debug_read_image_layer(VkImage image, VkFormat format, VkImageLayout layout,
+                           uint32_t base_layer, int w, int h,
+                           void* out_pixels) {
+    Backend* b = backend();
+    if (!b->initialized || image == VK_NULL_HANDLE || !out_pixels ||
+        w <= 0 || h <= 0) return 0;
+
+    const VkDeviceSize size = (VkDeviceSize)w * (VkDeviceSize)h * 4;
+    BufferEntry staging{};
+    if (!create_buffer(staging, size, VK_BUFFER_USAGE_TRANSFER_DST_BIT, nullptr)) return 0;
+
+    OneShotCtx c;
+    if (!begin_one_shot(c)) {
+        destroy_buffer_entry(staging);
+        return 0;
+    }
+
+    VkPipelineStageFlags srcStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+    VkAccessFlags srcAccess = 0;
+    if (layout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
+        srcStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        srcAccess = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    } else if (layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+        srcStage = VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT;
+        srcAccess = VK_ACCESS_SHADER_READ_BIT;
+    } else if (layout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
+        srcStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+        srcAccess = VK_ACCESS_TRANSFER_WRITE_BIT;
+    }
+
+    VkImageMemoryBarrier bar{};
+    bar.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    bar.srcAccessMask = srcAccess;
+    bar.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    bar.oldLayout = layout;
+    bar.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    bar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    bar.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    bar.image = image;
+    bar.subresourceRange.aspectMask = aspect_for_format(format);
+    bar.subresourceRange.baseMipLevel = 0;
+    bar.subresourceRange.levelCount = 1;
+    bar.subresourceRange.baseArrayLayer = base_layer;
+    bar.subresourceRange.layerCount = 1;
+    vkCmdPipelineBarrier(c.cmd, srcStage, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+                         0, nullptr, 0, nullptr, 1, &bar);
+
+    VkBufferImageCopy region{};
+    region.imageSubresource.aspectMask = aspect_for_format(format);
+    region.imageSubresource.mipLevel = 0;
+    region.imageSubresource.baseArrayLayer = base_layer;
+    region.imageSubresource.layerCount = 1;
+    region.imageExtent = {(uint32_t)w, (uint32_t)h, 1};
+    vkCmdCopyImageToBuffer(c.cmd, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           staging.buffer, 1, &region);
+
+    bar.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    bar.dstAccessMask = (layout == VK_IMAGE_LAYOUT_PRESENT_SRC_KHR)
+                            ? VK_ACCESS_MEMORY_READ_BIT
+                            : (layout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
+                                ? (VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
+                                   VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT)
+                                : VK_ACCESS_SHADER_READ_BIT;
+    bar.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    bar.newLayout = layout;
+    VkPipelineStageFlags dstStage =
+        (layout == VK_IMAGE_LAYOUT_PRESENT_SRC_KHR)
+            ? VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT
+            : (layout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
+                ? VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
+                : VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT;
+    vkCmdPipelineBarrier(c.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, dstStage, 0,
+                         0, nullptr, 0, nullptr, 1, &bar);
+    end_one_shot(c);
+
+    void* mapped = nullptr;
+    if (vkMapMemory(b->device, staging.memory, 0, size, 0, &mapped) != VK_SUCCESS || !mapped) {
+        destroy_buffer_entry(staging);
+        return 0;
+    }
+    std::memcpy(out_pixels, mapped, (size_t)size);
+    vkUnmapMemory(b->device, staging.memory);
+    destroy_buffer_entry(staging);
+    return 1;
+}
+
+int debug_read_image(VkImage image, VkFormat format, VkImageLayout layout,
+                     int w, int h, void* out_pixels) {
+    return debug_read_image_layer(image, format, layout, 0, w, h, out_pixels);
+}
+
 void blit_texture(GLuint src_name, GLuint dst_name,
                   int srcX0, int srcY0, int srcX1, int srcY1,
                   int dstX0, int dstY0, int dstX1, int dstY1,
@@ -1111,10 +1230,25 @@ void blit_images_impl(VkImage src_image, VkFormat src_format,
                       int srcX0, int srcY0, int srcX1, int srcY1,
                       int dstX0, int dstY0, int dstX1, int dstY1,
                       GLbitfield mask, GLenum filter,
-                      bool is_dst_default_fbo, int dst_height) {
+                      bool is_dst_default_fbo, int dst_height,
+                      bool record_inline) {
     Backend* b = backend();
     if (!b->initialized) return;
     if (src_image == VK_NULL_HANDLE || dst_image == VK_NULL_HANDLE) return;
+    static int blitBackendDiag = 0;
+    if (blitBackendDiag < 32) {
+        MITHRIL_LOG_WARN("fbodiag",
+                         "backend blit #%d src=%llx fmt=%d layout=%d->%d "
+                         "dst=%llx fmt=%d layout=%d->%d dstDefault=%d dstH=%d "
+                         "mask=0x%x",
+                         blitBackendDiag + 1,
+                         (unsigned long long)(uintptr_t)src_image, (int)src_format,
+                         (int)src_initial, (int)src_final,
+                         (unsigned long long)(uintptr_t)dst_image, (int)dst_format,
+                         (int)dst_initial, (int)dst_final,
+                         is_dst_default_fbo ? 1 : 0, dst_height, (unsigned)mask);
+        ++blitBackendDiag;
+    }
     // Only colour-buffer blits are implemented; depth/stencil blits would
     // need VK_IMAGE_ASPECT_DEPTH_BIT and a NEAREST filter (Vulkan forbids
     // linear filtering on depth formats).
@@ -1139,13 +1273,179 @@ void blit_images_impl(VkImage src_image, VkFormat src_format,
     // directly; default FBO content is in Vulkan orientation, but GL src coords
     // reading from it still produce correct results because the content
     // orientation and coordinate mapping are consistent within the image.
-    if (is_dst_default_fbo && dst_height > 0) {
+    // Temporary physical diagnostic: test the non-inverted rectangle because
+    // the A17/MoltenVK path may reject a descending VkImageBlit offset pair
+    // even though the Vulkan reference implementation permits it.  Restore
+    // the MobileGL identity transform after this experiment.
+    constexpr bool probe_no_default_y_flip = false;
+    if (is_dst_default_fbo && dst_height > 0 && !probe_no_default_y_flip) {
         dstY0 = dst_height - dstY0;
         dstY1 = dst_height - dstY1;
     }
 
+    // Physical-device diagnostic for the first default-FBO transfer.  The
+    // Minecraft source image is RGBA8 while the iPad CAMetalLayer swapchain
+    // is BGRA8; Vulkan requires the format feature bits needed by
+    // vkCmdBlitImage, and MoltenVK may otherwise fail this path without a
+    // useful application-level error.
+    static int blitCapsDiag = 0;
+    if (is_dst_default_fbo && blitCapsDiag < 2) {
+        VkFormatProperties srcProps{};
+        VkFormatProperties dstProps{};
+        vkGetPhysicalDeviceFormatProperties(b->physicalDevice, src_format, &srcProps);
+        vkGetPhysicalDeviceFormatProperties(b->physicalDevice, dst_format, &dstProps);
+        MITHRIL_LOG_WARN(
+            "fbodiag",
+            "blit caps srcFmt=%d optimal=0x%llx blitSrc=%d dstFmt=%d optimal=0x%llx blitDst=%d "
+            "rect src=%d,%d-%d,%d dst=%d,%d-%d,%d filter=%d yflip=%d",
+            (int)src_format, (unsigned long long)srcProps.optimalTilingFeatures,
+            (srcProps.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_SRC_BIT) ? 1 : 0,
+            (int)dst_format, (unsigned long long)dstProps.optimalTilingFeatures,
+            (dstProps.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_DST_BIT) ? 1 : 0,
+            srcX0, srcY0, srcX1, srcY1, dstX0, dstY0, dstX1, dstY1,
+            filter == GL_LINEAR ? 1 : 0, probe_no_default_y_flip ? 0 : 1);
+        ++blitCapsDiag;
+    }
+
+    const bool inline_record = record_inline && is_dst_default_fbo;
     OneShotCtx c;
-    if (!begin_one_shot(c)) return;
+    VkCommandBuffer record_cmd = VK_NULL_HANDLE;
+    if (inline_record) {
+        if (!ensure_command_buffer_recording()) return;
+        record_cmd = b->commandBuffer;
+    } else {
+        if (!begin_one_shot(c)) return;
+        record_cmd = c.cmd;
+    }
+
+    // A default-framebuffer blit is a second queue submission after the
+    // normal frame submit. Chain it through per-image semaphores so present
+    // cannot consume the drawable before this transfer completes. Repeated
+    // blits in one GL frame alternate the two semaphores:
+    // renderFinished -> blitFinished -> renderFinished -> ...
+    Swapchain* present_sc = nullptr;
+    int present_idx = -1;
+    VkSemaphore blit_wait = VK_NULL_HANDLE;
+    VkSemaphore blit_signal = VK_NULL_HANDLE;
+    int present_chain = 0;  // 1: render->blit, 2: blit->render
+    if (!inline_record && is_dst_default_fbo) {
+        Swapchain* sc = active_swapchain();
+        if (sc && sc->currentImage >= 0 &&
+            sc->currentImage < (int)sc->images.size() &&
+            sc->images[sc->currentImage] == dst_image) {
+            const size_t idx = (size_t)sc->currentImage;
+            if (idx < sc->renderFinishedSignaledPerImage.size() &&
+                sc->renderFinishedSignaledPerImage[idx] &&
+                idx < sc->renderFinishedPerImage.size() &&
+                idx < sc->blitFinishedPerImage.size() &&
+                sc->renderFinishedPerImage[idx] != VK_NULL_HANDLE &&
+                sc->blitFinishedPerImage[idx] != VK_NULL_HANDLE &&
+                !sc->blitFinishedSignaledPerImage[idx]) {
+                present_sc = sc;
+                present_idx = sc->currentImage;
+                blit_wait = sc->renderFinishedPerImage[idx];
+                blit_signal = sc->blitFinishedPerImage[idx];
+                present_chain = 1;
+            } else if (idx < sc->blitFinishedSignaledPerImage.size() &&
+                       sc->blitFinishedSignaledPerImage[idx] &&
+                       idx < sc->blitFinishedPerImage.size() &&
+                       idx < sc->renderFinishedPerImage.size() &&
+                       sc->blitFinishedPerImage[idx] != VK_NULL_HANDLE &&
+                       sc->renderFinishedPerImage[idx] != VK_NULL_HANDLE &&
+                       !sc->renderFinishedSignaledPerImage[idx]) {
+                present_sc = sc;
+                present_idx = sc->currentImage;
+                blit_wait = sc->blitFinishedPerImage[idx];
+                blit_signal = sc->renderFinishedPerImage[idx];
+                present_chain = 2;
+            }
+        }
+    }
+
+    auto layout_read_access = [](VkImageLayout layout) -> VkAccessFlags {
+        switch (layout) {
+            case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:
+                return VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+            case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
+            case VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL:
+            case VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL:
+                return VK_ACCESS_SHADER_READ_BIT;
+            case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
+                return VK_ACCESS_TRANSFER_READ_BIT;
+            case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
+                return VK_ACCESS_TRANSFER_WRITE_BIT;
+            case VK_IMAGE_LAYOUT_UNDEFINED:
+            case VK_IMAGE_LAYOUT_PRESENT_SRC_KHR:
+            case VK_IMAGE_LAYOUT_SHARED_PRESENT_KHR:
+                return 0;
+            default:
+                return 0;
+        }
+    };
+    auto layout_read_stage = [](VkImageLayout layout) -> VkPipelineStageFlags {
+        switch (layout) {
+            case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:
+                return VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+            case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
+            case VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL:
+            case VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL:
+                return VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+            case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
+            case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
+                return VK_PIPELINE_STAGE_TRANSFER_BIT;
+            case VK_IMAGE_LAYOUT_UNDEFINED:
+                return VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+            case VK_IMAGE_LAYOUT_PRESENT_SRC_KHR:
+            case VK_IMAGE_LAYOUT_SHARED_PRESENT_KHR:
+                // The presentation engine owns the image before an acquire;
+                // match MobileGL's PRESENT_SRC transition source contract.
+                return VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+            default:
+                return VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+        }
+    };
+    auto layout_write_access = [](VkImageLayout layout) -> VkAccessFlags {
+        switch (layout) {
+            case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:
+                return VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
+                       VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+            case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
+            case VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL:
+            case VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL:
+                return VK_ACCESS_SHADER_READ_BIT;
+            case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
+                return VK_ACCESS_TRANSFER_READ_BIT;
+            case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
+                return VK_ACCESS_TRANSFER_WRITE_BIT;
+            case VK_IMAGE_LAYOUT_UNDEFINED:
+                return 0;
+            case VK_IMAGE_LAYOUT_PRESENT_SRC_KHR:
+            case VK_IMAGE_LAYOUT_SHARED_PRESENT_KHR:
+                return VK_ACCESS_MEMORY_READ_BIT;
+            default:
+                return 0;
+        }
+    };
+    auto layout_write_stage = [&](VkImageLayout layout) -> VkPipelineStageFlags {
+        switch (layout) {
+            case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:
+                return VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+            case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
+            case VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL:
+            case VK_IMAGE_LAYOUT_DEPTH_READ_ONLY_OPTIMAL:
+                return VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+            case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
+            case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
+                return VK_PIPELINE_STAGE_TRANSFER_BIT;
+            case VK_IMAGE_LAYOUT_PRESENT_SRC_KHR:
+            case VK_IMAGE_LAYOUT_SHARED_PRESENT_KHR:
+                return VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
+            case VK_IMAGE_LAYOUT_UNDEFINED:
+                return VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+            default:
+                return VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+        }
+    };
 
     VkImageAspectFlags srcAspect = aspect_for_format(src_format);
     VkImageAspectFlags dstAspect = aspect_for_format(dst_format);
@@ -1153,9 +1453,7 @@ void blit_images_impl(VkImage src_image, VkFormat src_format,
     // Transition source to TRANSFER_SRC_OPTIMAL.
     VkImageMemoryBarrier sb{};
     sb.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    sb.srcAccessMask = (src_initial == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
-                        ? VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
-                        : VK_ACCESS_SHADER_READ_BIT;
+    sb.srcAccessMask = layout_read_access(src_initial);
     sb.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
     sb.oldLayout = src_initial;
     sb.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
@@ -1167,19 +1465,15 @@ void blit_images_impl(VkImage src_image, VkFormat src_format,
     sb.subresourceRange.levelCount = 1;
     sb.subresourceRange.baseArrayLayer = 0;
     sb.subresourceRange.layerCount = 1;
-    VkPipelineStageFlags srcStage = (src_initial == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
-                        ? VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
-                        : VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-    vkCmdPipelineBarrier(c.cmd, srcStage,
+    VkPipelineStageFlags srcStage = layout_read_stage(src_initial);
+    vkCmdPipelineBarrier(record_cmd, srcStage,
                          VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
                          0, nullptr, 0, nullptr, 1, &sb);
 
     // Transition destination to TRANSFER_DST_OPTIMAL.
     VkImageMemoryBarrier db{};
     db.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    db.srcAccessMask = (dst_initial == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
-                        ? VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
-                        : VK_ACCESS_SHADER_READ_BIT;
+    db.srcAccessMask = layout_read_access(dst_initial);
     db.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
     db.oldLayout = dst_initial;
     db.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
@@ -1191,12 +1485,59 @@ void blit_images_impl(VkImage src_image, VkFormat src_format,
     db.subresourceRange.levelCount = 1;
     db.subresourceRange.baseArrayLayer = 0;
     db.subresourceRange.layerCount = 1;
-    VkPipelineStageFlags dstStage = (dst_initial == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
-                        ? VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
-                        : VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-    vkCmdPipelineBarrier(c.cmd, dstStage,
+    VkPipelineStageFlags dstStage = layout_read_stage(dst_initial);
+    vkCmdPipelineBarrier(record_cmd, dstStage,
                          VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
                          0, nullptr, 0, nullptr, 1, &db);
+
+    // Bounded device diagnostic: replace the source with a known colour in
+    // the same command buffer immediately before the blit.  This separates
+    // a bad Minecraft FBO draw/layout from a transfer that cannot move
+    // RGBA8 into the BGRA8 CAMetalLayer drawable.  Remove after the physical
+    // diagnosis; it is deliberately not runtime behaviour.
+    static int sourceClearProbe = 0;
+    if (is_dst_default_fbo && sourceClearProbe < 0) {
+        VkImageMemoryBarrier clearToDst{};
+        clearToDst.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        clearToDst.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        clearToDst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        clearToDst.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        clearToDst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        clearToDst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        clearToDst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        clearToDst.image = src_image;
+        clearToDst.subresourceRange.aspectMask = srcAspect;
+        clearToDst.subresourceRange.levelCount = 1;
+        clearToDst.subresourceRange.layerCount = 1;
+        vkCmdPipelineBarrier(record_cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+                             0, nullptr, 0, nullptr, 1, &clearToDst);
+
+        VkClearColorValue sourceProbeColor{};
+        sourceProbeColor.float32[0] = 0.0f;
+        sourceProbeColor.float32[1] = 1.0f;
+        sourceProbeColor.float32[2] = 0.0f;
+        sourceProbeColor.float32[3] = 1.0f;
+        VkImageSubresourceRange sourceProbeRange{};
+        sourceProbeRange.aspectMask = srcAspect;
+        sourceProbeRange.levelCount = 1;
+        sourceProbeRange.layerCount = 1;
+        vkCmdClearColorImage(record_cmd, src_image,
+                             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                             &sourceProbeColor, 1, &sourceProbeRange);
+
+        clearToDst.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        clearToDst.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        clearToDst.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        clearToDst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        vkCmdPipelineBarrier(record_cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+                             0, nullptr, 0, nullptr, 1, &clearToDst);
+        MITHRIL_LOG_WARN("fbodiag", "source clear probe #%d image=%llx",
+                         sourceClearProbe + 1,
+                         (unsigned long long)(uintptr_t)src_image);
+        ++sourceClearProbe;
+    }
 
     VkImageBlit blit{};
     blit.srcSubresource.aspectMask = srcAspect;
@@ -1213,39 +1554,52 @@ void blit_images_impl(VkImage src_image, VkFormat src_format,
     blit.dstOffsets[1] = { dstX1, dstY1, 1 };
 
     VkFilter filt = (filter == GL_LINEAR) ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
-    vkCmdBlitImage(c.cmd,
+    vkCmdBlitImage(record_cmd,
                    src_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                    dst_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                    1, &blit, filt);
 
     // Transition both images back to their final layouts.
     sb.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-    sb.dstAccessMask = (src_final == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
-                        ? (VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT)
-                        : VK_ACCESS_SHADER_READ_BIT;
+    sb.dstAccessMask = layout_write_access(src_final);
     sb.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
     sb.newLayout = src_final;
-    VkPipelineStageFlags srcFinalStage = (src_final == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
-                        ? VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
-                        : VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-    vkCmdPipelineBarrier(c.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+    VkPipelineStageFlags srcFinalStage = layout_write_stage(src_final);
+    vkCmdPipelineBarrier(record_cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
                          srcFinalStage, 0,
                          0, nullptr, 0, nullptr, 1, &sb);
 
     db.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    db.dstAccessMask = (dst_final == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
-                        ? (VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT)
-                        : VK_ACCESS_SHADER_READ_BIT;
+    db.dstAccessMask = layout_write_access(dst_final);
     db.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     db.newLayout = dst_final;
-    VkPipelineStageFlags dstFinalStage = (dst_final == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
-                        ? VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
-                        : VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-    vkCmdPipelineBarrier(c.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+    VkPipelineStageFlags dstFinalStage = layout_write_stage(dst_final);
+    vkCmdPipelineBarrier(record_cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
                          dstFinalStage, 0,
                          0, nullptr, 0, nullptr, 1, &db);
 
-    end_one_shot(c);
+    if (inline_record) {
+        if (Swapchain* sc = active_swapchain()) {
+            if (sc->currentImage >= 0 &&
+                sc->currentImage < (int)sc->images.size() &&
+                sc->images[sc->currentImage] == dst_image) {
+                sc->currentColorLayout = dst_final;
+            }
+        }
+        mark_commands_recorded();
+    } else {
+        const bool submitted = end_one_shot(c, blit_wait, blit_signal);
+        if (submitted && present_sc && present_idx >= 0) {
+            const size_t idx = (size_t)present_idx;
+            if (present_chain == 1) {
+                present_sc->renderFinishedSignaledPerImage[idx] = false;
+                present_sc->blitFinishedSignaledPerImage[idx] = true;
+            } else if (present_chain == 2) {
+                present_sc->blitFinishedSignaledPerImage[idx] = false;
+                present_sc->renderFinishedSignaledPerImage[idx] = true;
+            }
+        }
+    }
 }
 
 } // namespace vk
@@ -1263,6 +1617,20 @@ void backend_generate_mipmaps(GLuint name) {
 int backend_read_pixels(int x, int y, int w, int h,
                         GLenum format, GLenum type, void* out_pixels) {
     return mithril::vk::read_pixels(x, y, w, h, format, type, out_pixels);
+}
+
+int backend_debug_read_image(VkImage image, VkFormat format,
+                             VkImageLayout layout, int w, int h,
+                             void* out_pixels) {
+    return mithril::vk::debug_read_image(image, format, layout,
+                                         w, h, out_pixels);
+}
+
+int backend_debug_read_image_layer(VkImage image, VkFormat format,
+                                   VkImageLayout layout, uint32_t base_layer,
+                                   int w, int h, void* out_pixels) {
+    return mithril::vk::debug_read_image_layer(
+        image, format, layout, base_layer, w, h, out_pixels);
 }
 
 void backend_blit_texture(GLuint src_name, GLuint dst_name,
@@ -1300,7 +1668,48 @@ void backend_blit_images(VkImage src_image, VkFormat src_format,
                                   srcX0, srcY0, srcX1, srcY1,
                                   dstX0, dstY0, dstX1, dstY1,
                                   mask, filter,
-                                  is_dst_default_fbo != 0, dst_height);
+                                  is_dst_default_fbo != 0, dst_height,
+                                  false);
+}
+
+void backend_blit_images_with_layouts(
+                         VkImage src_image, VkFormat src_format,
+                         VkImageLayout src_initial, VkImageLayout src_final,
+                         VkImage dst_image, VkFormat dst_format,
+                         VkImageLayout dst_initial, VkImageLayout dst_final,
+                         int srcX0, int srcY0, int srcX1, int srcY1,
+                         int dstX0, int dstY0, int dstX1, int dstY1,
+                         GLbitfield mask, GLenum filter,
+                         int is_dst_default_fbo, int dst_height) {
+    mithril::vk::blit_images_impl(src_image, src_format,
+                                  src_initial, src_final,
+                                  dst_image, dst_format,
+                                  dst_initial, dst_final,
+                                  srcX0, srcY0, srcX1, srcY1,
+                                  dstX0, dstY0, dstX1, dstY1,
+                                  mask, filter,
+                                  is_dst_default_fbo != 0, dst_height,
+                                  false);
+}
+
+void backend_record_blit_images_with_layouts(
+                         VkImage src_image, VkFormat src_format,
+                         VkImageLayout src_initial, VkImageLayout src_final,
+                         VkImage dst_image, VkFormat dst_format,
+                         VkImageLayout dst_initial, VkImageLayout dst_final,
+                         int srcX0, int srcY0, int srcX1, int srcY1,
+                         int dstX0, int dstY0, int dstX1, int dstY1,
+                         GLbitfield mask, GLenum filter,
+                         int is_dst_default_fbo, int dst_height) {
+    mithril::vk::blit_images_impl(src_image, src_format,
+                                  src_initial, src_final,
+                                  dst_image, dst_format,
+                                  dst_initial, dst_final,
+                                  srcX0, srcY0, srcX1, srcY1,
+                                  dstX0, dstY0, dstX1, dstY1,
+                                  mask, filter,
+                                  is_dst_default_fbo != 0, dst_height,
+                                  true);
 }
 
 } // extern "C"

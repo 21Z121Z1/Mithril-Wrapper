@@ -82,6 +82,16 @@ struct Swapchain {
     // consumes the signal.
     std::vector<bool> renderFinishedSignaledPerImage;
 
+    // A framebuffer blit to the default framebuffer is submitted as a
+    // synchronous one-shot command buffer after the normal frame submit.  In
+    // that case present must wait for the blit submit, not merely for the
+    // earlier render submit.  The two per-image semaphores form a small
+    // ping-pong chain for repeated blits in one GL frame:
+    //   renderFinished -> blitFinished -> renderFinished -> ... -> present
+    // Only one of the two flags is true at a time.
+    std::vector<VkSemaphore> blitFinishedPerImage;
+    std::vector<bool> blitFinishedSignaledPerImage;
+
     // Tracks whether the current frame-slot acquire semaphore has been consumed
     // by a vkQueueSubmit wait
     // this frame. vkAcquireNextImageKHR signals imageAvailable; the FIRST

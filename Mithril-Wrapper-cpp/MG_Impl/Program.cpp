@@ -270,6 +270,46 @@ void glLinkProgram(GLuint program) {
             MITHRIL_LOG_WARN("program", "LINKED program=%u shaders=[%s]",
                              program, src_peek.c_str());
         }
+        // Exact bounded reproduction for the first black-frame main-FBO
+        // shader.  The normal link log intentionally records only the first
+        // line; this one selected program needs its raw stage source so a
+        // descriptor/lowering hypothesis can be checked without guessing
+        // from a program number alone.  No runtime semantics are changed.
+        if (program == 58 || program == 80) {
+            for (GLuint sid : p->attachedShaders) {
+                mithril::Shader* sh = mithril::state_get_shader(sid);
+                if (!sh) continue;
+                uint64_t hash = 1469598103934665603ULL;
+                for (unsigned char c : sh->source) {
+                    hash ^= c;
+                    hash *= 1099511628211ULL;
+                }
+                MITHRIL_LOG_WARN("shaderdiag",
+                                 "raw program=%u shader=%u stage=0x%x bytes=%zu hash=%016llx",
+                                 program, sid, (unsigned)sh->type, sh->source.size(),
+                                 (unsigned long long)hash);
+                size_t pos = 0;
+                unsigned line = 0;
+                while (pos < sh->source.size() && line < 96) {
+                    size_t end = sh->source.find('\n', pos);
+                    if (end == std::string::npos) end = sh->source.size();
+                    std::string text = sh->source.substr(pos, end - pos);
+                    for (char& c : text) {
+                        if (c == '\r' || c == '\t') c = ' ';
+                    }
+                    MITHRIL_LOG_WARN("shaderdiag",
+                                     "raw program=%u shader=%u line=%u %s",
+                                     program, sid, line + 1, text.c_str());
+                    pos = end == sh->source.size() ? end : end + 1;
+                    ++line;
+                }
+                if (pos < sh->source.size()) {
+                    MITHRIL_LOG_WARN("shaderdiag",
+                                     "raw program=%u shader=%u truncated_at_line=%u remaining=%zu",
+                                     program, sid, line, sh->source.size() - pos);
+                }
+            }
+        }
         linkLog++;
     }
 
@@ -302,6 +342,74 @@ void glLinkProgram(GLuint program) {
                                                 (int)p->fragmentSpirv.size(),
                                                 VK_SHADER_STAGE_FRAGMENT_BIT);
             mithril::vk::merge_bindings(bindings, b);
+        }
+        if (program == 58 || program == 80) {
+            for (const auto& db : bindings) {
+                MITHRIL_LOG_WARN("shaderdiag",
+                                 "reflection program=%u set=%u binding=%u type=0x%x stages=0x%x "
+                                 "count=%u target=0x%x buffer=%u name=%s members=%zu",
+                                 program, db.set, db.binding, (unsigned)db.type,
+                                 (unsigned)db.stageMask, db.descriptorCount,
+                                 db.samplerTarget, db.bufferSize, db.name.c_str(),
+                                 db.members.size());
+            }
+        }
+        // Record the link-time sampler target for every program.  Program
+        // numbers are allocation-order dependent between runs, so limiting
+        // this to one historical program ID cannot identify the first black
+        // draw reliably.  This is observation only; descriptor binding still
+        // follows the reflected resource metadata below.
+        bool hasCubeSampler = false;
+        for (const auto& db : bindings) {
+            if (db.type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
+                hasCubeSampler = hasCubeSampler || db.samplerTarget == GL_TEXTURE_CUBE_MAP;
+                MITHRIL_LOG_WARN("samplerdiag",
+                                 "link program=%u set=%u binding=%u target=0x%x name=%s",
+                                 program, db.set, db.binding, db.samplerTarget,
+                                 db.name.c_str());
+            }
+        }
+        // The first post-clear world draw is currently a cubemap shader.
+        // Capture its exact source without relying on an allocation-order
+        // program number, which changes when Minecraft links optional stages.
+        if (hasCubeSampler) {
+            static int cubeShaderDiag = 0;
+            if (cubeShaderDiag < 2) {
+                for (GLuint sid : p->attachedShaders) {
+                    mithril::Shader* sh = mithril::state_get_shader(sid);
+                    if (!sh) continue;
+                    uint64_t hash = 1469598103934665603ULL;
+                    for (unsigned char c : sh->source) {
+                        hash ^= c;
+                        hash *= 1099511628211ULL;
+                    }
+                    MITHRIL_LOG_WARN(
+                        "cubediag", "raw program=%u shader=%u stage=0x%x bytes=%zu hash=%016llx",
+                        program, sid, (unsigned)sh->type, sh->source.size(),
+                        (unsigned long long)hash);
+                    size_t pos = 0;
+                    unsigned line = 0;
+                    while (pos < sh->source.size() && line < 128) {
+                        size_t end = sh->source.find('\n', pos);
+                        if (end == std::string::npos) end = sh->source.size();
+                        std::string text = sh->source.substr(pos, end - pos);
+                        for (char& c : text) {
+                            if (c == '\r' || c == '\t') c = ' ';
+                        }
+                        MITHRIL_LOG_WARN("cubediag",
+                                         "raw program=%u shader=%u line=%u %s",
+                                         program, sid, line + 1, text.c_str());
+                        pos = end == sh->source.size() ? end : end + 1;
+                        ++line;
+                    }
+                    if (pos < sh->source.size()) {
+                        MITHRIL_LOG_WARN("cubediag",
+                                         "raw program=%u shader=%u truncated_at_line=%u remaining=%zu",
+                                         program, sid, line, sh->source.size() - pos);
+                    }
+                }
+                ++cubeShaderDiag;
+            }
         }
         GLint nextLocation = 0;
         GLuint blockIndex = 0;

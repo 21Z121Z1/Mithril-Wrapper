@@ -569,6 +569,45 @@ VkPipeline get_or_create_pipeline(GLuint program,
         attrDescs.push_back(ad);
     }
 
+    // Bounded physical diagnostic for the first panorama/cubemap pipeline:
+    // log the exact Vulkan vertex-input contract next to the GL-side buffer
+    // metadata. This is intentionally observation-only; the binding layout
+    // must be proven before changing it.
+    static int vertexInputDiag = 0;
+    if (mithril::g_state && mithril::g_state->currentDrawFBO == 3 &&
+        vertexInputDiag < 12) {
+        MITHRIL_LOG_WARN(
+            "vtxdiag",
+            "pipeline #%d program=%u fbo=%u default=%d glAttribs=%d "
+            "vkBindings=%zu vkAttrs=%zu topology=0x%x",
+            vertexInputDiag + 1, (unsigned)program,
+            (unsigned)mithril::g_state->currentDrawFBO, is_default_fbo,
+            attrib_count, bindDescs.size(), attrDescs.size(),
+            (unsigned)gl_primitive_mode);
+        for (int i = 0; i < attrib_count; ++i) {
+            const MGVertexAttrib& a = attribs[i];
+            VkFormat format = VK_FORMAT_UNDEFINED;
+            uint32_t binding = 0;
+            uint32_t offset = 0;
+            for (const auto& ad : attrDescs) {
+                if (ad.location == (uint32_t)a.location) {
+                    format = ad.format;
+                    binding = ad.binding;
+                    offset = ad.offset;
+                    break;
+                }
+            }
+            MITHRIL_LOG_WARN(
+                "vtxdiag",
+                "attribute loc=%d glBuffer=%u stride=%d glOffset=%d "
+                "vkBinding=%u vkFormat=%d vkOffset=%u divisor=%u",
+                a.location, (unsigned)a.buffer_name, (int)a.stride,
+                (int)a.offset, binding, (int)format, offset,
+                attrib_divisor(a.location));
+        }
+        ++vertexInputDiag;
+    }
+
     VkPipelineVertexInputStateCreateInfo vertexInput{};
     vertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
     vertexInput.vertexBindingDescriptionCount = (uint32_t)bindDescs.size();

@@ -26,9 +26,65 @@
 
 extern "C" {
 
+/*
+ * Clear commands enter the same Vulkan render-pass path as draws, but unlike
+ * Drawing.cpp they do not go through prepare_draw().  Register the GL texture
+ * names backing a user FBO before begin_render_pass() so the backend can
+ * transition COLOR/DEPTH attachments from their sampled layout back to an
+ * attachment layout.  Without this, a clear after a post-process/sample pass
+ * declares COLOR_ATTACHMENT_OPTIMAL while the image is still
+ * SHADER_READ_ONLY_OPTIMAL; MoltenVK can then accept the submit while the
+ * attachment remains unchanged (the observed transparent-black transition).
+ */
+static void register_clear_fbo_attachments() {
+    if (!g_state || g_state->currentDrawFBO == 0) {
+        backend_set_fbo_attachment_tex_ids(nullptr, 0, 0);
+        return;
+    }
+    mithril::Framebuffer* fbo =
+        mithril::state_get_framebuffer(g_state->currentDrawFBO);
+    if (!fbo) {
+        backend_set_fbo_attachment_tex_ids(nullptr, 0, 0);
+        return;
+    }
+
+    GLuint colorTexIds[8] = {0};
+    int colorCount = fbo->drawBufferCount;
+    if (colorCount < 0) colorCount = 0;
+    if (colorCount > 8) colorCount = 8;
+    for (int i = 0; i < colorCount; ++i) {
+        if (fbo->drawBuffers[i] != GL_NONE) {
+            colorTexIds[i] = fbo->colors[i].texture;
+        }
+    }
+    backend_set_fbo_attachment_tex_ids(colorTexIds, colorCount,
+                                       fbo->depth.texture);
+}
+
 /* ---- Clear ---- */
 void glClearColor(GLclampf r, GLclampf g, GLclampf b, GLclampf a) {
     MITHRIL_ENSURE_INIT();
+    // Bounded physical diagnosis: glClear() reports the currently latched
+    // clear value, so observe the setter as well to distinguish a deliberate
+    // Minecraft black-clear from corrupted Mithril state after a failed draw.
+    static int clearColorDiag = 0;
+    static bool haveLastColor = false;
+    static GLclampf lastColor[4] = {0, 0, 0, 0};
+    const bool changed = !haveLastColor || r != lastColor[0] ||
+                         g != lastColor[1] || b != lastColor[2] ||
+                         a != lastColor[3];
+    if (changed && clearColorDiag < 96) {
+        MITHRIL_LOG_WARN("fbodiag",
+                         "glClearColor #%d fbo=%u color=%.3f,%.3f,%.3f,%.3f",
+                         clearColorDiag + 1,
+                         (unsigned)g_state->currentDrawFBO, r, g, b, a);
+        ++clearColorDiag;
+    }
+    lastColor[0] = r;
+    lastColor[1] = g;
+    lastColor[2] = b;
+    lastColor[3] = a;
+    haveLastColor = true;
     g_state->clearColor[0] = r;
     g_state->clearColor[1] = g;
     g_state->clearColor[2] = b;
@@ -54,6 +110,21 @@ void glClearStencil(GLint s) {
 
 void glClear(GLbitfield mask) {
     MITHRIL_ENSURE_INIT();
+    // Bounded physical diagnosis: correlate a later all-zero source FBO with
+    // the GL clear that precedes it.  This is observation-only; GL clear
+    // semantics remain implemented by the Vulkan command stream below.
+    static int clearDiag = 0;
+    if (clearDiag < 160) {
+        MITHRIL_LOG_WARN("fbodiag",
+                         "glClear #%d fbo=%u mask=0x%x color=%.3f,%.3f,%.3f,%.3f "
+                         "depth=%.3f stencil=%d",
+                         clearDiag + 1, (unsigned)g_state->currentDrawFBO,
+                         (unsigned)mask, g_state->clearColor[0],
+                         g_state->clearColor[1], g_state->clearColor[2],
+                         g_state->clearColor[3], g_state->clearDepth,
+                         g_state->clearStencil);
+        ++clearDiag;
+    }
     // Resolve current draw framebuffer attachments.
     VkImageView colors[8] = {VK_NULL_HANDLE};
     VkImageView depth = VK_NULL_HANDLE;
@@ -73,6 +144,7 @@ void glClear(GLbitfield mask) {
     //
     // 同时保留 LOAD+vkCmdClearAttachments 模式（旧 FIX）：只清除 mask 指定的 aspect，
     // 避免 glClear(GL_DEPTH_BUFFER_BIT) 误清颜色缓冲。
+    register_clear_fbo_attachments();
     backend_set_load_load();
     backend_begin_render_pass(colors, n, depth, w, h, 1);
     backend_clear_attachments(mask, 0, 0, w, h);
@@ -105,6 +177,7 @@ void glClearBufferfv(GLenum buffer, GLint drawbuffer, const GLfloat* value) {
         g_state->clearColor[0] = value[0]; g_state->clearColor[1] = value[1];
         g_state->clearColor[2] = value[2]; g_state->clearColor[3] = value[3];
         mask = GL_COLOR_BUFFER_BIT;
+        register_clear_fbo_attachments();
         backend_set_load_load();
         backend_begin_render_pass(colors, n, depth, w, h, 1);
         backend_clear_attachments(mask, 0, 0, w, h);
@@ -117,6 +190,7 @@ void glClearBufferfv(GLenum buffer, GLint drawbuffer, const GLfloat* value) {
         backend_set_clear_depth((double)value[0]);
         g_state->clearDepth = (GLclampd)value[0];
         mask = GL_DEPTH_BUFFER_BIT;
+        register_clear_fbo_attachments();
         backend_set_load_load();
         backend_begin_render_pass(colors, n, depth, w, h, 1);
         backend_clear_attachments(mask, 0, 0, w, h);
@@ -144,6 +218,7 @@ void glClearBufferiv(GLenum buffer, GLint drawbuffer, const GLint* value) {
         g_state->clearColor[0] = (float)value[0]; g_state->clearColor[1] = (float)value[1];
         g_state->clearColor[2] = (float)value[2]; g_state->clearColor[3] = (float)value[3];
         mask = GL_COLOR_BUFFER_BIT;
+        register_clear_fbo_attachments();
         backend_set_load_load();
         backend_begin_render_pass(colors, n, depth, w, h, 1);
         backend_clear_attachments(mask, 0, 0, w, h);
@@ -156,6 +231,7 @@ void glClearBufferiv(GLenum buffer, GLint drawbuffer, const GLint* value) {
         backend_set_clear_stencil(value[0]);
         g_state->clearStencil = value[0];
         mask = GL_STENCIL_BUFFER_BIT;
+        register_clear_fbo_attachments();
         backend_set_load_load();
         backend_begin_render_pass(colors, n, depth, w, h, 1);
         backend_clear_attachments(mask, 0, 0, w, h);
@@ -181,6 +257,7 @@ void glClearBufferuiv(GLenum buffer, GLint drawbuffer, const GLuint* value) {
         backend_set_clear_color((float)value[0], (float)value[1], (float)value[2], (float)value[3]);
         g_state->clearColor[0] = (float)value[0]; g_state->clearColor[1] = (float)value[1];
         g_state->clearColor[2] = (float)value[2]; g_state->clearColor[3] = (float)value[3];
+        register_clear_fbo_attachments();
         backend_set_load_load();
         backend_begin_render_pass(colors, n, depth, w, h, 1);
         backend_clear_attachments(GL_COLOR_BUFFER_BIT, 0, 0, w, h);
@@ -209,6 +286,7 @@ void glClearBufferfi(GLenum buffer, GLint drawbuffer, GLfloat depth_val, GLint s
     g_state->clearDepth = (GLclampd)depth_val;
     g_state->clearStencil = stencil_val;
 
+    register_clear_fbo_attachments();
     backend_set_load_load();
     backend_begin_render_pass(colors, n, depthView, w, h, 1);
     backend_clear_attachments(GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT, 0, 0, w, h);
@@ -248,6 +326,16 @@ void glClearBufferSubData(GLenum target, GLenum internalformat,
  */
 void glEnable(GLenum cap) {
     MITHRIL_ENSURE_INIT();
+    if (cap == GL_CULL_FACE) {
+        static int cullTrace = 0;
+        if (cullTrace < 96) {
+            auto* b = mithril::vk::backend();
+            MITHRIL_LOG_WARN("cubediag", "glEnable(CULL) #%d before=%d frameGen=%llu",
+                             cullTrace + 1, g_state->cullFace ? 1 : 0,
+                             (unsigned long long)(b ? b->frameGeneration : 0));
+            ++cullTrace;
+        }
+    }
     if (cap == GL_PRIMITIVE_RESTART_FIXED_INDEX) {
         g_state->primitiveRestartFixedIndex = true;
         g_state->bumpRenderVersion();
@@ -263,6 +351,16 @@ void glEnable(GLenum cap) {
 
 void glDisable(GLenum cap) {
     MITHRIL_ENSURE_INIT();
+    if (cap == GL_CULL_FACE) {
+        static int cullTrace = 0;
+        if (cullTrace < 96) {
+            auto* b = mithril::vk::backend();
+            MITHRIL_LOG_WARN("cubediag", "glDisable(CULL) #%d before=%d frameGen=%llu",
+                             cullTrace + 1, g_state->cullFace ? 1 : 0,
+                             (unsigned long long)(b ? b->frameGeneration : 0));
+            ++cullTrace;
+        }
+    }
     if (cap == GL_PRIMITIVE_RESTART_FIXED_INDEX) {
         g_state->primitiveRestartFixedIndex = false;
         g_state->bumpRenderVersion();
@@ -513,11 +611,33 @@ void glStencilOpSeparate(GLenum face, GLenum sfail, GLenum dpfail, GLenum dppass
 /* ---- Rasterizer ---- */
 void glCullFace(GLenum mode) {
     MITHRIL_ENSURE_INIT();
+    {
+        static int cullTrace = 0;
+        if (cullTrace < 96) {
+            auto* b = mithril::vk::backend();
+            MITHRIL_LOG_WARN("cubediag", "glCullFace(mode=0x%x) before=0x%x #%d frameGen=%llu",
+                             (unsigned)mode, (unsigned)g_state->cullMode,
+                             cullTrace + 1,
+                             (unsigned long long)(b ? b->frameGeneration : 0));
+            ++cullTrace;
+        }
+    }
     g_state->cullMode = mode;
 }
 
 void glFrontFace(GLenum mode) {
     MITHRIL_ENSURE_INIT();
+    {
+        static int cullTrace = 0;
+        if (cullTrace < 96) {
+            auto* b = mithril::vk::backend();
+            MITHRIL_LOG_WARN("cubediag", "glFrontFace(mode=0x%x) before=0x%x #%d frameGen=%llu",
+                             (unsigned)mode, (unsigned)g_state->frontFace,
+                             cullTrace + 1,
+                             (unsigned long long)(b ? b->frameGeneration : 0));
+            ++cullTrace;
+        }
+    }
     g_state->frontFace = mode;
 }
 

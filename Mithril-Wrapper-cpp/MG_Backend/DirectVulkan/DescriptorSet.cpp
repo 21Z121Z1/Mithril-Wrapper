@@ -154,6 +154,22 @@ void ensure_program_layouts(GLuint program,
                   return a.binding < c.binding;
               });
 
+    // Compare the backend's cached reflection with the link-time reflection
+    // when diagnosing the first black terrain draw.  The raw program log says
+    // program 80's Sampler2 is sampler2D; keep this bounded layout snapshot so
+    // a later draw-time target mismatch can be attributed to reflection,
+    // program-resource lifetime, or descriptor binding rather than guessed.
+    if (program == 80) {
+        for (const auto& db : pr.bindings) {
+            MITHRIL_LOG_WARN("layoutdiag",
+                             "program=%u set=%u binding=%u type=0x%x stages=0x%x "
+                             "target=0x%x name=%s",
+                             program, db.set, db.binding, (unsigned)db.type,
+                             (unsigned)db.stageMask, db.samplerTarget,
+                             db.name.c_str());
+        }
+    }
+
     pr.layoutsBuilt = true;  // set early so a reflection failure doesn't retry forever
     if (pr.bindings.empty()) {
         // No descriptors: caller falls back to the process-wide empty layout.
@@ -634,6 +650,18 @@ void bind_program_descriptors(GLuint program, VkPipelineBindPoint bindPoint) {
     mithril::Program* prog = mithril::state_get_program(program);
     if (!prog) return;
 
+    bool diagCubeProgram = false;
+    bool diagGuiProgram = false;
+    for (GLuint sid : prog->attachedShaders) {
+        mithril::Shader* sh = mithril::state_get_shader(sid);
+        if (sh && sh->source.find("samplerCube") != std::string::npos) {
+            diagCubeProgram = true;
+        }
+        if (sh && sh->source.find("#define IS_GUI") != std::string::npos) {
+            diagGuiProgram = true;
+        }
+    }
+
     /* Fixed-up packing plans. Built lazily here rather than in
      * ensure_program_layouts() because that runs during link, before the
      * frontend has necessarily registered every uniform; by the first draw the
@@ -666,16 +694,14 @@ void bind_program_descriptors(GLuint program, VkPipelineBindPoint bindPoint) {
         pr.setCursor[slot] = 0;
         pr.lastFrameGen[slot] = b->frameGeneration;
         pr.lastFlushGen[slot] = b->flushGeneration;
-        // FIX (mid-frame flush stale-set cache - mirror invalidate_descriptor_memo):
-        // a safe_device_wait_idle() flush submits the current buffer, re-begins the
-        // SAME slot, and (via drain_disposal_queues_except / the pre-vkCreateImage GC
-        // and delete_program_resources paths) can FREE resources that previously-
-        // allocated sets in this slot's cache still reference. Reusing such a set
-        // (setCursor already rewound to 0 above) relies on the rewrite to refresh
-        // it — which is skipped on a bail path (incomplete-set guard, DescriptorSet
-        // ~1299). Drop the whole per-slot set cache so the next bind allocates a
-        // BRAND-NEW set rewritten from current, still-valid resources.
-        pr.allocatedSets[slot].clear();
+        // A descriptor set remains a valid allocation until its pool is reset or
+        // destroyed. Rewind the cursor and rewrite the set contents below; do not
+        // clear allocatedSets here. Clearing the handles without resetting the
+        // pool leaks every set allocated by this program on every frame and
+        // eventually exhausts the pool (the next frame then grows another pool).
+        // Resource destruction invalidates the memo, not the descriptor-set
+        // allocation itself; the normal write path refreshes every binding before
+        // the set is bound.
         /* The cached sets this slot owns are about to be handed out again and
          * REWRITTEN by this frame's draws, so every memo entry naming one is
          * now a promise we can no longer keep. Dropping the memo here is what
@@ -798,6 +824,68 @@ void bind_program_descriptors(GLuint program, VkPipelineBindPoint bindPoint) {
                                 }
                             }
                         }
+                    }
+
+                    // For the first black cubemap draw, record the actual
+                    // application UBO bytes selected by the GL binding point.
+                    // Program::uboBackingStore is not authoritative for
+                    // app-declared blocks; this observes the buffer that will
+                    // really be written into the descriptor.
+                    static int cubeUboDiag = 0;
+                    static int guiUboDiag = 0;
+                    Backend* diagBackend = backend();
+                    const bool diagAppUbo = diagCubeProgram || diagGuiProgram;
+                    int& appUboDiag = diagGuiProgram ? guiUboDiag : cubeUboDiag;
+                    const char* appUboTag = diagGuiProgram ? "guidiag" : "cubediag";
+                    if (diagAppUbo && mithril::g_state->currentDrawFBO == 3 &&
+                        diagBackend && diagBackend->frameGeneration >= 35 &&
+                        appUboDiag < 16) {
+                        const auto& bt = mithril::vk::buffer_table();
+                        auto bit = sl.name ? bt.find(sl.name) : bt.end();
+                        const mithril::Buffer* glBuf = sl.name
+                            ? mithril::state_get_buffer(sl.name) : nullptr;
+                        const mithril::vk::BufferEntry* entry =
+                            bit != bt.end() ? &bit->second : nullptr;
+                        const uint8_t* bytes = nullptr;
+                        size_t byteCount = 0;
+                        if (entry && entry->mapped && uoff < entry->size) {
+                            bytes = static_cast<const uint8_t*>(entry->mapped) + uoff;
+                            byteCount = (size_t)std::min<VkDeviceSize>(
+                                entry->size - uoff, 64);
+                        } else if (glBuf && !glBuf->data.empty() &&
+                                   (size_t)uoff < glBuf->data.size()) {
+                            bytes = glBuf->data.data() + (size_t)uoff;
+                            byteCount = std::min(glBuf->data.size() - (size_t)uoff,
+                                                 (size_t)64);
+                        }
+                        float f[16] = {};
+                        if (bytes && byteCount) {
+                            std::memcpy(f, bytes, std::min(byteCount, sizeof(f)));
+                        }
+                        uint64_t hash = 1469598103934665603ULL;
+                        for (size_t i = 0; i < byteCount; ++i) {
+                            hash ^= bytes[i];
+                            hash *= 1099511628211ULL;
+                        }
+                        MITHRIL_LOG_WARN(
+                            appUboTag,
+                            "app-ubo prog=%u block=%u name=%s point=%u buf=%u "
+                            "vk=%d size=%llu off=%llu range=%llu mapped=%d "
+                            "bytes=%zu hash=%016llx col0=%g,%g,%g,%g "
+                            "col1=%g,%g,%g,%g col2=%g,%g,%g,%g "
+                            "col3=%g,%g,%g,%g",
+                            program, plan.glBlockIndex, info.name.c_str(), point,
+                            (unsigned)sl.name, entry ? 1 : 0,
+                            (unsigned long long)(entry ? entry->size : 0),
+                            (unsigned long long)uoff,
+                            (unsigned long long)urange,
+                            entry && entry->mapped ? 1 : 0, byteCount,
+                            (unsigned long long)hash,
+                            f[0], f[1], f[2], f[3],
+                            f[4], f[5], f[6], f[7],
+                            f[8], f[9], f[10], f[11],
+                            f[12], f[13], f[14], f[15]);
+                        ++appUboDiag;
                     }
                 }
                 if (ubuf == VK_NULL_HANDLE) {
@@ -982,6 +1070,53 @@ void bind_program_descriptors(GLuint program, VkPipelineBindPoint bindPoint) {
                 if (tex_id == 0 && tt != mithril::TextureTarget::_2D) {
                     // 目标 slot 未绑定：回退到任意 slot（兼容罕见 shader）。
                     tex_id = mithril::g_state->boundTextureForUnit((GLuint)unit);
+                }
+            }
+            // Bounded physical-device diagnostic for the first black main-FBO
+            // textured draws.  The draw trace tells us which GL texture name was
+            // selected, but not whether that name still owns a valid Vulkan
+            // image/view, has the expected dimensions, or is stuck in a transfer
+            // layout.  Keep this observation here, after the sampler target
+            // mapping, so it records the exact resource that the descriptor path
+            // is about to use.  This is intentionally not a fallback or a fix.
+            {
+                static int texDiag = 0;
+                static int lateTexDiag = 0;
+                auto* diagBackend = mithril::vk::backend();
+                const bool normalWindow =
+                    mithril::g_state && mithril::g_state->currentDrawFBO == 3 &&
+                    program >= 40 && texDiag < 96;
+                const bool lateWindow =
+                    mithril::g_state && mithril::g_state->currentDrawFBO == 3 &&
+                    diagBackend && diagBackend->frameGeneration >= 80 &&
+                    lateTexDiag < 64;
+                if (normalWindow || lateWindow) {
+                    mithril::Texture* glTex = tex_id ? mithril::state_get_texture(tex_id) : nullptr;
+                    auto& tex_tbl = mithril::vk::texture_table();
+                    auto tex_it = tex_id ? tex_tbl.find(tex_id) : tex_tbl.end();
+                    const bool hasEntry = tex_it != tex_tbl.end();
+                    const mithril::vk::TextureEntry* vkTex = hasEntry ? &tex_it->second : nullptr;
+                    VkImageView diagView = tex_id ? backend_get_texture_view(tex_id) : VK_NULL_HANDLE;
+                    MITHRIL_LOG_WARN(
+                        "texdiag",
+                        "program=%u binding=%u unit=%d samplerTarget=0x%x tex=%u "
+                        "glTarget=0x%x glFormat=0x%x size=%dx%d levels=%d "
+                        "image=%llu view=%llu vkFormat=%d layout=%d "
+                        "viewValid=%d",
+                        (unsigned)program, db.binding, unit, db.samplerTarget,
+                        (unsigned)tex_id,
+                        glTex ? (unsigned)glTex->target : 0u,
+                        glTex ? (unsigned)glTex->internalFormat : 0u,
+                        glTex ? (int)glTex->width : 0,
+                        glTex ? (int)glTex->height : 0,
+                        glTex ? (int)glTex->levels : 0,
+                        vkTex ? (unsigned long long)handle_bits(vkTex->image) : 0ull,
+                        vkTex ? (unsigned long long)handle_bits(vkTex->view) : 0ull,
+                        vkTex ? (int)vkTex->format : (int)VK_FORMAT_UNDEFINED,
+                        vkTex ? (int)vkTex->currentLayout : (int)VK_IMAGE_LAYOUT_UNDEFINED,
+                        diagView != VK_NULL_HANDLE);
+                    if (normalWindow) ++texDiag;
+                    if (lateWindow) ++lateTexDiag;
                 }
             }
             /* No texture on that unit.
@@ -1536,6 +1671,7 @@ void bind_program_descriptors(GLuint program, VkPipelineBindPoint bindPoint) {
 }
 
 void invalidate_descriptor_memo() {
+    Backend* b = backend();
     auto& tbl = program_table();
     for (auto& kv : tbl) {
         ProgramResources& pr = kv.second;
@@ -1543,31 +1679,21 @@ void invalidate_descriptor_memo() {
             // Clear the memo entries so a cached set referencing a just-destroyed
             // resource is never returned by bind_program_descriptors' memo hit.
             //
-            // FIX (GPU page fault / stale-set reuse): previously we deliberately
-            // did NOT touch setCursor/allocatedSets, relying on the setCursor
-            // reuse path (bind_program_descriptors line ~1166) to REWRITE a
-            // reused set with fresh descriptors. That is only sound if the
-            // rewrite is guaranteed to run. It is NOT: the rewrite can be
-            // skipped when a uniform-arena upload fails (early return) or when
-            // an incomplete-set guard bails out (DescriptorSet.cpp ~1299). In
-            // those cases a reused set retains a descriptor pointing at the
-            // just-deferred-destroyed VkImageView. The view is still alive now
-            // (it sits in disposalQueue until the slot fence signals), but the
-            // set is then submitted and, once the disposal drain frees the
-            // view, the next submit that reuses/re-records that descriptor reads
-            // freed memory -> kIOGPUCommandBufferCallbackErrorPageFault at a
-            // scene transition where textures are re-specified.
-            //
-            // Fix (mirrors reset_all_descriptor_pools): drop the whole per-slot
-            // set cache so the next bind allocates a BRAND-NEW set that is fully
-            // written from the current, still-valid resources. A set that may
-            // reference a destroyed view is never reused or re-bound.
+            // Do not clear allocatedSets here. The old descriptor sets may still
+            // be referenced by the command buffer currently being recorded, and
+            // dropping their handles without resetting the pool leaks the pool's
+            // allocations on every resource invalidation. For the active slot,
+            // advance the cursor past all existing sets so the next bind gets a
+            // fresh set; the old sets remain alive until the slot fence retires
+            // them. At the next frame boundary the slot is fenced and the cursor
+            // rewinds, after which the normal write path refreshes every binding.
             for (int j = 0; j < kDescriptorMemoSize; ++j) {
                 pr.descMemo[i][j] = DescriptorMemoEntry{};
             }
             pr.descMemoNext[i] = 0;
-            pr.allocatedSets[i].clear();
-            pr.setCursor[i] = 0;
+            if (b && i == b->currentFrame) {
+                pr.setCursor[i] = pr.allocatedSets[i].size();
+            }
         }
     }
     // The memo-cleared program may be bound again before the next draw; make

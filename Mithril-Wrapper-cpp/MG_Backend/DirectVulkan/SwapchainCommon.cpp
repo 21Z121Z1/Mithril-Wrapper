@@ -57,6 +57,16 @@ Swapchain* create_swapchain_post_surface(VkSurfaceKHR surface, int width, int he
     // Surface capabilities.
     VkSurfaceCapabilitiesKHR caps{};
     vkGetPhysicalDeviceSurfaceCapabilitiesKHR(b->physicalDevice, sc->surface, &caps);
+    MITHRIL_LOG_WARN("vk", "Swapchain: caps currentTransform=0x%x supportedTransform=0x%x "
+                     "currentExtent=%ux%u minExtent=%ux%u maxExtent=%ux%u",
+                     (unsigned)caps.currentTransform,
+                     (unsigned)caps.supportedTransforms,
+                     (unsigned)caps.currentExtent.width,
+                     (unsigned)caps.currentExtent.height,
+                     (unsigned)caps.minImageExtent.width,
+                     (unsigned)caps.minImageExtent.height,
+                     (unsigned)caps.maxImageExtent.width,
+                     (unsigned)caps.maxImageExtent.height);
     // Image count: MUST match CAMetalLayer.maximumDrawableCount (set to 2 in
     // SurfaceMetal.mm). A mismatch (e.g. maximumDrawableCount=3 but swapchain
     // creates 2 images) causes the IOSurface pool to have more drawables than
@@ -233,8 +243,11 @@ pm_done:
     // hits a spec violation (re-signaling a signaled binary semaphore).
     sc->renderFinishedPerImage.resize(imgCount2);
     sc->renderFinishedSignaledPerImage.assign(imgCount2, false);
+    sc->blitFinishedPerImage.resize(imgCount2);
+    sc->blitFinishedSignaledPerImage.assign(imgCount2, false);
     for (uint32_t i = 0; i < imgCount2; ++i) {
         vkCreateSemaphore(b->device, &semi, nullptr, &sc->renderFinishedPerImage[i]);
+        vkCreateSemaphore(b->device, &semi, nullptr, &sc->blitFinishedPerImage[i]);
     }
 
     // Depth/stencil image (VK_FORMAT_D32_SFLOAT_S8_UINT).
@@ -334,6 +347,11 @@ void destroy_swapchain(Swapchain* sc) {
     }
     sc->renderFinishedPerImage.clear();
     sc->renderFinishedSignaledPerImage.clear();
+    for (auto& sem : sc->blitFinishedPerImage) {
+        if (sem) { vkDestroySemaphore(b->device, sem, nullptr); sem = VK_NULL_HANDLE; }
+    }
+    sc->blitFinishedPerImage.clear();
+    sc->blitFinishedSignaledPerImage.clear();
     if (sc->swapchain) { vkDestroySwapchainKHR(b->device, sc->swapchain, nullptr); sc->swapchain = VK_NULL_HANDLE; }
     if (sc->surface)   { vkDestroySurfaceKHR(b->instance, sc->surface, nullptr); sc->surface = VK_NULL_HANDLE; }
     delete sc;
@@ -466,6 +484,13 @@ VkImageView swapchain_acquire_color(Swapchain* sc) {
         // starts rendering before the presentation engine releases the image
         // -> MoltenVK black screen. See MobileGL FrameContext.cpp:234.
         sc->imageAvailableConsumed = false;
+        static int acquirePresentationDiag = 0;
+        if (acquirePresentationDiag < 24) {
+            MITHRIL_LOG_WARN("frame", "acquire #%d image=%d slot=%d",
+                              acquirePresentationDiag + 1, sc->currentImage,
+                              acquireSlot);
+            acquirePresentationDiag++;
+        }
     }
     VkImageView view = (sc->currentImage >= 0 && sc->currentImage < (int)sc->views.size())
                        ? sc->views[sc->currentImage] : VK_NULL_HANDLE;
@@ -512,18 +537,39 @@ void swapchain_present_and_acquire(Swapchain* sc) {
         // wait — which is correct because the image is already in
         // PRESENT_SRC_KHR and no GPU work touches it.
         VkSemaphore waitSemaphore = VK_NULL_HANDLE;
-        if (idx < sc->renderFinishedSignaledPerImage.size() &&
-            sc->renderFinishedSignaledPerImage[idx] &&
-            idx < sc->renderFinishedPerImage.size() &&
-            sc->renderFinishedPerImage[idx] != VK_NULL_HANDLE) {
+        bool waitingOnBlit = false;
+        if (idx < sc->blitFinishedSignaledPerImage.size() &&
+            sc->blitFinishedSignaledPerImage[idx] &&
+            idx < sc->blitFinishedPerImage.size() &&
+            sc->blitFinishedPerImage[idx] != VK_NULL_HANDLE) {
+            waitSemaphore = sc->blitFinishedPerImage[idx];
+            waitingOnBlit = true;
+        } else if (idx < sc->renderFinishedSignaledPerImage.size() &&
+                   sc->renderFinishedSignaledPerImage[idx] &&
+                   idx < sc->renderFinishedPerImage.size() &&
+                   sc->renderFinishedPerImage[idx] != VK_NULL_HANDLE) {
             waitSemaphore = sc->renderFinishedPerImage[idx];
+        }
+        if (waitSemaphore != VK_NULL_HANDLE) {
             pi.waitSemaphoreCount = 1;
             pi.pWaitSemaphores = &waitSemaphore;
+        }
+        static int presentPresentationDiag = 0;
+        const bool emitPresentDiag = presentPresentationDiag < 24;
+        if (emitPresentDiag) {
+            MITHRIL_LOG_WARN("frame", "present #%d image=%u waitRender=%d",
+                              presentPresentationDiag + 1, (unsigned)idx,
+                              waitSemaphore != VK_NULL_HANDLE ? (waitingOnBlit ? 2 : 1) : 0);
         }
         pi.swapchainCount = 1;
         pi.pSwapchains = &sc->swapchain;
         pi.pImageIndices = &idx;
         VkResult r = vkQueuePresentKHR(b->graphicsQueue, &pi);
+        if (emitPresentDiag) {
+            MITHRIL_LOG_WARN("frame", "present result #%d rc=%d image=%u",
+                              presentPresentationDiag + 1, (int)r, (unsigned)idx);
+            presentPresentationDiag++;
+        }
         if (r == VK_SUCCESS || r == VK_SUBOPTIMAL_KHR) {
             b->consecutiveSubmitFailures = 0;
         } else if (r == VK_ERROR_OUT_OF_DATE_KHR) {
@@ -570,7 +616,11 @@ void swapchain_present_and_acquire(Swapchain* sc) {
         // renderFinishedSignaledPerImage[idx]=true forever, and the next
         // commit_frame would skip signaling (UB: present waits on a semaphore
         // that was never signaled).
-        if (idx < sc->renderFinishedSignaledPerImage.size()) {
+        if (waitingOnBlit) {
+            if (idx < sc->blitFinishedSignaledPerImage.size()) {
+                sc->blitFinishedSignaledPerImage[idx] = false;
+            }
+        } else if (idx < sc->renderFinishedSignaledPerImage.size()) {
             sc->renderFinishedSignaledPerImage[idx] = false;
         }
         sc->currentImage = -1;
