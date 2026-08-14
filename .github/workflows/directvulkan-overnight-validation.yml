@@ -10,6 +10,56 @@ permissions:
   contents: read
 
 jobs:
+  linux-lavapipe-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Vulkan software stack
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build clang libvulkan-dev vulkan-tools mesa-vulkan-drivers
+          vulkaninfo --summary || true
+
+      - name: Configure and build headless DirectVulkan
+        run: |
+          cmake -S . -B build-linux -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -DCMAKE_C_FLAGS="-Wno-error" \
+            -DCMAKE_CXX_FLAGS="-Wno-error"
+          cmake --build build-linux --target mithril -j2
+
+      - name: Compile smoke programs
+        run: |
+          clang -std=c11 -O0 -g -Wall -Wextra -IMithril-Wrapper-cpp/include -o tests/gl_smoke tests/gl_smoke.c -ldl
+          clang -std=c11 -O0 -g -Wall -Wextra -IMithril-Wrapper-cpp/include -o tests/render_smoke tests/render_smoke.c -ldl
+          clang -std=c11 -O0 -g -Wall -Wextra -IMithril-Wrapper-cpp/include -o tests/egl_sync_smoke tests/egl_sync_smoke.c -ldl
+
+      - name: Run complete GL to Vulkan draw/readback smokes on lavapipe
+        env:
+          MITHRIL_DEBUG: '1'
+          VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+        run: |
+          set -euo pipefail
+          LIB=$(find build-linux -name 'libmithril.so' -type f | head -1)
+          test -n "$LIB"
+          file "$LIB"
+          ./tests/gl_smoke "$LIB"
+          ./tests/render_smoke "$LIB"
+          ./tests/egl_sync_smoke "$LIB"
+
+      - name: Validate recovered invariants
+        run: |
+          set -euo pipefail
+          git diff --check 1e7f6b7a1941dcc6e4cef5b5e20359291f9924cb..HEAD
+          grep -q 'g_state->frontFace == GL_CCW ? 0' Mithril-Wrapper-cpp/MG_Impl/Drawing.cpp
+          grep -q 'type_description->type_name' Mithril-Wrapper-cpp/MG_Impl/Shader.cpp
+          grep -q 'GL_PIXEL_UNPACK_BUFFER' Mithril-Wrapper-cpp/MG_Impl/Texture.cpp
+
   macos26-native-gpu:
     runs-on: macos-26-arm64
     steps:
@@ -64,7 +114,7 @@ jobs:
 
       - name: Source integrity checks
         run: |
-          git diff --check HEAD^
+          git diff --check 1e7f6b7a1941dcc6e4cef5b5e20359291f9924cb..HEAD
           grep -q 'g_state->frontFace == GL_CCW ? 0' Mithril-Wrapper-cpp/MG_Impl/Drawing.cpp
           grep -q 'maxSamplerAnisotropy' Mithril-Wrapper-cpp/MG_Impl/Getter_gpu.mm
           grep -q 'type_description' Mithril-Wrapper-cpp/MG_Impl/Shader.cpp
