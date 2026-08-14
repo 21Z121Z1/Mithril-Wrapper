@@ -667,17 +667,13 @@ void bind_program_descriptors(GLuint program, VkPipelineBindPoint bindPoint) {
         pr.setCursor[slot] = 0;
         pr.lastFrameGen[slot] = b->frameGeneration;
         pr.lastFlushGen[slot] = b->flushGeneration;
-        // FIX (mid-frame flush stale-set cache - mirror invalidate_descriptor_memo):
-        // a safe_device_wait_idle() flush submits the current buffer, re-begins the
-        // SAME slot, and (via drain_disposal_queues_except / the pre-vkCreateImage GC
-        // and delete_program_resources paths) can FREE resources that previously-
-        // allocated sets in this slot's cache still reference. Reusing such a set
-        // (setCursor already rewound to 0 above) relies on the rewrite to refresh
-        // it — which is skipped on a bail path (incomplete-set guard, DescriptorSet
-        // ~1299). Drop the whole per-slot set cache so the next bind allocates a
-        // BRAND-NEW set rewritten from current, still-valid resources.
-        pr.allocatedSets[slot].clear();
-        /* The cached sets this slot owns are about to be handed out again and
+        /* The slot fence wait (or safe_device_wait_idle for a flush boundary)
+         * guarantees that no submitted command buffer still uses these sets.
+         * Keep the handles and rewind only the cursor: clearing allocatedSets
+         * here loses ownership without freeing/resetting the pool, forcing one
+         * fresh allocation per draw every generation until the pool exhausts.
+         *
+         * The cached sets this slot owns are about to be handed out again and
          * REWRITTEN by this frame's draws, so every memo entry naming one is
          * now a promise we can no longer keep. Dropping the memo here is what
          * makes the reuse below sound: within a frame the cursor only moves
@@ -1541,34 +1537,18 @@ void invalidate_descriptor_memo() {
     for (auto& kv : tbl) {
         ProgramResources& pr = kv.second;
         for (int i = 0; i < kMaxFramesInFlight; ++i) {
-            // Clear the memo entries so a cached set referencing a just-destroyed
-            // resource is never returned by bind_program_descriptors' memo hit.
-            //
-            // FIX (GPU page fault / stale-set reuse): previously we deliberately
-            // did NOT touch setCursor/allocatedSets, relying on the setCursor
-            // reuse path (bind_program_descriptors line ~1166) to REWRITE a
-            // reused set with fresh descriptors. That is only sound if the
-            // rewrite is guaranteed to run. It is NOT: the rewrite can be
-            // skipped when a uniform-arena upload fails (early return) or when
-            // an incomplete-set guard bails out (DescriptorSet.cpp ~1299). In
-            // those cases a reused set retains a descriptor pointing at the
-            // just-deferred-destroyed VkImageView. The view is still alive now
-            // (it sits in disposalQueue until the slot fence signals), but the
-            // set is then submitted and, once the disposal drain frees the
-            // view, the next submit that reuses/re-records that descriptor reads
-            // freed memory -> kIOGPUCommandBufferCallbackErrorPageFault at a
-            // scene transition where textures are re-specified.
-            //
-            // Fix (mirrors reset_all_descriptor_pools): drop the whole per-slot
-            // set cache so the next bind allocates a BRAND-NEW set that is fully
-            // written from the current, still-valid resources. A set that may
-            // reference a destroyed view is never reused or re-bound.
+            // A memo hit must never return a set that still names the old
+            // resource. Keep both allocatedSets and setCursor unchanged here:
+            // invalidation can occur in the middle of command-buffer recording,
+            // so rewinding the cursor could select and overwrite a set already
+            // referenced by an earlier draw. The next memo miss advances from
+            // the current cursor and fully writes a different set before binding
+            // it. At the next fence-gated generation boundary the cursor can be
+            // safely rewound and all allocated handles become reusable again.
             for (int j = 0; j < kDescriptorMemoSize; ++j) {
                 pr.descMemo[i][j] = DescriptorMemoEntry{};
             }
             pr.descMemoNext[i] = 0;
-            pr.allocatedSets[i].clear();
-            pr.setCursor[i] = 0;
         }
     }
     // The memo-cleared program may be bound again before the next draw; make

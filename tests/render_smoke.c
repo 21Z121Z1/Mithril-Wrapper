@@ -848,12 +848,14 @@ int main(int argc, char** argv) {
         }
 
         /* ---- 4g) 多帧动态 UBO + 贴图 + glFinish 稳定性 ------------------- */
-        /* 每帧：改写 UBO（orphan-rename + descriptor memo 失效）→ draw →
-         * glFinish(vkQueueSubmit) → readback。连续 N 帧验证：
+        /* 每帧多次改写 UBO（orphan-rename + descriptor memo 失效）→ draw，
+         * 然后 glFinish(vkQueueSubmit) → readback。连续 N 帧验证：
          *   - 每帧读回颜色随 UBO tint 变化而变（动态 uniform 真正生效）；
          *   - 全白纹理 × tint 的乘积 = tint 本身（验证采样链路颜色正确）；
-         *   - 全程无 GPU page fault / draw 丢弃（读回非黑即证明 draw 未被丢）。 */
-        const int NFRAMES = 8;
+         *   - 旧实现每次失效都会遗失 set，220*12 次 draw 足以让每个
+         *     frame slot 越过 1024-set pool 上限；复用正确时不会扩池。 */
+        const int NFRAMES = 220;
+        const int DRAWS_PER_FRAME = 12;
         int stableFrames = 0;
         /* 前面 4e/4f 换了 bound program/texture，这里恢复 texProg + 采样器 +
          * UBO 的完整绑定状态后再进入多帧循环。 */
@@ -865,20 +867,22 @@ int main(int argc, char** argv) {
         if (texLoc >= 0) uniform1i(texLoc, 0);
         bindVertexArray(texVao);
         for (int f = 0; f < NFRAMES; ++f) {
-            /* 动态改写 UBO：第 f 帧 tint = (f 递增的 R, 0, 0, 1) */
-            GLfloat tint[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
-            tint[0] = (float)(30 + f * 20) / 255.0f;  /* 30,50,...,170 */
-            bindBuffer(GL_UNIFORM_BUFFER, ubo);
-            bufferData(GL_UNIFORM_BUFFER, sizeof(tint), tint, GL_DYNAMIC_DRAW);
             clearColor(0.0f, 0.0f, 0.0f, 0.0f);
             clear(GL_COLOR_BUFFER_BIT);
-            drawArrays(GL_TRIANGLES, 0, 3);
+            int wantR = 0;
+            for (int d = 0; d < DRAWS_PER_FRAME; ++d) {
+                GLfloat tint[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
+                wantR = 30 + ((f * DRAWS_PER_FRAME + d) % 8) * 20;
+                tint[0] = (float)wantR / 255.0f;
+                bindBuffer(GL_UNIFORM_BUFFER, ubo);
+                bufferData(GL_UNIFORM_BUFFER, sizeof(tint), tint, GL_DYNAMIC_DRAW);
+                drawArrays(GL_TRIANGLES, 0, 3);
+            }
             finish();  /* vkQueueSubmit + 等待，验证提交稳定性 */
             if (getError() != GL_NO_ERROR) { ++failures; break; }
 
             unsigned char fp[4] = {0,0,0,0};
             readPixels(R / 2, C / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, fp);
-            int wantR = 30 + f * 20;
             /* 允许 ±12 的线性采样/量化容差（float→uint8 四舍五入） */
             if (fp[0] >= wantR - 12 && fp[0] <= wantR + 12 &&
                 fp[3] > 128 && fp[1] < 20 && fp[2] < 20) {
