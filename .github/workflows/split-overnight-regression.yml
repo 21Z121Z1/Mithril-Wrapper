@@ -1,0 +1,81 @@
+name: Split overnight regressions into independent cases
+
+on:
+  push:
+    branches:
+      - codex/directvulkan-overnight-recovery-20260814
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: codex/directvulkan-overnight-recovery-20260814
+          fetch-depth: 0
+
+      - name: Add selective case execution to focused regression binary
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('tests/overnight_regression_smoke.c')
+          s = p.read_text()
+          marker = '    API a = {0};\n'
+          insert = '''    const char* only_case = getenv("MITHRIL_OVERNIGHT_CASE");\n#define RUN_CASE(name) (!only_case || strcmp(only_case, (name)) == 0)\n    if (only_case) printf("OVERNIGHT REGRESSION CASE: %s\\n", only_case);\n'''
+          if s.count(marker) != 1:
+              raise SystemExit('API marker mismatch')
+          s = s.replace(marker, marker + insert, 1)
+
+          def wrap(text, start_marker, end_marker, case_name):
+              if text.count(start_marker) != 1 or text.count(end_marker) != 1:
+                  raise SystemExit(f'marker mismatch for {case_name}')
+              a = text.index(start_marker)
+              b = text.index(end_marker, a)
+              body = text[a:b]
+              return text[:a] + f'    if (RUN_CASE("{case_name}")) {{\n' + body + '    }\n\n' + text[b:]
+
+          s = wrap(s,
+              '    /* Symbol ownership regression: eglGetProcAddress must not hand LWJGL a system OpenGL function. */\n',
+              '    const int W = 64, H = 64;\n', 'symbol')
+          s = wrap(s,
+              '    /* Regression 1: GL user-FBO winding must remain GL semantics after the Vulkan Y mapping. */\n',
+              '    /* Regression 2: PBO pixels is an offset, not a CPU address. */\n', 'frontface')
+          s = wrap(s,
+              '    /* Regression 2: PBO pixels is an offset, not a CPU address. */\n',
+              '    /* Regression 3: one GL uniform block shared by VS+FS must map to one backend binding. */\n', 'pbo')
+          s = wrap(s,
+              '    /* Regression 3: one GL uniform block shared by VS+FS must map to one backend binding. */\n',
+              '    printf("OVERNIGHT REGRESSION: %d checks, %d failures\\n",checks,failures);\n', 'ubo')
+          s = s.replace('    dlclose(h); return failures ? 1 : 0;\n}',
+                        '    dlclose(h); return failures ? 1 : 0;\n#undef RUN_CASE\n}\n')
+          p.write_text(s)
+          PY
+
+      - name: Split triage workflow into four named regression steps
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('.github/workflows/directvulkan-triage.yml')
+          s = p.read_text()
+          old = '''      - name: Overnight root-cause regressions\n        env:\n          MITHRIL_DEBUG: '1'\n        run: ./tests/overnight_regression_smoke_triage "$MITHRIL_LIB"\n'''
+          new = '''      - name: Overnight regression - Mithril GL symbol ownership\n        env:\n          MITHRIL_DEBUG: '1'\n          MITHRIL_OVERNIGHT_CASE: symbol\n        run: ./tests/overnight_regression_smoke_triage "$MITHRIL_LIB"\n\n      - name: Overnight regression - user-FBO front-face mapping\n        env:\n          MITHRIL_DEBUG: '1'\n          MITHRIL_OVERNIGHT_CASE: frontface\n        run: ./tests/overnight_regression_smoke_triage "$MITHRIL_LIB"\n\n      - name: Overnight regression - PBO offset texture upload\n        env:\n          MITHRIL_DEBUG: '1'\n          MITHRIL_OVERNIGHT_CASE: pbo\n        run: ./tests/overnight_regression_smoke_triage "$MITHRIL_LIB"\n\n      - name: Overnight regression - cross-stage shared UBO\n        env:\n          MITHRIL_DEBUG: '1'\n          MITHRIL_OVERNIGHT_CASE: ubo\n        run: ./tests/overnight_regression_smoke_triage "$MITHRIL_LIB"\n'''
+          if s.count(old) != 1:
+              raise SystemExit(f'triage step marker mismatch: {s.count(old)}')
+          p.write_text(s.replace(old, new))
+          PY
+          git diff --check
+
+      - name: Commit permanent focused-test split
+        run: |
+          set -euo pipefail
+          rm .github/workflows/split-overnight-regression.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          git commit -m 'test: isolate overnight DirectVulkan regressions'
+          git push origin HEAD:codex/directvulkan-overnight-recovery-20260814
