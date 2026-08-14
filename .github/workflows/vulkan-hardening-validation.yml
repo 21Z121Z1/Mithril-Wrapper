@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - fix/mobilegl-style-mc262-startup-preflight
+      - 'ci/**'
+  pull_request:
   workflow_dispatch:
 
 permissions:
@@ -11,11 +13,19 @@ permissions:
 
 jobs:
   macos-metal-regressions:
-    runs-on: macos-26-arm64
+    runs-on: macos-26
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           submodules: recursive
+
+      - name: Record runner provenance
+        run: |
+          sw_vers
+          uname -a
+          xcodebuild -version
+          printf 'commit=%s\n' "$GITHUB_SHA" | tee runner-provenance.txt
 
       - name: Install MoltenVK runtime
         run: brew install vulkan-loader molten-vk
@@ -30,6 +40,8 @@ jobs:
           DYLIB=$(find build -name 'libmithril.dylib' -type f | head -1)
           test -n "$DYLIB"
           file "$DYLIB"
+          shasum -a 256 "$DYLIB" | tee mithril-sha256.txt
+          dwarfdump --uuid "$DYLIB" | tee mithril-uuid.txt
 
       - name: Run GL state-machine smoke
         run: |
@@ -38,7 +50,7 @@ jobs:
           clang -std=c11 -O0 -Wall -Wextra \
             -IMithril-Wrapper-cpp/include \
             -o tests/gl_smoke tests/gl_smoke.c -ldl
-          ./tests/gl_smoke "$DYLIB"
+          ./tests/gl_smoke "$DYLIB" | tee gl-smoke.log
 
       - name: Run real GPU render smoke
         run: |
@@ -48,7 +60,7 @@ jobs:
           clang -std=c11 -O0 -Wall -Wextra \
             -IMithril-Wrapper-cpp/include \
             -o tests/render_smoke tests/render_smoke.c -ldl
-          ./tests/render_smoke "$DYLIB"
+          ./tests/render_smoke "$DYLIB" 2>&1 | tee render-smoke.log
 
       - name: Run EGL fence-sync smoke
         run: |
@@ -58,7 +70,7 @@ jobs:
           clang -std=c11 -O0 -Wall -Wextra \
             -IMithril-Wrapper-cpp/include \
             -o tests/egl_sync_smoke tests/egl_sync_smoke.c -ldl
-          ./tests/egl_sync_smoke "$DYLIB"
+          ./tests/egl_sync_smoke "$DYLIB" 2>&1 | tee egl-sync-smoke.log
 
       - name: Run CAMetalLayer surface smoke
         run: |
@@ -67,7 +79,7 @@ jobs:
           clang++ -std=c++17 -fobjc-arc -O0 -Wall -Wextra \
             -framework Foundation -framework QuartzCore -framework Metal \
             -o tests/surface_metal_smoke tests/surface_metal_smoke.mm -ldl
-          ./tests/surface_metal_smoke "$DYLIB"
+          ./tests/surface_metal_smoke "$DYLIB" 2>&1 | tee surface-metal-smoke.log
 
       - name: Verify synchronization contracts
         run: |
@@ -81,3 +93,20 @@ jobs:
           grep -q 'surface_destroy' Mithril-Wrapper-cpp/egl/egl.cpp
           ! grep -q 'object_setClass' Mithril-Wrapper-cpp/egl/SurfaceMetal.mm
           echo 'Vulkan/EGL synchronization and surface contracts OK'
+
+      - name: Upload hardening evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: mithril-macos26-hardening-evidence
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            runner-provenance.txt
+            mithril-sha256.txt
+            mithril-uuid.txt
+            gl-smoke.log
+            render-smoke.log
+            egl-sync-smoke.log
+            surface-metal-smoke.log
+            build/**/libmithril.dylib
