@@ -294,9 +294,11 @@ VkBuffer backend_create_buffer_storage(GLuint name, VkDeviceSize size,
 void     backend_buffer_upload(GLuint name, GLintptr offset, const void* data, size_t size);
 /* Return the live host pointer of a persistently-mapped buffer (glBufferStorage
  * + MAP_PERSISTENT), or NULL if the buffer is not persistently mapped. */
-void*    backend_get_buffer_mapped_pointer(GLuint name);
-VkBuffer backend_get_buffer(GLuint name);
-void     backend_delete_buffer(GLuint name);
+void*       backend_get_buffer_mapped_pointer(GLuint name);
+VkBuffer    backend_get_buffer(GLuint name);
+// 查询后端 VkBuffer 实际分配容量（含 256 对齐 padding）。返回 0 表示 buffer 不存在。
+VkDeviceSize backend_get_buffer_capacity(GLuint name);
+void        backend_delete_buffer(GLuint name);
 
 /* Shared 16-byte zero-filled buffer for unbound vertex attribute slots. */
 VkBuffer backend_get_zero_buffer(void);

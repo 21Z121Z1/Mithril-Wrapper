@@ -541,7 +541,14 @@ static bool trace_draw(const char* kind, int mode, int first, int count, int ins
                 if (ib_buf) {
                     // FIX (orphan chain 根因): allocSize 必须 256 对齐
                     size_t aligned_need = (need + 255u) & ~(size_t)255u;
-                    backend_get_or_create_buffer(ib, nullptr, aligned_need);
+                    // 后端容量已够则跳过
+                    VkDeviceSize backend_cap = backend_get_buffer_capacity(ib);
+                    if (backend_cap < aligned_need) {
+                        backend_get_or_create_buffer(ib, nullptr, aligned_need);
+                    } else {
+                        LOG_RESOURCE("DRAW-IBO-GROW ib=%u skip-orphan backend_cap=%zu >= need=%zu",
+                                     (unsigned)ib, (size_t)backend_cap, aligned_need);
+                    }
                     ib_buf->allocSize = (GLsizeiptr)aligned_need;
                     LOG_RESOURCE("DRAW-IBO-GROW ib=%u from=%lld to=%zu", (unsigned)ib,
                                  (long long)ib_size, aligned_need);
@@ -579,7 +586,16 @@ static bool trace_draw(const char* kind, int mode, int first, int count, int ins
                 // 再次 DRAW-OVERRUN → orphan 新 buffer → GL allocSize 仍不对齐
                 // → 每帧 orphan 链 → disposal queue 堆积 → 显存泄漏。
                 size_t aligned_need = (need + 255u) & ~(size_t)255u;
-                backend_get_or_create_buffer(at.boundBuffer, nullptr, aligned_need);
+                // FIX (避免不必要 orphan): 若后端已有足够容量，仅更新 GL
+                // allocSize 而不调后端（避免在飞 orphan 链）。
+                VkDeviceSize backend_cap = backend_get_buffer_capacity(at.boundBuffer);
+                if (backend_cap >= aligned_need) {
+                    // 后端容量已够，仅更新 GL 层跟踪
+                    LOG_RESOURCE("DRAW-VB-GROW buf=%u skip-orphan backend_cap=%zu >= need=%zu",
+                                 (unsigned)at.boundBuffer, (size_t)backend_cap, aligned_need);
+                } else {
+                    backend_get_or_create_buffer(at.boundBuffer, nullptr, aligned_need);
+                }
                 vb->allocSize = (GLsizeiptr)aligned_need;
                 LOG_RESOURCE("DRAW-VB-GROW buf=%u from=%lld to=%zu (aligned need=%zu)",
                              (unsigned)at.boundBuffer, (long long)vb->allocSize,
@@ -834,7 +850,13 @@ void glMultiDrawArrays(GLenum mode, const GLint* first, const GLsizei* count, GL
                                      (int)first[i] + count[i], need, (long long)vb->allocSize);
                         // FIX (orphan chain 根因): allocSize 必须 256 对齐
                         size_t aligned_need = (need + 255u) & ~(size_t)255u;
-                        backend_get_or_create_buffer(at.boundBuffer, nullptr, aligned_need);
+                        VkDeviceSize backend_cap = backend_get_buffer_capacity(at.boundBuffer);
+                        if (backend_cap < aligned_need) {
+                            backend_get_or_create_buffer(at.boundBuffer, nullptr, aligned_need);
+                        } else {
+                            LOG_RESOURCE("DRAW-VB-GROW multidraw_arrays buf=%u skip-orphan cap=%zu",
+                                         (unsigned)at.boundBuffer, (size_t)backend_cap);
+                        }
                         vb->allocSize = (GLsizeiptr)aligned_need;
                         LOG_RESOURCE("DRAW-VB-GROW multidraw_arrays buf=%u from=%lld to=%zu",
                                      (unsigned)at.boundBuffer, (long long)vb->allocSize, aligned_need);
@@ -886,7 +908,13 @@ void glMultiDrawElements(GLenum mode, const GLsizei* count, GLenum type,
                                      (int)count[i], need, (long long)vb->allocSize);
                         // FIX (orphan chain 根因): allocSize 必须 256 对齐
                         size_t aligned_need = (need + 255u) & ~(size_t)255u;
-                        backend_get_or_create_buffer(at.boundBuffer, nullptr, aligned_need);
+                        VkDeviceSize backend_cap = backend_get_buffer_capacity(at.boundBuffer);
+                        if (backend_cap < aligned_need) {
+                            backend_get_or_create_buffer(at.boundBuffer, nullptr, aligned_need);
+                        } else {
+                            LOG_RESOURCE("DRAW-VB-GROW multidraw_elem buf=%u skip-orphan cap=%zu",
+                                         (unsigned)at.boundBuffer, (size_t)backend_cap);
+                        }
                         vb->allocSize = (GLsizeiptr)aligned_need;
                         LOG_RESOURCE("DRAW-VB-GROW multidraw_elem buf=%u from=%lld to=%zu",
                                      (unsigned)at.boundBuffer, (long long)vb->allocSize, aligned_need);
@@ -949,7 +977,13 @@ void glMultiDrawElementsBaseVertex(GLenum mode, const GLsizei* count, GLenum typ
                                          (int)count[i], need, (long long)vb->allocSize);
                             // FIX (orphan chain 根因): allocSize 必须 256 对齐
                             size_t aligned_need = (need + 255u) & ~(size_t)255u;
-                            backend_get_or_create_buffer(at.boundBuffer, nullptr, aligned_need);
+                            VkDeviceSize backend_cap = backend_get_buffer_capacity(at.boundBuffer);
+                            if (backend_cap < aligned_need) {
+                                backend_get_or_create_buffer(at.boundBuffer, nullptr, aligned_need);
+                            } else {
+                                LOG_RESOURCE("DRAW-VB-GROW multidraw_bv buf=%u skip-orphan cap=%zu",
+                                             (unsigned)at.boundBuffer, (size_t)backend_cap);
+                            }
                             vb->allocSize = (GLsizeiptr)aligned_need;
                             LOG_RESOURCE("DRAW-VB-GROW multidraw_bv buf=%u from=%lld to=%zu",
                                          (unsigned)at.boundBuffer, (long long)vb->allocSize, aligned_need);
