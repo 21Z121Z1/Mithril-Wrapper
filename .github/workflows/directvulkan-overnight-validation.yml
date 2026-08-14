@@ -1,0 +1,120 @@
+name: DirectVulkan overnight recovery validation
+
+on:
+  push:
+    branches:
+      - codex/directvulkan-overnight-recovery-20260814
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  macos26-native-gpu:
+    runs-on: macos-26-arm64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Vulkan loader and MoltenVK
+        run: brew install vulkan-loader molten-vk
+
+      - name: Configure native arm64
+        run: |
+          cmake -B build-native \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_C_FLAGS="-Wno-error" \
+            -DCMAKE_CXX_FLAGS="-Wno-error"
+
+      - name: Build Mithril
+        run: cmake --build build-native --config RelWithDebInfo --target mithril -j$(sysctl -n hw.ncpu)
+
+      - name: Locate and inspect dylib
+        id: dylib
+        run: |
+          set -euo pipefail
+          DYLIB=$(find build-native -name 'libmithril.dylib' -type f | head -1)
+          test -n "$DYLIB"
+          echo "path=$DYLIB" >> "$GITHUB_OUTPUT"
+          file "$DYLIB"
+          otool -L "$DYLIB"
+          nm -gU "$DYLIB" | grep -E '(_eglGetDisplay|_glDrawElements|_glGetString|_backend_init)$'
+
+      - name: Compile host smoke programs
+        run: |
+          clang -std=c11 -O0 -Wall -Wextra -IMithril-Wrapper-cpp/include -o tests/gl_smoke tests/gl_smoke.c -ldl
+          clang -std=c11 -O0 -Wall -Wextra -IMithril-Wrapper-cpp/include -o tests/render_smoke tests/render_smoke.c -ldl
+          clang -std=c11 -O0 -Wall -Wextra -IMithril-Wrapper-cpp/include -o tests/egl_sync_smoke tests/egl_sync_smoke.c -ldl
+          clang++ -std=c++17 -fobjc-arc -O0 -Wall -Wextra \
+            -framework Foundation -framework QuartzCore -framework Metal \
+            -o tests/surface_metal_smoke tests/surface_metal_smoke.mm -ldl
+
+      - name: Run host state and real-GPU smokes
+        env:
+          MITHRIL_DEBUG: '1'
+        run: |
+          set -euo pipefail
+          DYLIB='${{ steps.dylib.outputs.path }}'
+          export DYLD_LIBRARY_PATH="$(brew --prefix)/lib"
+          ./tests/gl_smoke "$DYLIB"
+          ./tests/render_smoke "$DYLIB"
+          ./tests/egl_sync_smoke "$DYLIB"
+          ./tests/surface_metal_smoke "$DYLIB"
+
+      - name: Source integrity checks
+        run: |
+          git diff --check HEAD^
+          grep -q 'g_state->frontFace == GL_CCW ? 0' Mithril-Wrapper-cpp/MG_Impl/Drawing.cpp
+          grep -q 'maxSamplerAnisotropy' Mithril-Wrapper-cpp/MG_Impl/Getter_gpu.mm
+          grep -q 'type_description' Mithril-Wrapper-cpp/MG_Impl/Shader.cpp
+
+  ios-arm64-cross-build:
+    runs-on: macos-26-arm64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Fetch iOS toolchain and MoltenVK 1.4.2
+        run: |
+          set -euo pipefail
+          curl -fsSL -o ios.toolchain.cmake https://github.com/leetal/ios-cmake/raw/master/ios.toolchain.cmake
+          curl -fsSL -o MoltenVK-ios.tar https://github.com/KhronosGroup/MoltenVK/releases/download/v1.4.2/MoltenVK-ios.tar
+          mkdir moltenvk-staging
+          tar -xf MoltenVK-ios.tar -C moltenvk-staging
+          FOUND=$(find moltenvk-staging -type d -name MoltenVK.xcframework -path '*static*' | head -1)
+          test -n "$FOUND"
+          mv "$FOUND" ./MoltenVK.xcframework
+          HDRS=$(find moltenvk-staging -type d -name vulkan -path '*/include/vulkan' | head -1)
+          test -n "$HDRS"
+          mv "$(dirname "$HDRS")" ./MoltenVK-Headers
+          test -f MoltenVK.xcframework/ios-arm64/libMoltenVK.a
+          test -f MoltenVK-Headers/vulkan/vulkan.h
+
+      - name: Configure iOS arm64
+        run: |
+          cmake -B build-ios \
+            -DCMAKE_TOOLCHAIN_FILE=ios.toolchain.cmake \
+            -DPLATFORM=OS64 \
+            -DDEPLOYMENT_TARGET=15.0 \
+            -DENABLE_BITCODE=OFF \
+            -DENABLE_ARC=OFF \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_C_FLAGS="-Wno-error=implicit-function-declaration" \
+            -DCMAKE_CXX_FLAGS="-Wno-error"
+
+      - name: Build iOS dylib
+        run: cmake --build build-ios --config RelWithDebInfo --target mithril -j$(sysctl -n hw.ncpu)
+
+      - name: Verify iOS ABI and exports
+        run: |
+          set -euo pipefail
+          DYLIB=$(find build-ios -name 'libmithril.dylib' -type f | head -1)
+          test -n "$DYLIB"
+          file "$DYLIB"
+          NM_OUT=$(nm -gU "$DYLIB")
+          for sym in eglGetDisplay eglInitialize eglCreateContext eglMakeCurrent eglSwapBuffers glGetString glGetIntegerv glTexSubImage2D glDrawArrays glDrawElements; do
+            echo "$NM_OUT" | grep -qE " [Tt] _?${sym}$" || { echo "missing $sym"; exit 1; }
+          done
+          otool -L "$DYLIB"
