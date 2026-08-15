@@ -63,7 +63,7 @@ extern "C" const char* mithril_get_gpu_renderer_string(void) {
 
     if (!backend_available()) {
         cached = "Mithril-Wrapper (no device)";
-        return cached;
+        return cached.c_str();
     }
 
     std::string gpuName = friendly_gpu_name(backend_physical_device_name());
