@@ -1,0 +1,44 @@
+name: One-shot DirectMetal pass lifetime fix
+
+on:
+  push:
+    branches:
+      - ci/minecraft-on-mithril-e2e-20260815
+    paths:
+      - .github/workflows/one-shot-fix-directmetal-pass-lifetime.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply-source-fix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ci/minecraft-on-mithril-e2e-20260815
+          persist-credentials: true
+          fetch-depth: 1
+      - name: Apply exact source transformation
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('Mithril-Wrapper-cpp/MG_Backend/DirectMetal/MetalCommandStream.mm')
+          text = path.read_text(encoding='utf-8')
+          old = '''    // A fresh encoder starts with DEFAULT state — replay the full shadow.\n    apply_full_state(g_renderEncoder);\n'''
+          new = '''    // A render pipeline is compatible with the attachment formats of the pass\n    // it was created for; unlike viewport/scissor/depth-stencil state it is\n    // therefore NOT dynamic state that may be replayed onto a new encoder.\n    // Drop the previous pass' PSO before replaying the true dynamic shadow.\n    // Every draw goes through bind_pipeline() and establishes the pipeline\n    // compiled for the current color/depth attachment signature.  This also\n    // prevents a clear in a newly-bound depth-only FBO from restoring a color\n    // PSO that Metal validation correctly rejects for that encoder.\n    e.boundPipeline = nullptr;\n    e.descriptorsBound = false;\n\n    // A fresh encoder starts with DEFAULT dynamic state — replay the shadow.\n    apply_full_state(g_renderEncoder);\n'''
+          count = text.count(old)
+          if count != 1:
+              raise SystemExit(f'expected exactly one begin_render_pass replay site, found {count}')
+          path.write_text(text.replace(old, new), encoding='utf-8')
+          PY
+          git diff --check
+          git diff -- Mithril-Wrapper-cpp/MG_Backend/DirectMetal/MetalCommandStream.mm
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Mithril-Wrapper-cpp/MG_Backend/DirectMetal/MetalCommandStream.mm
+          git commit -m 'fix(metal): invalidate PSO across render-pass transitions'
+          git push origin HEAD:ci/minecraft-on-mithril-e2e-20260815
