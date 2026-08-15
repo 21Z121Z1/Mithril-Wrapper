@@ -1,12 +1,22 @@
 {
-  "schema_version": "1.0",
+  "schema_version": "1.1",
   "profile": "minecraft-26.2-directmetal",
   "core": {
     "version": "3.3",
     "glsl_version": "3.30",
+    "symbols_file": "verify/gl46_core_symbols.txt",
     "status": "minecraft-e2e-proven",
+    "state_semantics": [
+      "core33.resource_roundtrip",
+      "core33.error_state",
+      "core33.program_state",
+      "draw.configuration"
+    ],
     "oracles": [
-      "render_smoke",
+      "directmetal_texture_fbo_roundtrip_smoke",
+      "directmetal_state_semantics_smoke",
+      "directmetal_terrain_semantics_smoke",
+      "directmetal_vertex_binding_smoke",
       "minecraft_production_client_gametest"
     ]
   },
@@ -86,6 +96,21 @@
     }
   },
   "semantic_evidence": {
+    "core33.resource_roundtrip": {
+      "domain": "textures_samplers",
+      "status": "proven",
+      "oracle": "directmetal_texture_fbo_roundtrip_smoke"
+    },
+    "core33.error_state": {
+      "domain": "state_error",
+      "status": "proven",
+      "oracle": "directmetal_state_semantics_smoke"
+    },
+    "core33.program_state": {
+      "domain": "program_state",
+      "status": "proven",
+      "oracle": "directmetal_state_semantics_smoke"
+    },
     "vertex.bind_buffer": {
       "domain": "vao_vertex_fetch",
       "status": "proven",
