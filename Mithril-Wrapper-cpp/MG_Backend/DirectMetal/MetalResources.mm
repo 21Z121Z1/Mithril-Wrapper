@@ -337,13 +337,27 @@ MetalSampler* default_texture_sampler() { ensure_default_texture(); return g_def
 
 // ---- Textures ----------------------------------------------------------------
 
+// OpenGL names the six cubemap faces as distinct TexImage targets, while
+// Metal allocates one cube texture and addresses faces as slices.  Normalize
+// the face enums at the allocation boundary so subsequent face uploads do not
+// accidentally create ordinary 2D textures and reinterpret the face index as
+// a texture-depth Z coordinate.
+static GLenum normalize_metal_texture_target(GLenum target) {
+    if (target >= GL_TEXTURE_CUBE_MAP_POSITIVE_X &&
+        target <= GL_TEXTURE_CUBE_MAP_NEGATIVE_Z) {
+        return GL_TEXTURE_CUBE_MAP;
+    }
+    return target;
+}
+
 MetalTexture* get_or_create_texture(GLuint name, int width, int height,
                                     int depth, int levels, GLenum internal_format,
                                     GLenum target, int samples) {
     Backend* b = backend();
     if (!b->initialized || name == 0 || width <= 0) return nullptr;
-    if (target == GL_TEXTURE_2D || target == GL_TEXTURE_2D_ARRAY ||
-        target == GL_TEXTURE_RECTANGLE || target == GL_TEXTURE_1D) {
+    const GLenum storageTarget = normalize_metal_texture_target(target);
+    if (storageTarget == GL_TEXTURE_2D || storageTarget == GL_TEXTURE_2D_ARRAY ||
+        storageTarget == GL_TEXTURE_RECTANGLE || storageTarget == GL_TEXTURE_1D) {
         if (height <= 0) height = 1;
     }
     if (depth <= 0) depth = 1;
@@ -364,7 +378,7 @@ MetalTexture* get_or_create_texture(GLuint name, int width, int height,
      * 2DMultisample 是不同的纹理类型，Metal 校验会拒绝错误的组合（镜像修复
      * Vulkan 侧 get_or_create_texture 的同类 bug）。 */
     if (mt && mt->tex != nil && mt->width == width && mt->height == height &&
-        mt->depth == depth && mt->levels >= levels && mt->glTarget == target &&
+        mt->depth == depth && mt->levels >= levels && mt->glTarget == storageTarget &&
         mt->samples == (samples > 1 ? samples : 1) &&
         mt->vkFormat == vkf) {
         return mt; // existing allocation fits
@@ -381,12 +395,32 @@ MetalTexture* get_or_create_texture(GLuint name, int width, int height,
     d.depth = (NSUInteger)depth;
     d.mipmapLevelCount = (NSUInteger)levels;
     d.sampleCount = samples > 1 ? samples : 1;
-    switch (target) {
-        case GL_TEXTURE_3D:           d.textureType = MTLTextureType3D; break;
-        case GL_TEXTURE_CUBE_MAP:     d.textureType = MTLTextureTypeCube; d.depth = 1; break;
-        case GL_TEXTURE_2D_ARRAY:     d.textureType = MTLTextureType2DArray; break;
-        case GL_TEXTURE_1D:           d.textureType = MTLTextureType2D; break; // Metal has no 1D-on-CPU path; treat as 2D height=1
-        case GL_TEXTURE_1D_ARRAY:     d.textureType = MTLTextureType2DArray; break;
+    switch (storageTarget) {
+        case GL_TEXTURE_3D:
+            d.textureType = MTLTextureType3D;
+            break;
+        case GL_TEXTURE_CUBE_MAP:
+            d.textureType = MTLTextureTypeCube;
+            d.depth = 1;
+            d.arrayLength = 1;
+            break;
+        case GL_TEXTURE_2D_ARRAY:
+            d.textureType = MTLTextureType2DArray;
+            d.depth = 1;
+            d.arrayLength = (NSUInteger)depth;
+            break;
+        case GL_TEXTURE_1D:
+            d.textureType = MTLTextureType2D; // emulate 1D as 2D height=1
+            d.height = 1;
+            d.depth = 1;
+            break;
+        case GL_TEXTURE_1D_ARRAY:
+            // GL represents a 1D array as width x layer-count in TexImage2D.
+            d.textureType = MTLTextureType2DArray;
+            d.height = 1;
+            d.depth = 1;
+            d.arrayLength = (NSUInteger)height;
+            break;
         case GL_TEXTURE_2D_MULTISAMPLE:
             d.textureType = MTLTextureType2DMultisample;
             d.usage = MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget;
@@ -408,7 +442,7 @@ MetalTexture* get_or_create_texture(GLuint name, int width, int height,
     mt->tex = tex;
     mt->vkFormat = vkf;
     mt->width = width; mt->height = height; mt->depth = depth;
-    mt->levels = levels; mt->glTarget = target; mt->samples = samples;
+    mt->levels = levels; mt->glTarget = storageTarget; mt->samples = samples;
     return mt;
 }
 
@@ -433,7 +467,10 @@ void dmt_internal_texture_upload(GLuint name, int level, int x, int y, int z,
     const uint8_t* base = (const uint8_t*)pixels +
                           (NSUInteger)(skipPixels * bpp) +
                           (NSUInteger)skipRows * rowBytes;
-    NSUInteger imageBytes = rowBytes * (NSUInteger)h;
+    const NSUInteger imageHeight =
+        (up && up->unpackImageHeight > 0) ? (NSUInteger)up->unpackImageHeight
+                                          : (NSUInteger)h;
+    NSUInteger imageBytes = rowBytes * imageHeight;
     if (skipImages) base += (NSUInteger)skipImages * imageBytes;
 
     MTLRegion region;
@@ -447,8 +484,8 @@ void dmt_internal_texture_upload(GLuint name, int level, int x, int y, int z,
         NSUInteger slice = (NSUInteger)((z >= 0) ? (z % 6) : 0);
         [mt->tex replaceRegion:region mipmapLevel:(NSUInteger)level slice:slice
                       withBytes:base bytesPerRow:rowBytes bytesPerImage:imageBytes];
-    } else if (mt->glTarget == GL_TEXTURE_2D_ARRAY ||
-               mt->glTarget == GL_TEXTURE_1D_ARRAY) {
+    } else if (mt->glTarget == GL_TEXTURE_2D_ARRAY) {
+        // Array layers are Metal slices, never region.depth.
         region.origin.z = 0;
         region.size.depth = 1;
         for (int layer = 0; layer < d; ++layer) {
@@ -457,10 +494,22 @@ void dmt_internal_texture_upload(GLuint name, int level, int x, int y, int z,
                          withBytes:base + (NSUInteger)layer * imageBytes
                         bytesPerRow:rowBytes bytesPerImage:imageBytes];
         }
+    } else if (mt->glTarget == GL_TEXTURE_1D_ARRAY) {
+        // GL 1D-array y/height select layers; each Metal slice is height=1.
+        region.origin = MTLOriginMake(x, 0, 0);
+        region.size = MTLSizeMake(w, 1, 1);
+        for (int layer = 0; layer < h; ++layer) {
+            [mt->tex replaceRegion:region mipmapLevel:(NSUInteger)level
+                             slice:(NSUInteger)(y + layer)
+                         withBytes:base + (NSUInteger)layer * rowBytes
+                        bytesPerRow:rowBytes bytesPerImage:rowBytes];
+        }
     } else if (mt->glTarget == GL_TEXTURE_3D) {
         [mt->tex replaceRegion:region mipmapLevel:(NSUInteger)level slice:0
                       withBytes:base bytesPerRow:rowBytes bytesPerImage:imageBytes];
     } else {
+        region.origin.z = 0;
+        region.size.depth = 1;
         [mt->tex replaceRegion:region mipmapLevel:(NSUInteger)level
                       withBytes:base bytesPerRow:rowBytes];
     }
@@ -479,14 +528,51 @@ void dmt_internal_texture_upload_compressed(GLuint name, int level, int x, int y
     MTLRegion region;
     region.origin = MTLOriginMake(x, y, z);
     region.size = MTLSizeMake(w, h, d);
-    if (mt->glTarget == GL_TEXTURE_CUBE_MAP || mt->glTarget == GL_TEXTURE_2D_ARRAY ||
-        mt->glTarget == GL_TEXTURE_3D) {
-        NSUInteger slice = (NSUInteger)z;
-        [mt->tex replaceRegion:region mipmapLevel:(NSUInteger)level slice:slice
-                      withBytes:pixels bytesPerRow:0 bytesPerImage:0];
-    } else {
+    const uint8_t* base = static_cast<const uint8_t*>(pixels);
+    if (mt->glTarget == GL_TEXTURE_CUBE_MAP) {
+        region.origin.z = 0;
+        region.size.depth = 1;
         [mt->tex replaceRegion:region mipmapLevel:(NSUInteger)level
-                      withBytes:pixels bytesPerRow:0];
+                         slice:(NSUInteger)z
+                     withBytes:base bytesPerRow:0 bytesPerImage:0];
+    } else if (mt->glTarget == GL_TEXTURE_2D_ARRAY) {
+        region.origin.z = 0;
+        region.size.depth = 1;
+        if (d <= 0 || dataLen % d != 0) {
+            MITHRIL_LOG_WARN("mtl", "compressed 2D-array upload has invalid layer payload: bytes=%d layers=%d",
+                             (int)dataLen, d);
+            return;
+        }
+        const NSUInteger layerBytes = (NSUInteger)dataLen / (NSUInteger)d;
+        for (int layer = 0; layer < d; ++layer) {
+            [mt->tex replaceRegion:region mipmapLevel:(NSUInteger)level
+                             slice:(NSUInteger)(z + layer)
+                         withBytes:base + (NSUInteger)layer * layerBytes
+                        bytesPerRow:0 bytesPerImage:0];
+        }
+    } else if (mt->glTarget == GL_TEXTURE_1D_ARRAY) {
+        region.origin = MTLOriginMake(x, 0, 0);
+        region.size = MTLSizeMake(w, 1, 1);
+        if (h <= 0 || dataLen % h != 0) {
+            MITHRIL_LOG_WARN("mtl", "compressed 1D-array upload has invalid layer payload: bytes=%d layers=%d",
+                             (int)dataLen, h);
+            return;
+        }
+        const NSUInteger layerBytes = (NSUInteger)dataLen / (NSUInteger)h;
+        for (int layer = 0; layer < h; ++layer) {
+            [mt->tex replaceRegion:region mipmapLevel:(NSUInteger)level
+                             slice:(NSUInteger)(y + layer)
+                         withBytes:base + (NSUInteger)layer * layerBytes
+                        bytesPerRow:0 bytesPerImage:0];
+        }
+    } else if (mt->glTarget == GL_TEXTURE_3D) {
+        [mt->tex replaceRegion:region mipmapLevel:(NSUInteger)level slice:0
+                      withBytes:base bytesPerRow:0 bytesPerImage:0];
+    } else {
+        region.origin.z = 0;
+        region.size.depth = 1;
+        [mt->tex replaceRegion:region mipmapLevel:(NSUInteger)level
+                      withBytes:base bytesPerRow:0];
     }
 }
 
@@ -501,27 +587,57 @@ void dmt_internal_clear_texture(GLuint name, int level, int x, int y, int z,
         w = mt->width; h = mt->height; d = mt->depth;
     }
 
-    // Build one cleared row and replicate. data==nullptr means clear-to-zero.
+    // Build a complete 2D image for one layer/depth slice.  Passing a
+    // single row for a region whose height > 1 lets Metal read past the row.
     std::vector<uint8_t> clearTexel(bpp, 0);
     if (data) std::memcpy(clearTexel.data(), data, bpp);
-    NSUInteger rowBytes = (NSUInteger)w * bpp;
-    std::vector<uint8_t> row(rowBytes);
-    for (int i = 0; i < w; ++i)
-        std::memcpy(row.data() + (NSUInteger)i * bpp, clearTexel.data(), bpp);
-
-    MTLRegion region;
-    region.origin = MTLOriginMake(x, y, z);
-    region.size = MTLSizeMake(w, h, 1);
-    for (int slice = 0; slice < d; ++slice) {
-        if (mt->glTarget == GL_TEXTURE_CUBE_MAP || mt->glTarget == GL_TEXTURE_2D_ARRAY ||
-            mt->glTarget == GL_TEXTURE_3D) {
-            region.origin.z = z + slice;
-            [mt->tex replaceRegion:region mipmapLevel:(NSUInteger)level
-                          withBytes:row.data() bytesPerRow:rowBytes];
-        } else {
-            [mt->tex replaceRegion:region mipmapLevel:(NSUInteger)level
-                          withBytes:row.data() bytesPerRow:rowBytes];
+    const NSUInteger rowBytes = (NSUInteger)w * bpp;
+    const NSUInteger imageRows = (mt->glTarget == GL_TEXTURE_1D_ARRAY) ? 1u : (NSUInteger)h;
+    std::vector<uint8_t> image(rowBytes * imageRows);
+    for (NSUInteger row = 0; row < imageRows; ++row) {
+        for (int col = 0; col < w; ++col) {
+            std::memcpy(image.data() + row * rowBytes + (NSUInteger)col * bpp,
+                        clearTexel.data(), bpp);
         }
+    }
+
+    if (mt->glTarget == GL_TEXTURE_2D_ARRAY) {
+        MTLRegion region = MTLRegionMake2D(x, y, w, h);
+        for (int layer = 0; layer < d; ++layer) {
+            [mt->tex replaceRegion:region mipmapLevel:(NSUInteger)level
+                             slice:(NSUInteger)(z + layer)
+                         withBytes:image.data() bytesPerRow:rowBytes
+                        bytesPerImage:rowBytes * (NSUInteger)h];
+        }
+    } else if (mt->glTarget == GL_TEXTURE_1D_ARRAY) {
+        MTLRegion region = MTLRegionMake2D(x, 0, w, 1);
+        for (int layer = 0; layer < h; ++layer) {
+            [mt->tex replaceRegion:region mipmapLevel:(NSUInteger)level
+                             slice:(NSUInteger)(y + layer)
+                         withBytes:image.data() bytesPerRow:rowBytes
+                        bytesPerImage:rowBytes];
+        }
+    } else if (mt->glTarget == GL_TEXTURE_CUBE_MAP) {
+        MTLRegion region = MTLRegionMake2D(x, y, w, h);
+        [mt->tex replaceRegion:region mipmapLevel:(NSUInteger)level
+                         slice:(NSUInteger)z
+                     withBytes:image.data() bytesPerRow:rowBytes
+                    bytesPerImage:rowBytes * (NSUInteger)h];
+    } else if (mt->glTarget == GL_TEXTURE_3D) {
+        MTLRegion region;
+        region.origin = MTLOriginMake(x, y, z);
+        region.size = MTLSizeMake(w, h, d);
+        std::vector<uint8_t> volume(image.size() * (NSUInteger)d);
+        for (int layer = 0; layer < d; ++layer)
+            std::memcpy(volume.data() + image.size() * (NSUInteger)layer,
+                        image.data(), image.size());
+        [mt->tex replaceRegion:region mipmapLevel:(NSUInteger)level slice:0
+                      withBytes:volume.data() bytesPerRow:rowBytes
+                     bytesPerImage:rowBytes * (NSUInteger)h];
+    } else {
+        MTLRegion region = MTLRegionMake2D(x, y, w, h);
+        [mt->tex replaceRegion:region mipmapLevel:(NSUInteger)level
+                      withBytes:image.data() bytesPerRow:rowBytes];
     }
 }
 
