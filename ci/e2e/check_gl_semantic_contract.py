@@ -18,7 +18,17 @@ def parse_advertised(getter_text: str):
     if not em:
         raise ValueError("could not parse kExtensions")
     extensions = re.findall(r'"(GL_[A-Za-z0-9_]+)"', em.group(1))
-    return vm.group(1), sm.group(1), extensions
+
+    def integer_case(name: str):
+        m = re.search(rf'case\s+{re.escape(name)}\s*:\s*\*params\s*=\s*([0-9]+)\s*;', getter_text)
+        if not m:
+            raise ValueError(f"could not parse {name} integer query")
+        return int(m.group(1))
+
+    major = integer_case("GL_MAJOR_VERSION")
+    minor = integer_case("GL_MINOR_VERSION")
+    numeric_glsl = integer_case("GL_SHADING_LANGUAGE_VERSION")
+    return vm.group(1), sm.group(1), extensions, major, minor, numeric_glsl
 
 
 def exported_symbols(dylib: pathlib.Path):
@@ -69,7 +79,7 @@ def main():
     getter_path = pathlib.Path(args.getter)
     manifest = json.loads(manifest_path.read_text())
     getter_text = getter_path.read_text()
-    gl_version, glsl_version, advertised = parse_advertised(getter_text)
+    gl_version, glsl_version, advertised, major, minor, numeric_glsl = parse_advertised(getter_text)
 
     failures = []
     notes = []
@@ -78,6 +88,21 @@ def main():
         failures.append(f"GL_VERSION source={gl_version} contract={core['version']}")
     if glsl_version != core["glsl_version"]:
         failures.append(f"GLSL source={glsl_version} contract={core['glsl_version']}")
+
+    try:
+        contract_major, contract_minor = [int(x) for x in core["version"].split(".", 1)]
+        contract_numeric_glsl = int(core["glsl_version"].replace(".", ""))
+    except Exception as exc:
+        failures.append(f"invalid core version contract: {exc}")
+        contract_major = contract_minor = contract_numeric_glsl = -1
+    if (major, minor) != (contract_major, contract_minor):
+        failures.append(
+            f"GL_MAJOR/MINOR integer query={major}.{minor} contract={core['version']}"
+        )
+    if numeric_glsl != contract_numeric_glsl:
+        failures.append(
+            f"GL_SHADING_LANGUAGE_VERSION integer query={numeric_glsl} contract={contract_numeric_glsl}"
+        )
 
     contract_ext = manifest["advertised_extensions"]
     if len(advertised) != len(set(advertised)):
@@ -164,6 +189,8 @@ def main():
         "profile": manifest.get("profile"),
         "advertised_gl_version": gl_version,
         "advertised_glsl_version": glsl_version,
+        "integer_gl_version": f"{major}.{minor}",
+        "integer_glsl_version": numeric_glsl,
         "advertised_extensions": advertised,
         "export_check_performed": exports is not None,
         "trace_event_count": len(trace_events),
