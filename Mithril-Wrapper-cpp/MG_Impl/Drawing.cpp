@@ -697,6 +697,35 @@ static bool trace_draw(const char* kind, int mode, int first, int count, int ins
     return true;  // 安全，可以 draw
 }
 
+static uint64_t primitive_count_for_draw(GLenum mode, GLsizei count) {
+    if (count <= 0) return 0;
+    switch (mode) {
+        case GL_POINTS:         return (uint64_t)count;
+        case GL_LINES:          return (uint64_t)count / 2u;
+        case GL_LINE_STRIP:     return count >= 2 ? (uint64_t)count - 1u : 0u;
+        case GL_LINE_LOOP:      return count >= 2 ? (uint64_t)count : 0u;
+        case GL_TRIANGLES:      return (uint64_t)count / 3u;
+        case GL_TRIANGLE_STRIP:
+        case GL_TRIANGLE_FAN:   return count >= 3 ? (uint64_t)count - 2u : 0u;
+        default:                return 0u;
+    }
+}
+
+static void account_software_primitive_queries(GLenum mode, GLsizei count,
+                                                GLsizei instances) {
+    if (!g_state || count <= 0 || instances <= 0) return;
+    const uint64_t prims = primitive_count_for_draw(mode, count) *
+                           (uint64_t)instances;
+    if (g_state->activeQuery[(int)mithril::QueryTarget::PrimitivesGenerated] != 0)
+        g_state->swPrimAccum += prims;
+
+    if (g_state->activeQuery[(int)mithril::QueryTarget::TfbPrimsWritten] != 0) {
+        auto* tf = mithril::state_get_transform_feedback(g_state->currentTransformFeedback);
+        if (tf && tf->active && !tf->paused)
+            g_state->swTfbWrittenAccum += prims;
+    }
+}
+
 void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
     MITHRIL_ENSURE_INIT();
     // GPU fault 诊断：在 prepare_draw 之前记录 draw 调用 —— 若 draw 被
@@ -714,6 +743,7 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
     // outside a render-pass instance and crash inside MoltenVK. Bail out
     // without calling end_draw(): there is no pass to end.
     if (!prepare_draw(mode)) return;
+    account_software_primitive_queries(mode, count, 1);
     backend_draw_arrays((int)mode, (int)first, (int)count);
     end_draw();
 }
@@ -722,6 +752,7 @@ void glDrawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLsizei prim
     MITHRIL_ENSURE_INIT();
     if (!trace_draw("arrays_inst", (int)mode, (int)first, (int)count, (int)primcount)) return;
     if (!prepare_draw(mode)) return;  // root cause AI — see glDrawArrays
+    account_software_primitive_queries(mode, count, primcount);
     backend_draw_arrays_instanced((int)mode, (int)first, (int)count, (int)primcount);
     end_draw();
 }
@@ -738,6 +769,7 @@ void glDrawArraysInstancedBaseInstance(GLenum mode, GLint first, GLsizei count,
     // the early-out path too, otherwise it leaks into the next draw (which
     // expects firstInstance == 0) and misaddresses its instance data.
     if (!prepare_draw(mode)) { g_state->currentBaseInstance = 0; return; }
+    account_software_primitive_queries(mode, count, primcount);
     backend_draw_arrays_instanced((int)mode, (int)first, (int)count, (int)primcount);
     g_state->currentBaseInstance = 0;
     end_draw();
@@ -752,6 +784,7 @@ void glDrawElements(GLenum mode, GLsizei count, GLenum type, const void* indices
     LOG_RESOURCE("draw index_type=%d type=0x%x", index_type_to_int(type), (unsigned)type);
     if (!validate_draw_call(mode, count)) return;
     if (!prepare_draw(mode)) return;  // root cause AI — see glDrawArrays
+    account_software_primitive_queries(mode, count, 1);
     // If a VBO is bound for GL_ELEMENT_ARRAY_BUFFER, indices is an offset into it.
     mithril::VertexArray* vao = mithril::state_get_vao(g_state->currentVAO);
     GLuint ib_name = vao ? vao->elementArrayBuffer : 0;
@@ -814,6 +847,7 @@ void glDrawElementsInstanced(GLenum mode, GLsizei count, GLenum type,
     g_state->drawIndexType = type;  // GPU fault 诊断：供 trace_draw 越界检查
     if (!trace_draw("elements_inst", (int)mode, 0, (int)count, (int)primcount)) return;
     if (!prepare_draw(mode)) return;  // root cause AI — see glDrawArrays
+    account_software_primitive_queries(mode, count, primcount);
     mithril::VertexArray* vao = mithril::state_get_vao(g_state->currentVAO);
     GLuint ib_name = vao ? vao->elementArrayBuffer : 0;
     VkBuffer ib = backend_get_buffer(ib_name);
@@ -961,6 +995,7 @@ void glMultiDrawArrays(GLenum mode, const GLint* first, const GLsizei* count, GL
                 }
             }
         }
+        account_software_primitive_queries(mode, count[i], 1);
         backend_draw_arrays((int)mode, (int)first[i], (int)count[i]);
     }
     end_draw();  // 一次 end_render_pass
@@ -1030,9 +1065,11 @@ void glMultiDrawElements(GLenum mode, const GLsizei* count, GLenum type,
                     }
                 }
             }
-            if (need_draw)
+            if (need_draw) {
+                account_software_primitive_queries(mode, count[i], 1);
                 backend_draw_indexed((int)mode, (int)count[i], idx_type, ib,
                                      (VkDeviceSize)(intptr_t)indices[i]);
+            }
         }
     } else {
         // 客户端指针路径：逐 sub-draw staging 进 transient buffer
@@ -1041,8 +1078,10 @@ void glMultiDrawElements(GLenum mode, const GLsizei* count, GLenum type,
                 GLuint transient = (GLuint)(uintptr_t)indices[i];
                 VkBuffer staged = backend_get_or_create_buffer(transient | 0x80000000u,
                                                                indices[i], (size_t)count[i] * elem);
-                if (staged != VK_NULL_HANDLE)
+                if (staged != VK_NULL_HANDLE) {
+                    account_software_primitive_queries(mode, count[i], 1);
                     backend_draw_indexed((int)mode, (int)count[i], idx_type, staged, 0);
+                }
             }
         }
     }
@@ -1124,8 +1163,10 @@ void glMultiDrawElementsBaseVertex(GLenum mode, const GLsizei* count, GLenum typ
                 GLuint transient = (GLuint)(uintptr_t)indices[i];
                 VkBuffer staged = backend_get_or_create_buffer(transient | 0x80000000u,
                                                                indices[i], (size_t)count[i] * elem);
-                if (staged != VK_NULL_HANDLE)
+                if (staged != VK_NULL_HANDLE) {
+                    account_software_primitive_queries(mode, count[i], 1);
                     backend_draw_indexed((int)mode, (int)count[i], idx_type, staged, 0);
+                }
             }
         }
         g_state->currentBaseVertex = 0;

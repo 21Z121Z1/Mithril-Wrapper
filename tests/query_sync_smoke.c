@@ -410,18 +410,19 @@ int main(int argc, char** argv) {
     GLint curQ = 0;
     getQueryiv(GL_SAMPLES_PASSED, GL_CURRENT_QUERY, &curQ);
     CHECK(curQ == 0, "no active SAMPLES_PASSED query after glEndQuery");
-    /* 注：本项目 glGetError 依 MobileGlues 惯例恒返回 GL_NO_ERROR（防 MC
-     * 日志刷屏，Getter.cpp:197），错误只入队不外报。故此处断言可观测契约：
-     * 重复 begin 不崩溃、活动查询槽仍指向第一个查询、endQuery 只结束一次。*/
     beginQuery(GL_SAMPLES_PASSED, qOcc);
-    beginQuery(GL_SAMPLES_PASSED, qAny);  /* 同 target 重复 begin：被拒 */
+    beginQuery(GL_SAMPLES_PASSED, qAny);  /* 同 target 重复 begin：INVALID_OPERATION */
+    CHECK(getError() == GL_INVALID_OPERATION,
+          "nested glBeginQuery reports GL_INVALID_OPERATION");
     GLint nested = 0;
     getQueryiv(GL_SAMPLES_PASSED, GL_CURRENT_QUERY, &nested);
     CHECK(nested == (GLint)qOcc,
           "nested glBeginQuery(same target) rejected, current query stays %d", nested);
     endQuery(GL_SAMPLES_PASSED);
-    endQuery(GL_SAMPLES_PASSED);  /* 第二次 end 无活跃查询：安全 no-op */
-    getError();
+    endQuery(GL_SAMPLES_PASSED);  /* 第二次 end 无活跃查询 */
+    CHECK(getError() == GL_INVALID_OPERATION,
+          "glEndQuery without active query reports GL_INVALID_OPERATION");
+    CHECK(getError() == GL_NO_ERROR, "query error queue drained after exact assertions");
 
     /* ---- 7. 同步对象：真 fence 语义 -------------------------------------- */
     GLsync f1 = fenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
@@ -453,13 +454,19 @@ int main(int argc, char** argv) {
     /* ---- 8. 同步对象错误路径 --------------------------------------------- */
     while (getError() != GL_NO_ERROR) {}
     GLsync bad = fenceSync(0x1234 /* bad condition */, 0);
-    CHECK(bad == NULL, "glFenceSync(bad condition) → NULL (error queued, not reported)");
+    CHECK(bad == NULL, "glFenceSync(bad condition) → NULL");
+    CHECK(getError() == GL_INVALID_ENUM,
+          "glFenceSync(bad condition) reports GL_INVALID_ENUM");
     deleteSync(f2);
     CHECK(isSync(f2) == GL_FALSE, "glIsSync false after glDeleteSync");
     CHECK(clientWaitSync(f2, 0, 0) == GL_WAIT_FAILED,
           "glClientWaitSync(deleted) → GL_WAIT_FAILED");
+    CHECK(getError() == GL_INVALID_VALUE,
+          "glClientWaitSync(deleted) reports GL_INVALID_VALUE");
     CHECK(clientWaitSync(NULL, 0, 0) == GL_WAIT_FAILED,
           "glClientWaitSync(NULL) → GL_WAIT_FAILED");
+    CHECK(getError() == GL_INVALID_VALUE,
+          "glClientWaitSync(NULL) reports GL_INVALID_VALUE");
 
     /* ---- 9. glGetInteger64v(GL_TIMESTAMP) -------------------------------- */
     GLint64 nowTs = 0;
