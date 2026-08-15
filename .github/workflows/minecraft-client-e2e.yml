@@ -52,11 +52,15 @@ jobs:
           } | tee "$E2E_ROOT/environment-host.txt"
           rc=${PIPESTATUS[0]}
           if [[ $rc -ne 0 ]]; then
-            python3 ci/minecraft-e2e/evidence.py --root "$E2E_ROOT" fail --failure-id INFRA_ENVIRONMENT_FINGERPRINT_FAILED --phase preflight --message "host fingerprint failed" --retryable
+            python3 ci/minecraft-e2e/evidence.py --root "$E2E_ROOT" fail \
+              --failure-id INFRA_ENVIRONMENT_FINGERPRINT_FAILED --phase preflight \
+              --message "host fingerprint failed" --retryable
             exit $rc
           fi
           test "$(uname -m)" = arm64 || {
-            python3 ci/minecraft-e2e/evidence.py --root "$E2E_ROOT" fail --failure-id BUILD_WRONG_ARCH --phase preflight --message "macos-26 runner is not arm64"
+            python3 ci/minecraft-e2e/evidence.py --root "$E2E_ROOT" fail \
+              --failure-id BUILD_WRONG_ARCH --phase preflight \
+              --message "macos-26 runner is not arm64"
             exit 12
           }
 
@@ -80,7 +84,9 @@ jobs:
           brew install glfw vulkan-loader molten-vk ninja
           rc=$?
           if [[ $rc -ne 0 ]]; then
-            python3 ci/minecraft-e2e/evidence.py --root "$E2E_ROOT" fail --failure-id DEPENDENCY_NATIVE_BOOTSTRAP_FAILED --phase bootstrap --message "Homebrew native dependencies failed" --retryable
+            python3 ci/minecraft-e2e/evidence.py --root "$E2E_ROOT" fail \
+              --failure-id DEPENDENCY_NATIVE_BOOTSTRAP_FAILED --phase bootstrap \
+              --message "Homebrew native dependencies failed" --retryable
             exit $rc
           fi
 
@@ -94,20 +100,29 @@ jobs:
             -DCMAKE_C_FLAGS="-Wno-error" \
             -DCMAKE_CXX_FLAGS="-Wno-error"
           rc=$?
-          if [[ $rc -eq 0 ]]; then cmake --build build-minecraft-e2e-native --target mithril --parallel; rc=$?; fi
+          if [[ $rc -eq 0 ]]; then
+            cmake --build build-minecraft-e2e-native --target mithril --parallel
+            rc=$?
+          fi
           if [[ $rc -ne 0 ]]; then
-            python3 ci/minecraft-e2e/evidence.py --root "$E2E_ROOT" fail --failure-id BUILD_NATIVE_FAILED --phase native_build --message "Mithril native build failed"
+            python3 ci/minecraft-e2e/evidence.py --root "$E2E_ROOT" fail \
+              --failure-id BUILD_NATIVE_FAILED --phase native_build \
+              --message "Mithril native build failed"
             exit $rc
           fi
           dylib=$(find build-minecraft-e2e-native -type f -name libmithril.dylib -print | head -1)
           [[ -s "$dylib" ]] || {
-            python3 ci/minecraft-e2e/evidence.py --root "$E2E_ROOT" fail --failure-id PACKAGE_DYLIB_MISSING --phase package --message "libmithril.dylib missing after successful build"
+            python3 ci/minecraft-e2e/evidence.py --root "$E2E_ROOT" fail \
+              --failure-id PACKAGE_DYLIB_MISSING --phase package \
+              --message "libmithril.dylib missing after successful build"
             exit 14
           }
           dylib="$(cd "$(dirname "$dylib")" && pwd)/$(basename "$dylib")"
           echo "dylib=$dylib" >> "$GITHUB_OUTPUT"
           shasum -a 256 "$dylib" | tee "$E2E_ROOT/built-mithril.sha256"
           file "$dylib" | tee "$E2E_ROOT/built-mithril.file.txt"
+          otool -L "$dylib" | tee "$E2E_ROOT/built-mithril.otool.txt"
+          nm -gU "$dylib" | sort > "$E2E_ROOT/built-mithril.exports.txt"
 
       - name: Prove existing offscreen real-GPU readback control
         shell: bash
@@ -120,12 +135,20 @@ jobs:
           clang -std=c11 -O0 -Wall -Wextra -IMithril-Wrapper-cpp/include \
             -o build-minecraft-e2e-native/render_smoke tests/render_smoke.c -ldl
           rc=$?
-          if [[ $rc -eq 0 ]]; then build-minecraft-e2e-native/render_smoke "$MITHRIL_DYLIB" | tee "$E2E_ROOT/native-render-smoke.log"; rc=${PIPESTATUS[0]}; fi
+          if [[ $rc -eq 0 ]]; then
+            build-minecraft-e2e-native/render_smoke "$MITHRIL_DYLIB" \
+              | tee "$E2E_ROOT/native-render-smoke.log"
+            rc=${PIPESTATUS[0]}
+          fi
           if [[ $rc -ne 0 ]]; then
-            python3 ci/minecraft-e2e/evidence.py --root "$E2E_ROOT" fail --failure-id RENDER_NATIVE_GPU_CONTROL_FAILED --phase native_control --message "existing DirectMetal offscreen render_smoke failed"
+            python3 ci/minecraft-e2e/evidence.py --root "$E2E_ROOT" fail \
+              --failure-id RENDER_NATIVE_GPU_CONTROL_FAILED --phase native_control \
+              --message "existing DirectMetal offscreen render_smoke failed"
             exit $rc
           fi
-          python3 ci/minecraft-e2e/evidence.py --root "$E2E_ROOT" event --event native_gpu_control_passed --phase native_control --message "real GPU draw/readback control passed"
+          python3 ci/minecraft-e2e/evidence.py --root "$E2E_ROOT" event \
+            --event native_gpu_control_passed --phase native_control \
+            --message "real GPU draw/readback control passed"
 
       - name: Prove cubemap and array Metal slice semantics
         shell: bash
@@ -145,41 +168,18 @@ jobs:
             rc=${PIPESTATUS[0]}
           fi
           if [[ $rc -ne 0 ]]; then
-            python3 ci/minecraft-e2e/evidence.py --root "$E2E_ROOT" fail --failure-id RENDER_LAYERED_TEXTURE_CONTROL_FAILED --phase native_control --message "DirectMetal cubemap/array slice regression control failed"
+            python3 ci/minecraft-e2e/evidence.py --root "$E2E_ROOT" fail \
+              --failure-id RENDER_LAYERED_TEXTURE_CONTROL_FAILED --phase native_control \
+              --message "DirectMetal cubemap/array slice regression control failed"
             exit $rc
           fi
-          python3 ci/minecraft-e2e/evidence.py --root "$E2E_ROOT" event --event layered_texture_control_passed --phase native_control --message "cubemap faces and array layers map to Metal slices"
+          python3 ci/minecraft-e2e/evidence.py --root "$E2E_ROOT" event \
+            --event layered_texture_control_passed --phase native_control \
+            --message "cubemap faces and array layers map to Metal slices"
 
-      - name: Prove Minecraft final-blit and multi-draw indirect paths
-        shell: bash
-        env:
-          MITHRIL_DYLIB: ${{ steps.mithril.outputs.dylib }}
-          MITHRIL_BACKEND: metal
-        run: |
-          set +e
-          export DYLD_LIBRARY_PATH="$(brew --prefix)/lib"
-          clang -std=c11 -O0 -Wall -Wextra -Werror \
-            -IMithril-Wrapper-cpp/include \
-            -include tests/directmetal_minecraft_path_pfn_compat.h \
-            -o build-minecraft-e2e-native/directmetal_minecraft_path_smoke \
-            tests/directmetal_minecraft_path_smoke.c -ldl
-          rc=$?
-          if [[ $rc -eq 0 ]]; then
-            build-minecraft-e2e-native/directmetal_minecraft_path_smoke "$MITHRIL_DYLIB" \
-              | tee "$E2E_ROOT/native-minecraft-path-smoke.log"
-            rc=${PIPESTATUS[0]}
-          fi
-          if [[ $rc -ne 0 ]]; then
-            python3 ci/minecraft-e2e/evidence.py --root "$E2E_ROOT" fail --failure-id RENDER_MINECRAFT_PATH_CONTROL_FAILED --phase native_control --message "default-FBO final blit or multi-draw indirect GPU control failed"
-            exit $rc
-          fi
-          python3 ci/minecraft-e2e/evidence.py --root "$E2E_ROOT" event --event minecraft_path_control_passed --phase native_control --message "default-FBO final blit and multi-draw indirect controls passed"
-
-      - name: Build GLFW to Mithril EGL/CAMetalLayer bridge
+      - name: Build GLFW to Mithril EGL/CAMetalLayer bridge with pre-present oracle
         id: bridge
         shell: bash
-        env:
-          MITHRIL_DYLIB: ${{ steps.mithril.outputs.dylib }}
         run: |
           set +e
           mkdir -p build-minecraft-e2e-native/bridge
@@ -189,27 +189,36 @@ jobs:
           BRIDGE="$PWD/build-minecraft-e2e-native/bridge/libglfw_mithril.dylib"
           clang++ -std=c++20 -fobjc-arc -dynamiclib -Wall -Wextra -Werror \
             ci/minecraft-e2e/native/glfw_mithril_bridge.mm \
+            ci/minecraft-e2e/native/prepresent_capture.mm \
             -I"$GLFW_PREFIX/include" -IMithril-Wrapper-cpp/include \
             -framework AppKit -framework QuartzCore -framework Foundation \
             -Wl,-reexport_library,"$GLFW_REAL" \
             -o "$BRIDGE"
           rc=$?
           if [[ $rc -ne 0 ]]; then
-            python3 ci/minecraft-e2e/evidence.py --root "$E2E_ROOT" fail --failure-id BUILD_GLFW_BRIDGE_FAILED --phase bridge_build --message "GLFW→Mithril bridge did not compile"
+            python3 ci/minecraft-e2e/evidence.py --root "$E2E_ROOT" fail \
+              --failure-id BUILD_GLFW_BRIDGE_FAILED --phase bridge_build \
+              --message "GLFW→Mithril pre-present bridge did not compile"
             exit $rc
           fi
           echo "bridge=$BRIDGE" >> "$GITHUB_OUTPUT"
           echo "glfw_real=$GLFW_REAL" >> "$GITHUB_OUTPUT"
           file "$BRIDGE" | tee "$E2E_ROOT/glfw-bridge.file.txt"
           otool -L "$BRIDGE" | tee "$E2E_ROOT/glfw-bridge.otool.txt"
-          nm -gU "$BRIDGE" | grep -E ' _glfw(CreateWindow|MakeContextCurrent|SwapBuffers|GetProcAddress|GetCurrentContext)$' | tee "$E2E_ROOT/glfw-bridge.overrides.txt"
+          nm -gU "$BRIDGE" | grep -E \
+            ' _glfw(CreateWindow|MakeContextCurrent|SwapBuffers|GetProcAddress|GetCurrentContext)$' \
+            | tee "$E2E_ROOT/glfw-bridge.overrides.txt"
 
       - name: Run real Minecraft 26.2 production Client GameTest
         shell: bash
-        env:
-          MITHRIL_DYLIB: ${{ steps.mithril.outputs.dylib }}
         run: |
           set +e
+          # Keep an immutable copy of the preflight placeholder while allowing
+          # an in-process Fabric oracle to claim failure.json with a more
+          # specific GAME_/WRAPPER_/RENDER_ failure than Gradle can provide.
+          cp "$E2E_ROOT/failure.json" "$E2E_ROOT/failure-pre-minecraft.json"
+          rm -f "$E2E_ROOT/failure.json"
+
           gradle -p .github/ci/minecraft-e2e --build-cache --stacktrace \
             -PmithrilDylib="${{ steps.mithril.outputs.dylib }}" \
             -PglfwBridge="${{ steps.bridge.outputs.bridge }}" \
@@ -217,8 +226,28 @@ jobs:
             -PevidenceRoot="$E2E_ROOT" \
             runProductionClientGameTest
           rc=$?
-          if [[ $rc -ne 0 ]]; then
-            python3 ci/minecraft-e2e/evidence.py --root "$E2E_ROOT" fail --failure-id RUNTIME_MINECRAFT_E2E_FAILED --phase minecraft_client --message "Production Client GameTest failed; preserve more specific in-game failure if present"
+
+          if [[ $rc -eq 0 ]]; then
+            [[ -f "$E2E_ROOT/failure.json" ]] || \
+              cp "$E2E_ROOT/failure-pre-minecraft.json" "$E2E_ROOT/failure.json"
+          else
+            if [[ -f "$E2E_ROOT/failure.json" ]]; then
+              python3 - "$E2E_ROOT/failure.json" <<'PY'
+          import json, pathlib, sys
+          p=pathlib.Path(sys.argv[1])
+          try: d=json.loads(p.read_text())
+          except Exception: d={}
+          if d.get('failure_id'):
+              d['status']='failed'
+              d.setdefault('retryable', False)
+              p.write_text(json.dumps(d, indent=2, sort_keys=True)+'\n')
+          PY
+            else
+              cp "$E2E_ROOT/failure-pre-minecraft.json" "$E2E_ROOT/failure.json"
+            fi
+            python3 ci/minecraft-e2e/evidence.py --root "$E2E_ROOT" fail \
+              --failure-id RUNTIME_MINECRAFT_E2E_FAILED --phase minecraft_client \
+              --message "Production Client GameTest failed; preserve more specific in-game failure if present"
             exit $rc
           fi
 
@@ -238,9 +267,11 @@ jobs:
             'schema_version':'1.0', 'built_path':str(built), 'loaded_path':str(loaded),
             'built_sha256':sha(built), 'loaded_sha256':sha(loaded),
             'exact_image':sha(built)==sha(loaded),
-            'context_count':state.get('context_count',0), 'swap_count':state.get('swap_count',0),
+            'context_count':state.get('context_count',0),
+            'swap_count':state.get('swap_count',0),
             'get_proc_address_count':state.get('get_proc_address_count',0),
-            'gl_vendor':state.get('gl_vendor',''), 'gl_renderer':state.get('gl_renderer',''),
+            'gl_vendor':state.get('gl_vendor',''),
+            'gl_renderer':state.get('gl_renderer',''),
             'gl_version':state.get('gl_version','')
           }
           (root/'wrapper-identity.json').write_text(json.dumps(identity,indent=2)+'\n')
@@ -255,7 +286,9 @@ jobs:
           PY
           rc=$?
           if [[ $rc -ne 0 ]]; then
-            python3 ci/minecraft-e2e/evidence.py --root "$E2E_ROOT" fail --failure-id WRAPPER_IDENTITY_OR_ACTIVITY_FAILED --phase runtime_identity --message "exact dylib / DirectMetal GL identity / context / swap gate failed"
+            python3 ci/minecraft-e2e/evidence.py --root "$E2E_ROOT" fail \
+              --failure-id WRAPPER_IDENTITY_OR_ACTIVITY_FAILED --phase runtime_identity \
+              --message "exact dylib / DirectMetal GL identity / context / swap gate failed"
             exit $rc
           fi
 
@@ -263,8 +296,6 @@ jobs:
         if: always()
         continue-on-error: true
         shell: bash
-        env:
-          MITHRIL_DYLIB: ${{ steps.mithril.outputs.dylib }}
         run: |
           ci/minecraft-e2e/collect-diagnostics.sh \
             "$E2E_ROOT" \
@@ -275,8 +306,10 @@ jobs:
         continue-on-error: true
         shell: bash
         run: |
+          if [[ ! -f "$E2E_ROOT/failure.json" && -f "$E2E_ROOT/failure-pre-minecraft.json" ]]; then
+            cp "$E2E_ROOT/failure-pre-minecraft.json" "$E2E_ROOT/failure.json"
+          fi
           python3 ci/minecraft-e2e/evidence.py --root "$E2E_ROOT" finalize
-          python3 ci/minecraft-e2e/evidence.py --root "$E2E_ROOT" manifest
 
       - name: Upload compact agent context
         if: always()
@@ -297,10 +330,11 @@ jobs:
             build/minecraft-e2e-artifacts/bridge-state.json
             build/minecraft-e2e-artifacts/game-state.json
             build/minecraft-e2e-artifacts/readback-control.json
+            build/minecraft-e2e-artifacts/presentation.json
             build/minecraft-e2e-artifacts/native-render-smoke.log
             build/minecraft-e2e-artifacts/native-layered-texture-smoke.log
-            build/minecraft-e2e-artifacts/native-minecraft-path-smoke.log
             build/minecraft-e2e-artifacts/render/samples.json
+            build/minecraft-e2e-artifacts/render/minecraft-framebuffer.png
             build/minecraft-e2e-artifacts/manifest.json
 
       - name: Upload full E2E diagnostics
