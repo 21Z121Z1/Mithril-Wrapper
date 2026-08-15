@@ -4,6 +4,11 @@
 // for design rationale.
 #include "State.h"
 
+#include <cstdarg>
+#include <cstdio>
+#include <cstdlib>
+#include <mutex>
+
 namespace mithril {
 
 // ---- thread_local current context ----
@@ -11,6 +16,39 @@ thread_local GLState* g_state = nullptr;
 
 // ---- EGL initialized flag ----
 bool g_eglInitialized = false;
+
+// Optional semantic trace used by the production Minecraft E2E.  It is fully
+// dormant unless MITHRIL_GL_SEMANTIC_TRACE is set, so normal runtime hot paths
+// pay only a getenv-free function call at explicitly instrumented semantic
+// boundaries.  The file is line buffered so a crash still leaves useful evidence.
+void semantic_trace_eventf(const char* domain, const char* semantic,
+                           const char* api, const char* fmt, ...) {
+    static std::mutex traceMutex;
+    static bool initialized = false;
+    static FILE* traceFile = nullptr;
+
+    std::lock_guard<std::mutex> lock(traceMutex);
+    if (!initialized) {
+        initialized = true;
+        const char* path = std::getenv("MITHRIL_GL_SEMANTIC_TRACE");
+        if (path && *path) {
+            traceFile = std::fopen(path, "a");
+            if (traceFile) std::setvbuf(traceFile, nullptr, _IOLBF, 0);
+        }
+    }
+    if (!traceFile) return;
+
+    char details[1024] = {};
+    if (fmt && *fmt) {
+        va_list args;
+        va_start(args, fmt);
+        std::vsnprintf(details, sizeof(details), fmt, args);
+        va_end(args);
+    }
+    std::fprintf(traceFile, "%s\t%s\t%s\t%s\n",
+                 domain ? domain : "", semantic ? semantic : "",
+                 api ? api : "", details);
+}
 
 // =========================================================================
 // Enum conversions

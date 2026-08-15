@@ -239,8 +239,8 @@ struct VertexAttrib {
 // ---- Vertex buffer binding point (per VAO) ----
 // GL 4.3 separate-attribute-format model: an attribute names a *binding index*,
 // and the instance-step divisor lives on the binding, not on the attribute
-// (glVertexAttribDivisor is spec'd as shorthand for setting the divisor of the
-// binding the attribute currently points at). Pipeline.cpp reads
+// (glVertexAttribDivisor is spec'd as VertexAttribBinding(index,index) followed
+// by VertexBindingDivisor(index,divisor)). Pipeline.cpp reads
 // bindings[attribs[loc].bindingIndex].divisor to pick
 // VK_VERTEX_INPUT_RATE_INSTANCE — keep that the single source of truth.
 struct VertexBinding {
@@ -922,6 +922,11 @@ void          account_draw_primitives(int gl_mode, int64_t count, int64_t instan
 // ---- Error helpers ----
 void   state_set_error(GLenum err);
 GLenum state_take_error();
+
+// Optional production semantic trace. Enabled only when
+// MITHRIL_GL_SEMANTIC_TRACE points at an output TSV file.
+void semantic_trace_eventf(const char* domain, const char* semantic,
+                           const char* api, const char* fmt, ...);
 
 // ---- Name allocation (unified via NameAllocator) ----
 void state_gen_names(const char* kind, GLsizei n, GLuint* out);

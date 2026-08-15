@@ -136,6 +136,9 @@ void glDisableVertexAttribArray(GLuint index) {
 void glVertexAttribPointer(GLuint index, GLint size, GLenum type,
                            GLboolean normalized, GLsizei stride, const void* pointer) {
     MITHRIL_ENSURE_INIT();
+    mithril::semantic_trace_eventf("vao_vertex_fetch", "vertex.legacy.pointer", "glVertexAttribPointer",
+        "attrib=%u;size=%d;type=0x%x;normalized=%u;stride=%d;offset=%llu", index, size, type,
+        (unsigned)normalized, stride, (unsigned long long)(uintptr_t)pointer);
     if (index >= mithril::kMaxVertexAttribs || stride < 0) {
         mithril::state_set_error(GL_INVALID_VALUE);
         return;
@@ -174,6 +177,9 @@ void glVertexAttribPointer(GLuint index, GLint size, GLenum type,
 void glVertexAttribIPointer(GLuint index, GLint size, GLenum type,
                             GLsizei stride, const void* pointer) {
     MITHRIL_ENSURE_INIT();
+    mithril::semantic_trace_eventf("vao_vertex_fetch", "vertex.legacy.ipointer", "glVertexAttribIPointer",
+        "attrib=%u;size=%d;type=0x%x;stride=%d;offset=%llu", index, size, type, stride,
+        (unsigned long long)(uintptr_t)pointer);
     if (index >= mithril::kMaxVertexAttribs || stride < 0) {
         mithril::state_set_error(GL_INVALID_VALUE);
         return;
@@ -211,6 +217,8 @@ void glVertexAttribIPointer(GLuint index, GLint size, GLenum type,
 
 void glVertexAttribDivisor(GLuint index, GLuint divisor) {
     MITHRIL_ENSURE_INIT();
+    mithril::semantic_trace_eventf("vao_vertex_fetch", "vertex.legacy.divisor", "glVertexAttribDivisor",
+        "attrib=%u;divisor=%u", index, divisor);
     if (index >= mithril::kMaxVertexAttribs) {
         mithril::state_set_error(GL_INVALID_VALUE);
         return;
@@ -246,6 +254,8 @@ void glVertexAttribDivisor(GLuint index, GLuint divisor) {
 
 void glBindVertexBuffer(GLuint bindingindex, GLuint buffer, GLintptr offset, GLsizei stride) {
     MITHRIL_ENSURE_INIT();
+    mithril::semantic_trace_eventf("vao_vertex_fetch", "vertex.bind_buffer", "glBindVertexBuffer",
+        "binding=%u;buffer=%u;offset=%lld;stride=%d", bindingindex, buffer, (long long)offset, stride);
     if (bindingindex >= (GLuint)mithril::kMaxVertexBindings ||
         offset < 0 || stride < 0) {
         mithril::state_set_error(GL_INVALID_VALUE);
@@ -263,6 +273,8 @@ void glBindVertexBuffer(GLuint bindingindex, GLuint buffer, GLintptr offset, GLs
 
 void glVertexAttribBinding(GLuint attribindex, GLuint bindingindex) {
     MITHRIL_ENSURE_INIT();
+    mithril::semantic_trace_eventf("vao_vertex_fetch", "vertex.attrib.binding", "glVertexAttribBinding",
+        "attrib=%u;binding=%u", attribindex, bindingindex);
     if (attribindex >= (GLuint)mithril::kMaxVertexAttribs ||
         bindingindex >= (GLuint)mithril::kMaxVertexBindings) {
         mithril::state_set_error(GL_INVALID_VALUE);
@@ -278,6 +290,9 @@ void glVertexAttribBinding(GLuint attribindex, GLuint bindingindex) {
 void glVertexAttribFormat(GLuint attribindex, GLint size, GLenum type,
                           GLboolean normalized, GLuint relativeoffset) {
     MITHRIL_ENSURE_INIT();
+    mithril::semantic_trace_eventf("vao_vertex_fetch", "vertex.attrib.format", "glVertexAttribFormat",
+        "attrib=%u;size=%d;type=0x%x;normalized=%u;relative=%u", attribindex, size, type,
+        (unsigned)normalized, relativeoffset);
     if (attribindex >= (GLuint)mithril::kMaxVertexAttribs) {
         mithril::state_set_error(GL_INVALID_VALUE);
         return;
@@ -298,6 +313,8 @@ void glVertexAttribFormat(GLuint attribindex, GLint size, GLenum type,
 
 void glVertexAttribIFormat(GLuint attribindex, GLint size, GLenum type, GLuint relativeoffset) {
     MITHRIL_ENSURE_INIT();
+    mithril::semantic_trace_eventf("vao_vertex_fetch", "vertex.attrib.iformat", "glVertexAttribIFormat",
+        "attrib=%u;size=%d;type=0x%x;relative=%u", attribindex, size, type, relativeoffset);
     if (attribindex >= (GLuint)mithril::kMaxVertexAttribs) {
         mithril::state_set_error(GL_INVALID_VALUE);
         return;
@@ -322,6 +339,8 @@ void glVertexAttribLFormat(GLuint attribindex, GLint size, GLenum type, GLuint r
 
 void glVertexBindingDivisor(GLuint bindingindex, GLuint divisor) {
     MITHRIL_ENSURE_INIT();
+    mithril::semantic_trace_eventf("vao_vertex_fetch", "vertex.binding.divisor", "glVertexBindingDivisor",
+        "binding=%u;divisor=%u", bindingindex, divisor);
     if (bindingindex >= (GLuint)mithril::kMaxVertexBindings) {
         mithril::state_set_error(GL_INVALID_VALUE);
         return;

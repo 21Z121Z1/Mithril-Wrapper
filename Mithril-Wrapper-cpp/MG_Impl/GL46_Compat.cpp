@@ -2323,10 +2323,39 @@ void glGetUniformdv(GLuint program, GLint location, GLdouble* params) {
 /* ---- glProgramUniform* (GL 4.1, ARB_separate_shader_objects): set a
  * program's uniforms without binding it. Delegate via save/restore of the
  * current program (store_uniform reads g_state->currentProgram). ---- */
-static void program_uniform_begin(GLuint program) {
-    if (!g_state) return;
-    g_state->currentProgram = program;
-}
+class ProgramUniformScope {
+public:
+    explicit ProgramUniformScope(GLuint program)
+        : state_(g_state), previous_(state_ ? state_->currentProgram : 0) {
+        if (!state_) return;
+        mithril::Program* target = mithril::state_get_program(program);
+        if (!target || !target->linked) {
+            mithril::state_set_error(GL_INVALID_OPERATION);
+            return;
+        }
+        state_->currentProgram = program;
+        valid_ = true;
+    }
+
+    ~ProgramUniformScope() {
+        if (valid_ && state_) state_->currentProgram = previous_;
+    }
+
+    bool valid() const { return valid_; }
+
+private:
+    mithril::GLState* state_ = nullptr;
+    GLuint previous_ = 0;
+    bool valid_ = false;
+};
+
+// Keep the existing compact ProgramUniform wrappers while making the temporary
+// selector override exception/early-return safe.  The RAII scope restores the
+// program selected by glUseProgram when each wrapper returns.
+#define program_uniform_begin(program) \
+    MITHRIL_ENSURE_INIT(); \
+    ProgramUniformScope _programUniformScope((program)); \
+    if (!_programUniformScope.valid()) return
 
 void glProgramUniform1i(GLuint program, GLint loc, GLint v0)               { program_uniform_begin(program); glUniform1i(loc, v0); }
 void glProgramUniform1iv(GLuint program, GLint loc, GLsizei count, const GLint* value) { program_uniform_begin(program); glUniform1iv(loc, count, value); }
@@ -2379,6 +2408,8 @@ void glProgramUniformMatrix2x4dv(GLuint program, GLint loc, GLsizei count, GLboo
 void glProgramUniformMatrix4x2dv(GLuint program, GLint loc, GLsizei count, GLboolean transpose, const GLdouble* value) { program_uniform_begin(program); glUniformMatrix4x2dv(loc, count, transpose, value); }
 void glProgramUniformMatrix3x4dv(GLuint program, GLint loc, GLsizei count, GLboolean transpose, const GLdouble* value) { program_uniform_begin(program); glUniformMatrix3x4dv(loc, count, transpose, value); }
 void glProgramUniformMatrix4x3dv(GLuint program, GLint loc, GLsizei count, GLboolean transpose, const GLdouble* value) { program_uniform_begin(program); glUniformMatrix4x3dv(loc, count, transpose, value); }
+
+#undef program_uniform_begin
 
 /* ---- Program pipeline objects (GL 4.1): minimal name tracking. The
  * separable-program path is not exercised by the target workload; binding is

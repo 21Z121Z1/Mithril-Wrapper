@@ -259,6 +259,12 @@ static bool prepare_draw(GLenum mode) {
         m.divisor      = (int)binding.divisor;
     }
 
+    mithril::semantic_trace_eventf(
+        "draw", "draw.configuration", "prepare_draw",
+        "mode=0x%x;program=%u;vao=%u;fbo=%u;attribs=%d",
+        mode, g_state->currentProgram, g_state->currentVAO,
+        g_state->currentDrawFBO, attrib_count);
+
     // Get-or-create the VkGraphicsPipeline. Blend state + colorWriteMask are
     // part of the pipeline signature so that enabling/disabling GL_BLEND,
     // changing blend functions, or calling glColorMask creates a distinct
