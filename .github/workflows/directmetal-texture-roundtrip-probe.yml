@@ -1,0 +1,44 @@
+name: DirectMetal texture FBO roundtrip probe
+
+on:
+  push:
+    branches:
+      - ci/minecraft-on-mithril-e2e-20260815
+    paths:
+      - tests/directmetal_texture_fbo_roundtrip_smoke.c
+      - .github/workflows/directmetal-texture-roundtrip-probe.yml
+      - Mithril-Wrapper-cpp/MG_Backend/DirectMetal/**
+      - Mithril-Wrapper-cpp/MG_Impl/Texture.cpp
+      - Mithril-Wrapper-cpp/MG_Impl/Framebuffer.cpp
+
+permissions:
+  contents: read
+
+jobs:
+  roundtrip:
+    runs-on: macos-26
+    timeout-minutes: 15
+    env:
+      MITHRIL_BACKEND: metal
+      MTL_DEBUG_LAYER: '1'
+      MTL_SHADER_VALIDATION: '0'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - run: brew install vulkan-loader molten-vk ninja
+      - name: Build production dylib
+        run: |
+          cmake -S . -B build-roundtrip -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS='-Wno-error' -DCMAKE_CXX_FLAGS='-Wno-error'
+          cmake --build build-roundtrip --target mithril --parallel
+      - name: Run exact texture/FBO/readPixels diagnostic
+        shell: bash
+        run: |
+          set -euo pipefail
+          dylib=$(find build-roundtrip -type f -name libmithril.dylib -print | head -1)
+          export DYLD_LIBRARY_PATH="$(brew --prefix)/lib"
+          clang -std=c11 -O0 -Wall -Wextra -Werror -IMithril-Wrapper-cpp/include \
+            -o build-roundtrip/directmetal_texture_fbo_roundtrip_smoke \
+            tests/directmetal_texture_fbo_roundtrip_smoke.c -ldl
+          build-roundtrip/directmetal_texture_fbo_roundtrip_smoke "$dylib"
