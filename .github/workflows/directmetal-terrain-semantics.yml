@@ -42,7 +42,7 @@ jobs:
           test -s /tmp/mithril-path
           file "$(cat /tmp/mithril-path)"
 
-      - name: Compile terrain semantics GPU oracle
+      - name: Compile terrain semantics GPU oracles
         shell: bash
         run: |
           set -euo pipefail
@@ -50,8 +50,12 @@ jobs:
             -IMithril-Wrapper-cpp/include \
             tests/directmetal_terrain_semantics_smoke.c \
             -o build-terrain-semantics/directmetal_terrain_semantics_smoke -ldl
+          clang -std=gnu11 -O0 -g -Wall -Wextra -Werror \
+            -IMithril-Wrapper-cpp/include \
+            tests/directmetal_vertex_binding_smoke.c \
+            -o build-terrain-semantics/directmetal_vertex_binding_smoke -ldl
 
-      - name: Run terrain semantics on real hosted Metal GPU
+      - name: Run indexed and clip semantics on real hosted Metal GPU
         shell: bash
         run: |
           set -euo pipefail
@@ -59,11 +63,21 @@ jobs:
           build-terrain-semantics/directmetal_terrain_semantics_smoke "$(cat /tmp/mithril-path)" \
             | tee build-terrain-semantics/terrain-semantics.log
 
-      - name: Upload semantics log
+      - name: Run vertex binding semantics on real hosted Metal GPU
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DYLD_LIBRARY_PATH="$(brew --prefix)/lib"
+          build-terrain-semantics/directmetal_vertex_binding_smoke "$(cat /tmp/mithril-path)" \
+            | tee build-terrain-semantics/vertex-binding.log
+
+      - name: Upload semantics logs
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: directmetal-terrain-semantics-${{ github.sha }}-${{ github.run_attempt }}
           retention-days: 7
           if-no-files-found: warn
-          path: build-terrain-semantics/terrain-semantics.log
+          path: |
+            build-terrain-semantics/terrain-semantics.log
+            build-terrain-semantics/vertex-binding.log
