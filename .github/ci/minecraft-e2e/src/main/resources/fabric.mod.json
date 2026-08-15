@@ -6,7 +6,7 @@
   "environment": "client",
   "entrypoints": {
     "fabric-client-gametest": [
-      "dev.mithril.e2e.MithrilClientGameTest"
+      "dev.mithril.e2e.MithrilPrePresentClientGameTest"
     ]
   },
   "depends": {
