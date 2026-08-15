@@ -1959,9 +1959,14 @@ void glGetQueryIndexediv(GLenum target, GLuint index, GLenum pname, GLint* param
 /* GL 3.0 — unsigned uniform query. */
 void glGetUniformuiv(GLuint program, GLint location, GLuint* params) {
     MITHRIL_ENSURE_INIT();
-    GLint v = 0;
-    glGetUniformiv(program, location, &v);
-    if (params) *params = (GLuint)v;
+    if (!params) return;
+    mithril::Program* p = mithril::state_get_program(program);
+    if (!p) return;
+    auto it = p->uniformByLocation.find(location);
+    if (it == p->uniformByLocation.end()) { *params = 0; return; }
+    const auto& u = p->uniforms[it->second];
+    if (u.value.empty()) { *params = 0; return; }
+    for (size_t i = 0; i < u.value.size(); ++i) params[i] = (GLuint)u.value[i];
 }
 
 /* GL 3.0 — fragment data location. We don't track output bindings; -1 is the

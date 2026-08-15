@@ -606,9 +606,11 @@ void glGetUniformfv(GLuint program, GLint location, GLfloat* params) {
     if (!p || !params) return;
     auto it = p->uniformByLocation.find(location);
     if (it == p->uniformByLocation.end()) { *params = 0; return; }
-    auto& u = p->uniforms[it->second];
-    if (!u.value.empty()) *params = u.value[0];
-    else *params = 0;
+    const auto& u = p->uniforms[it->second];
+    if (u.value.empty()) { *params = 0; return; }
+    // Core GL requires glGetUniform* to return every component of the
+    // uniform value (and every element for arrays/matrices), not only x.
+    std::copy(u.value.begin(), u.value.end(), params);
 }
 
 void glGetUniformiv(GLuint program, GLint location, GLint* params) {
@@ -617,8 +619,9 @@ void glGetUniformiv(GLuint program, GLint location, GLint* params) {
     if (!p || !params) return;
     auto it = p->uniformByLocation.find(location);
     if (it == p->uniformByLocation.end()) { *params = 0; return; }
-    auto& u = p->uniforms[it->second];
-    *params = u.value.empty() ? 0 : (GLint)u.value[0];
+    const auto& u = p->uniforms[it->second];
+    if (u.value.empty()) { *params = 0; return; }
+    for (size_t i = 0; i < u.value.size(); ++i) params[i] = (GLint)u.value[i];
 }
 
 GLuint glGetUniformBlockIndex(GLuint program, const GLchar* uniformBlockName) {
