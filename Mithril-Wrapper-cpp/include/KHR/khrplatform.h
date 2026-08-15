@@ -37,7 +37,15 @@ typedef ptrdiff_t        GLsizeiptr;
 typedef ptrdiff_t        GLintptrARB;
 typedef ptrdiff_t        GLsizeiptrARB;
 typedef char             GLcharARB;
+/* Apple's OpenGL ABI historically declares GLhandleARB as an opaque pointer,
+ * while other desktop platforms use an unsigned integer name.  Keep the
+ * public Mithril headers source-compatible with native macOS headers so an
+ * Objective-C++ host may include Cocoa/GLFW and Mithril GL/EGL together. */
+#if defined(__APPLE__)
+typedef void*            GLhandleARB;
+#else
 typedef unsigned int     GLhandleARB;
+#endif
 typedef struct __GLsync* GLsync;
 typedef void (*GLDEBUGPROC)(GLenum, GLenum, GLuint, GLenum, GLsizei, const GLchar*, const void*);
 typedef void (*GLDEBUGPROCARB)(GLenum, GLenum, GLuint, GLenum, GLsizei, const GLchar*, const void*);
