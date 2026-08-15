@@ -588,50 +588,74 @@ static bool trace_draw(const char* kind, int mode, int first, int count, int ins
                 // 扩展后可以安全 draw，继续执行
             }
         }
-        // 顶点 attrib 越界：前 2 个 enabled attrib，检查 (first+count) 顶点
-        // 覆盖范围是否超出其 buffer（stride 已知时）
-        int checked = 0;
-        for (int a = 0; a < mithril::kMaxVertexAttribs && checked < 2; ++a) {
+        // FIX (indexed-draw 误报根因 — 纯红屏 + 顶点数据清零链):
+        // indexed draw 的 count 是「索引数」不是「顶点数」。MC 的 quad
+        // 拼接索引（0,1,2, 2,3,0）每 quad 上传 4 顶点、用 6 索引绘制
+        // （6/4 = 1.5），用 count×stride 推顶点范围会系统性 1.5× 高估
+        // → 每帧误报 DRAW-OVERRUN → auto-grow 用空数据重建 buffer →
+        // MC 刚上传的顶点被 defer_destroy 清零 → 画面只剩 clear 色
+        // （MC 加载界面红底 → 纯红屏），错乱数据进一步诱发 GPU page
+        // fault → DEVICE_LOST。真机日志实证：need/have 恒为 1.5。
+        //
+        // GL 语义下正确的程序保证索引值 < 上传顶点数（vb->size /
+        // stride），因此 indexed draw 的 GPU 访问上界就是 GL 数据量
+        // vb->size 本身；fault 防护只需保证 backend VkBuffer 容量覆盖
+        // GL 数据量（防两层容量失同步的真 bug）。
+        // drawArrays 的 first+count 是准确顶点数，保留原范围检查。
+        bool indexed_kind = (kind[0] == 'e');
+        for (int a = 0; a < mithril::kMaxVertexAttribs; ++a) {
             const mithril::VertexAttrib& at = vao->attribs[a];
             if (!at.enabled || !at.boundBuffer) continue;
             auto* vb = mithril::state_get_buffer(at.boundBuffer);
             if (!vb) continue;
-            checked++;
             GLsizei stride = at.stride ? at.stride : (GLsizei)(at.size * 4);
             if (stride <= 0) continue;
             size_t offset = (size_t)(intptr_t)at.pointer;
-            size_t need = offset + (size_t)(first + count) * (size_t)stride;
+            size_t need;
+            if (indexed_kind) {
+                // 索引值范围无法从 count 推出（quad 4顶点/6索引）；正确
+                // 程序的访问上界 = GL 真实数据量。仅做容量失同步防护。
+                need = (size_t)vb->size;
+                if (need == 0) need = (size_t)vb->allocSize;  // subData-only 路径
+                if (offset + (size_t)stride > need) need = offset + (size_t)stride;
+            } else {
+                need = offset + (size_t)(first + count) * (size_t)stride;
+            }
             if (need > (size_t)vb->allocSize) {
+                GLsizeiptr old_alloc = vb->allocSize;
                 LOG_RESOURCE("DRAW-OVERRUN vb prog=%u attr=%d buf=%u stride=%d "
-                             "off=%zu first+count=%d need=%zuB have=%lldB (alloc=%lldB)",
+                             "off=%zu %s=%d need=%zuB have=%lldB (alloc=%lldB)",
                              (unsigned)g_state->currentProgram, a,
                              (unsigned)at.boundBuffer, (int)stride, offset,
-                             first + count, need, (long long)vb->size,
-                             (long long)vb->allocSize);
-                // FIX (GPU page fault 根因): 顶点 buffer 越界 → 扩展 buffer 到
-                // 实际需要的大小（新增部分填 0）。这模拟了桌面 GL driver
-                // 的"buffer 末尾多分配空间"的行为，让越界读返回 0 而不是
-                // fault。MC 下次 orphan 会重新上传正确数据覆盖填 0 区域。
-                // 参考：MobileGL Vulkan 后端在 iOS 上同样处理了这种情况。
-                // FIX (orphan chain 根因): GL 层 allocSize 必须与后端实际
-                // 分配大小一致（256 对齐）。否则下一帧 need 仍大于 allocSize，
-                // 再次 DRAW-OVERRUN → orphan 新 buffer → GL allocSize 仍不对齐
-                // → 每帧 orphan 链 → disposal queue 堆积 → 显存泄漏。
+                             indexed_kind ? "data" : "first+count",
+                             indexed_kind ? 0 : (first + count), need,
+                             (long long)vb->size, (long long)old_alloc);
+                // FIX (GPU page fault 防护 + 数据保留): 扩展 buffer 到需要
+                // 的大小。先扩 CPU 副本（新增部分 0），再以「旧数据 + 0
+                // 填充」重建 backend buffer —— MC 已上传的顶点不会丢，
+                // 模拟桌面 GL driver 的 buffer 末尾 padding 行为。
                 size_t aligned_need = (need + 255u) & ~(size_t)255u;
-                // FIX (避免不必要 orphan): 若后端已有足够容量，仅更新 GL
-                // allocSize 而不调后端（避免在飞 orphan 链）。
                 VkDeviceSize backend_cap = backend_get_buffer_capacity(at.boundBuffer);
-                if (backend_cap >= aligned_need) {
-                    // 后端容量已够，仅更新 GL 层跟踪
+                if (backend_cap >= (VkDeviceSize)aligned_need) {
+                    // 后端容量已够：只同步 GL 层记账，不动 buffer、不清数据。
+                    if ((VkDeviceSize)vb->allocSize < backend_cap)
+                        vb->allocSize = (GLsizeiptr)backend_cap;
                     LOG_RESOURCE("DRAW-VB-GROW buf=%u skip-orphan backend_cap=%zu >= need=%zu",
                                  (unsigned)at.boundBuffer, (size_t)backend_cap, aligned_need);
                 } else {
-                    backend_get_or_create_buffer(at.boundBuffer, nullptr, aligned_need);
+                    // 真 grow：CPU 副本扩到 aligned_need（0 填充）后整体
+                    // 重建，旧顶点数据完整保留（防误报场景下画面被清空）。
+                    if (vb->data.size() < aligned_need) vb->data.resize(aligned_need, 0);
+                    backend_get_or_create_buffer(
+                        at.boundBuffer,
+                        vb->data.empty() ? nullptr : vb->data.data(),
+                        aligned_need);
+                    vb->allocSize =
+                        (GLsizeiptr)backend_get_buffer_capacity(at.boundBuffer);
+                    LOG_RESOURCE("DRAW-VB-GROW buf=%u from=%lld to=%zu (aligned need=%zu)",
+                                 (unsigned)at.boundBuffer, (long long)old_alloc,
+                                 (size_t)vb->allocSize, need);
                 }
-                vb->allocSize = (GLsizeiptr)aligned_need;
-                LOG_RESOURCE("DRAW-VB-GROW buf=%u from=%lld to=%zu (aligned need=%zu)",
-                             (unsigned)at.boundBuffer, (long long)vb->allocSize,
-                             aligned_need, need);
                 // 扩展后可以安全 draw，继续执行
             }
         }
@@ -857,41 +881,48 @@ void glMultiDrawArrays(GLenum mode, const GLint* first, const GLsizei* count, GL
     if (!first || !count || drawcount <= 0) return;
     if (!prepare_draw(mode)) return;  // root cause AI — 一次 SetupDraw
     // FIX (DRAW-OVERRUN GPU page fault): 逐 sub-draw 检查顶点 buffer 越界，
-    // 越界时自动扩展 buffer 到实际需要的大小（填 0），防止 GPU Address Fault。
-    // 与单 draw 路径的 trace_draw auto-grow 策略一致。
+    // 越界时自动扩展 buffer（保数据版，与 trace_draw 策略一致）。
     for (GLsizei i = 0; i < drawcount; ++i) {
         if (count[i] <= 0) continue;
         if (g_state->currentVAO) {
             mithril::VertexArray* vao = mithril::state_get_vao(g_state->currentVAO);
             if (vao) {
-                int checked = 0;
-                for (int a = 0; a < mithril::kMaxVertexAttribs && checked < 2; ++a) {
+                for (int a = 0; a < mithril::kMaxVertexAttribs; ++a) {
                     const mithril::VertexAttrib& at = vao->attribs[a];
                     if (!at.enabled || !at.boundBuffer) continue;
                     auto* vb = mithril::state_get_buffer(at.boundBuffer);
                     if (!vb) continue;
-                    checked++;
                     GLsizei stride = at.stride ? at.stride : (GLsizei)(at.size * 4);
                     if (stride <= 0) continue;
                     size_t offset = (size_t)(intptr_t)at.pointer;
                     size_t need = offset + (size_t)((int)first[i] + count[i]) * (size_t)stride;
                     if (need > (size_t)vb->allocSize) {
+                        GLsizeiptr old_alloc = vb->allocSize;
                         LOG_RESOURCE("DRAW-OVERRUN multidraw_arrays i=%d attr=%d buf=%u stride=%d "
                                      "off=%zu first+count=%d need=%zuB have=%lldB",
                                      (int)i, a, (unsigned)at.boundBuffer, (int)stride, offset,
-                                     (int)first[i] + count[i], need, (long long)vb->allocSize);
-                        // FIX (orphan chain 根因): allocSize 必须 256 对齐
+                                     (int)first[i] + count[i], need, (long long)old_alloc);
                         size_t aligned_need = (need + 255u) & ~(size_t)255u;
                         VkDeviceSize backend_cap = backend_get_buffer_capacity(at.boundBuffer);
-                        if (backend_cap < aligned_need) {
-                            backend_get_or_create_buffer(at.boundBuffer, nullptr, aligned_need);
-                        } else {
+                        if (backend_cap >= (VkDeviceSize)aligned_need) {
+                            if ((VkDeviceSize)vb->allocSize < backend_cap)
+                                vb->allocSize = (GLsizeiptr)backend_cap;
                             LOG_RESOURCE("DRAW-VB-GROW multidraw_arrays buf=%u skip-orphan cap=%zu",
                                          (unsigned)at.boundBuffer, (size_t)backend_cap);
+                        } else {
+                            // 真 grow：CPU 副本扩容（0 填充）后整体重建，
+                            // 旧数据保留（详见 trace_draw 同款修复）。
+                            if (vb->data.size() < aligned_need) vb->data.resize(aligned_need, 0);
+                            backend_get_or_create_buffer(
+                                at.boundBuffer,
+                                vb->data.empty() ? nullptr : vb->data.data(),
+                                aligned_need);
+                            vb->allocSize =
+                                (GLsizeiptr)backend_get_buffer_capacity(at.boundBuffer);
+                            LOG_RESOURCE("DRAW-VB-GROW multidraw_arrays buf=%u from=%lld to=%zu",
+                                         (unsigned)at.boundBuffer, (long long)old_alloc,
+                                         (size_t)vb->allocSize);
                         }
-                        vb->allocSize = (GLsizeiptr)aligned_need;
-                        LOG_RESOURCE("DRAW-VB-GROW multidraw_arrays buf=%u from=%lld to=%zu",
-                                     (unsigned)at.boundBuffer, (long long)vb->allocSize, aligned_need);
                     }
                 }
             }
@@ -917,39 +948,51 @@ void glMultiDrawElements(GLenum mode, const GLsizei* count, GLenum type,
         // VBO 路径：indices[i] 是 offset，零拷贝
         for (GLsizei i = 0; i < drawcount; ++i) {
             if (count[i] <= 0) continue;
-            // FIX (DRAW-OVERRUN GPU page fault): 检查顶点 buffer 越界，
-            // 越界时自动扩展 buffer（而非跳过 sub-draw）
+            // FIX (DRAW-OVERRUN 误报根因): indexed draw 的 count 是索引数
+            // 不是顶点数（MC quad：4顶点/6索引 = 1.5× 高估）。改为容量
+            // 失同步防护：backend VkBuffer 必须覆盖 GL 真实数据量。
+            // 详见 trace_draw 同款修复。
             bool need_draw = true;
             mithril::VertexArray* vao2 = mithril::state_get_vao(g_state->currentVAO);
             if (vao2) {
-                int checked = 0;
-                for (int a = 0; a < mithril::kMaxVertexAttribs && checked < 2; ++a) {
+                for (int a = 0; a < mithril::kMaxVertexAttribs; ++a) {
                     const mithril::VertexAttrib& at = vao2->attribs[a];
                     if (!at.enabled || !at.boundBuffer) continue;
                     auto* vb = mithril::state_get_buffer(at.boundBuffer);
                     if (!vb) continue;
-                    checked++;
                     GLsizei stride = at.stride ? at.stride : (GLsizei)(at.size * 4);
                     if (stride <= 0) continue;
                     size_t offset = (size_t)(intptr_t)at.pointer;
-                    size_t need = offset + (size_t)count[i] * (size_t)stride;
+                    size_t need = (size_t)vb->size;
+                    if (need == 0) need = (size_t)vb->allocSize;  // subData-only 路径
+                    if (offset + (size_t)stride > need) need = offset + (size_t)stride;
                     if (need > (size_t)vb->allocSize) {
+                        GLsizeiptr old_alloc = vb->allocSize;
                         LOG_RESOURCE("DRAW-OVERRUN multidraw_elem i=%d attr=%d buf=%u stride=%d "
-                                     "off=%zu count=%d need=%zuB have=%lldB",
+                                     "off=%zu data=%lldB need=%zuB (alloc=%lldB)",
                                      (int)i, a, (unsigned)at.boundBuffer, (int)stride, offset,
-                                     (int)count[i], need, (long long)vb->allocSize);
-                        // FIX (orphan chain 根因): allocSize 必须 256 对齐
+                                     (long long)vb->size, need, (long long)old_alloc);
                         size_t aligned_need = (need + 255u) & ~(size_t)255u;
                         VkDeviceSize backend_cap = backend_get_buffer_capacity(at.boundBuffer);
-                        if (backend_cap < aligned_need) {
-                            backend_get_or_create_buffer(at.boundBuffer, nullptr, aligned_need);
-                        } else {
+                        if (backend_cap >= (VkDeviceSize)aligned_need) {
+                            if ((VkDeviceSize)vb->allocSize < backend_cap)
+                                vb->allocSize = (GLsizeiptr)backend_cap;
                             LOG_RESOURCE("DRAW-VB-GROW multidraw_elem buf=%u skip-orphan cap=%zu",
                                          (unsigned)at.boundBuffer, (size_t)backend_cap);
+                        } else {
+                            // 真 grow：CPU 副本扩容（0 填充）后整体重建，
+                            // 旧数据保留（详见 trace_draw 同款修复）。
+                            if (vb->data.size() < aligned_need) vb->data.resize(aligned_need, 0);
+                            backend_get_or_create_buffer(
+                                at.boundBuffer,
+                                vb->data.empty() ? nullptr : vb->data.data(),
+                                aligned_need);
+                            vb->allocSize =
+                                (GLsizeiptr)backend_get_buffer_capacity(at.boundBuffer);
+                            LOG_RESOURCE("DRAW-VB-GROW multidraw_elem buf=%u from=%lld to=%zu",
+                                         (unsigned)at.boundBuffer, (long long)old_alloc,
+                                         (size_t)vb->allocSize);
                         }
-                        vb->allocSize = (GLsizeiptr)aligned_need;
-                        LOG_RESOURCE("DRAW-VB-GROW multidraw_elem buf=%u from=%lld to=%zu",
-                                     (unsigned)at.boundBuffer, (long long)vb->allocSize, aligned_need);
                     }
                 }
             }
@@ -986,39 +1029,51 @@ void glMultiDrawElementsBaseVertex(GLenum mode, const GLsizei* count, GLenum typ
     if (ib != VK_NULL_HANDLE && basevertex) {
         for (GLsizei i = 0; i < drawcount; ++i) {
             if (count[i] <= 0) continue;
-            // FIX (DRAW-OVERRUN GPU page fault): 检查顶点 buffer 越界，
-            // 越界时自动扩展 buffer（而非跳过 sub-draw）
+            // FIX (DRAW-OVERRUN 误报根因): indexed draw 的 count 是索引数
+            // 不是顶点数（MC quad：4顶点/6索引 = 1.5× 高估）。改为容量
+            // 失同步防护：backend VkBuffer 必须覆盖 GL 真实数据量。
+            // 详见 trace_draw 同款修复。
             if (g_state->currentVAO) {
                 mithril::VertexArray* vao3 = mithril::state_get_vao(g_state->currentVAO);
                 if (vao3) {
-                    int checked = 0;
-                    for (int a = 0; a < mithril::kMaxVertexAttribs && checked < 2; ++a) {
+                    for (int a = 0; a < mithril::kMaxVertexAttribs; ++a) {
                         const mithril::VertexAttrib& at = vao3->attribs[a];
                         if (!at.enabled || !at.boundBuffer) continue;
                         auto* vb = mithril::state_get_buffer(at.boundBuffer);
                         if (!vb) continue;
-                        checked++;
                         GLsizei stride2 = at.stride ? at.stride : (GLsizei)(at.size * 4);
                         if (stride2 <= 0) continue;
                         size_t offset = (size_t)(intptr_t)at.pointer;
-                        size_t need = offset + (size_t)count[i] * (size_t)stride2;
+                        size_t need = (size_t)vb->size;
+                        if (need == 0) need = (size_t)vb->allocSize;  // subData-only 路径
+                        if (offset + (size_t)stride2 > need) need = offset + (size_t)stride2;
                         if (need > (size_t)vb->allocSize) {
+                            GLsizeiptr old_alloc = vb->allocSize;
                             LOG_RESOURCE("DRAW-OVERRUN multidraw_bv i=%d attr=%d buf=%u stride=%d "
-                                         "off=%zu count=%d need=%zuB have=%lldB",
+                                         "off=%zu data=%lldB need=%zuB (alloc=%lldB)",
                                          (int)i, a, (unsigned)at.boundBuffer, (int)stride2, offset,
-                                         (int)count[i], need, (long long)vb->allocSize);
-                            // FIX (orphan chain 根因): allocSize 必须 256 对齐
+                                         (long long)vb->size, need, (long long)old_alloc);
                             size_t aligned_need = (need + 255u) & ~(size_t)255u;
                             VkDeviceSize backend_cap = backend_get_buffer_capacity(at.boundBuffer);
-                            if (backend_cap < aligned_need) {
-                                backend_get_or_create_buffer(at.boundBuffer, nullptr, aligned_need);
-                            } else {
+                            if (backend_cap >= (VkDeviceSize)aligned_need) {
+                                if ((VkDeviceSize)vb->allocSize < backend_cap)
+                                    vb->allocSize = (GLsizeiptr)backend_cap;
                                 LOG_RESOURCE("DRAW-VB-GROW multidraw_bv buf=%u skip-orphan cap=%zu",
                                              (unsigned)at.boundBuffer, (size_t)backend_cap);
+                            } else {
+                                // 真 grow：CPU 副本扩容（0 填充）后整体重建，
+                                // 旧数据保留（详见 trace_draw 同款修复）。
+                                if (vb->data.size() < aligned_need) vb->data.resize(aligned_need, 0);
+                                backend_get_or_create_buffer(
+                                    at.boundBuffer,
+                                    vb->data.empty() ? nullptr : vb->data.data(),
+                                    aligned_need);
+                                vb->allocSize =
+                                    (GLsizeiptr)backend_get_buffer_capacity(at.boundBuffer);
+                                LOG_RESOURCE("DRAW-VB-GROW multidraw_bv buf=%u from=%lld to=%zu",
+                                             (unsigned)at.boundBuffer, (long long)old_alloc,
+                                             (size_t)vb->allocSize);
                             }
-                            vb->allocSize = (GLsizeiptr)aligned_need;
-                            LOG_RESOURCE("DRAW-VB-GROW multidraw_bv buf=%u from=%lld to=%zu",
-                                         (unsigned)at.boundBuffer, (long long)vb->allocSize, aligned_need);
                         }
                     }
                 }
