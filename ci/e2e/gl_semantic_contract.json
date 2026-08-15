@@ -1,0 +1,170 @@
+{
+  "schema_version": "1.0",
+  "profile": "minecraft-26.2-directmetal",
+  "core": {
+    "version": "3.3",
+    "glsl_version": "3.30",
+    "status": "minecraft-e2e-proven",
+    "oracles": [
+      "render_smoke",
+      "minecraft_production_client_gametest"
+    ]
+  },
+  "advertised_extensions": {
+    "GL_ARB_vertex_attrib_binding": {
+      "symbols": [
+        "glBindVertexBuffer",
+        "glVertexAttribFormat",
+        "glVertexAttribIFormat",
+        "glVertexAttribLFormat",
+        "glVertexAttribBinding",
+        "glVertexBindingDivisor"
+      ],
+      "state_semantics": [
+        "vertex.bind_buffer",
+        "vertex.attrib.format",
+        "vertex.attrib.iformat",
+        "vertex.attrib.binding",
+        "vertex.binding.divisor",
+        "vertex.legacy.pointer",
+        "vertex.legacy.divisor"
+      ],
+      "gpu_oracles": [
+        "directmetal_vertex_binding_smoke"
+      ],
+      "status": "proven"
+    },
+    "GL_ARB_clip_control": {
+      "symbols": [
+        "glClipControl"
+      ],
+      "state_semantics": [
+        "clip.control"
+      ],
+      "gpu_oracles": [
+        "directmetal_terrain_semantics_smoke"
+      ],
+      "status": "proven"
+    },
+    "GL_ARB_multi_draw_indirect": {
+      "symbols": [
+        "glMultiDrawArraysIndirect",
+        "glMultiDrawElementsIndirect"
+      ],
+      "state_semantics": [
+        "draw.multi_indirect"
+      ],
+      "gpu_oracles": [
+        "directmetal_terrain_semantics_smoke"
+      ],
+      "status": "proven"
+    },
+    "GL_ARB_indirect_parameters": {
+      "symbols": [
+        "glMultiDrawArraysIndirectCount",
+        "glMultiDrawElementsIndirectCount"
+      ],
+      "state_semantics": [
+        "draw.indirect_count"
+      ],
+      "gpu_oracles": [
+        "directmetal_terrain_semantics_smoke"
+      ],
+      "status": "proven"
+    },
+    "GL_MITHRIL_wrapper": {
+      "symbols": [
+        "glGetString"
+      ],
+      "state_semantics": [
+        "wrapper.identity"
+      ],
+      "gpu_oracles": [
+        "minecraft_wrapper_identity"
+      ],
+      "status": "proven"
+    }
+  },
+  "semantic_evidence": {
+    "vertex.bind_buffer": {
+      "domain": "vao_vertex_fetch",
+      "status": "proven",
+      "oracle": "directmetal_vertex_binding_smoke"
+    },
+    "vertex.attrib.format": {
+      "domain": "vao_vertex_fetch",
+      "status": "proven",
+      "oracle": "directmetal_vertex_binding_smoke"
+    },
+    "vertex.attrib.iformat": {
+      "domain": "vao_vertex_fetch",
+      "status": "proven",
+      "oracle": "directmetal_vertex_binding_smoke"
+    },
+    "vertex.attrib.binding": {
+      "domain": "vao_vertex_fetch",
+      "status": "proven",
+      "oracle": "directmetal_vertex_binding_smoke"
+    },
+    "vertex.binding.divisor": {
+      "domain": "vao_vertex_fetch",
+      "status": "proven",
+      "oracle": "directmetal_vertex_binding_smoke"
+    },
+    "vertex.legacy.pointer": {
+      "domain": "vao_vertex_fetch",
+      "status": "proven",
+      "oracle": "directmetal_vertex_binding_smoke"
+    },
+    "vertex.legacy.ipointer": {
+      "domain": "vao_vertex_fetch",
+      "status": "proven",
+      "oracle": "directmetal_vertex_binding_smoke"
+    },
+    "vertex.legacy.divisor": {
+      "domain": "vao_vertex_fetch",
+      "status": "proven",
+      "oracle": "directmetal_vertex_binding_smoke"
+    },
+    "draw.configuration": {
+      "domain": "draw",
+      "status": "proven",
+      "oracle": "directmetal_terrain_semantics_smoke"
+    },
+    "clip.control": {
+      "domain": "draw",
+      "status": "proven",
+      "oracle": "directmetal_terrain_semantics_smoke"
+    },
+    "draw.multi_indirect": {
+      "domain": "draw",
+      "status": "proven",
+      "oracle": "directmetal_terrain_semantics_smoke"
+    },
+    "draw.indirect_count": {
+      "domain": "draw",
+      "status": "proven",
+      "oracle": "directmetal_terrain_semantics_smoke"
+    },
+    "wrapper.identity": {
+      "domain": "runtime_identity",
+      "status": "proven",
+      "oracle": "minecraft_wrapper_identity"
+    }
+  },
+  "trace_coverage": {
+    "enforced_domains": [
+      "vao_vertex_fetch",
+      "draw"
+    ],
+    "next_domains": [
+      "textures_samplers",
+      "buffer_mapping_storage",
+      "framebuffer_mrt",
+      "blend_depth_stencil",
+      "direct_state_access",
+      "sync_query",
+      "pixel_pack_unpack"
+    ]
+  }
+}
