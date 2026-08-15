@@ -44,6 +44,7 @@
 
 #include "../DirectVulkan/FormatMap.h"   // mithril::vk::gl_internal_to_vk (shared)
 #include "../../MG_State/State.h"        // g_state / state_get_program / FBO tables
+#include "../../MG_Impl/Framebuffer.h"     // fbo_attachment_texture (texture/RB proxy)
 
 #include <cstdio>
 #include <cstring>
@@ -546,15 +547,22 @@ int dmt_read_pixels(int x, int y, int w, int h,
     dmt::commit_frame(nullptr);
 
     dmt::MetalTexture* src = nullptr;
+    const bool readDepth = (format == GL_DEPTH_COMPONENT);
     if (!g_state || g_state->currentReadFBO == 0) {
-        // EGL default framebuffer: the wrapper EGL installed as
-        // eglDefaultColorImage (the swapchain's colorTex cookie).
-        src = dmt::as_teximg(g_state ? g_state->eglDefaultColorImage
-                                     : VK_NULL_HANDLE);
+        VkImage image = VK_NULL_HANDLE;
+        if (g_state) {
+            image = readDepth ? g_state->eglDefaultDepthImage
+                              : g_state->eglDefaultColorImage;
+        }
+        src = dmt::as_teximg(image);
     } else {
         Framebuffer* fbo = state_get_framebuffer(g_state->currentReadFBO);
-        if (!fbo || !fbo->colors[0].texture) return 0;
-        src = dmt::texture_table_get(fbo->colors[0].texture);
+        if (!fbo) return 0;
+        const GLuint texName = readDepth
+            ? fbo_attachment_texture(fbo->depth)
+            : fbo_attachment_texture(fbo->colors[0]);
+        if (!texName) return 0;
+        src = dmt::texture_table_get(texName);
     }
     if (!src || src->tex == nil) return 0;
     return dmt::dmt_internal_read_pixels(src, x, y, w, h, format, type,

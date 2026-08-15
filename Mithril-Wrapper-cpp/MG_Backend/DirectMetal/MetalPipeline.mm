@@ -37,6 +37,8 @@
 #include "../../MG_State/State.h"
 #include "../../MG_Impl/Log.h"
 
+#include <TargetConditionals.h>
+
 #include <spirv_cross.hpp>
 #include <spirv_msl.hpp>
 
@@ -156,6 +158,7 @@ BuiltinCache& builtin_cache() {
 bool compile_msl_function(MetalProgramResources* pr,
                           const uint32_t* spirv, int words,
                           spv::ExecutionModel stage,
+                          uint32_t fragOutputMask,
                           MetalCompiledFunction& out) {
     Backend* b = backend();
     if (!b->initialized || !spirv || words <= 0) return false;
@@ -176,15 +179,21 @@ bool compile_msl_function(MetalProgramResources* pr,
         }
         compiler.set_entry_point(entryName, stage);
 
-        // MSL options: match the language version the MTLCompileOptions below
-        // will request, and pick the platform profile from the memory model
-        // (Apple-Silicon-style unified GPUs take the iOS profile, discrete
-        // Mac GPUs the macOS one) — this mirrors how MoltenVK chooses.
+        // The SPIRV-Cross platform profile is an OS/ABI choice, not a
+        // memory-architecture choice. Apple-Silicon Macs are unified-memory
+        // devices but still require macOS MSL.
         spirv_cross::CompilerMSL::Options mopts = compiler.get_msl_options();
         mopts.msl_version = spv_msl_version_from_device();
-        mopts.platform = b->unifiedMemory
-            ? spirv_cross::CompilerMSL::Options::iOS
-            : spirv_cross::CompilerMSL::Options::macOS;
+#if TARGET_OS_OSX
+        mopts.platform = spirv_cross::CompilerMSL::Options::macOS;
+#else
+        mopts.platform = spirv_cross::CompilerMSL::Options::iOS;
+#endif
+        // A depth-only FBO still needs its fragment stage for discard,
+        // gl_FragDepth and storage side effects. Suppress only unattached
+        // color outputs so Metal's fragment outputs match the PSO.
+        if (stage == spv::ExecutionModelFragment)
+            mopts.enable_frag_output_mask = fragOutputMask;
         compiler.set_msl_options(mopts);
 
         // The frontend's SPIR-V already remaps Z to [0,1] (Shader.cpp's
@@ -359,13 +368,20 @@ bool compile_msl_function(MetalProgramResources* pr,
  * entry stays cached with valid=false so the failure is attempted once. */
 MetalCompiledFunction* get_or_compile_stage(MetalProgramResources* pr,
                                             const uint32_t* spirv, int words,
-                                            spv::ExecutionModel stage) {
-    const uint64_t h = fnv1a(spirv, static_cast<size_t>(words) * sizeof(uint32_t));
+                                            spv::ExecutionModel stage,
+                                            uint32_t fragOutputMask = 0xffffffffu) {
+    uint64_t h = fnv1a(spirv, static_cast<size_t>(words) * sizeof(uint32_t));
+    // MSL generation depends on stage and (for fragment shaders) the output
+    // mask. Include both so a color-pass function cannot be reused for a
+    // depth-only pass (or vice versa).
+    h = fnv1a_u64(static_cast<uint64_t>(stage), h);
+    h = fnv1a_u64(static_cast<uint64_t>(fragOutputMask), h);
     auto it = pr->fnCache.find(h);
     if (it != pr->fnCache.end()) return &it->second;
 
     MetalCompiledFunction cf;
-    const bool ok = compile_msl_function(pr, spirv, words, stage, cf);
+    const bool ok = compile_msl_function(pr, spirv, words, stage,
+                                         fragOutputMask, cf);
     auto res = pr->fnCache.emplace(h, std::move(cf));
     return ok ? &res.first->second : nullptr;
 }
@@ -672,12 +688,25 @@ MetalProgramResources* resources_get(GLuint program) {
     return it == tbl.end() ? nullptr : it->second;
 }
 
+static void delete_pipeline_entry(MetalPipelineEntry* entry) {
+    if (!entry) return;
+    EncoderState& e = enc();
+    // EncoderState keeps a non-owning pointer into the pipeline cache so a
+    // fresh encoder can replay state. Never let that pointer outlive its
+    // cache entry: program deletion/relink can happen before the next pass.
+    if (e.boundPipeline == &entry->pipe) {
+        e.boundPipeline = nullptr;
+        e.descriptorsBound = false;
+    }
+    delete entry;
+}
+
 void delete_program_resources(GLuint program) {
     auto& tbl = program_tbl();
     auto it = tbl.find(program);
     if (it == tbl.end()) return;
     MetalProgramResources* pr = it->second;
-    for (auto& kv : pr->pipes) delete kv.second;
+    for (auto& kv : pr->pipes) delete_pipeline_entry(kv.second);
     delete pr->computePipe;
     delete pr;
     tbl.erase(it);
@@ -690,7 +719,7 @@ void purge_pipeline_caches() {
     // be poisoned by whatever killed the device in the first place.
     for (auto& kv : program_tbl()) {
         MetalProgramResources* pr = kv.second;
-        for (auto& p : pr->pipes) delete p.second;
+        for (auto& p : pr->pipes) delete_pipeline_entry(p.second);
         pr->pipes.clear();
         delete pr->computePipe;
         pr->computePipe = nullptr;
@@ -706,7 +735,7 @@ void purge_pipeline_caches() {
     failed_sig_tbl().clear();
 
     BuiltinCache& c = builtin_cache();
-    for (auto& kv : c.clearPipes) delete kv.second;
+    for (auto& kv : c.clearPipes) delete_pipeline_entry(kv.second);
     c.clearPipes.clear();
     for (int i = 0; i < 4; ++i) c.clearDSS[i] = nil;
     c.blitPipes.clear();
@@ -772,9 +801,10 @@ MetalPipeline* get_or_create_pipeline(
     id<MTLFunction> vertexFunction = vf->function;
     id<MTLFunction> fragmentFunction = nil;
     if (fragment_spirv && fragment_word_count > 0) {
+        const uint32_t fragOutputMask = color_count == 0 ? 0u : 0xffffffffu;
         MetalCompiledFunction* ff = get_or_compile_stage(
             pr, fragment_spirv, fragment_word_count,
-            spv::ExecutionModelFragment);
+            spv::ExecutionModelFragment, fragOutputMask);
         if (!ff || !ff->valid) return nullptr;
         fragmentFunction = ff->function;
     }
