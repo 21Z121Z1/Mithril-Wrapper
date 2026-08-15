@@ -51,6 +51,7 @@ jobs:
             tests/directmetal_terrain_semantics_smoke.c \
             -o build-terrain-semantics/directmetal_terrain_semantics_smoke -ldl
           clang -std=gnu11 -O0 -g -Wall -Wextra -Werror \
+            -DGL_VERTEX_ATTRIB_ARRAY_BUFFER_BINDING=0x889F \
             -IMithril-Wrapper-cpp/include \
             tests/directmetal_vertex_binding_smoke.c \
             -o build-terrain-semantics/directmetal_vertex_binding_smoke -ldl
