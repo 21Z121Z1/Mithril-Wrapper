@@ -1,0 +1,48 @@
+plugins {
+    id 'net.fabricmc.fabric-loom' version "${loom_version}"
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    minecraft "com.mojang:minecraft:${project.minecraft_version}"
+    implementation "net.fabricmc:fabric-loader:${project.loader_version}"
+    implementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
+    productionRuntimeMods "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(25)
+    }
+}
+
+def mithrilDylib = providers.gradleProperty('mithrilDylib').map { file(it).absolutePath }
+def glfwBridge = providers.gradleProperty('glfwBridge').map { file(it).absolutePath }
+def glfwDelegate = providers.gradleProperty('glfwDelegate').map { file(it).absolutePath }
+def evidenceRoot = providers.gradleProperty('evidenceRoot').map { file(it).absolutePath }
+
+tasks.register('runProductionClientGameTest', net.fabricmc.loom.task.prod.ClientProductionRunTask) {
+    dependsOn tasks.named('jar')
+    mods.from(tasks.named('jar'))
+    mods.from(configurations.productionRuntimeMods)
+
+    jvmArgs.add('-XstartOnFirstThread')
+    jvmArgs.add('-Dfabric.client.gametest')
+    jvmArgs.add('-Dfabric.client.gametest.disableNetworkSynchronizer=true')
+    jvmArgs.add("-Dmithril.e2e.root=${evidenceRoot.get()}")
+    jvmArgs.add("-Dorg.lwjgl.glfw.libname=${glfwBridge.get()}")
+    jvmArgs.add("-Dorg.lwjgl.opengl.libname=${mithrilDylib.get()}")
+
+    environment('MITHRIL_BACKEND', 'metal')
+    environment('MITHRIL_E2E_ROOT', evidenceRoot.get())
+    environment('MITHRIL_E2E_MITHRIL_DYLIB', mithrilDylib.get())
+    environment('MITHRIL_E2E_GLFW_DELEGATE', glfwDelegate.get())
+    environment('MITHRIL_DEBUG', '1')
+    environment('MTL_DEBUG_LAYER', '1')
+
+    useXVFB = false
+    runDir = file("${buildDir}/run/clientGameTest")
+}
