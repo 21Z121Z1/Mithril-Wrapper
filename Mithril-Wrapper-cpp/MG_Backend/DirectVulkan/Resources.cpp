@@ -2227,3 +2227,15 @@ VkFormat dvk_vk_format_for_gl(GLenum internal_format) {
 }
 
 } // extern "C"
+
+// DescriptorSet.cpp uses the helper through Resources.h's C++ namespace. The
+// implementation above lives in the generated C API block so its backend
+// prefix rewrite can keep the public entry-point list mechanical; bridge the
+// two linkages explicitly instead of relying on an accidental unmangled name.
+namespace mithril {
+namespace vk {
+VkBufferView get_or_create_texel_buffer_view(GLuint texName) {
+    return ::get_or_create_texel_buffer_view(texName);
+}
+} // namespace vk
+} // namespace mithril
