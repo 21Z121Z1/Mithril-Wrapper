@@ -800,7 +800,18 @@ void begin_render_pass(MetalTexture** color_views, int color_count,
         return;
     }
 
-    // A fresh encoder starts with DEFAULT state — replay the full shadow.
+    // A render pipeline is compatible with the attachment formats of the pass
+    // it was created for; unlike viewport/scissor/depth-stencil state it is
+    // therefore NOT dynamic state that may be replayed onto a new encoder.
+    // Drop the previous pass' PSO before replaying the true dynamic shadow.
+    // Every draw goes through bind_pipeline() and establishes the pipeline
+    // compiled for the current color/depth attachment signature.  This also
+    // prevents a clear in a newly-bound depth-only FBO from restoring a color
+    // PSO that Metal validation correctly rejects for that encoder.
+    e.boundPipeline = nullptr;
+    e.descriptorsBound = false;
+
+    // A fresh encoder starts with DEFAULT dynamic state — replay the shadow.
     apply_full_state(g_renderEncoder);
 
     e.passActive = true;
