@@ -28,6 +28,9 @@ jobs:
         run: |
           set -euo pipefail
           python3 ci/e2e/apply_gl_semantic_closure.py
+          # Workflow files are managed by the authenticated GitHub connector,
+          # not by GITHUB_TOKEN. Keep this job source-only.
+          git checkout -- .github/workflows/minecraft-client-e2e.yml
           git diff --check
 
       - name: Commit transformed source if needed
@@ -46,7 +49,6 @@ jobs:
             Mithril-Wrapper-cpp/MG_Impl/VertexArray.cpp \
             Mithril-Wrapper-cpp/MG_Impl/Drawing.cpp \
             Mithril-Wrapper-cpp/MG_State/State.h \
-            Mithril-Wrapper-cpp/MG_State/State.cpp \
-            .github/workflows/minecraft-client-e2e.yml
+            Mithril-Wrapper-cpp/MG_State/State.cpp
           git commit -m 'fix(gl): enforce semantic capability contract and state isolation'
           git push origin HEAD:${GITHUB_REF_NAME}
