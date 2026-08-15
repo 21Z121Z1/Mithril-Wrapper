@@ -48,6 +48,9 @@ thread_local GLFWwindow* g_current = nullptr;
 std::atomic<unsigned long long> g_context_count{0};
 std::atomic<unsigned long long> g_swap_count{0};
 std::atomic<unsigned long long> g_proc_count{0};
+std::string g_last_gl_vendor;
+std::string g_last_gl_renderer;
+std::string g_last_gl_version;
 
 std::string getenv_string(const char* name) {
     const char* value = std::getenv(name);
@@ -149,6 +152,17 @@ void write_state(const char* stage) {
         vendor = reinterpret_cast<const char*>(m.getString(GL_VENDOR));
         renderer = reinterpret_cast<const char*>(m.getString(GL_RENDERER));
         version = reinterpret_cast<const char*>(m.getString(GL_VERSION));
+        if (vendor && *vendor) g_last_gl_vendor = vendor;
+        if (renderer && *renderer) g_last_gl_renderer = renderer;
+        if (version && *version) g_last_gl_version = version;
+    } else {
+        // The final bridge-state snapshot is normally written after Minecraft
+        // detaches/destroys the context. Preserve the last identity observed
+        // while the production context was current instead of overwriting the
+        // evidence with empty strings during teardown.
+        vendor = g_last_gl_vendor.c_str();
+        renderer = g_last_gl_renderer.c_str();
+        version = g_last_gl_version.c_str();
     }
     FILE* f = std::fopen(tmp.c_str(), "w");
     if (!f) return;
@@ -278,8 +292,11 @@ GLFWwindow* glfwCreateWindow(int width, int height, const char* title,
         return nullptr;
     }
     const EGLint contextAttribs[] = {
-        EGL_CONTEXT_MAJOR_VERSION, 4,
-        EGL_CONTEXT_MINOR_VERSION, 6,
+        // Keep the bridge request aligned with the semantic capability
+        // contract. Higher-version compatibility symbols may still exist in
+        // the dylib, but this production E2E must not imply a 4.x context.
+        EGL_CONTEXT_MAJOR_VERSION, 3,
+        EGL_CONTEXT_MINOR_VERSION, 3,
         EGL_CONTEXT_OPENGL_PROFILE_MASK, EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT,
         EGL_NONE
     };
