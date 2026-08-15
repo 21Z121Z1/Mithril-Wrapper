@@ -769,11 +769,14 @@ MetalPipeline* get_or_create_pipeline(
                                                      vertex_word_count,
                                                      spv::ExecutionModelVertex);
     if (!vf || !vf->valid) return nullptr;
-    MetalCompiledFunction* ff = nullptr;
+    id<MTLFunction> vertexFunction = vf->function;
+    id<MTLFunction> fragmentFunction = nil;
     if (fragment_spirv && fragment_word_count > 0) {
-        ff = get_or_compile_stage(pr, fragment_spirv, fragment_word_count,
-                                  spv::ExecutionModelFragment);
+        MetalCompiledFunction* ff = get_or_compile_stage(
+            pr, fragment_spirv, fragment_word_count,
+            spv::ExecutionModelFragment);
         if (!ff || !ff->valid) return nullptr;
+        fragmentFunction = ff->function;
     }
 
     const uint64_t sig = pipeline_signature(
@@ -787,8 +790,8 @@ MetalPipeline* get_or_create_pipeline(
 
     /* ---- Build the PSO descriptor ---- */
     MTLRenderPipelineDescriptor* d = [[MTLRenderPipelineDescriptor alloc] init];
-    d.vertexFunction = vf->function;
-    d.fragmentFunction = (ff && ff->valid) ? ff->function : nil;
+    d.vertexFunction = vertexFunction;
+    d.fragmentFunction = fragmentFunction;
     /* MSAA：PSO 采样数必须等于 render pass 附件纹理的 sampleCount（Metal 校验
      * 强制）。与缓存键 / Vulkan 的 rasterizationSamples 同一来源。 */
     d.rasterSampleCount = (NSUInteger)mithril::draw_fbo_sample_count();
