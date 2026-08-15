@@ -6,6 +6,17 @@ plugins {
 
 repositories {
     mavenCentral()
+    maven {
+        name = 'Modrinth'
+        url = 'https://api.modrinth.com/maven'
+        content {
+            includeGroup 'maven.modrinth'
+        }
+    }
+}
+
+configurations {
+    sodiumRuntimeMods
 }
 
 dependencies {
@@ -13,6 +24,9 @@ dependencies {
     implementation "net.fabricmc:fabric-loader:${project.loader_version}"
     implementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
     productionRuntimeMods "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
+    // Official Modrinth Maven publication for Sodium 0.9.1 / Minecraft 26.2.
+    // Version id 2Yom1N68 corresponds to upstream tag mc26.2-0.9.1 (2cfb93d...).
+    sodiumRuntimeMods 'maven.modrinth:AANobbMI:2Yom1N68'
 }
 
 java {
@@ -23,7 +37,10 @@ java {
 
 def mithrilDylib = providers.gradleProperty('mithrilDylib').map { file(it).absolutePath }
 def glfwBridge = providers.gradleProperty('glfwBridge').map { file(it).absolutePath }
+def nativeGlfwBridge = providers.gradleProperty('nativeGlfwBridge').map { file(it).absolutePath }
 def evidenceRoot = providers.gradleProperty('evidenceRoot').map { file(it).absolutePath }
+def differentialBackend = providers.gradleProperty('e2eBackend').orElse('mithril')
+def differentialSodium = providers.gradleProperty('e2eSodium').map { it.toBoolean() }.orElse(false)
 
 abstract class MithrilClientProductionRunTask extends net.fabricmc.loom.task.prod.ClientProductionRunTask {
     @Override
@@ -40,6 +57,24 @@ abstract class MithrilClientProductionRunTask extends net.fabricmc.loom.task.pro
     }
 }
 
+abstract class DifferentialClientProductionRunTask extends net.fabricmc.loom.task.prod.ClientProductionRunTask {
+    @Override
+    protected void configureCommand(ExecSpec exec) {
+        super.configureCommand(exec)
+        def project = getProject()
+        def backend = (project.findProperty('e2eBackend') ?: 'mithril').toString()
+        exec.environment('MITHRIL_E2E_ROOT', project.file(project.property('evidenceRoot')).absolutePath)
+        exec.environment('MITHRIL_E2E_GLFW_DELEGATE', project.file(project.property('glfwDelegate')).absolutePath)
+        if (backend == 'mithril') {
+            exec.environment('MITHRIL_BACKEND', 'metal')
+            exec.environment('MITHRIL_E2E_MITHRIL_DYLIB', project.file(project.property('mithrilDylib')).absolutePath)
+            exec.environment('MITHRIL_DEBUG', '1')
+            exec.environment('MTL_DEBUG_LAYER', '1')
+            exec.environment('MTL_SHADER_VALIDATION', '0')
+        }
+    }
+}
+
 tasks.register('runProductionClientGameTest', MithrilClientProductionRunTask) {
     dependsOn tasks.named('jar')
     mods.from(tasks.named('jar'))
@@ -53,4 +88,35 @@ tasks.register('runProductionClientGameTest', MithrilClientProductionRunTask) {
 
     useXVFB = false
     runDir = file("${buildDir}/run/clientGameTest")
+}
+
+tasks.register('runDifferentialClientGameTest', DifferentialClientProductionRunTask) {
+    dependsOn tasks.named('jar')
+    mods.from(tasks.named('jar'))
+    mods.from(configurations.productionRuntimeMods)
+    if (differentialSodium.get()) {
+        mods.from(configurations.sodiumRuntimeMods)
+    }
+
+    def backend = differentialBackend.get()
+    def sodium = differentialSodium.get()
+    if (backend != 'native' && backend != 'mithril') {
+        throw new GradleException("e2eBackend must be native or mithril, got ${backend}")
+    }
+
+    jvmArgs.add('-Dfabric.client.gametest')
+    jvmArgs.add('-Dfabric.client.gametest.disableNetworkSynchronizer=true')
+    jvmArgs.add('-Dmithril.e2e.differential=true')
+    jvmArgs.add("-Dmithril.e2e.root=${evidenceRoot.get()}")
+    jvmArgs.add("-Dmithril.e2e.backend=${backend}")
+    jvmArgs.add("-Dmithril.e2e.expectSodium=${sodium}")
+    if (backend == 'native') {
+        jvmArgs.add("-Dorg.lwjgl.glfw.libname=${nativeGlfwBridge.get()}")
+    } else {
+        jvmArgs.add("-Dorg.lwjgl.glfw.libname=${glfwBridge.get()}")
+        jvmArgs.add("-Dorg.lwjgl.opengl.libname=${mithrilDylib.get()}")
+    }
+
+    useXVFB = false
+    runDir = file("${buildDir}/run/differential-${backend}-${sodium ? 'sodium' : 'vanilla'}")
 }
