@@ -1,0 +1,90 @@
+name: Minecraft native OpenGL Linux reference
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['ci/minecraft-on-mithril-e2e-*']
+    paths:
+      - '.github/workflows/minecraft-native-linux-reference.yml'
+      - '.github/ci/minecraft-e2e/**'
+      - 'ci/minecraft-e2e/**'
+
+permissions: { contents: read }
+
+concurrency:
+  group: minecraft-native-linux-reference-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native-reference:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      REF_ROOT: ${{ github.workspace }}/build/minecraft-native-linux-reference
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with: { persist-credentials: false }
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961
+        with: { distribution: temurin, java-version: '25' }
+      - uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb
+        with: { gradle-version: '9.4.1', cache-read-only: true, cache-cleanup: on-success }
+      - name: Install Xvfb and Mesa native OpenGL
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb libglfw3-dev libgl1-mesa-dri libglx-mesa0 mesa-utils
+          glxinfo -B || true
+      - name: Build native pre-swap capture bridge
+        id: bridge
+        shell: bash
+        run: |
+          set -euo pipefail
+          GLFW_REAL=$(ldconfig -p | awk '/libglfw.so.3/{print $NF; exit}')
+          test -f "$GLFW_REAL"
+          mkdir -p build/linux-reference
+          BRIDGE="$PWD/build/linux-reference/libglfw_native_capture.so"
+          clang++ -std=c++20 -shared -fPIC -Wall -Wextra -Werror \
+            ci/minecraft-e2e/native/glfw_linux_capture_bridge.cpp \
+            -x c++ ci/minecraft-e2e/native/prepresent_capture.mm -x none \
+            "$GLFW_REAL" -ldl -lGL -o "$BRIDGE"
+          echo "glfw_real=$GLFW_REAL" >> "$GITHUB_OUTPUT"
+          echo "bridge=$BRIDGE" >> "$GITHUB_OUTPUT"
+          ldd "$BRIDGE"
+      - name: Native OpenGL vanilla reference
+        id: vanilla
+        continue-on-error: true
+        shell: bash
+        run: |
+          ROOT="$REF_ROOT/native-vanilla"; mkdir -p "$ROOT/render"
+          python3 ci/minecraft-e2e/run-lane.py --timeout 360 --log "$ROOT/runner.log" -- \
+            gradle --no-daemon -p .github/ci/minecraft-e2e --stacktrace \
+            -Pe2eBackend=native -Pe2eSodium=false -Pe2eUseXVFB=true -PevidenceRoot="$ROOT" \
+            -PnativeGlfwBridge="${{ steps.bridge.outputs.bridge }}" \
+            -PglfwDelegate="${{ steps.bridge.outputs.glfw_real }}" runDifferentialClientGameTest
+      - name: Native OpenGL Sodium 0.9.1 reference
+        id: sodium
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: |
+          ROOT="$REF_ROOT/native-sodium"; mkdir -p "$ROOT/render"
+          python3 ci/minecraft-e2e/run-lane.py --timeout 360 --log "$ROOT/runner.log" -- \
+            gradle --no-daemon -p .github/ci/minecraft-e2e --stacktrace \
+            -Pe2eBackend=native -Pe2eSodium=true -Pe2eUseXVFB=true -PevidenceRoot="$ROOT" \
+            -PnativeGlfwBridge="${{ steps.bridge.outputs.bridge }}" \
+            -PglfwDelegate="${{ steps.bridge.outputs.glfw_real }}" runDifferentialClientGameTest
+      - name: Upload native reference evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: minecraft-native-linux-reference-${{ github.sha }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: build/minecraft-native-linux-reference/**
+      - name: Enforce both native reference lanes
+        if: always()
+        env:
+          VANILLA: ${{ steps.vanilla.outcome }}
+          SODIUM: ${{ steps.sodium.outcome }}
+        run: |
+          test "$VANILLA" = success
+          test "$SODIUM" = success
