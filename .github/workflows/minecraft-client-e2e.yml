@@ -28,7 +28,7 @@ jobs:
 
     steps:
       - name: Checkout exact source
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           submodules: recursive
           persist-credentials: false
@@ -61,13 +61,13 @@ jobs:
           }
 
       - name: Setup Java 25
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961
         with:
           distribution: temurin
           java-version: '25'
 
       - name: Setup Gradle 9.4.1 cache
-        uses: gradle/actions/setup-gradle@v6
+        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb
         with:
           gradle-version: '9.4.1'
           cache-read-only: ${{ github.ref != 'refs/heads/main' }}
@@ -149,6 +149,31 @@ jobs:
             exit $rc
           fi
           python3 ci/minecraft-e2e/evidence.py --root "$E2E_ROOT" event --event layered_texture_control_passed --phase native_control --message "cubemap faces and array layers map to Metal slices"
+
+      - name: Prove Minecraft final-blit and multi-draw indirect paths
+        shell: bash
+        env:
+          MITHRIL_DYLIB: ${{ steps.mithril.outputs.dylib }}
+          MITHRIL_BACKEND: metal
+        run: |
+          set +e
+          export DYLD_LIBRARY_PATH="$(brew --prefix)/lib"
+          clang -std=c11 -O0 -Wall -Wextra -Werror \
+            -IMithril-Wrapper-cpp/include \
+            -include tests/directmetal_minecraft_path_pfn_compat.h \
+            -o build-minecraft-e2e-native/directmetal_minecraft_path_smoke \
+            tests/directmetal_minecraft_path_smoke.c -ldl
+          rc=$?
+          if [[ $rc -eq 0 ]]; then
+            build-minecraft-e2e-native/directmetal_minecraft_path_smoke "$MITHRIL_DYLIB" \
+              | tee "$E2E_ROOT/native-minecraft-path-smoke.log"
+            rc=${PIPESTATUS[0]}
+          fi
+          if [[ $rc -ne 0 ]]; then
+            python3 ci/minecraft-e2e/evidence.py --root "$E2E_ROOT" fail --failure-id RENDER_MINECRAFT_PATH_CONTROL_FAILED --phase native_control --message "default-FBO final blit or multi-draw indirect GPU control failed"
+            exit $rc
+          fi
+          python3 ci/minecraft-e2e/evidence.py --root "$E2E_ROOT" event --event minecraft_path_control_passed --phase native_control --message "default-FBO final blit and multi-draw indirect controls passed"
 
       - name: Build GLFW to Mithril EGL/CAMetalLayer bridge
         id: bridge
@@ -255,7 +280,7 @@ jobs:
 
       - name: Upload compact agent context
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: mithril-minecraft-e2e-summary-${{ github.sha }}-${{ github.run_attempt }}
           retention-days: 7
@@ -272,14 +297,16 @@ jobs:
             build/minecraft-e2e-artifacts/bridge-state.json
             build/minecraft-e2e-artifacts/game-state.json
             build/minecraft-e2e-artifacts/readback-control.json
+            build/minecraft-e2e-artifacts/native-render-smoke.log
             build/minecraft-e2e-artifacts/native-layered-texture-smoke.log
+            build/minecraft-e2e-artifacts/native-minecraft-path-smoke.log
             build/minecraft-e2e-artifacts/render/samples.json
             build/minecraft-e2e-artifacts/manifest.json
 
       - name: Upload full E2E diagnostics
         if: always()
         continue-on-error: true
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: mithril-minecraft-e2e-diagnostics-${{ github.sha }}-${{ github.run_attempt }}
           retention-days: 7
