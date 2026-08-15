@@ -12,6 +12,10 @@
 // per-target via g_state->textureBindings[unit][target] (BindingSlot). The
 // legacy flat boundTextures[] / boundTextureTargets[] arrays are gone.
 #include "includes.h"
+#include "../MG_Backend/DirectVulkan/FormatMap.h"
+
+#include <cstdint>
+#include <limits>
 
 // Pnames that are standard OpenGL but absent from our minimal glcorearb.h.
 #ifndef GL_TEXTURE_SWIZZLE_RGBA
@@ -122,6 +126,100 @@ static mithril::Texture* bound_texture_for_target(GLenum target) {
     return t;
 }
 
+static bool checked_add_size(size_t a, size_t b, size_t* result) {
+    if (b > std::numeric_limits<size_t>::max() - a) return false;
+    *result = a + b;
+    return true;
+}
+
+static bool checked_mul_size(size_t a, size_t b, size_t* result) {
+    if (a != 0 && b > std::numeric_limits<size_t>::max() / a) return false;
+    *result = a * b;
+    return true;
+}
+
+/* With GL_PIXEL_UNPACK_BUFFER bound, the `pixels` argument is a byte offset
+ * into that buffer, not a host pointer. Minecraft 26.2 uses this path for
+ * texture and cubemap reloads. Resolve and bounds-check the offset before the
+ * Vulkan staging code sees it. */
+static const void* resolve_unpack_pixels(const void* pixels,
+                                         GLsizei width, GLsizei height, GLsizei depth,
+                                         GLenum format, GLenum type) {
+    const GLuint pboName = g_state->bufferBindings[
+        (int)mithril::BufferTarget::PixelUnpack].name;
+    if (pboName == 0) return pixels;
+
+    mithril::Buffer* pbo = mithril::state_get_buffer(pboName);
+    const uintptr_t offset = reinterpret_cast<uintptr_t>(pixels);
+    if (!pbo || offset > static_cast<uintptr_t>(pbo->size)) {
+        mithril::state_set_error(GL_INVALID_OPERATION);
+        return nullptr;
+    }
+
+    const int bpp = mithril::vk::host_texel_bytes(format, type);
+    if (width < 0 || height < 0 || depth < 0 || bpp <= 0 ||
+        g_state->pixelStore.unpackAlignment <= 0 ||
+        g_state->pixelStore.unpackRowLength < 0 ||
+        g_state->pixelStore.unpackImageHeight < 0 ||
+        g_state->pixelStore.unpackSkipPixels < 0 ||
+        g_state->pixelStore.unpackSkipRows < 0 ||
+        g_state->pixelStore.unpackSkipImages < 0) {
+        mithril::state_set_error(GL_INVALID_OPERATION);
+        return nullptr;
+    }
+
+    size_t required = 0;
+    if (width > 0 && height > 0 && depth > 0) {
+        const size_t alignment = (size_t)g_state->pixelStore.unpackAlignment;
+        const size_t rowPixels = g_state->pixelStore.unpackRowLength > 0
+            ? (size_t)g_state->pixelStore.unpackRowLength : (size_t)width;
+        const size_t imageHeight = g_state->pixelStore.unpackImageHeight > 0
+            ? (size_t)g_state->pixelStore.unpackImageHeight : (size_t)height;
+        size_t rowBytes = 0, rowStride = 0, layerStride = 0;
+        size_t start = 0, lastLayer = 0, lastRow = 0, lastPixels = 0;
+        if (!checked_mul_size(rowPixels, (size_t)bpp, &rowBytes) ||
+            !checked_add_size(rowBytes, alignment - 1u, &rowStride)) {
+            mithril::state_set_error(GL_INVALID_OPERATION);
+            return nullptr;
+        }
+        rowStride = rowStride / alignment * alignment;
+        if (!checked_mul_size(rowStride, imageHeight, &layerStride) ||
+            !checked_mul_size((size_t)g_state->pixelStore.unpackSkipImages,
+                              layerStride, &start) ||
+            !checked_mul_size((size_t)g_state->pixelStore.unpackSkipRows,
+                              rowStride, &lastRow) ||
+            !checked_add_size(start, lastRow, &start) ||
+            !checked_mul_size((size_t)g_state->pixelStore.unpackSkipPixels,
+                              (size_t)bpp, &lastPixels) ||
+            !checked_add_size(start, lastPixels, &start) ||
+            !checked_mul_size((size_t)(depth - 1), layerStride, &lastLayer) ||
+            !checked_add_size(start, lastLayer, &required) ||
+            !checked_mul_size((size_t)(height - 1), rowStride, &lastRow) ||
+            !checked_add_size(required, lastRow, &required) ||
+            !checked_mul_size((size_t)width, (size_t)bpp, &lastPixels) ||
+            !checked_add_size(required, lastPixels, &required)) {
+            mithril::state_set_error(GL_INVALID_OPERATION);
+            return nullptr;
+        }
+    }
+
+    const size_t bufferSize = (size_t)pbo->size;
+    if ((size_t)offset > bufferSize || required > bufferSize - (size_t)offset) {
+        mithril::state_set_error(GL_INVALID_OPERATION);
+        return nullptr;
+    }
+
+    void* base = backend_get_buffer_mapped_pointer(pboName);
+    if (!base) {
+        if (pbo->data.size() < bufferSize) {
+            mithril::state_set_error(GL_INVALID_OPERATION);
+            return nullptr;
+        }
+        base = pbo->data.data();
+    }
+    return static_cast<const uint8_t*>(base) + offset;
+}
+
 void glTexImage2D(GLenum target, GLint level, GLint internalFormat,
                   GLsizei width, GLsizei height, GLint border,
                   GLenum format, GLenum type, const void* pixels) {
@@ -172,7 +270,9 @@ void glTexImage2D(GLenum target, GLint level, GLint internalFormat,
     // MobileGL 始终用 base level 尺寸作为 VkImage extent。
     backend_get_or_create_texture(t->id, t->width, t->height, 1, t->levels,
                                   internalFormat, target, 1);
-    if (pixels) {
+    const void* uploadPixels = resolve_unpack_pixels(pixels, width, height, 1,
+                                                     format, type);
+    if (uploadPixels) {
         MGUnpackParams unpack{
             g_state->pixelStore.unpackAlignment,
             g_state->pixelStore.unpackRowLength,
@@ -193,7 +293,7 @@ void glTexImage2D(GLenum target, GLint level, GLint internalFormat,
             uploadZ = (GLint)(target - GL_TEXTURE_CUBE_MAP_POSITIVE_X);
         }
         backend_texture_upload(t->id, level, 0, 0, uploadZ, width, height, 1,
-                               format, type, pixels, &unpack,
+                               format, type, uploadPixels, &unpack,
                                /*is_full_upload=*/1);
     }
 }
@@ -215,7 +315,9 @@ void glTexImage3D(GLenum target, GLint level, GLint internalFormat,
 
     backend_get_or_create_texture(t->id, width, height, depth, t->levels,
                                   internalFormat, target, 1);
-    if (pixels) {
+    const void* uploadPixels = resolve_unpack_pixels(pixels, width, height, depth,
+                                                     format, type);
+    if (uploadPixels) {
         MGUnpackParams unpack{
             g_state->pixelStore.unpackAlignment,
             g_state->pixelStore.unpackRowLength,
@@ -225,7 +327,7 @@ void glTexImage3D(GLenum target, GLint level, GLint internalFormat,
             g_state->pixelStore.unpackSkipImages
         };
         backend_texture_upload(t->id, level, 0, 0, 0, width, height, depth,
-                               format, type, pixels, &unpack,
+                               format, type, uploadPixels, &unpack,
                                /*is_full_upload=*/1);
     }
 }
@@ -290,7 +392,10 @@ void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset,
                      GLenum format, GLenum type, const void* pixels) {
     MITHRIL_ENSURE_INIT();
     mithril::Texture* t = bound_texture_for_target(target);
-    if (!t || !pixels) return;
+    if (!t) return;
+    const void* uploadPixels = resolve_unpack_pixels(pixels, width, height, 1,
+                                                     format, type);
+    if (!uploadPixels) return;
     MGUnpackParams unpack{
         g_state->pixelStore.unpackAlignment,
         g_state->pixelStore.unpackRowLength,
@@ -307,7 +412,7 @@ void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset,
         subZ = (GLint)(target - GL_TEXTURE_CUBE_MAP_POSITIVE_X);
     }
     backend_texture_upload(t->id, level, xoffset, yoffset, subZ,
-                           width, height, 1, format, type, pixels, &unpack,
+                           width, height, 1, format, type, uploadPixels, &unpack,
                            /*is_full_upload=*/0);
 }
 
@@ -317,7 +422,10 @@ void glTexSubImage3D(GLenum target, GLint level,
                      GLenum format, GLenum type, const void* pixels) {
     MITHRIL_ENSURE_INIT();
     mithril::Texture* t = bound_texture_for_target(target);
-    if (!t || !pixels) return;
+    if (!t) return;
+    const void* uploadPixels = resolve_unpack_pixels(pixels, width, height, depth,
+                                                     format, type);
+    if (!uploadPixels) return;
     MGUnpackParams unpack{
         g_state->pixelStore.unpackAlignment,
         g_state->pixelStore.unpackRowLength,
@@ -327,7 +435,7 @@ void glTexSubImage3D(GLenum target, GLint level,
         g_state->pixelStore.unpackSkipImages
     };
     backend_texture_upload(t->id, level, xoffset, yoffset, zoffset,
-                           width, height, depth, format, type, pixels, &unpack,
+                           width, height, depth, format, type, uploadPixels, &unpack,
                            /*is_full_upload=*/0);
 }
 

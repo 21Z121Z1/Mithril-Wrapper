@@ -395,7 +395,11 @@ void safe_device_wait_idle();
 // commit_frame(). Records the current frame slot so a sync object stamped with
 // the returned serial can be completed exactly when that slot's fence signals.
 uint64_t backend_frame_serial_advance(int frameSlot);
-// extern "C"：与 Backend.h 的全局 C 声明合并（MG_Impl/Drawing.cpp 跨命名空间调用）。
+// extern "C"：与 Backend.h 的全局 C 声明合并（MG_Impl/Drawing.cpp、egl/egl.cpp
+// 跨命名空间以 mithril::vk:: 限定名调用同一 C 链接符号）。
+// Returns the latest serial that has actually been submitted to the queue.
+extern "C" uint64_t backend_current_submit_serial();
+// Returns the highest serial whose GPU submission has definitely completed.
 extern "C" uint64_t backend_last_completed_serial();
 // Block (or, with timeout==0, poll) until the submission bearing `serial` has
 // completed. Returns true if completed, false if still pending (timeout==0) or

@@ -36,6 +36,31 @@
 #ifndef GL_INVALID_INDEX
 #define GL_INVALID_INDEX 0xFFFFFFFFu
 #endif
+/* GLsync 常量：精简 glcorearb.h 未包含 fence-sync 块，按 Khronos 注册表值定义 */
+#ifndef GL_SYNC_GPU_COMMANDS_COMPLETE
+#define GL_SYNC_GPU_COMMANDS_COMPLETE 0x9117
+#endif
+#ifndef GL_SYNC_FLUSH_COMMANDS_BIT
+#define GL_SYNC_FLUSH_COMMANDS_BIT 0x00000001
+#endif
+#ifndef GL_ALREADY_SIGNALED
+#define GL_ALREADY_SIGNALED 0x911A
+#endif
+#ifndef GL_TIMEOUT_EXPIRED
+#define GL_TIMEOUT_EXPIRED 0x911B
+#endif
+#ifndef GL_CONDITION_SATISFIED
+#define GL_CONDITION_SATISFIED 0x911C
+#endif
+#ifndef GL_SIGNALED
+#define GL_SIGNALED 0x9119
+#endif
+#ifndef GL_UNSIGNALED
+#define GL_UNSIGNALED 0x9118
+#endif
+#ifndef GL_SYNC_STATUS
+#define GL_SYNC_STATUS 0x9114
+#endif
 
 /* ---- 依赖的 GL 函数指针 typedef（与 glcorearb.h 签名一致） -------------- */
 typedef void      (*genTextures_fn)(GLsizei, GLuint*);
@@ -69,6 +94,9 @@ typedef void      (*useProgram_fn)(GLuint);
 typedef void      (*viewport_fn)(GLint, GLint, GLsizei, GLsizei);
 typedef void      (*clearColor_fn)(GLfloat, GLfloat, GLfloat, GLfloat);
 typedef void      (*clear_fn)(GLbitfield);
+typedef void      (*clearDepth_fn)(GLdouble);
+typedef void      (*enable_fn)(GLenum);
+typedef void      (*disable_fn)(GLenum);
 typedef void      (*drawArrays_fn)(GLenum, GLint, GLsizei);
 typedef void      (*finish_fn)(void);
 typedef void      (*readPixels_fn)(GLint, GLint, GLsizei, GLsizei,
@@ -88,6 +116,10 @@ typedef GLuint    (*getUniformBlockIndex_fn)(GLuint, const GLchar*);
 typedef void      (*uniformBlockBinding_fn)(GLuint, GLuint, GLuint);
 typedef void      (*uniform1i_fn)(GLint, GLint);
 typedef void      (*uniform4f_fn)(GLint, GLfloat, GLfloat, GLfloat, GLfloat);
+typedef GLsync    (*fenceSync_fn)(GLenum, GLbitfield);
+typedef GLenum    (*clientWaitSync_fn)(GLsync, GLbitfield, GLuint64);
+typedef void      (*deleteSync_fn)(GLsync);
+typedef void      (*getSynciv_fn)(GLsync, GLenum, GLsizei, GLsizei*, GLint*);
 
 /* ---- 断言基础设施（Uniaball 风格） -------------------------------------- */
 static int failures = 0;
@@ -156,6 +188,9 @@ int main(int argc, char** argv) {
     viewport_fn           viewport           = NULL;
     clearColor_fn         clearColor         = NULL;
     clear_fn              clear              = NULL;
+    clearDepth_fn         clearDepth         = NULL;
+    enable_fn             enable             = NULL;
+    disable_fn            disable            = NULL;
     drawArrays_fn         drawArrays         = NULL;
     finish_fn             finish             = NULL;
     readPixels_fn         readPixels         = NULL;
@@ -173,6 +208,10 @@ int main(int argc, char** argv) {
     uniformBlockBinding_fn uniformBlockBinding = NULL;
     uniform1i_fn          uniform1i          = NULL;
     uniform4f_fn          uniform4f          = NULL;
+    fenceSync_fn          fenceSync          = NULL;
+    clientWaitSync_fn     clientWaitSync     = NULL;
+    deleteSync_fn         deleteSync         = NULL;
+    getSynciv_fn          getSynciv          = NULL;
 
     RESOLVE(genTextures, "glGenTextures");
     RESOLVE(bindTexture, "glBindTexture");
@@ -202,6 +241,9 @@ int main(int argc, char** argv) {
     RESOLVE(viewport, "glViewport");
     RESOLVE(clearColor, "glClearColor");
     RESOLVE(clear, "glClear");
+    RESOLVE(clearDepth, "glClearDepth");
+    RESOLVE(enable, "glEnable");
+    RESOLVE(disable, "glDisable");
     RESOLVE(drawArrays, "glDrawArrays");
     RESOLVE(finish, "glFinish");
     RESOLVE(readPixels, "glReadPixels");
@@ -219,6 +261,10 @@ int main(int argc, char** argv) {
     RESOLVE(uniformBlockBinding, "glUniformBlockBinding");
     RESOLVE(uniform1i, "glUniform1i");
     RESOLVE(uniform4f, "glUniform4f");
+    RESOLVE(fenceSync, "glFenceSync");
+    RESOLVE(clientWaitSync, "glClientWaitSync");
+    RESOLVE(deleteSync, "glDeleteSync");
+    RESOLVE(getSynciv, "glGetSynciv");
     if (failures) { printf("RENDER SMOKE FAILED (missing symbols)\n"); dlclose(h); return 1; }
 
     /* ---- 版本（走 backend 起来后的 glGetIntegerv，验证偏移修复） ---------- */
@@ -337,6 +383,58 @@ int main(int argc, char** argv) {
           "corner pixel is red (r=%d g=%d b=%d a=%d) — full-screen triangle rasterized",
           px[0], px[1], px[2], px[3]);
     CHECK(getError() == GL_NO_ERROR, "glReadPixels leaves no error");
+
+
+    /* ---- depth-only FBO: shadow/depth-prepass path ----------------------- */
+    {
+        GLuint depthTex = 0, depthFbo = 0;
+        genTextures(1, &depthTex);
+        bindTexture(GL_TEXTURE_2D, depthTex);
+        texImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT32F, R, C, 0,
+         GL_DEPTH_COMPONENT, GL_FLOAT, NULL);
+        genFramebuffers(1, &depthFbo);
+        bindFramebuffer(GL_FRAMEBUFFER, depthFbo);
+        framebufferTex2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, depthTex, 0);
+        GLenum depthStatus = checkFBO(GL_FRAMEBUFFER);
+        CHECK(depthStatus == GL_FRAMEBUFFER_COMPLETE,
+    "depth-only FBO complete (status=0x%x)", depthStatus);
+
+        viewport(0, 0, R, C);
+        enable(GL_DEPTH_TEST);
+        clearDepth(1.0);
+        clear(GL_DEPTH_BUFFER_BIT);
+        useProgram(prog);
+        bindVertexArray(vao);
+        drawArrays(GL_TRIANGLES, 0, 3);
+        finish();
+        float depthPx = 1.0f;
+        readPixels(R / 2, C / 2, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT, &depthPx);
+        CHECK(depthPx > 0.1f && depthPx < 0.9f,
+    "depth-only GPU draw updated center depth (depth=%f)", depthPx);
+        CHECK(getError() == GL_NO_ERROR, "depth-only draw/readback leaves no error");
+        disable(GL_DEPTH_TEST);
+        bindFramebuffer(GL_FRAMEBUFFER, fbo);
+        viewport(0, 0, R, C);
+    }
+
+    /* ---- GLsync: fence maps to real Vulkan submit serial ---------------- */
+    {
+        useProgram(prog);
+        bindVertexArray(vao);
+        drawArrays(GL_TRIANGLES, 0, 3);  /* pending GPU work before fence */
+        GLsync sync = fenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+        CHECK(sync != NULL, "glFenceSync created a real submission fence");
+        GLenum wait = clientWaitSync(sync, GL_SYNC_FLUSH_COMMANDS_BIT, 1000000000ULL);
+        CHECK(wait == GL_ALREADY_SIGNALED || wait == GL_CONDITION_SATISFIED,
+    "glClientWaitSync observes GPU completion (result=0x%x)", wait);
+        GLint status = GL_UNSIGNALED;
+        GLsizei length = 0;
+        getSynciv(sync, GL_SYNC_STATUS, 1, &length, &status);
+        CHECK(length == 1 && status == GL_SIGNALED,
+    "glGetSynciv reports GL_SIGNALED after wait (status=0x%x)", status);
+        deleteSync(sync);
+        CHECK(getError() == GL_NO_ERROR, "GLsync lifecycle leaves no error");
+    }
 
     /* =====================================================================
      * 扩展测试：贴图采样 + mipmap + 动态 UBO + 多帧 glFinish 稳定性

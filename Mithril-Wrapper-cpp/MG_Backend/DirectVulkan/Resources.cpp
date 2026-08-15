@@ -1198,10 +1198,14 @@ VkBuffer backend_get_or_create_buffer(GLuint name, const void* data, size_t size
         }
         // ---- 路径 A: GPU 已读完这个 buffer → 原地覆写（安全）----
         if (data && size > 0) {
-            void* dst = nullptr;
-            if (vkMapMemory(b->device, it->second.memory, 0, size, 0, &dst) == VK_SUCCESS && dst) {
-                std::memcpy(dst, data, size);
-                vkUnmapMemory(b->device, it->second.memory);
+            if (it->second.persistentlyMapped && it->second.mapped) {
+                std::memcpy(it->second.mapped, data, size);
+            } else {
+                void* dst = nullptr;
+                if (vkMapMemory(b->device, it->second.memory, 0, size, 0, &dst) == VK_SUCCESS && dst) {
+                    std::memcpy(dst, data, size);
+                    vkUnmapMemory(b->device, it->second.memory);
+                }
             }
         }
         LOG_RESOURCE("buf INPLACE name=%u size=%llu (cap=%llu)",
@@ -1324,10 +1328,15 @@ void backend_buffer_upload(GLuint name, GLintptr offset, const void* data, size_
             mithril::vk::safe_device_wait_idle();
             if (!mithril::vk::buffer_maybe_inflight(it->second)) {
                 // 已脱离在飞：安全原地写入，数据必达 GPU。
-                void* dst = nullptr;
-                vkMapMemory(b->device, it->second.memory, (VkDeviceSize)offset,
-                            (VkDeviceSize)size, 0, &dst);
-                if (dst) { std::memcpy(dst, data, (size_t)size); vkUnmapMemory(b->device, it->second.memory); }
+                if (it->second.persistentlyMapped && it->second.mapped) {
+                    std::memcpy(static_cast<uint8_t*>(it->second.mapped) + offset,
+                                data, (size_t)size);
+                } else {
+                    void* dst = nullptr;
+                    vkMapMemory(b->device, it->second.memory, (VkDeviceSize)offset,
+                                (VkDeviceSize)size, 0, &dst);
+                    if (dst) { std::memcpy(dst, data, (size_t)size); vkUnmapMemory(b->device, it->second.memory); }
+                }
                 mithril::vk::stamp_buffer_write(it->second);
                 return;
             }
@@ -1346,10 +1355,15 @@ void backend_buffer_upload(GLuint name, GLintptr offset, const void* data, size_
         return;
     }
     // Buffer 不在飞：可以安全原地更新。
-    void* dst = nullptr;
     if (data && size > 0) {
-        vkMapMemory(b->device, it->second.memory, offset, size, 0, &dst);
-        if (dst) { std::memcpy(dst, data, size); vkUnmapMemory(b->device, it->second.memory); }
+        if (it->second.persistentlyMapped && it->second.mapped) {
+            std::memcpy(static_cast<uint8_t*>(it->second.mapped) + offset,
+                        data, size);
+        } else {
+            void* dst = nullptr;
+            vkMapMemory(b->device, it->second.memory, offset, size, 0, &dst);
+            if (dst) { std::memcpy(dst, data, size); vkUnmapMemory(b->device, it->second.memory); }
+        }
     }
     mithril::vk::stamp_buffer_write(it->second);
 }

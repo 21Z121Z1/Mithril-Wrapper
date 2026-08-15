@@ -50,6 +50,9 @@ void set_load_clear(bool clear);   // true = CLEAR (glClear), false = LOAD
  * wait on it. Pass nullptr to detach (headless / no surface).
  */
 void set_active_swapchain(Swapchain* sc);
+// Read-only access for out-of-band submits (safe_device_wait_idle) that
+// must consume the same acquire semaphore as normal frame submits.
+Swapchain* active_swapchain();
 
 // Begin a dynamic-rendering pass against the given attachments.
 void begin_render_pass(VkImageView* color_views, int color_count,

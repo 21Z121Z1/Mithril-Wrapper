@@ -536,14 +536,14 @@ struct Sync {
     void*       handle = nullptr;
     GLenum      condition = GL_SYNC_GPU_COMMANDS_COMPLETE;
     GLbitfield  flags = 0;
+    // Vulkan submission serial that must complete before this GL fence signals.
+    // Zero means there was no submitted GPU work before the fence (or it has
+    // already completed and been folded into `signaled`). glFenceSync flushes
+    // eagerly, so this is the EXACT serial of the submit containing every
+    // command that preceded the fence.
+    uint64_t    submitSerial = 0;
     bool        signaled = false;
     bool        markedForDeletion = false;
-    // ---- 真实 GPU fence 语义（Device.cpp 提交序号机制）----
-    // glFenceSync 时刻"下一次提交"的序号（= backend_current_submit_serial()+1）。
-    // fence 视为在该次提交包含的所有命令之后。signaled 判定：
-    //   serial <= backend_last_completed_serial()   → 已完成（真 GPU 水位线）
-    //   serial >  backend_current_submit_serial()   → fence 之后零命令待提交
-    uint64_t    serial = 0;
 };
 
 // ---- Transform Feedback ----

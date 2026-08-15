@@ -16,3 +16,5 @@ extern "C" bool surface_get_size(void* native_window, int* out_w, int* out_h) {
     if (out_h) *out_h = 64;
     return true;
 }
+
+extern "C" void surface_destroy(void* native_window) { (void)native_window; }

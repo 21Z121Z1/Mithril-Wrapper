@@ -14,21 +14,32 @@
 // linker, not on the backend.
 #include "includes.h"
 
+#include <cstdint>
 #include <dlfcn.h>
-#include <cstring>
 
 extern "C" {
 
 /*
- * Resolve `name` to a function pointer. First check our own dylib via
- * dlsym(RTLD_DEFAULT, ...) — that catches every GL entry point we export.
- * Unknown names return NULL, which is the GLX spec behaviour.
+ * Resolve `name` to a function pointer. On Apple, resolve against the image
+ * that owns this resolver. RTLD_DEFAULT is not ownership-preserving: iOS may
+ * already have OpenGLES loaded, and a same-named system symbol can win the
+ * global lookup. Unknown names return NULL, which is the GLX spec behaviour.
  */
 static void* lookup_symbol(const char* name) {
     if (!name) return nullptr;
-    // dlsym(RTLD_DEFAULT) searches the global symbol table incl. this dylib
-    // (we compile with -fvisibility=default and the GL symbols are extern "C").
-    void* p = dlsym(RTLD_DEFAULT, name);
+    void* p = nullptr;
+#if defined(__APPLE__)
+    static void* selfHandle = []() -> void* {
+        Dl_info info = {};
+        const void* resolver = reinterpret_cast<const void*>(
+            reinterpret_cast<uintptr_t>(&lookup_symbol));
+        if (!dladdr(resolver, &info) || !info.dli_fname) return nullptr;
+        return dlopen(info.dli_fname, RTLD_NOW | RTLD_LOCAL);
+    }();
+    if (selfHandle) p = dlsym(selfHandle, name);
+#else
+    p = dlsym(RTLD_DEFAULT, name);
+#endif
     if (p) return p;
     // Some hosts probe for glX* entry points. We don't implement them, but
     // returning a generic no-op stub would mislead the caller into thinking

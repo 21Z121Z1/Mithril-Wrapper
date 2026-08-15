@@ -388,6 +388,12 @@ static bool remap_descriptor_bindings(
     std::vector<std::vector<uint32_t>*> modules = {&vs, &fs};
     std::vector<SpvReflectShaderModule> reflectModules;
     reflectModules.reserve(2);
+    // A user-declared uniform block is one GL logical binding even though
+    // SPIR-V reflection may expose a different descriptor variable in each
+    // stage. Keep the name-to-binding map across VS and FS. The synthetic
+    // mithril_GlobalBlock remains per-stage because it is assembled from
+    // stage-local loose uniforms.
+    std::unordered_map<std::string, uint32_t> sharedUboBindings;
 
     for (auto* spv : modules) {
         if (spv->empty()) continue;
@@ -426,7 +432,34 @@ static bool remap_descriptor_bindings(
         std::vector<std::pair<uint32_t, uint32_t>> plan;  // (spirv_id, binding)
         plan.reserve(bindings.size());
         for (auto* binding : bindings) {
-            plan.emplace_back(binding->spirv_id, nextBinding++);
+            // SPIRV-Reflect normally reports the descriptor variable name in
+            // `name`. For anonymous GLSL block declarations (`uniform Foo
+            // { ... };`) that field is empty, but `type_description->type_name`
+            // still carries the logical block name. Both forms must exercise
+            // the same cross-stage identity.
+            const char* reflectedName = binding->name;
+            if ((!reflectedName || reflectedName[0] == '\0') &&
+                binding->type_description && binding->type_description->type_name) {
+                reflectedName = binding->type_description->type_name;
+            }
+            const bool namedUbo =
+                binding->descriptor_type == SPV_REFLECT_DESCRIPTOR_TYPE_UNIFORM_BUFFER &&
+                reflectedName && reflectedName[0] != '\0' &&
+                std::strcmp(reflectedName, kGlobalBlockName) != 0;
+            uint32_t assigned = 0;
+            if (namedUbo) {
+                const std::string name(reflectedName);
+                auto it = sharedUboBindings.find(name);
+                if (it != sharedUboBindings.end()) {
+                    assigned = it->second;
+                } else {
+                    assigned = nextBinding++;
+                    sharedUboBindings.emplace(name, assigned);
+                }
+            } else {
+                assigned = nextBinding++;
+            }
+            plan.emplace_back(binding->spirv_id, assigned);
         }
 
         for (const auto& [targetId, assigned] : plan) {

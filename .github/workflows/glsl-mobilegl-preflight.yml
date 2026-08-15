@@ -1,0 +1,94 @@
+name: GLSL MobileGL preflight closure
+
+on:
+  push:
+    branches:
+      - refactor/glsl-mobilegl-preflight-20260814
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: glsl-mobilegl-preflight-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: macos-26
+    timeout-minutes: 90
+    steps:
+      - name: Checkout source under test
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Verify port invariants
+        run: |
+          set -euo pipefail
+          grep -q 'selfHandle' Mithril-Wrapper-cpp/MG_Impl/lookup.cpp
+          grep -q 'sharedUboBindings' Mithril-Wrapper-cpp/MG_Impl/Shader.cpp
+          grep -q 'type_description->type_name' Mithril-Wrapper-cpp/MG_Impl/Shader.cpp
+          grep -q 'resolve_unpack_pixels' Mithril-Wrapper-cpp/MG_Impl/Texture.cpp
+          grep -q 'backend_device_max_sampler_anisotropy' Mithril-Wrapper-cpp/MG_Impl/Getter.cpp
+          grep -q 'TARGET_OS_IPHONE' Mithril-Wrapper-cpp/MG_Impl/Drawing.cpp
+          git diff --check
+
+      - name: Install Vulkan loader and MoltenVK
+        run: brew install vulkan-loader molten-vk
+
+      - name: Configure native macOS build
+        run: |
+          cmake -S . -B build-preflight \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_C_FLAGS='-Wno-error' \
+            -DCMAKE_CXX_FLAGS='-Wno-error'
+
+      - name: Build native Mithril
+        run: cmake --build build-preflight --config RelWithDebInfo --target mithril -j$(sysctl -n hw.ncpu)
+
+      - name: Run existing real-GPU render smoke
+        run: |
+          set -euo pipefail
+          DYLIB=$(find build-preflight -name 'libmithril.dylib' -type f | head -1)
+          test -n "$DYLIB"
+          export DYLD_LIBRARY_PATH="$(brew --prefix)/lib"
+          export MITHRIL_DEBUG=1
+          clang -std=c11 -O0 -Wall -Wextra -IMithril-Wrapper-cpp/include \
+            -o /tmp/render_smoke tests/render_smoke.c -ldl
+          /tmp/render_smoke "$DYLIB"
+
+      - name: Run synthetic Minecraft GUI smoke headless
+        run: |
+          set -euo pipefail
+          DYLIB=$(find build-preflight -name 'libmithril.dylib' -type f | head -1)
+          export DYLD_LIBRARY_PATH="$(brew --prefix)/lib"
+          export MITHRIL_DEBUG=1
+          clang -std=c11 -O0 -Wall -Wextra -IMithril-Wrapper-cpp/include \
+            -o /tmp/mc_gui_smoke tests/mc_gui_smoke.c -ldl
+          /tmp/mc_gui_smoke "$DYLIB"
+
+      - name: Run synthetic Minecraft GUI smoke through EGL
+        run: |
+          set -euo pipefail
+          DYLIB=$(find build-preflight -name 'libmithril.dylib' -type f | head -1)
+          export DYLD_LIBRARY_PATH="$(brew --prefix)/lib"
+          export MITHRIL_DEBUG=1
+          /tmp/mc_gui_smoke "$DYLIB" --egl
+
+      - name: Verify tests did not mutate tracked source
+        run: |
+          set -euo pipefail
+          git diff --check
+          git diff --exit-code
+          git diff --cached --exit-code
+          git submodule foreach --recursive 'git diff --check && git diff --exit-code && git diff --cached --exit-code'
+
+          # Out-of-tree CMake output is expected. Any other untracked source
+          # file is not: surface it explicitly rather than treating all build
+          # products as a source mutation.
+          unexpected_untracked="$(git ls-files --others --exclude-standard | grep -v '^build-preflight/' || true)"
+          if [ -n "$unexpected_untracked" ]; then
+            printf 'Unexpected untracked files after validation:\n%s\n' "$unexpected_untracked"
+            exit 1
+          fi
