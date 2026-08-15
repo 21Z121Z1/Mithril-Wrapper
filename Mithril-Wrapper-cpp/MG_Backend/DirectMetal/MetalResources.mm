@@ -88,7 +88,7 @@ static MetalBuffer* create_metal_buffer(GLuint name, const void* data,
         // frontend uploads fresh contents right after a glBufferData call.
         if (data && mb->contents) {
             std::memcpy(mb->contents, data, size);
-            if (mb->managed) [mb->buf didModifyRange:NSMakeRange(0, size)];
+            MITHRIL_DMT_SYNC(mb, 0, size);
         }
         return mb;
     }
@@ -100,13 +100,12 @@ static MetalBuffer* create_metal_buffer(GLuint name, const void* data,
     mb->persistent = persistent;
     mb->capacity = cap;
     mb->buf = [b->device newBufferWithLength:cap
-                                      options:(mb->managed ? MTLResourceStorageModeManaged
-                                                           : MTLResourceStorageModeShared)];
+                                      options:MITHRIL_DMT_STORAGE(mb->managed)];
     if (mb->buf == nil) { mb->capacity = 0; return nullptr; }
     mb->contents = mb->buf.contents;
     if (data && mb->contents) {
         std::memcpy(mb->contents, data, size);
-        if (mb->managed) [mb->buf didModifyRange:NSMakeRange(0, size)];
+        MITHRIL_DMT_SYNC(mb, 0, size);
     }
     return mb;
 }
@@ -255,7 +254,7 @@ void dmt_internal_buffer_upload(GLuint name, GLintptr offset, const void* data,
         mb = grown;
     }
     std::memcpy((uint8_t*)mb->contents + offset, data, size);
-    if (mb->managed) [mb->buf didModifyRange:NSMakeRange(offset, size)];
+    MITHRIL_DMT_SYNC(mb, offset, size);
 }
 
 // ---- Samplers ---------------------------------------------------------------
@@ -638,8 +637,7 @@ int dmt_internal_read_pixels(MetalTexture* colorSrc, int x, int y, int w, int h,
     NSUInteger rowBytes = (NSUInteger)w * 4;
     NSUInteger total = rowBytes * (NSUInteger)h;
     id<MTLBuffer> rb = [b->device newBufferWithLength:total
-                                              options:(b->unifiedMemory ? MTLResourceStorageModeShared
-                                                                        : MTLResourceStorageModeManaged)];
+                                              options:MITHRIL_DMT_STORAGE(!b->unifiedMemory)];
     if (rb == nil) return 0;
 
     // Synchronous one-shot command buffer (does not touch the frame buffer).

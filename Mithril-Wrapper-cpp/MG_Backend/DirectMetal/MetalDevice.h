@@ -43,6 +43,22 @@
 
 #define MITHRIL_DMT_MAX_FRAMES_IN_FLIGHT 2
 
+// Platform compatibility: [id<MTLBuffer> didModifyRange:] and
+// MTLResourceStorageModeManaged are macOS-only APIs. On iOS (unified memory)
+// buffers are always Shared and need no explicit sync.
+// Wrap all didModifyRange calls in MITHRIL_DMT_SYNC so they compile out on iOS.
+#if TARGET_OS_OSX
+    #define MITHRIL_DMT_SYNC(mb, off, len) do { \
+        if ((mb) && (mb)->managed) \
+            [(mb)->buf didModifyRange:NSMakeRange((NSUInteger)(off), (NSUInteger)((len) ? (len) : 1))]; \
+    } while (0)
+    #define MITHRIL_DMT_STORAGE(managed) \
+        ((managed) ? MTLResourceStorageModeManaged : MTLResourceStorageModeShared)
+#else
+    #define MITHRIL_DMT_SYNC(mb, off, len) ((void)0)
+    #define MITHRIL_DMT_STORAGE(managed) MTLResourceStorageModeShared
+#endif
+
 namespace mithril {
 namespace dmt {
 

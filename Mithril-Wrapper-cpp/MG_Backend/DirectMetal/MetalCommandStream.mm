@@ -189,9 +189,7 @@ bool scratch_alloc(NSUInteger bytes, id<MTLBuffer>& outBuf, NSUInteger& outOff,
         if (s.buf != nil) newCap = s.capacity * 2;
         if (newCap < bytes) newCap = bytes;
         id<MTLBuffer> nb = [b->device newBufferWithLength:newCap
-                              options:(b->unifiedMemory
-                                           ? MTLResourceStorageModeShared
-                                           : MTLResourceStorageModeManaged)];
+                              options:MITHRIL_DMT_STORAGE(!b->unifiedMemory)];
         if (nb == nil) {
             static uint32_t warned = 0;
             warn_limited(warned, "dmt", "scratch index buffer allocation failed");
@@ -210,11 +208,13 @@ bool scratch_alloc(NSUInteger bytes, id<MTLBuffer>& outBuf, NSUInteger& outOff,
 }
 
 // Managed-storage scratch must be flushed after every CPU write so a discrete
-// GPU sees the bytes (mirrors ubo_upload's didModifyRange).
+// GPU sees the bytes. No-op on iOS (Shared storage).
 void scratch_flush(id<MTLBuffer> buf, NSUInteger offset, NSUInteger len) {
+#if TARGET_OS_OSX
     if (!backend()->unifiedMemory && buf != nil) {
         [buf didModifyRange:NSMakeRange(offset, len ? len : 1)];
     }
+#endif
 }
 
 /* ---- Shadow-state application helpers ----

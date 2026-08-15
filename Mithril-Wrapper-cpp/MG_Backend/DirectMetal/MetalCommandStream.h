@@ -130,6 +130,14 @@ void draw_indexed_indirect(GLenum primitive, int index_type,
                            MetalBuffer* index_buffer, NSUInteger index_offset,
                            MetalBuffer* indirect, NSUInteger offset,
                            int count, int stride);
+void draw_indirect_count(GLenum primitive, MetalBuffer* indirect, NSUInteger offset,
+                         MetalBuffer* count_buffer, NSUInteger count_offset,
+                         int max_drawcount, int stride);
+void draw_indexed_indirect_count(GLenum primitive, int index_type,
+                                 MetalBuffer* index_buffer, NSUInteger index_offset,
+                                 MetalBuffer* indirect, NSUInteger offset,
+                                 MetalBuffer* count_buffer, NSUInteger count_offset,
+                                 int max_drawcount, int stride);
 
 // Compute. The full dispatch (pipeline + descriptor binding + threadgroups)
 // lives in MetalPipeline.mm; this only provides the encoder, ending any

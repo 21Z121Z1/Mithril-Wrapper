@@ -5,6 +5,7 @@
 #ifdef __APPLE__
 
 #include "MetalDevice.h"
+#include "../BackendTypes.h"   // MITHRIL_LIMIT_* selectors
 #include "../../MG_Impl/Log.h"
 
 #include <mach/mach_time.h>
@@ -91,9 +92,10 @@ static NSUInteger next_block_size(NSUInteger prev) {
 }
 
 static id<MTLBuffer> arena_new_block(Backend* b, NSUInteger len) {
+    // iOS uses MTLResourceStorageModeShared (unified memory); macOS discrete
+    // GPU uses MTLResourceStorageModeManaged (requires didModifyRange sync).
     return [b->device newBufferWithLength:len
-                                  options:(b->unifiedMemory ? MTLResourceStorageModeShared
-                                                            : MTLResourceStorageModeManaged)];
+                                  options:MITHRIL_DMT_STORAGE(!b->unifiedMemory)];
 }
 
 bool ubo_allocate(int slot, NSUInteger size, UboSliceDmt& out) {
@@ -128,7 +130,13 @@ bool ubo_upload(int slot, const void* data, NSUInteger size, UboSliceDmt& out) {
     if (!ubo_allocate(slot, size, out)) return false;
     if (data && out.buf.contents) {
         std::memcpy((uint8_t*)out.buf.contents + out.offset, data, size);
+        // Sync managed buffer on macOS; no-op on iOS (Shared storage).
+        // MITHRIL_DMT_SYNC needs a MetalBuffer*, but out.buf is id<MTLBuffer>.
+        // For UBO arena we can call didModifyRange directly since the arena
+        // is always Shared on iOS (compiles out via #if TARGET_OS_OSX).
+#if TARGET_OS_OSX
         if (!backend()->unifiedMemory) [out.buf didModifyRange:NSMakeRange(out.offset, size)];
+#endif
     }
     return true;
 }

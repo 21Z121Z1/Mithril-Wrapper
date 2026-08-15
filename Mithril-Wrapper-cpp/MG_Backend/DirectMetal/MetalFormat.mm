@@ -56,12 +56,23 @@ MTLPixelFormat pixel_format_from_vk(VkFormat f) {
         case VK_FORMAT_R32G32B32A32_UINT:   return MTLPixelFormatRGBA32Uint;
         case VK_FORMAT_R32G32B32A32_SINT:   return MTLPixelFormatRGBA32Sint;
         case VK_FORMAT_R32G32B32A32_SFLOAT: return MTLPixelFormatRGBA32Float;
-        case VK_FORMAT_R16G16B16A16_UNORM: /* dup guard */ return MTLPixelFormatRGBA16Unorm;
+        // R16G16B16A16_UNORM already handled above (line 45).
         case VK_FORMAT_D16_UNORM:           return MTLPixelFormatDepth32Float; // no D16 in Metal
-        case VK_FORMAT_X8_D24_UNORM_PACK32: return MTLPixelFormatDepth24Unorm_Stencil8;
+        // Depth24Unorm_Stencil8 is macOS-only; iOS uses Depth32Float_Stencil8.
+        case VK_FORMAT_X8_D24_UNORM_PACK32:
+#if TARGET_OS_OSX
+            return MTLPixelFormatDepth24Unorm_Stencil8;
+#else
+            return MTLPixelFormatDepth32Float_Stencil8;
+#endif
         case VK_FORMAT_D32_SFLOAT:          return MTLPixelFormatDepth32Float;
         case VK_FORMAT_S8_UINT:             return MTLPixelFormatStencil8;
-        case VK_FORMAT_D24_UNORM_S8_UINT:   return MTLPixelFormatDepth24Unorm_Stencil8;
+        case VK_FORMAT_D24_UNORM_S8_UINT:
+#if TARGET_OS_OSX
+            return MTLPixelFormatDepth24Unorm_Stencil8;
+#else
+            return MTLPixelFormatDepth32Float_Stencil8;
+#endif
         case VK_FORMAT_D32_SFLOAT_S8_UINT:  return MTLPixelFormatDepth32Float_Stencil8;
         case VK_FORMAT_BC1_RGBA_UNORM_BLOCK:  return MTLPixelFormatBC1_RGBA;
         case VK_FORMAT_BC1_RGBA_SRGB_BLOCK:   return MTLPixelFormatBC1_RGBA_sRGB;
@@ -119,6 +130,11 @@ MTLVertexFormat vertex_format_from_gl(GLenum type, int size, int normalized, int
         }
         return MTLVertexFormatInvalid;
     }
+    // MTLVertexFormat{Int,UInt}{,2,3,4}Normalized are macOS-only;
+    // iOS does not have these single/certain normalized int vertex formats.
+    // On iOS, fall back to the non-normalized integer format (the shader
+    // can normalize manually, or the pipeline will report mismatch).
+#if TARGET_OS_OSX
     if (type == GL_INT && !integer) {
         switch (size) {
             case 1: return norm ? MTLVertexFormatIntNormalized : MTLVertexFormatInt;
@@ -135,6 +151,26 @@ MTLVertexFormat vertex_format_from_gl(GLenum type, int size, int normalized, int
             case 4: return norm ? MTLVertexFormatUInt4Normalized : MTLVertexFormatUInt4;
         }
     }
+#else
+    // iOS: normalized int/uint vertex formats are not available.
+    // Use the integer format; the caller should handle conversion.
+    if (type == GL_INT && !integer) {
+        switch (size) {
+            case 1: return MTLVertexFormatInt;
+            case 2: return MTLVertexFormatInt2;
+            case 3: return MTLVertexFormatInt3;
+            case 4: return MTLVertexFormatInt4;
+        }
+    }
+    if (type == GL_UNSIGNED_INT && !integer) {
+        switch (size) {
+            case 1: return MTLVertexFormatUInt;
+            case 2: return MTLVertexFormatUInt2;
+            case 3: return MTLVertexFormatUInt3;
+            case 4: return MTLVertexFormatUInt4;
+        }
+    }
+#endif
     if (type == GL_INT && integer) {
         switch (size) {
             case 1: return MTLVertexFormatInt;

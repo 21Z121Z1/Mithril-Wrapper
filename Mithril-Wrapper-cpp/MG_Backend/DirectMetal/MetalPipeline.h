@@ -24,6 +24,8 @@
 #include "MetalDevice.h"
 #include "MetalCommandStream.h"
 #include "BackendTypes.h"   // MGVertexAttrib
+#include "../DirectVulkan/Std140.h"  // Std140Slot (shared, dependency-free)
+#include "../DirectVulkan/Reflect.h" // mithril::vk::DescriptorBinding (shared reflection)
 #include "BackendMetalDecls.h"  // generated dmt_* prototypes (build dir)
 
 #include <string>
