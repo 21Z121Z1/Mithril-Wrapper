@@ -1,0 +1,36 @@
+name: Apply ARB vertex binding source fix
+
+on:
+  push:
+    branches:
+      - ci/minecraft-on-mithril-e2e-20260815
+    paths:
+      - ci/e2e/apply_vertex_binding_fix.py
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: true
+          fetch-depth: 2
+      - name: Materialize reviewed ARB vertex binding fix
+        run: |
+          set -euo pipefail
+          python3 ci/e2e/apply_vertex_binding_fix.py
+          git diff --check
+          git diff --stat
+          test -n "$(git status --short)"
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add Mithril-Wrapper-cpp/MG_State/State.h \
+                  Mithril-Wrapper-cpp/MG_Impl/VertexArray.cpp \
+                  Mithril-Wrapper-cpp/MG_Impl/Drawing.cpp
+          git commit -m 'fix(gl): honor ARB vertex attribute bindings at draw time'
+          git push origin HEAD:ci/minecraft-on-mithril-e2e-20260815
