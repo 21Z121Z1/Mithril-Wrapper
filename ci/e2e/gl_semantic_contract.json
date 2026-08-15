@@ -1,5 +1,5 @@
 {
-  "schema_version": "1.1",
+  "schema_version": "1.2",
   "profile": "minecraft-26.2-directmetal",
   "core": {
     "version": "3.3",
@@ -10,10 +10,14 @@
       "core33.resource_roundtrip",
       "core33.error_state",
       "core33.program_state",
+      "texture.layered",
+      "sync.query",
       "draw.configuration"
     ],
     "oracles": [
       "directmetal_texture_fbo_roundtrip_smoke",
+      "directmetal_layered_texture_smoke",
+      "query_sync_smoke",
       "directmetal_state_semantics_smoke",
       "directmetal_terrain_semantics_smoke",
       "directmetal_vertex_binding_smoke",
@@ -101,6 +105,21 @@
       "status": "proven",
       "oracle": "directmetal_texture_fbo_roundtrip_smoke"
     },
+    "texture.layered": {
+      "domain": "textures_samplers",
+      "status": "proven",
+      "oracle": "directmetal_layered_texture_smoke"
+    },
+    "pixel.client_roundtrip": {
+      "domain": "pixel_pack_unpack",
+      "status": "proven",
+      "oracle": "directmetal_texture_fbo_roundtrip_smoke"
+    },
+    "sync.query": {
+      "domain": "sync_query",
+      "status": "proven",
+      "oracle": "query_sync_smoke"
+    },
     "core33.error_state": {
       "domain": "state_error",
       "status": "proven",
@@ -176,6 +195,20 @@
       "status": "proven",
       "oracle": "minecraft_wrapper_identity"
     }
+  },
+  "oracle_phases": {
+    "gpu": [
+      "directmetal_terrain_semantics_smoke",
+      "directmetal_vertex_binding_smoke",
+      "directmetal_state_semantics_smoke",
+      "directmetal_texture_fbo_roundtrip_smoke",
+      "directmetal_layered_texture_smoke",
+      "query_sync_smoke"
+    ],
+    "production": [
+      "minecraft_production_client_gametest",
+      "minecraft_wrapper_identity"
+    ]
   },
   "trace_coverage": {
     "enforced_domains": [
