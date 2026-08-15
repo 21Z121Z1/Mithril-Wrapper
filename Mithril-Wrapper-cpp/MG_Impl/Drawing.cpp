@@ -955,8 +955,10 @@ void glMultiDrawArrays(GLenum mode, const GLint* first, const GLsizei* count, GL
                 }
             }
         }
+        g_state->currentDrawID = (uint32_t)i;
         backend_draw_arrays((int)mode, (int)first[i], (int)count[i]);
     }
+    g_state->currentDrawID = 0;
     end_draw();  // 一次 end_render_pass
 }
 
@@ -1024,9 +1026,11 @@ void glMultiDrawElements(GLenum mode, const GLsizei* count, GLenum type,
                     }
                 }
             }
-            if (need_draw)
+            if (need_draw) {
+                g_state->currentDrawID = (uint32_t)i;
                 backend_draw_indexed((int)mode, (int)count[i], idx_type, ib,
                                      (VkDeviceSize)(intptr_t)indices[i]);
+            }
         }
     } else {
         // 客户端指针路径：逐 sub-draw staging 进 transient buffer
@@ -1035,11 +1039,14 @@ void glMultiDrawElements(GLenum mode, const GLsizei* count, GLenum type,
                 GLuint transient = (GLuint)(uintptr_t)indices[i];
                 VkBuffer staged = backend_get_or_create_buffer(transient | 0x80000000u,
                                                                indices[i], (size_t)count[i] * elem);
-                if (staged != VK_NULL_HANDLE)
+                if (staged != VK_NULL_HANDLE) {
+                    g_state->currentDrawID = (uint32_t)i;
                     backend_draw_indexed((int)mode, (int)count[i], idx_type, staged, 0);
+                }
             }
         }
     }
+    g_state->currentDrawID = 0;
     end_draw();
 }
 
@@ -1107,14 +1114,17 @@ void glMultiDrawElementsBaseVertex(GLenum mode, const GLsizei* count, GLenum typ
                 }
             }
             g_state->currentBaseVertex = basevertex[i];
+            g_state->currentDrawID = (uint32_t)i;
             backend_draw_indexed((int)mode, (int)count[i], idx_type, ib,
                                  (VkDeviceSize)(intptr_t)indices[i]);
         }
         g_state->currentBaseVertex = 0;
+        g_state->currentDrawID = 0;
     } else if (basevertex) {
         for (GLsizei i = 0; i < drawcount; ++i) {
             if (count[i] > 0 && indices[i]) {
                 g_state->currentBaseVertex = basevertex[i];
+                g_state->currentDrawID = (uint32_t)i;
                 GLuint transient = (GLuint)(uintptr_t)indices[i];
                 VkBuffer staged = backend_get_or_create_buffer(transient | 0x80000000u,
                                                                indices[i], (size_t)count[i] * elem);
@@ -1123,6 +1133,7 @@ void glMultiDrawElementsBaseVertex(GLenum mode, const GLsizei* count, GLenum typ
             }
         }
         g_state->currentBaseVertex = 0;
+        g_state->currentDrawID = 0;
     }
     end_draw();
 }

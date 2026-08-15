@@ -339,6 +339,20 @@ uint32_t current_base_instance() {
 NSInteger current_base_vertex() {
     return mithril::g_state ? (NSInteger)mithril::g_state->currentBaseVertex : 0;
 }
+uint32_t current_draw_id() {
+    return mithril::g_state ? mithril::g_state->currentDrawID : 0u;
+}
+// SPIRV-Cross lowers SPIR-V DrawIndex to a constant uint pointer at its
+// reserved draw_id_buffer_index (19 by default). Metal has no native
+// multi-draw ordinal for the CPU-expanded paths below, so bind the exact
+// OpenGL sub-draw ordinal as an inline constant before every native draw.
+// Vertex attributes occupy only slots 0..15 in this backend, leaving 19
+// reserved exactly as required by our pinned SPIRV-Cross ABI.
+void bind_draw_id(uint32_t drawID) {
+    if (g_renderEncoder != nil) {
+        [g_renderEncoder setVertexBytes:&drawID length:sizeof(drawID) atIndex:19];
+    }
+}
 
 /* ---- Primitive expansion (fan / line-loop / U8 indices) ---- */
 
@@ -374,6 +388,7 @@ void issue_arrays_draw(GLenum primitive, uint32_t first, uint32_t count,
                        uint32_t instanceCount, uint32_t baseInstance) {
     id<MTLRenderCommandEncoder> r = g_renderEncoder;
     if (count == 0) return;
+    bind_draw_id(current_draw_id());
 
     if (primitive == GL_TRIANGLE_FAN) {
         if (count < 3) return;
@@ -440,6 +455,7 @@ void issue_indexed_draw(GLenum primitive, uint32_t count, int index_type,
                         uint32_t baseInstance) {
     id<MTLRenderCommandEncoder> r = g_renderEncoder;
     if (count == 0 || !index_buffer || index_buffer->buf == nil) return;
+    bind_draw_id(current_draw_id());
     const bool fan = (primitive == GL_TRIANGLE_FAN);
     const bool loop = (primitive == GL_LINE_LOOP);
 
@@ -1342,6 +1358,7 @@ void draw_indirect(GLenum primitive, MetalBuffer* indirect, NSUInteger offset,
         // Pure GPU-side path: hand the record to Metal untouched. Only a
         // non-default stride forces the per-record loop.
         if (count == 1 && effStride == 16) {
+            bind_draw_id(current_draw_id());
             [g_renderEncoder drawPrimitives:primitive_from_gl(primitive)
                               indirectBuffer:indirect->buf
                         indirectBufferOffset:offset];
@@ -1354,7 +1371,9 @@ void draw_indirect(GLenum primitive, MetalBuffer* indirect, NSUInteger offset,
         return;
     }
 
+    const uint32_t savedDrawID = current_draw_id();
     for (int i = 0; i < count; ++i) {
+        if (mithril::g_state) mithril::g_state->currentDrawID = (uint32_t)i;
         MtlDrawPrimitivesArgs args;
         std::memcpy(&args, (const uint8_t*)indirect->contents + offset + (NSUInteger)i * effStride,
                     sizeof(args));
@@ -1365,11 +1384,13 @@ void draw_indirect(GLenum primitive, MetalBuffer* indirect, NSUInteger offset,
                               args.instanceCount,
                               args.baseInstance);
         } else {
+            bind_draw_id(current_draw_id());
             [g_renderEncoder drawPrimitives:primitive_from_gl(primitive)
                               indirectBuffer:indirect->buf
                         indirectBufferOffset:offset + (NSUInteger)i * effStride];
         }
     }
+    if (mithril::g_state) mithril::g_state->currentDrawID = savedDrawID;
 }
 
 void draw_indexed_indirect(GLenum primitive, int index_type,
@@ -1395,6 +1416,7 @@ void draw_indexed_indirect(GLenum primitive, int index_type,
     if (!expanded && !restartNeedsAdaptation && indirect->contents == nullptr &&
         count == 1 && effStride == 20) {
         // Fast path: one record, plain primitive, app index buffer as-is.
+        bind_draw_id(current_draw_id());
         [g_renderEncoder drawIndexedPrimitives:primitive_from_gl(primitive)
                                      indexType:index_type_from_int(index_type)
                                    indexBuffer:index_buffer->buf
@@ -1409,7 +1431,9 @@ void draw_indexed_indirect(GLenum primitive, int index_type,
         return;
     }
 
+    const uint32_t savedDrawID = current_draw_id();
     for (int i = 0; i < count; ++i) {
+        if (mithril::g_state) mithril::g_state->currentDrawID = (uint32_t)i;
         MtlDrawIndexedPrimitivesArgs args;
         std::memcpy(&args, (const uint8_t*)indirect->contents + offset + (NSUInteger)i * effStride,
                     sizeof(args));
@@ -1424,6 +1448,7 @@ void draw_indexed_indirect(GLenum primitive, int index_type,
                                args.instanceCount,
                                (NSInteger)args.baseVertex, args.baseInstance);
         } else {
+            bind_draw_id(current_draw_id());
             [g_renderEncoder drawIndexedPrimitives:primitive_from_gl(primitive)
                                          indexType:index_type_from_int(index_type)
                                        indexBuffer:index_buffer->buf
@@ -1432,6 +1457,7 @@ void draw_indexed_indirect(GLenum primitive, int index_type,
                               indirectBufferOffset:offset + (NSUInteger)i * effStride];
         }
     }
+    if (mithril::g_state) mithril::g_state->currentDrawID = savedDrawID;
 }
 
 /* ---- GL 4.6 ARB_indirect_parameters (_Count variants) ----

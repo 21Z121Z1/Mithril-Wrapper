@@ -845,6 +845,11 @@ struct GLState {
     // 深度对照 MobileGL drawParams.baseVertex / drawParams.baseInstance。
     int32_t  currentBaseVertex = 0;
     uint32_t currentBaseInstance = 0;
+    // ARB_shader_draw_parameters: ordinal of the current sub-draw inside
+    // a Multi* command. Ordinary draws are zero. DirectMetal lowers
+    // SPIR-V DrawIndex to SPIRV-Cross' spvDrawIndex buffer(19), so the
+    // backend reads this value immediately before each native draw.
+    uint32_t currentDrawID = 0;
 
     // GPU fault 诊断：最近一次 glDrawElements 的索引类型（trace_draw 用它
     // 计算索引越界检查的每索引字节数）。glDrawElements 入口处设置。
