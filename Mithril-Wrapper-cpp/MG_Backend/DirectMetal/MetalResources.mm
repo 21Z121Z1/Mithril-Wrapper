@@ -774,7 +774,8 @@ void dmt_internal_resolve_images(MetalTexture* src, MetalTexture* dst,
 // ---- Readback -----------------------------------------------------------------
 
 int dmt_internal_read_pixels(MetalTexture* colorSrc, int x, int y, int w, int h,
-                             GLenum format, GLenum type, void* out_pixels) {
+                             GLenum format, GLenum type, void* out_pixels,
+                             int flip_y) {
     if (!colorSrc || colorSrc->tex == nil || !out_pixels || w <= 0 || h <= 0) return 0;
     Backend* b = backend();
     if (!b->initialized) return 0;
@@ -811,14 +812,16 @@ int dmt_internal_read_pixels(MetalTexture* colorSrc, int x, int y, int w, int h,
     [cb waitUntilCompleted];
     if (cb.error != nil) return 0;
 
-    // Metal rows are top-down; GL readPixels expects bottom-left origin —
-    // flip rows. Only the RGBA/UNSIGNED_BYTE layout is fully supported, same
-    // as the Vulkan path.
+    // User FBO textures keep GL bottom-left row order in storage. The
+    // drawable/default framebuffer is presentation-oriented and therefore
+    // requires the historical row reversal. The caller knows which source
+    // class is being read and passes flip_y explicitly.
     const uint8_t* src = (const uint8_t*)rb.contents;
     bool bgra = (colorSrc->vkFormat == VK_FORMAT_B8G8R8A8_UNORM);
     for (int r = 0; r < h; ++r) {
         const uint8_t* srow = src + (NSUInteger)r * rowBytes;
-        uint8_t* drow = (uint8_t*)out_pixels + (NSUInteger)(h - 1 - r) * rowBytes;
+        const int dstRow = flip_y ? (h - 1 - r) : r;
+        uint8_t* drow = (uint8_t*)out_pixels + (NSUInteger)dstRow * rowBytes;
         if (bgra) {
             for (int c = 0; c < w; ++c) {
                 drow[c * 4 + 0] = srow[c * 4 + 2];

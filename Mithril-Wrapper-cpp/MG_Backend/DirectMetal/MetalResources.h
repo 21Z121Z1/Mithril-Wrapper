@@ -99,7 +99,8 @@ void dmt_internal_resolve_images(MetalTexture* src, MetalTexture* dst,
 // Synchronous RGBA8 (or Depth32Float) readback from a texture into the
 // caller's buffer, GL bottom-left row order. Returns 1 on success.
 int  dmt_internal_read_pixels(MetalTexture* colorSrc, int x, int y, int w, int h,
-                              GLenum format, GLenum type, void* out_pixels);
+                              GLenum format, GLenum type, void* out_pixels,
+                              int flip_y);
 
 } // namespace dmt
 } // namespace mithril

@@ -548,7 +548,8 @@ int dmt_read_pixels(int x, int y, int w, int h,
 
     dmt::MetalTexture* src = nullptr;
     const bool readDepth = (format == GL_DEPTH_COMPONENT);
-    if (!g_state || g_state->currentReadFBO == 0) {
+    const bool readDefaultFramebuffer = (!g_state || g_state->currentReadFBO == 0);
+    if (readDefaultFramebuffer) {
         VkImage image = VK_NULL_HANDLE;
         if (g_state) {
             image = readDepth ? g_state->eglDefaultDepthImage
@@ -565,8 +566,11 @@ int dmt_read_pixels(int x, int y, int w, int h,
         src = dmt::texture_table_get(texName);
     }
     if (!src || src->tex == nil) return 0;
+    // User FBO textures are already stored in GL bottom-left row order; only
+    // the drawable/default framebuffer uses the presentation-oriented Metal
+    // row order that needs conversion on readback.
     return dmt::dmt_internal_read_pixels(src, x, y, w, h, format, type,
-                                         out_pixels);
+                                         out_pixels, readDefaultFramebuffer ? 1 : 0);
 }
 
 void dmt_blit_texture(GLuint src_name, GLuint dst_name,
