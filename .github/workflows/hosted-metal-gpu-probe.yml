@@ -4,8 +4,7 @@ on:
   workflow_dispatch:
   push:
     branches:
-      - feature/direct-metal
-      - codex/autonomous-direct-metal-next
+      - integration/directmetal-unified-20260815
 
 concurrency:
   group: directmetal-hosted-${{ github.ref }}
@@ -22,7 +21,7 @@ jobs:
       MITHRIL_EXPECT_RENDERER: Mithril DirectMetal
       MITHRIL_LIBRARY: ./output/libmithril.dylib
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
 
@@ -58,7 +57,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          tests=(state_smoke shader_smoke draw_smoke texture_smoke sampler_smoke matrix_uniform_smoke provoking_vertex_smoke buffer_texture_smoke typed_vertex_smoke packed_vertex_attrib_smoke ubo_smoke query_smoke sync_smoke stencil_persistence_smoke 3d_smoke render3d_smoke fbo_smoke directmetal_fbo_smoke)
+          tests=(state_smoke shader_smoke draw_smoke texture_smoke sampler_smoke matrix_uniform_smoke provoking_vertex_smoke buffer_texture_smoke typed_vertex_smoke packed_vertex_attrib_smoke ubo_smoke query_smoke sync_smoke stencil_persistence_smoke 3d_smoke render3d_smoke fbo_smoke directmetal_fbo_smoke layered_fbo_smoke unsupported_stub_smoke)
           for test_name in "${tests[@]}"; do
             echo "==> ${test_name}"
             clang -std=c11 -Wall -Wextra "tests/${test_name}.c" -o "$RUNNER_TEMP/${test_name}"
@@ -101,7 +100,7 @@ jobs:
     name: iPhoneOS DirectMetal arm64 cross-build required
     runs-on: macos-26
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
 
@@ -143,7 +142,7 @@ jobs:
       MTL_DEBUG_LAYER: '0'
       MTL_SHADER_VALIDATION: '0'
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
 
@@ -185,7 +184,7 @@ jobs:
           set -euo pipefail
           sdk="$(xcrun --sdk iphonesimulator --show-sdk-path)"
           target_flags=(-target arm64-apple-ios16.0-simulator -isysroot "$sdk")
-          for test_name in draw_smoke provoking_vertex_smoke packed_vertex_attrib_smoke fbo_smoke directmetal_fbo_smoke stencil_persistence_smoke; do
+          for test_name in draw_smoke provoking_vertex_smoke packed_vertex_attrib_smoke fbo_smoke directmetal_fbo_smoke layered_fbo_smoke stencil_persistence_smoke; do
             xcrun --sdk iphonesimulator clang "${target_flags[@]}" \
               -std=c11 -Wall -Wextra -Dmain=mithril_smoke_main \
               -c "tests/${test_name}.c" -o "$RUNNER_TEMP/${test_name}.o"
@@ -264,6 +263,7 @@ jobs:
           run_app packed_vertex_attrib_smoke com.mithril.ci.packedattrib 'packed_vertex_attrib_smoke: PASS'
           run_app fbo_smoke com.mithril.ci.fbofull 'FBO SMOKE ALL PASSED'
           run_app directmetal_fbo_smoke com.mithril.ci.fbo 'directmetal_fbo_smoke: PASS'
+          run_app layered_fbo_smoke com.mithril.ci.layeredfbo 'layered_fbo_smoke: PASS'
           run_app stencil_persistence_smoke com.mithril.ci.stencil 'stencil_persistence_smoke: PASS'
 
       - name: Shutdown Simulator
