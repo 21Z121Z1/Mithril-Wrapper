@@ -212,6 +212,7 @@
   },
   "trace_coverage": {
     "enforced_domains": [
+      "api_call",
       "vao_vertex_fetch",
       "draw"
     ],
@@ -224,5 +225,6 @@
       "sync_query",
       "pixel_pack_unpack"
     ]
-  }
+  },
+  "api_evidence": {}
 }

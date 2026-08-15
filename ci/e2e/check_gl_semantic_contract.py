@@ -127,6 +127,7 @@ def main():
         )
 
     semantics = manifest["semantic_evidence"]
+    api_evidence = manifest.get("api_evidence", {})
     if core.get("status") != "minecraft-e2e-proven":
         failures.append("core version status must be minecraft-e2e-proven")
     if not core.get("state_semantics"):
@@ -216,11 +217,18 @@ def main():
             observed[key]["count"] += 1
             observed[key]["apis"].add(event["api"])
             observed[key]["domains"].add(event["domain"])
-            evidence = semantics.get(key)
-            if not evidence or evidence.get("status") != "proven":
-                failures.append(
-                    f"observed but unproven semantic: {key} via {event['api']} line {event['line']}"
-                )
+            if event["domain"] == "api_call" and key.startswith("api."):
+                evidence = api_evidence.get(event["api"])
+                if not evidence or evidence.get("status") != "proven":
+                    failures.append(
+                        f"observed but unproven API: {event['api']} line {event['line']}"
+                    )
+            else:
+                evidence = semantics.get(key)
+                if not evidence or evidence.get("status") != "proven":
+                    failures.append(
+                        f"observed but unproven semantic: {key} via {event['api']} line {event['line']}"
+                    )
         if malformed:
             failures.append(f"semantic trace contains {len(malformed)} malformed line(s)")
     if args.require_trace and not trace_events:
@@ -240,8 +248,16 @@ def main():
             "count": value["count"],
             "apis": sorted(value["apis"]),
             "domains": sorted(value["domains"]),
-            "oracle": semantics.get(key, {}).get("oracle"),
-            "status": semantics.get(key, {}).get("status", "unproven"),
+            "oracle": (
+                api_evidence.get(next(iter(value["apis"]), ""), {}).get("oracle")
+                if "api_call" in value["domains"]
+                else semantics.get(key, {}).get("oracle")
+            ),
+            "status": (
+                api_evidence.get(next(iter(value["apis"]), ""), {}).get("status", "unproven")
+                if "api_call" in value["domains"]
+                else semantics.get(key, {}).get("status", "unproven")
+            ),
         }
         for key, value in sorted(observed.items())
     }

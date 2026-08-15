@@ -8,6 +8,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <mutex>
+#include <string>
+#include <unordered_set>
+#if defined(__APPLE__) || defined(__linux__)
+#include <dlfcn.h>
+#endif
 
 namespace mithril {
 
@@ -48,6 +53,34 @@ void semantic_trace_eventf(const char* domain, const char* semantic,
     std::fprintf(traceFile, "%s\t%s\t%s\t%s\n",
                  domain ? domain : "", semantic ? semantic : "",
                  api ? api : "", details);
+}
+
+void semantic_trace_external_api_call(const char* api, const void* caller) {
+    // Keep production overhead effectively zero unless tracing was explicitly
+    // requested by CI. getenv is resolved only once per process.
+    static const bool enabled = [] {
+        const char* path = std::getenv("MITHRIL_GL_SEMANTIC_TRACE");
+        return path && *path;
+    }();
+    if (!enabled || !api || !*api) return;
+
+#if defined(__APPLE__) || defined(__linux__)
+    // A large part of the compatibility implementation delegates one GL entry
+    // point to another. Those are implementation details, not calls made by
+    // Minecraft/LWJGL. Compare image bases and suppress same-dylib callers.
+    Dl_info callerInfo{};
+    Dl_info selfInfo{};
+    if (caller && dladdr(caller, &callerInfo) != 0 &&
+        dladdr(reinterpret_cast<const void*>(&semantic_trace_external_api_call), &selfInfo) != 0 &&
+        callerInfo.dli_fbase == selfInfo.dli_fbase) {
+        return;
+    }
+#endif
+
+    thread_local std::unordered_set<std::string> seen;
+    if (!seen.emplace(api).second) return;
+    std::string semantic = std::string("api.") + api;
+    semantic_trace_eventf("api_call", semantic.c_str(), api, "external_first_call");
 }
 
 // =========================================================================
