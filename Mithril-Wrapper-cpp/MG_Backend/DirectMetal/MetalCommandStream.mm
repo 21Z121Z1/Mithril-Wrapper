@@ -296,6 +296,12 @@ void apply_full_state(id<MTLRenderCommandEncoder> r) {
             [r setVertexBuffer:e.vertBuf[i] offset:e.vertOff[i] atIndex:(NSUInteger)i];
         }
     }
+    if (e.visibilityBuffer != nil) {
+        [r setVisibilityResultMode:(e.visibilityCounting
+                                        ? MTLVisibilityResultModeCounting
+                                        : MTLVisibilityResultModeDisabled)
+                            offset:0];
+    }
 }
 
 /* ---- Draw guard (mirrors vk::draw_recording_allowed) ----
@@ -783,6 +789,7 @@ void begin_render_pass(MetalTexture** color_views, int color_count,
 
         e.passW = width;
         e.passH = height;
+        desc.visibilityResultBuffer = e.visibilityBuffer;
 
         g_renderEncoder = [b->cmd renderCommandEncoderWithDescriptor:desc];
     }
@@ -818,6 +825,26 @@ void end_render_pass() {
 // The live render encoder of the current pass (nil when no pass is active).
 // bind_program_descriptors and the clear quad draw through it.
 id<MTLRenderCommandEncoder> current_encoder() { return g_renderEncoder; }
+
+void set_visibility_query(id<MTLBuffer> buffer, bool counting) {
+    EncoderState& e = enc();
+    // The buffer is immutable render-pass state. Changing it requires a new
+    // encoder; the next draw recreates the pass with the new descriptor.
+    if (e.passActive && e.visibilityBuffer != buffer) end_render_pass();
+    e.visibilityBuffer = buffer;
+    e.visibilityCounting = counting && buffer != nil;
+    if (e.passActive && g_renderEncoder != nil && e.visibilityBuffer != nil) {
+        [g_renderEncoder setVisibilityResultMode:(e.visibilityCounting
+                                                      ? MTLVisibilityResultModeCounting
+                                                      : MTLVisibilityResultModeDisabled)
+                                          offset:0];
+    }
+}
+
+void clear_visibility_query(id<MTLBuffer> buffer) {
+    EncoderState& e = enc();
+    if (e.visibilityBuffer == buffer) set_visibility_query(nil, false);
+}
 
 /* ---- Dynamic-state setters ----
  *
@@ -1174,6 +1201,8 @@ void reset_encoder_state() {
     e.boundPipeline = nullptr;
     e.descriptorsBound = false;
     e.hasCommands = false;
+    e.visibilityBuffer = nil;
+    e.visibilityCounting = false;
     e.colorCount = 0;
     e.depthView = nullptr;
     e.passW = 0;

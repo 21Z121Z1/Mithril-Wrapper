@@ -5,14 +5,13 @@
 //
 // MAPPING (kind -> Metal primitive):
 //   * OCCLUSION    -> per-pool 8-byte Shared MTLBuffer driven by the render
-//                     encoder's visibility-result machinery
-//                     (setVisibilityResultBuffer: + setVisibilityResultMode:).
+//                     pass visibilityResultBuffer + encoder visibility mode.
 //                     GPU accumulates directly into CPU-mapped memory, so
 //                     reads need no resolve round-trip.
 //   * TIMESTAMP    -> per-pool MTLCounterSampleBuffer (counterSet =
-//                     MTLCommonCounterTimestamp, 64 slots, Shared storage).
-//                     glQueryCounter samples one slot; the last written slot
-//                     is the live result.
+//                     MTLCommonCounterTimestamp, 64 slots) resolved into a
+//                     CPU-visible MTLBuffer. glQueryCounter samples one slot;
+//                     the last written slot is the live result.
 //   * TIME_ELAPSED -> two counter samples (begin slot + end slot) in the same
 //                     buffer; result = t1 - t0. Same shape as the Vulkan
 //                     backend's 2-slot timestamp pool (the radv-style GL
@@ -37,8 +36,8 @@
 //   * wait=true blocks only on the COMMITTED slot command buffers. Samples
 //     still queued in the uncommitted backend()->cmd cannot be waited on
 //     from here without hijacking commit_frame's serial bookkeeping.
-//   * OCCLUSION needs a live render encoder (visibility mode is encoder
-//     state, not command-buffer state); see the trade-off in query_begin.
+//   * OCCLUSION binds its result buffer through the next render-pass
+//     descriptor; changing query buffers closes the current render encoder.
 #ifdef __APPLE__
 
 #include "MetalQueries.h"
@@ -58,11 +57,13 @@ namespace dmt {
 namespace {
 
 constexpr uint32_t kCounterSlots = 64;   // samples per pool (8 B each)
+constexpr NSUInteger kCounterResultStride = 256; // resolve offset alignment
 
 struct QueryPool {
     int kind = -1;                          // MITHRIL_QUERY_*
     id<MTLBuffer> visibility = nil;         // occlusion: shared 8-byte counter
     id<MTLCounterSampleBuffer> counters = nil; // timestamp/elapsed slots
+    id<MTLBuffer> counterResults = nil;      // resolved, CPU-visible values
     uint64_t cpuT0 = 0, cpuT1 = 0;          // CPU fallback (ns)
     bool cpuFallback = false;               // sample on the CPU clock now on
     bool begun = false, ended = false;
@@ -70,7 +71,6 @@ struct QueryPool {
 
     // Bookkeeping VkQueryPool provides for free but a bare slot cursor does
     // not (additions to the original design sketch, each load-bearing):
-    bool     pendingVisibility = false; // occlusion begun with no encoder
     uint32_t elapsedSlot0 = 0;          // TIME_ELAPSED begin slot (end = +1)
     uint32_t samplesWritten = 0;        // wrap detection at kCounterSlots
 };
@@ -129,7 +129,7 @@ static id<MTLCounterSampleBuffer> new_counter_buffer(NSUInteger samples) {
             [[MTLCounterSampleBufferDescriptor alloc] init];
         d.counterSet = cs;             // single-counter set: 8 B per sample
         d.sampleCount = samples;
-        d.storageMode = MTLStorageModeShared;   // CPU-mapped contents
+        d.storageMode = MTLStorageModeShared;
         NSError* err = nil;
         id<MTLCounterSampleBuffer> csb =
             [b->device newCounterSampleBufferWithDescriptor:d error:&err];
@@ -145,9 +145,11 @@ static id<MTLCounterSampleBuffer> new_counter_buffer(NSUInteger samples) {
 
 // The counter set holds exactly one counter (timestamp) -> stride is 8 bytes.
 static uint64_t read_slot(const QueryPool& p, uint32_t slot) {
-    if (p.counters == nil || p.counters.contents == nullptr) return 0;
+    if (p.counterResults == nil || p.counterResults.contents == nullptr) return 0;
     uint64_t v = 0;
-    std::memcpy(&v, (const uint8_t*)p.counters.contents + (size_t)slot * 8, 8);
+    std::memcpy(&v, (const uint8_t*)p.counterResults.contents +
+                        (size_t)slot * kCounterResultStride,
+                8);
     return v;
 }
 
@@ -178,19 +180,25 @@ static bool advance_slot(QueryPool& p) {
 // the first draw has opened a pass — the case where Vulkan would simply
 // record vkCmdWriteTimestamp on the bare command buffer.
 static bool sample_counter(QueryPool& p, uint32_t slot) {
-    if (p.counters == nil) return false;
+    if (p.counters == nil || p.counterResults == nil) return false;
     if (!ensure_command_buffer()) return false;
     if (@available(macOS 10.15, iOS 14.0, *)) {
         id<MTLRenderCommandEncoder> renc = current_encoder();
         if (renc != nil) {
-            [renc sampleCountersInBuffer:p.counters atOffset:slot
+            [renc sampleCountersInBuffer:p.counters atSampleIndex:slot
                              withBarrier:YES];
-            return true;
+            end_render_pass();
         }
         id<MTLBlitCommandEncoder> benc = [backend()->cmd blitCommandEncoder];
         if (benc == nil) return false;
-        [benc sampleCountersInBuffer:p.counters atOffset:slot
-                         withBarrier:YES];
+        if (renc == nil) {
+            [benc sampleCountersInBuffer:p.counters atSampleIndex:slot
+                             withBarrier:YES];
+        }
+        [benc resolveCounters:p.counters
+                      inRange:NSMakeRange(slot, 1)
+            destinationBuffer:p.counterResults
+          destinationOffset:(NSUInteger)slot * kCounterResultStride];
         [benc endEncoding];
         note_non_render_commands();   // hasCommands accounting stays honest
         return true;
@@ -249,6 +257,12 @@ bool query_pool_create(uint64_t query_id, int kind) {
         if (timestamp_counter_set() == nil) return false;
         p.counters = new_counter_buffer(kCounterSlots);
         if (p.counters == nil) return false;
+        p.counterResults = [b->device
+            newBufferWithLength:kCounterSlots * kCounterResultStride
+                        options:MTLResourceStorageModeShared];
+        if (p.counterResults == nil) return false;
+        std::memset(p.counterResults.contents, 0,
+                    kCounterSlots * kCounterResultStride);
     }
 
     table[query_id] = p;
@@ -262,7 +276,11 @@ void query_pool_destroy(uint64_t query_id) {
     // entry and letting ARC drop the id<> refs is safe with queries in
     // flight. VkQueryPool needed the queue only because vkDestroyQueryPool
     // is immediate and the driver does not hold references for you.
-    pool_table().erase(query_id);
+    auto& table = pool_table();
+    auto it = table.find(query_id);
+    if (it != table.end() && it->second.visibility != nil)
+        clear_visibility_query(it->second.visibility);
+    table.erase(query_id);
 }
 
 // ---- Begin / end -----------------------------------------------------------
@@ -284,26 +302,7 @@ void query_begin(uint64_t query_id) {
         std::memset(p.visibility.contents, 0, 8);
         p.begun = true;
         p.ended = false;
-        p.pendingVisibility = false;
-
-        id<MTLRenderCommandEncoder> enc = current_encoder();
-        if (enc != nil) {
-            [enc setVisibilityResultBuffer:p.visibility];
-            [enc setVisibilityResultMode:MTLVisibilityResultModeCounting
-                                   offset:0];
-        } else {
-            // TRADE-OFF (no live pass): the visibility mode is ENCODER state
-            // — there is nowhere to record it yet, and MetalCommandStream
-            // deliberately does not know about queries (no replay support).
-            // Record a pending flag and try again at query_end; draws made
-            // before then are NOT counted, so the result undercounts. GL
-            // occlusion in Minecraft is a debug aid (F3 chunk-border style
-            // overlays), never gameplay logic — an undercount is acceptable
-            // where a silent no-op or a stale count would not be obviously
-            // worse. The Vulkan version depends on recording state in the
-            // same way (begin outside a command buffer is silently lost).
-            p.pendingVisibility = true;
-        }
+        set_visibility_query(p.visibility, true);
         return;
     }
 
@@ -343,25 +342,7 @@ void query_end(uint64_t query_id) {
     if (p.kind == MITHRIL_QUERY_OCCLUSION) {
         p.begun = false;
         p.ended = true;
-        id<MTLRenderCommandEncoder> enc = current_encoder();
-        if (enc != nil) {
-            if (p.pendingVisibility) {
-                // Begin had no encoder: bind + enable now, then disable
-                // immediately below. Zero draws happen in between, so the
-                // count stays at the memset zero — but the encoder's
-                // visibility state ends up well-defined instead of stale.
-                [enc setVisibilityResultBuffer:p.visibility];
-                [enc setVisibilityResultMode:MTLVisibilityResultModeCounting
-                                       offset:0];
-                p.pendingVisibility = false;
-            }
-            [enc setVisibilityResultMode:MTLVisibilityResultModeDisabled
-                                   offset:0];
-        } else {
-            // No encoder at end either: the pending mode is dropped; the
-            // result remains the memset zero and availability is still true.
-            p.pendingVisibility = false;
-        }
+        set_visibility_query(p.visibility, false);
         return;
     }
 
@@ -519,10 +500,7 @@ void query_copy_results(uint64_t query_id, uint32_t gl_buffer_id,
         const uint64_t a = avail ? 1ull : 0ull;
         std::memcpy(dst + 8, &a, 8);
     }
-    if (mb->managed) {
-        // CPU write -> GPU visibility on discrete GPUs.
-        [mb->buf didModifyRange:NSMakeRange((NSUInteger)offset, need)];
-    }
+    MITHRIL_DMT_SYNC(mb, (NSUInteger)offset, need);
 }
 
 // ---- Clock -----------------------------------------------------------------
@@ -543,23 +521,32 @@ uint64_t query_timestamp_now_ns() {
         // commit, block, read. Mirrors the Vulkan backend's temp-pool +
         // commit + blocking-read; rare path (perf-hud init), cost is fine.
         static id<MTLCounterSampleBuffer> csb = nil;
+        static id<MTLBuffer> result = nil;
         static bool tried = false;
         if (!tried) {
             tried = true;
             csb = new_counter_buffer(1);
+            if (csb != nil) {
+                result = [b->device newBufferWithLength:kCounterResultStride
+                                                options:MTLResourceStorageModeShared];
+            }
         }
-        if (csb != nil) {
+        if (csb != nil && result != nil) {
             id<MTLCommandBuffer> cb = new_oneshot_command_buffer();
             if (cb != nil) {
                 id<MTLBlitCommandEncoder> enc = [cb blitCommandEncoder];
                 if (enc != nil) {
-                    [enc sampleCountersInBuffer:csb atOffset:0
+                    [enc sampleCountersInBuffer:csb atSampleIndex:0
                                      withBarrier:YES];
+                    [enc resolveCounters:csb
+                                 inRange:NSMakeRange(0, 1)
+                       destinationBuffer:result
+                     destinationOffset:0];
                     [enc endEncoding];
                     [cb commit];
                     [cb waitUntilCompleted];
                     uint64_t v = 0;
-                    std::memcpy(&v, csb.contents, 8);
+                    std::memcpy(&v, result.contents, 8);
                     if (v != 0) return v;   // 0 = never written -> fallback
                 }
             }

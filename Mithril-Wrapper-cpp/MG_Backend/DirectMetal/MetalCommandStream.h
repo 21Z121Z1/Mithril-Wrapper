@@ -65,6 +65,11 @@ struct EncoderState {
     bool descriptorsBound = false;    // draw guard (mirrors Vulkan path)
     bool hasCommands = false;         // anything encoded this frame?
 
+    // Occlusion queries require the result buffer on the render-pass
+    // descriptor before the encoder is created. The mode itself is dynamic.
+    id<MTLBuffer> visibilityBuffer = nil;
+    bool visibilityCounting = false;
+
     // Bound vertex buffers for encoder replay after clear-quad draws.
     id<MTLBuffer> vertBuf[kMaxVertexAttribSlots] = {};
     NSUInteger vertOff[kMaxVertexAttribSlots] = {};
@@ -89,6 +94,8 @@ void end_render_pass();
 // The live render encoder of the current pass (nil when no pass is active).
 // bind_program_descriptors / clear quads draw through it.
 id<MTLRenderCommandEncoder> current_encoder();
+void set_visibility_query(id<MTLBuffer> buffer, bool counting);
+void clear_visibility_query(id<MTLBuffer> buffer);
 
 /* ---- Dynamic-state setters (back the dmt_set_* entry points) ----
  * Each stores into EncoderState AND applies to the live encoder when a pass
