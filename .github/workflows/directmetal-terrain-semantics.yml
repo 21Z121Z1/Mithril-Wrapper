@@ -1,0 +1,69 @@
+name: DirectMetal terrain indexed semantics
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'ci/minecraft-on-mithril-e2e-*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: directmetal-terrain-semantics-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  terrain-semantics:
+    runs-on: macos-26
+    timeout-minutes: 20
+    env:
+      MTL_DEBUG_LAYER: '1'
+      MTL_SHADER_VALIDATION: '0'
+      MITHRIL_BACKEND: metal
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Install native dependencies
+        shell: bash
+        run: brew install vulkan-loader molten-vk ninja
+
+      - name: Build dual-backend Mithril with DirectMetal
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-terrain-semantics -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-terrain-semantics --target mithril --parallel
+          find build-terrain-semantics -type f -name libmithril.dylib -print -quit > /tmp/mithril-path
+          test -s /tmp/mithril-path
+          file "$(cat /tmp/mithril-path)"
+
+      - name: Compile terrain semantics GPU oracle
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang -std=gnu11 -O0 -g -Wall -Wextra -Werror \
+            -IMithril-Wrapper-cpp/include \
+            tests/directmetal_terrain_semantics_smoke.c \
+            -o build-terrain-semantics/directmetal_terrain_semantics_smoke -ldl
+
+      - name: Run terrain semantics on real hosted Metal GPU
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DYLD_LIBRARY_PATH="$(brew --prefix)/lib"
+          build-terrain-semantics/directmetal_terrain_semantics_smoke "$(cat /tmp/mithril-path)" \
+            | tee build-terrain-semantics/terrain-semantics.log
+
+      - name: Upload semantics log
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: directmetal-terrain-semantics-${{ github.sha }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: build-terrain-semantics/terrain-semantics.log
