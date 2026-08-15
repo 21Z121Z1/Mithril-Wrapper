@@ -55,6 +55,10 @@ jobs:
             -IMithril-Wrapper-cpp/include \
             tests/directmetal_vertex_binding_smoke.c \
             -o build-terrain-semantics/directmetal_vertex_binding_smoke -ldl
+          clang -std=gnu11 -O0 -g -Wall -Wextra -Werror \
+            -IMithril-Wrapper-cpp/include \
+            tests/directmetal_sodium_terrain_contract_smoke.c \
+            -o build-terrain-semantics/directmetal_sodium_terrain_contract_smoke -ldl
 
       - name: Run indexed and clip semantics on real hosted Metal GPU
         shell: bash
@@ -72,6 +76,14 @@ jobs:
           build-terrain-semantics/directmetal_vertex_binding_smoke "$(cat /tmp/mithril-path)" \
             | tee build-terrain-semantics/vertex-binding.log
 
+      - name: Run exact Sodium terrain contract on real hosted Metal GPU
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DYLD_LIBRARY_PATH="$(brew --prefix)/lib"
+          build-terrain-semantics/directmetal_sodium_terrain_contract_smoke "$(cat /tmp/mithril-path)" \
+            | tee build-terrain-semantics/sodium-terrain-contract.log
+
       - name: Upload semantics logs
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -82,3 +94,4 @@ jobs:
           path: |
             build-terrain-semantics/terrain-semantics.log
             build-terrain-semantics/vertex-binding.log
+            build-terrain-semantics/sodium-terrain-contract.log
