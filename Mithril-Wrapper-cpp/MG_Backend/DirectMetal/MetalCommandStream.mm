@@ -472,12 +472,38 @@ void issue_indexed_draw(GLenum primitive, uint32_t count, int index_type,
         (programmableRestart && restartToken <= sourceMax);
     const bool nativeRestartToken = restartCanMatch && restartToken == sourceMax;
 
-    // Metal only accepts U16/U32 indices and ALWAYS reserves that type's
-    // maximum value as a primitive-restart sentinel. U8 therefore always
-    // needs widening; programmable restart needs remapping unless its token
-    // already equals the native maximum. Fixed U16/U32 can stay zero-copy.
+    // Metal reserves the maximum U16/U32 index as a strip restart sentinel
+    // even though OpenGL treats it as an ordinary index while primitive
+    // restart is disabled.  Preserve the zero-copy U16 path unless this exact
+    // representability conflict is present; then widen only the affected
+    // index slice to U32 so 0xffff remains the numeric vertex index 65535.
+    const bool stripPrimitive =
+        primitive == GL_TRIANGLE_STRIP || primitive == GL_LINE_STRIP;
+    bool disabledU16MaxNeedsWiden = false;
+    if (!restartCanMatch && index_type == 0 && stripPrimitive) {
+        const NSUInteger sourceBytes = (NSUInteger)count * sizeof(uint16_t);
+        if (index_buffer->contents == nullptr || index_offset > index_buffer->capacity ||
+            sourceBytes > index_buffer->capacity - index_offset) {
+            static uint32_t warned = 0;
+            warn_limited(warned, "dmt", "U16 strip sentinel scan needs a valid CPU-readable index slice — draw dropped");
+            return;
+        }
+        const uint16_t* s = (const uint16_t*)((const uint8_t*)index_buffer->contents + index_offset);
+        for (uint32_t i = 0; i < count; ++i) {
+            if (s[i] == 0xffffu) {
+                disabledU16MaxNeedsWiden = true;
+                break;
+            }
+        }
+    }
+
+    // Metal only accepts U16/U32 indices. U8 therefore always needs widening;
+    // programmable restart needs remapping unless its token already equals the
+    // native maximum. Fixed U16/U32 can stay zero-copy. A restart-disabled U16
+    // strip containing 0xffff takes the narrow widening path above.
     const bool needsRestartRemap = restartCanMatch && !nativeRestartToken;
-    if (index_type != 2 && !fan && !loop && !needsRestartRemap) {
+    if (index_type != 2 && !fan && !loop && !needsRestartRemap &&
+        !disabledU16MaxNeedsWiden) {
         [r drawIndexedPrimitives:primitive_from_gl(primitive)
                        indexCount:(NSUInteger)count
                         indexType:index_type_from_int(index_type)
@@ -596,7 +622,8 @@ void issue_indexed_draw(GLenum primitive, uint32_t count, int index_type,
     // remaps a custom token in-place; 0xffffffff cannot be represented as a
     // non-restart Metal index, but such a vertex index cannot address a real
     // Minecraft vertex buffer and is outside the practical terrain domain.
-    const bool use32 = (index_type == 1) || (index_type == 0 && needsRestartRemap);
+    const bool use32 = (index_type == 1) ||
+                       (index_type == 0 && (needsRestartRemap || disabledU16MaxNeedsWiden));
     const NSUInteger bytes = (NSUInteger)count * (use32 ? 4u : 2u);
     id<MTLBuffer> sb; NSUInteger off; void* ptr;
     if (!scratch_alloc(bytes, sb, off, ptr)) return;
