@@ -139,6 +139,18 @@ VkFramebuffer get_or_create_framebuffer(VkRenderPass rp,
 VkRenderPass get_template_render_pass(const VkFormat* color_formats, int color_count,
                                       VkFormat depth_format, int samples);
 
+// Render-pass/framebuffer cache lifetime (fixes the unbounded VkFramebuffer
+// accumulation that led to OOM -> device-lost on long MC sessions).
+//
+// Call BEFORE an attachment view enters the disposal queue: removes every
+// cached framebuffer that references the view and defers the VkFramebuffer
+// itself (a pending command buffer may still hold a vkCmdBeginRenderPass
+// against it). Used by texture re-spec / deletion and swapchain teardown.
+void retire_framebuffers_referencing(VkImageView view);
+// Full teardown for the device-lost recovery purge — destroys every cached
+// VkFramebuffer and VkRenderPass. Only call with the device idle.
+void destroy_all_cached_framebuffers_and_render_passes();
+
 // GPU fault 诊断：backend_draw_*（全局 extern "C" 作用域）调用的帧 draw
 // 计数递增（实现见 CommandStream.cpp，供 commit_frame 的帧摘要记录）。
 void frame_draw_count_inc();

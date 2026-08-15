@@ -318,6 +318,15 @@ void destroy_swapchain(Swapchain* sc) {
     Backend* b = backend();
     if (!b->device) { delete sc; return; }
     vkDeviceWaitIdle(b->device);
+    // FIX (VkFramebuffer leak - P0): evict every cached framebuffer keyed on
+    // the swapchain's views BEFORE destroying the views themselves. The
+    // device is idle here, so the retired framebuffers (queued into the
+    // current slot's disposal queue below) are freed by the drain that
+    // follows. Without this, each swapchain rebuild stranded every
+    // per-image framebuffer entry forever.
+    mithril::vk::retire_framebuffers_referencing(sc->depthView);
+    for (auto& v : sc->views) mithril::vk::retire_framebuffers_referencing(v);
+    mithril::vk::drain_all_disposal_queues();
     if (sc->depthView)   { vkDestroyImageView(b->device, sc->depthView, nullptr); sc->depthView = VK_NULL_HANDLE; }
     if (sc->depthImage)  { vkDestroyImage(b->device, sc->depthImage, nullptr); sc->depthImage = VK_NULL_HANDLE; }
     if (sc->depthMemory) { vkFreeMemory(b->device, sc->depthMemory, nullptr); sc->depthMemory = VK_NULL_HANDLE; }

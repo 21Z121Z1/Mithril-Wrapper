@@ -171,6 +171,35 @@ struct FramebufferKeyHash {
     }
 };
 
+// ---- Render-pass / framebuffer cache lifetime management -------------------
+//
+// FIX (VkFramebuffer leak - P0): the caches used to grow without bound —
+// every texture re-spec (atlas rebuild, dimension switch, resource-pack
+// reload) creates a fresh VkImageView, which keys a NEW FramebufferKey, while
+// the retired entries (still holding dead view handles) were never destroyed.
+// Each VkFramebuffer wraps a Metal object, so a long MC session accumulated
+// thousands of them — a direct path to VK_ERROR_OUT_OF_DEVICE_MEMORY ->
+// VK_ERROR_DEVICE_LOST on iOS.
+//
+// Lifecycle now mirrors the disposal-queue discipline used for textures and
+// buffers (exported definitions live after the anonymous namespace):
+//   * retire_framebuffers_referencing(view): called whenever an attachment
+//     view is about to be deferred-destroyed. Removes every cache entry that
+//     references the view and queues the VkFramebuffer for deferred
+//     destruction (a pending command buffer may still hold a
+//     vkCmdBeginRenderPass against it).
+//   * destroy_all_cached_framebuffers_and_render_passes(): full teardown for
+//     the device-lost recovery purge (device already idle there).
+static std::unordered_map<RenderPassKey, VkRenderPass, RenderPassKeyHash>& render_pass_cache() {
+    static std::unordered_map<RenderPassKey, VkRenderPass, RenderPassKeyHash> cache;
+    return cache;
+}
+
+static std::unordered_map<FramebufferKey, VkFramebuffer, FramebufferKeyHash>& framebuffer_cache() {
+    static std::unordered_map<FramebufferKey, VkFramebuffer, FramebufferKeyHash> cache;
+    return cache;
+}
+
 static VkRenderPass impl_get_or_create_render_pass(const VkFormat* color_formats, int color_count,
                                        VkFormat depth_format, int samples, bool loadClear) {
     Backend* b = backend();
@@ -202,7 +231,7 @@ static VkRenderPass impl_get_or_create_render_pass(const VkFormat* color_formats
     key.loadClear = loadClear;
     for (int i = 0; i < color_count; ++i) key.colorFormats[i] = validFmts[i];
 
-    static std::unordered_map<RenderPassKey, VkRenderPass, RenderPassKeyHash> cache;
+    auto& cache = render_pass_cache();
     auto it = cache.find(key);
     if (it != cache.end()) return it->second;
 
@@ -320,7 +349,7 @@ static VkFramebuffer impl_get_or_create_framebuffer(VkRenderPass rp,
     key.height = (uint32_t)height;
     for (int i = 0; i < color_count; ++i) key.views[i] = color_views[i];
 
-    static std::unordered_map<FramebufferKey, VkFramebuffer, FramebufferKeyHash> cache;
+    auto& cache = framebuffer_cache();
     auto it = cache.find(key);
     if (it != cache.end()) return it->second;
 
@@ -600,6 +629,51 @@ void record_layout_barrier(VkCommandBuffer cb, VkImage image, VkFormat format,
 }
 
 } // namespace
+
+// ---- Render-pass / framebuffer cache lifetime (exported; see header) ----
+
+void retire_framebuffers_referencing(VkImageView view) {
+    Backend* b = backend();
+    if (!b || !b->device || view == VK_NULL_HANDLE) return;
+    auto& cache = framebuffer_cache();
+    size_t evicted = 0;
+    for (auto it = cache.begin(); it != cache.end();) {
+        bool refs = (it->first.depthView == view);
+        for (uint32_t i = 0; !refs && i < it->first.viewCount; ++i)
+            refs = (it->first.views[i] == view);
+        if (!refs) { ++it; continue; }
+        DeferredDestroy d;
+        d.framebuffer = it->second;
+        b->disposalQueue[b->currentFrame].push_back(d);
+        it = cache.erase(it);
+        ++evicted;
+    }
+    if (evicted) {
+        LOG_RESOURCE("fb retire: evicted %zu framebuffers referencing view=%p",
+                     evicted, (void*)view);
+    }
+}
+
+void destroy_all_cached_framebuffers_and_render_passes() {
+    Backend* b = backend();
+    if (!b || !b->device) return;
+    auto& fbs = framebuffer_cache();
+    size_t fbCount = fbs.size();
+    for (auto& kv : fbs) {
+        if (kv.second) vkDestroyFramebuffer(b->device, kv.second, nullptr);
+    }
+    fbs.clear();
+    auto& rps = render_pass_cache();
+    size_t rpCount = rps.size();
+    for (auto& kv : rps) {
+        if (kv.second) vkDestroyRenderPass(b->device, kv.second, nullptr);
+    }
+    rps.clear();
+    if (fbCount || rpCount) {
+        MITHRIL_LOG_WARN("vk", "framebuffer/renderpass purge: destroyed %zu "
+                          "framebuffers + %zu render passes", fbCount, rpCount);
+    }
+}
 
 // GPU fault 诊断：backend_draw_*（全局 extern "C" 作用域，看不到匿名
 // namespace 的 encoder()）通过此函数递增本帧 draw 计数，供 commit_frame

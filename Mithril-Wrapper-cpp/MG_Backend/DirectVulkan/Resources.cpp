@@ -451,6 +451,12 @@ void defer_destroy_texture_entry(TextureEntry& e) {
     // may still reference this texture view. Invalidate the memo so no stale set
     // is re-bound after the view is destroyed.
     mithril::vk::invalidate_descriptor_memo();
+    // FIX (VkFramebuffer leak - P0): cached framebuffers keyed on this view
+    // must leave the cache with it — otherwise every texture re-spec leaves a
+    // dead entry behind and the cache grows without bound for the whole
+    // process. The VkFramebuffer rides the same deferred-destroy path (a
+    // pending command buffer may still hold its vkCmdBeginRenderPass).
+    mithril::vk::retire_framebuffers_referencing(e.view);
     DeferredDestroy d;
     d.image = e.image;
     d.view  = e.view;

@@ -165,6 +165,20 @@ void safe_device_wait_idle() {
         b->fencePending[i] = false;
     }
 
+    // 4b. FIX (delayed-release OOM pressure - P1): with every fencePending
+    //     cleared, the normal drain path (ensure_command_buffer_recording /
+    //     backend_poll_completed_frames) skips its wait-block entirely, so
+    //     nothing would ever drain the disposal queues again until each slot
+    //     is re-submitted and re-waited. glGenerateMipmap-heavy sequences
+    //     (every safe_device_wait_idle call) therefore piled deferred
+    //     VkImage/VkDeviceMemory releases across all slots, inflating the
+    //     VRAM high-water mark on iOS. The device is provably idle RIGHT NOW,
+    //     so draining every slot here is safe and releases memory at the
+    //     earliest possible point.
+    if (!b->deviceLost) {
+        drain_all_disposal_queues();
+    }
+
     // 5. 如果之前在录制且设备未 lost，重新 begin command buffer。
     //    设备 lost 时不重新 begin（command buffer 录制会被 ensure_command_buffer_recording
     //    的 deviceLost 检查拦截）。
@@ -275,21 +289,29 @@ void backend_purge_cached_resources_for_recovery() {
     // 2. Drain all deferred-destruction queues (staging buffers, old textures, etc.)
     drain_all_disposal_queues();
 
-    // 3. Destroy all cached VkPipeline objects — the biggest memory consumers.
+    // 3. FIX (P0 leak): destroy every cached VkFramebuffer / VkRenderPass.
+    //    These used to survive recovery cycles and accumulate forever — each
+    //    retired swapchain/texture view keyed a new FramebufferKey entry that
+    //    was never destroyed, so every rebuild attempt started from a larger
+    //    Metal-object footprint, escalating the OOM -> device-lost loop.
+    destroy_all_cached_framebuffers_and_render_passes();
+
+    // 4. Destroy all cached VkPipeline objects — the biggest memory consumers.
     //    Each VkPipeline is backed by a Metal MTLRenderPipelineState which holds
     //    compiled shader code + render state, typically 1-5 MB each.
     //    Minecraft creates dozens to hundreds of distinct pipelines during gameplay.
     clear_all_pipeline_caches();
 
-    // 4. Reset all descriptor pools — frees every allocated VkDescriptorSet.
+    // 5. Reset all descriptor pools — frees every allocated VkDescriptorSet.
     //    Each set holds Metal descriptor resources; thousands can accumulate.
     reset_all_descriptor_pools();
 
-    // 5. Reset the encoder state so the post-recovery frame starts clean.
+    // 6. Reset the encoder state so the post-recovery frame starts clean.
     reset_encoder_state();
 
     MITHRIL_LOG_WARN("vk", "backend_purge_cached_resources_for_recovery: "
-                      "purged pipelines + descriptor pools + disposal queues "
+                      "purged pipelines + descriptor pools + framebuffers + "
+                      "render passes + disposal queues "
                       "(freeing memory for swapchain rebuild)");
 }
 
@@ -321,6 +343,10 @@ void drain_disposal_queue(int slot) {
         // GL 查询对象退役的 VkQueryPool（glDeleteQueries 推入）。查询的
         // begin/end/timestamp 命令可能仍在该 slot 的 command buffer 里。
         if (d.queryPool) vkDestroyQueryPool(b->device, d.queryPool, nullptr);
+        // FIX (framebuffer leak - P0): retired cache entries whose attachment
+        // view was deferred-destroyed. Same discipline as the view itself —
+        // destroy only after every command buffer referencing them completed.
+        if (d.framebuffer) vkDestroyFramebuffer(b->device, d.framebuffer, nullptr);
     }
     q.clear();
 }

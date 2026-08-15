@@ -58,6 +58,12 @@ struct DeferredDestroy {
     // pool cannot be destroyed at glDeleteQueries time — it rides the same
     // deferred-destruction path as buffers/textures.
     VkQueryPool     queryPool = VK_NULL_HANDLE;
+    // FIX (framebuffer/renderpass leak - P0): cached VkFramebuffer entries
+    // retired when one of their attachment views is destroyed (texture
+    // re-spec / swapchain rebuild). A framebuffer may still be referenced by
+    // the vkCmdBeginRenderPass recorded into an in-flight command buffer, so
+    // it must ride the same deferred path as the view itself.
+    VkFramebuffer   framebuffer = VK_NULL_HANDLE;
     // FIX (MobileGL-style VRAM monitoring): byte size of the memory allocation
     // being freed, so drain_disposal_queue can decrement currentVramBytes.
     // Only set for entries that own a VkDeviceMemory (buffer/texture main alloc
