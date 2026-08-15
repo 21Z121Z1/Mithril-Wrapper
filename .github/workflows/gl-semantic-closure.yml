@@ -42,21 +42,26 @@ jobs:
           test -s /tmp/mithril-path
           file "$(cat /tmp/mithril-path)"
           git diff --check
+          : > build-semantic/oracles-passed.txt
 
       - name: Compile semantic oracles
         shell: bash
         run: |
           set -euo pipefail
-          clang -std=gnu11 -O0 -g -Wall -Wextra -Werror \
-            -IMithril-Wrapper-cpp/include tests/directmetal_terrain_semantics_smoke.c \
+          common=(-O0 -g -Wall -Wextra -Werror -IMithril-Wrapper-cpp/include)
+          clang -std=gnu11 "${common[@]}" tests/directmetal_terrain_semantics_smoke.c \
             -o build-semantic/directmetal_terrain_semantics_smoke -ldl
-          clang -std=gnu11 -O0 -g -Wall -Wextra -Werror \
-            -DGL_VERTEX_ATTRIB_ARRAY_BUFFER_BINDING=0x889F \
-            -IMithril-Wrapper-cpp/include tests/directmetal_vertex_binding_smoke.c \
+          clang -std=gnu11 "${common[@]}" -DGL_VERTEX_ATTRIB_ARRAY_BUFFER_BINDING=0x889F \
+            tests/directmetal_vertex_binding_smoke.c \
             -o build-semantic/directmetal_vertex_binding_smoke -ldl
-          clang -std=gnu11 -O0 -g -Wall -Wextra -Werror \
-            -IMithril-Wrapper-cpp/include tests/directmetal_state_semantics_smoke.c \
+          clang -std=gnu11 "${common[@]}" tests/directmetal_state_semantics_smoke.c \
             -o build-semantic/directmetal_state_semantics_smoke -ldl
+          clang -std=c11 "${common[@]}" tests/directmetal_texture_fbo_roundtrip_smoke.c \
+            -o build-semantic/directmetal_texture_fbo_roundtrip_smoke -ldl
+          clang -std=gnu11 "${common[@]}" tests/directmetal_layered_texture_smoke.c \
+            -o build-semantic/directmetal_layered_texture_smoke -ldl
+          clang -std=gnu11 "${common[@]}" tests/query_sync_smoke.c \
+            -o build-semantic/query_sync_smoke -ldl
 
       - name: Run indexed clip and indirect GPU semantics
         shell: bash
@@ -65,6 +70,7 @@ jobs:
           export DYLD_LIBRARY_PATH="$(brew --prefix)/lib"
           build-semantic/directmetal_terrain_semantics_smoke "$(cat /tmp/mithril-path)" \
             | tee build-semantic/terrain-semantics.log
+          echo directmetal_terrain_semantics_smoke >> build-semantic/oracles-passed.txt
 
       - name: Run ARB vertex binding GPU semantics
         shell: bash
@@ -73,14 +79,43 @@ jobs:
           export DYLD_LIBRARY_PATH="$(brew --prefix)/lib"
           build-semantic/directmetal_vertex_binding_smoke "$(cat /tmp/mithril-path)" \
             | tee build-semantic/vertex-binding.log
+          echo directmetal_vertex_binding_smoke >> build-semantic/oracles-passed.txt
 
-      - name: Run GL error and ProgramUniform semantics
+      - name: Run GL error ProgramUniform and uniform query semantics
         shell: bash
         run: |
           set -euo pipefail
           export DYLD_LIBRARY_PATH="$(brew --prefix)/lib"
           build-semantic/directmetal_state_semantics_smoke "$(cat /tmp/mithril-path)" \
             | tee build-semantic/state-semantics.log
+          echo directmetal_state_semantics_smoke >> build-semantic/oracles-passed.txt
+
+      - name: Run texture FBO pixel roundtrip semantics
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DYLD_LIBRARY_PATH="$(brew --prefix)/lib"
+          build-semantic/directmetal_texture_fbo_roundtrip_smoke "$(cat /tmp/mithril-path)" \
+            | tee build-semantic/texture-fbo-roundtrip.log
+          echo directmetal_texture_fbo_roundtrip_smoke >> build-semantic/oracles-passed.txt
+
+      - name: Run layered texture semantics
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DYLD_LIBRARY_PATH="$(brew --prefix)/lib"
+          build-semantic/directmetal_layered_texture_smoke "$(cat /tmp/mithril-path)" \
+            | tee build-semantic/layered-texture.log
+          echo directmetal_layered_texture_smoke >> build-semantic/oracles-passed.txt
+
+      - name: Run query and sync semantics
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DYLD_LIBRARY_PATH="$(brew --prefix)/lib"
+          build-semantic/query_sync_smoke "$(cat /tmp/mithril-path)" \
+            | tee build-semantic/query-sync.log
+          echo query_sync_smoke >> build-semantic/oracles-passed.txt
 
       - name: Enforce advertised capability contract
         shell: bash
@@ -91,6 +126,11 @@ jobs:
             --getter Mithril-Wrapper-cpp/MG_Impl/Getter.cpp \
             --dylib "$(cat /tmp/mithril-path)" \
             --report build-semantic/contract-report.json
+          python3 ci/e2e/check_oracle_ledger.py \
+            --manifest ci/e2e/gl_semantic_contract.json \
+            --ledger build-semantic/oracles-passed.txt \
+            --phase gpu \
+            --report build-semantic/oracle-ledger-report.json
 
       - name: Upload semantic evidence
         if: always()
@@ -101,7 +141,9 @@ jobs:
           if-no-files-found: warn
           path: |
             build-semantic/*.log
+            build-semantic/oracles-passed.txt
             build-semantic/contract-report.json
+            build-semantic/oracle-ledger-report.json
 
   minecraft-semantic-e2e:
     name: Minecraft 26.2 production semantic trace
@@ -142,6 +184,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$E2E_ROOT"
+          : > "$E2E_ROOT/oracles-passed.txt"
           cmake -S . -B build-minecraft-semantic -G Ninja -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_FLAGS="-Wno-error" -DCMAKE_CXX_FLAGS="-Wno-error"
           cmake --build build-minecraft-semantic --target mithril --parallel
@@ -183,6 +226,42 @@ jobs:
             -PglfwDelegate="${{ steps.bridge.outputs.glfw_real }}" \
             -PevidenceRoot="$E2E_ROOT" \
             runProductionClientGameTest
+          echo minecraft_production_client_gametest >> "$E2E_ROOT/oracles-passed.txt"
+
+      - name: Verify exact active Mithril image and bridge activity
+        shell: bash
+        env:
+          MITHRIL_DYLIB: ${{ steps.mithril.outputs.dylib }}
+        run: |
+          set -euo pipefail
+          python3 - "$E2E_ROOT" "$MITHRIL_DYLIB" <<'PY'
+          import hashlib, json, pathlib, sys
+          root=pathlib.Path(sys.argv[1]); built=pathlib.Path(sys.argv[2]).resolve()
+          state=json.loads((root/'bridge-state.json').read_text())
+          loaded=pathlib.Path(state['mithril_path']).resolve()
+          def sha(p): return hashlib.sha256(p.read_bytes()).hexdigest()
+          identity={
+            'schema_version':'1.0', 'built_path':str(built), 'loaded_path':str(loaded),
+            'built_sha256':sha(built), 'loaded_sha256':sha(loaded),
+            'exact_image':sha(built)==sha(loaded),
+            'context_count':state.get('context_count',0),
+            'swap_count':state.get('swap_count',0),
+            'get_proc_address_count':state.get('get_proc_address_count',0),
+            'gl_vendor':state.get('gl_vendor',''),
+            'gl_renderer':state.get('gl_renderer',''),
+            'gl_version':state.get('gl_version','')
+          }
+          (root/'wrapper-identity.json').write_text(json.dumps(identity,indent=2)+'\n')
+          if not identity['exact_image']: raise SystemExit('WRAPPER_WRONG_IMAGE')
+          if identity['context_count'] < 1: raise SystemExit('WRAPPER_CONTEXT_NOT_CREATED')
+          if identity['swap_count'] < 2: raise SystemExit('PRESENT_NOT_SCHEDULED')
+          if 'Mithril-Wrapper' not in identity['gl_version'] or 'Metal 3 (DirectMetal)' not in identity['gl_version']:
+              raise SystemExit('WRAPPER_NOT_ACTIVE_DIRECTMETAL')
+          if 'Mithril-Wrapper' not in identity['gl_renderer'] or 'DirectMetal' not in identity['gl_renderer']:
+              raise SystemExit('WRAPPER_RENDERER_IDENTITY_MISMATCH')
+          print(json.dumps(identity,indent=2))
+          PY
+          echo minecraft_wrapper_identity >> "$E2E_ROOT/oracles-passed.txt"
 
       - name: Fail on observed but unproven GL semantics
         shell: bash
@@ -196,6 +275,11 @@ jobs:
             --trace "$E2E_ROOT/gl-semantic-trace.tsv" \
             --require-trace \
             --report "$E2E_ROOT/gl-semantic-contract-report.json"
+          python3 ci/e2e/check_oracle_ledger.py \
+            --manifest ci/e2e/gl_semantic_contract.json \
+            --ledger "$E2E_ROOT/oracles-passed.txt" \
+            --phase production \
+            --report "$E2E_ROOT/oracle-ledger-report.json"
 
       - name: Upload Minecraft semantic evidence
         if: always()
