@@ -1,0 +1,52 @@
+name: Apply GL semantic closure source changes
+
+on:
+  push:
+    branches:
+      - 'fix/gl-semantic-closure-*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: apply-gl-semantic-closure-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  materialize:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: true
+          fetch-depth: 0
+
+      - name: Apply deterministic reviewed transformation
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 ci/e2e/apply_gl_semantic_closure.py
+          git diff --check
+
+      - name: Commit transformed source if needed
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet; then
+            echo 'source already materialized'
+            exit 0
+          fi
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add \
+            Mithril-Wrapper-cpp/MG_Impl/Getter.cpp \
+            Mithril-Wrapper-cpp/MG_Impl/GL46_Compat.cpp \
+            Mithril-Wrapper-cpp/MG_Impl/VertexArray.cpp \
+            Mithril-Wrapper-cpp/MG_Impl/Drawing.cpp \
+            Mithril-Wrapper-cpp/MG_State/State.h \
+            Mithril-Wrapper-cpp/MG_State/State.cpp \
+            .github/workflows/minecraft-client-e2e.yml
+          git commit -m 'fix(gl): enforce semantic capability contract and state isolation'
+          git push origin HEAD:${GITHUB_REF_NAME}
