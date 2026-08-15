@@ -29,6 +29,7 @@
 #include <cstring>
 #include <ctime>
 #include <cstdlib>
+#include <sys/stat.h>
 #include <vector>
 
 // FIX (device lost 根因 - 真实内存上限): os_proc_available_memory() 返回进程
@@ -743,11 +744,28 @@ bool init_device() {
     // MITHRIL_DEBUG=1 时提升 MoltenVK 日志到 Debug（级别 4）：输出 SPIRV-Cross
     // 着色器翻译细节、管线创建失败原因、GPU fault 完整上下文。配合 Mithril
     // 自身的 OOM 尸检转储，一次真机测试即可定位红屏/设备丢失根因。
-    if (getenv("MITHRIL_DEBUG")) {
-        setenv("MVK_CONFIG_LOG_LEVEL", "4", 1);
-        MITHRIL_LOG_WARN("vk", "MITHRIL_DEBUG set: MoltenVK log level -> 4 "
-                          "(debug), Mithril ring buffer verbose");
+    // iOS 启动器没有环境变量入口 → 额外用 $HOME/Documents/mithril_debug
+    // 文件夹存在作为开关（文件 App 可新建文件夹）。
+    {
+        bool dbg = getenv("MITHRIL_DEBUG") != nullptr;
+        if (!dbg) {
+            const char* home = getenv("HOME");
+            if (home) {
+                char p[512];
+                snprintf(p, sizeof(p), "%s/Documents/mithril_debug", home);
+                struct ::stat st{};
+                dbg = (::stat(p, &st) == 0 && S_ISDIR(st.st_mode));
+            }
+        }
+        if (dbg) {
+            setenv("MVK_CONFIG_LOG_LEVEL", "4", 1);
+            MITHRIL_LOG_WARN("vk", "mithril_debug flag: MoltenVK log level -> 4 "
+                              "(debug), Mithril log -> verbose");
+        }
     }
+    // MoltenVK 日志默认走 NSLog（系统控制台），启动器的日志视图捕获不到。
+    // 导流到 stderr 与 Mithril 日志汇合，让一次测试拿到全部诊断。
+    setenv("MVK_CONFIG_LOG_DESTINATION", "1", 1);  // 1 = stderr
 
     // ---- Instance ----
     std::vector<VkExtensionProperties> instExtProps;
@@ -1391,6 +1409,35 @@ bool init_device() {
 
     b->initialized = true;
     MITHRIL_LOG_INFO("vk", "Vulkan 1.2 backend initialised (MoltenVK static link)");
+
+    // ---- 启动横幅（零配置诊断）----
+    // 一次测试拿全环境画像：GPU、驱动、limits、显存预算。红屏/OOM 报告
+    // 附上这份横幅即可对环境做初判，不用反复猜测设备差异。
+    {
+        VkPhysicalDeviceProperties pdp{};
+        vkGetPhysicalDeviceProperties(b->physicalDevice, &pdp);
+        MITHRIL_LOG_INFO("vk", "==== MITHRIL STARTUP BANNER ====");
+        MITHRIL_LOG_INFO("vk", "  GPU: %s (driverVersion %x, api %u.%u.%u, "
+                          "deviceID %x, vendorID %x)",
+                         pdp.deviceName, pdp.driverVersion,
+                         VK_API_VERSION_MAJOR(pdp.apiVersion),
+                         VK_API_VERSION_MINOR(pdp.apiVersion),
+                         VK_API_VERSION_PATCH(pdp.apiVersion),
+                         pdp.deviceID, pdp.vendorID);
+        MITHRIL_LOG_INFO("vk", "  VRAM budget: %llu MB (tracked=%llu MB, "
+                          "allocs=%u)",
+                         (unsigned long long)(b->totalVramBytes / (1024*1024)),
+                         (unsigned long long)(b->currentVramBytes / (1024*1024)),
+                         b->currentAllocationCount);
+        MITHRIL_LOG_INFO("vk", "  queue: family=%u timestampValidBits=%u "
+                          "maxTex=%u maxColorAttach=%u maxUniformRange=%u",
+                         b->graphicsFamily,
+                         backend_query_timestamp_valid_bits(),
+                         pdp.limits.maxImageDimension2D,
+                         pdp.limits.maxColorAttachments,
+                         (unsigned)pdp.limits.maxUniformBufferRange);
+        MITHRIL_LOG_INFO("vk", "==== END BANNER ====");
+    }
 
     // FIX (GPU page fault root cause): eagerly create the process-wide default
     // 1x1 black texture NOW, while the device is fresh and VRAM is plentiful.

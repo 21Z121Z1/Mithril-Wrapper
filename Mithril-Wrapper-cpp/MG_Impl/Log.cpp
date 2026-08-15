@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <sys/stat.h>
 
 namespace mithril {
 
@@ -26,6 +27,18 @@ const char* level_str(LogLevel l) {
 bool env_flag(const char* name) {
     const char* v = std::getenv(name);
     return v && (v[0] == '1' || v[0] == 'y' || v[0] == 'Y');
+}
+
+// iOS 启动器没有环境变量入口（JVM 参数也到不了 native 侧），
+// 用「Documents/mithril_debug 文件夹存在」做开关：文件 App 能新建
+// 文件夹（新建空文件反而做不到）。跨平台读 $HOME/Documents。
+bool debug_marker_exists() {
+    const char* home = std::getenv("HOME");
+    if (!home) return false;
+    char path[512];
+    std::snprintf(path, sizeof(path), "%s/Documents/mithril_debug", home);
+    struct stat st{};
+    return ::stat(path, &st) == 0 && S_ISDIR(st.st_mode);
 }
 } // namespace
 
@@ -59,6 +72,13 @@ struct LogLevelInit {
         if (env_flag("MITHRIL_VERBOSE")) log_set_level(LogLevel::Verbose);
         else if (env_flag("MITHRIL_DEBUG")) log_set_level(LogLevel::Debug);
         else if (env_flag("MITHRIL_INFO")) log_set_level(LogLevel::Info);
+        else if (debug_marker_exists()) log_set_level(LogLevel::Verbose);
+        else {
+            // 零配置诊断默认值：Info（含 init 横幅 / swapchain 配置 / OOM
+            // 尸检 / 恢复路径）。iOS 启动器没有环境变量入口，诊断必须
+            // 开箱即用；Info 级不会逐帧刷屏。
+            log_set_level(LogLevel::Info);
+        }
     }
 } g_log_init;
 } // namespace
