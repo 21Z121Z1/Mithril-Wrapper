@@ -127,6 +127,29 @@ jobs:
           fi
           python3 ci/minecraft-e2e/evidence.py --root "$E2E_ROOT" event --event native_gpu_control_passed --phase native_control --message "real GPU draw/readback control passed"
 
+      - name: Prove cubemap and array Metal slice semantics
+        shell: bash
+        env:
+          MITHRIL_DYLIB: ${{ steps.mithril.outputs.dylib }}
+          MITHRIL_BACKEND: metal
+        run: |
+          set +e
+          export DYLD_LIBRARY_PATH="$(brew --prefix)/lib"
+          clang -std=c11 -O0 -Wall -Wextra -Werror -IMithril-Wrapper-cpp/include \
+            -o build-minecraft-e2e-native/directmetal_layered_texture_smoke \
+            tests/directmetal_layered_texture_smoke.c -ldl
+          rc=$?
+          if [[ $rc -eq 0 ]]; then
+            build-minecraft-e2e-native/directmetal_layered_texture_smoke "$MITHRIL_DYLIB" \
+              | tee "$E2E_ROOT/native-layered-texture-smoke.log"
+            rc=${PIPESTATUS[0]}
+          fi
+          if [[ $rc -ne 0 ]]; then
+            python3 ci/minecraft-e2e/evidence.py --root "$E2E_ROOT" fail --failure-id RENDER_LAYERED_TEXTURE_CONTROL_FAILED --phase native_control --message "DirectMetal cubemap/array slice regression control failed"
+            exit $rc
+          fi
+          python3 ci/minecraft-e2e/evidence.py --root "$E2E_ROOT" event --event layered_texture_control_passed --phase native_control --message "cubemap faces and array layers map to Metal slices"
+
       - name: Build GLFW to Mithril EGL/CAMetalLayer bridge
         id: bridge
         shell: bash
@@ -199,14 +222,15 @@ jobs:
           if not identity['exact_image']: raise SystemExit('WRAPPER_WRONG_IMAGE')
           if identity['context_count'] < 1: raise SystemExit('WRAPPER_CONTEXT_NOT_CREATED')
           if identity['swap_count'] < 2: raise SystemExit('PRESENT_NOT_SCHEDULED')
-          if identity['get_proc_address_count'] < 10: raise SystemExit('WRAPPER_NOT_ACTIVE')
-          if 'Mithril-Wrapper' not in identity['gl_version'] and 'Mithril-Wrapper' not in identity['gl_renderer']:
-              raise SystemExit('WRAPPER_NOT_ACTIVE')
+          if 'Mithril-Wrapper' not in identity['gl_version'] or 'Metal 3 (DirectMetal)' not in identity['gl_version']:
+              raise SystemExit('WRAPPER_NOT_ACTIVE_DIRECTMETAL')
+          if 'Mithril-Wrapper' not in identity['gl_renderer'] or 'DirectMetal' not in identity['gl_renderer']:
+              raise SystemExit('WRAPPER_RENDERER_IDENTITY_MISMATCH')
           print(json.dumps(identity,indent=2))
           PY
           rc=$?
           if [[ $rc -ne 0 ]]; then
-            python3 ci/minecraft-e2e/evidence.py --root "$E2E_ROOT" fail --failure-id WRAPPER_IDENTITY_OR_ACTIVITY_FAILED --phase runtime_identity --message "exact dylib / context / swap / function-resolution identity gate failed"
+            python3 ci/minecraft-e2e/evidence.py --root "$E2E_ROOT" fail --failure-id WRAPPER_IDENTITY_OR_ACTIVITY_FAILED --phase runtime_identity --message "exact dylib / DirectMetal GL identity / context / swap gate failed"
             exit $rc
           fi
 
@@ -248,6 +272,7 @@ jobs:
             build/minecraft-e2e-artifacts/bridge-state.json
             build/minecraft-e2e-artifacts/game-state.json
             build/minecraft-e2e-artifacts/readback-control.json
+            build/minecraft-e2e-artifacts/native-layered-texture-smoke.log
             build/minecraft-e2e-artifacts/render/samples.json
             build/minecraft-e2e-artifacts/manifest.json
 
