@@ -184,6 +184,70 @@ uint32_t find_memory_type(uint32_t type_bits, VkMemoryPropertyFlags props) {
 // 红屏根因：之前 90% gate 会 REJECT 分配，导致 Minecraft 启动时的必要纹理
 //（字体图集 16MB、mojang logo 等）被拒绝 → 纹理缺失 → 红屏。
 // 现在 95% gate 只 GC，不 reject，让分配尽可能成功。
+// ---------------------------------------------------------------------------
+// OOM 尸检（diagnosis）：vkAllocateMemory 真正失败时转储"谁吃掉了显存"。
+// 没有这个，设备日志只剩一条 "OOM after L1+L2"——无法区分是 swapchain
+// 尺寸异常、纹理失控增长、还是泄漏。带上调用点上下文 + 存活资源 Top 列表，
+// 一次真机测试即可定位。
+// ---------------------------------------------------------------------------
+void dump_oom_autopsy(const char* context, VkDeviceSize reqSize) {
+    Backend* b = backend();
+    MITHRIL_LOG_ERROR("vk", "=== OOM AUTOPSY (%s) === requested=%llu KB, "
+                      "vram=%llu/%llu MB, submitSerial=%llu completed=%llu",
+                      context,
+                      (unsigned long long)(reqSize / 1024),
+                      (unsigned long long)(b->currentVramBytes / (1024*1024)),
+                      (unsigned long long)(b->totalVramBytes / (1024*1024)),
+                      (unsigned long long)b->submitSerial,
+                      (unsigned long long)b->completedSerial);
+
+    auto& texs = texture_table();
+    auto& bufs = buffer_table();
+    MITHRIL_LOG_ERROR("vk", "autopsy: alive textures=%zu buffers=%zu "
+                      "(tracked vram may lag deferred frees)",
+                      texs.size(), bufs.size());
+
+    // Top 10 纹理（按 device-local 分配大小）
+    {
+        std::vector<std::pair<GLuint, const TextureEntry*>> top;
+        top.reserve(texs.size());
+        for (auto& kv : texs) top.emplace_back(kv.first, &kv.second);
+        std::partial_sort(top.begin(),
+                          top.begin() + std::min<size_t>(10, top.size()),
+                          top.end(), [](auto& a, auto& b) {
+                              return a.second->memorySize > b.second->memorySize;
+                          });
+        for (size_t i = 0; i < top.size() && i < 10; ++i) {
+            const TextureEntry* t = top[i].second;
+            MITHRIL_LOG_ERROR("vk", "autopsy tex#%zu: name=%u %dx%d d=%d "
+                              "lv=%d fmt=%d bytes=%llu KB staging=%llu KB",
+                              i, top[i].first, t->width, t->height, t->depth,
+                              t->levels, (int)t->format,
+                              (unsigned long long)(t->memorySize / 1024),
+                              (unsigned long long)(t->stagingSize / 1024));
+        }
+    }
+    // Top 10 缓冲
+    {
+        std::vector<std::pair<GLuint, const BufferEntry*>> top;
+        top.reserve(bufs.size());
+        for (auto& kv : bufs) top.emplace_back(kv.first, &kv.second);
+        std::partial_sort(top.begin(),
+                          top.begin() + std::min<size_t>(10, top.size()),
+                          top.end(), [](auto& a, auto& b) {
+                              return a.second->size > b.second->size;
+                          });
+        for (size_t i = 0; i < top.size() && i < 10; ++i) {
+            MITHRIL_LOG_ERROR("vk", "autopsy buf#%zu: name=%u size=%llu KB "
+                              "mapped=%d",
+                              i, top[i].first,
+                              (unsigned long long)(top[i].second->size / 1024),
+                              top[i].second->mapped ? 1 : 0);
+        }
+    }
+    MITHRIL_LOG_ERROR("vk", "=== END OOM AUTOPSY ===");
+}
+
 VkResult try_allocate_memory_with_gc(VkDevice device, const VkMemoryAllocateInfo* info,
                                      const VkAllocationCallbacks* allocator,
                                      VkDeviceMemory* memory) {
@@ -261,6 +325,8 @@ VkResult try_allocate_memory_with_gc(VkDevice device, const VkMemoryAllocateInfo
                           gcTriggerCount,
                           (unsigned long long)(b->currentVramBytes / (1024*1024)));
     }
+    // 尸检：L1 失败 = drain 不够救 — 此时转储资源画像，帮助定位失控源头
+    if (gcTriggerCount <= 3) dump_oom_autopsy("after-L1", reqSize);
     // FIX (GPU page fault root cause — re-entrant purge): NEVER purge while the
     // command buffer is still recording with live descriptor-set / pipeline
     // binds. Even though safe_device_wait_idle() above flushed+re-begun the
@@ -287,6 +353,7 @@ VkResult try_allocate_memory_with_gc(VkDevice device, const VkMemoryAllocateInfo
                           (unsigned long long)(b->currentVramBytes / (1024*1024)),
                           (unsigned long long)(b->totalVramBytes / (1024*1024)));
     }
+    if (gcTriggerCount <= 3) dump_oom_autopsy("final-L3", reqSize);
     return r;
 }
 

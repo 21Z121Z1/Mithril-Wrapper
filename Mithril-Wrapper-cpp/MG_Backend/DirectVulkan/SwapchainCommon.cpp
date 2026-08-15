@@ -158,8 +158,14 @@ pm_done:
         // 降低显存占用后重试。这避免了 swapchain 创建失败 → eglSwapBuffers 重试
         // → 再次失败的死循环。
         MITHRIL_LOG_WARN("vk", "vkCreateSwapchainKHR failed (imgCount=%u, "
-                          "usage=0x%x) — retrying with reduced resources",
-                          (unsigned)imgCount, (unsigned)scci.imageUsage);
+                          "usage=0x%x, extent=%ux%u, caps.currentExtent=%ux%u, "
+                          "vram=%llu/%llu MB) — retrying with reduced resources",
+                          (unsigned)imgCount, (unsigned)scci.imageUsage,
+                          (unsigned)extent.width, (unsigned)extent.height,
+                          (unsigned)caps.currentExtent.width,
+                          (unsigned)caps.currentExtent.height,
+                          (unsigned long long)(b->currentVramBytes / (1024*1024)),
+                          (unsigned long long)(b->totalVramBytes / (1024*1024)));
         // 降级 1: 减少图像数量到 minImageCount（通常 2）
         if (imgCount > caps.minImageCount) {
             imgCount = caps.minImageCount;

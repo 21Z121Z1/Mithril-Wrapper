@@ -42,6 +42,9 @@
 #include <glslang/MachineIndependent/iomapper.h>
 #include <SPIRV/GlslangToSpv.h>
 
+#include <atomic>
+#include <cstdio>
+
 #include <spirv_reflect.h>
 
 #include <algorithm>
@@ -624,6 +627,26 @@ bool compile_program(const std::string& vs_src, const std::string& fs_src,
     if (!remap_descriptor_bindings(out_vs, out_fs, *next)) {
         info = "SPIRV-Reflect binding remap failed";
         return false;
+    }
+
+    // 诊断钩子：MITHRIL_DUMP_SPIRV=/dir 时把最终 SPIR-V（remap 之后，即
+    // 驱动真正收到的字节）落盘，供 spirv-val / spirv-cross --msl 离线
+    // 复核——lavapipe 直接消费 SPIR-V，而 MoltenVK 还要过一道
+    // SPIRV-Cross 翻译，两者接受度不同。
+    if (const char* dumpDir = getenv("MITHRIL_DUMP_SPIRV")) {
+        static std::atomic<uint32_t> s_dumpSeq{0};
+        const uint32_t seq = s_dumpSeq.fetch_add(1);
+        auto writeSpv = [&](const std::vector<uint32_t>& words, const char* stage) {
+            char path[512];
+            snprintf(path, sizeof(path), "%s/prog%03u_%s.spv", dumpDir, seq, stage);
+            FILE* f = fopen(path, "wb");
+            if (f) {
+                fwrite(words.data(), sizeof(uint32_t), words.size(), f);
+                fclose(f);
+            }
+        };
+        writeSpv(out_vs, "vert");
+        writeSpv(out_fs, "frag");
     }
     return true;
 }

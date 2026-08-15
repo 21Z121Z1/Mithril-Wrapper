@@ -740,6 +740,15 @@ bool init_device() {
     //   消除跨 MoltenVK 版本/平台的不确定性。参考 MoltenVK MVKDevice.mm:3621-3627。
     setenv("MVK_CONFIG_VK_SEMAPHORE_SUPPORT_STYLE", "2", 1);
 
+    // MITHRIL_DEBUG=1 时提升 MoltenVK 日志到 Debug（级别 4）：输出 SPIRV-Cross
+    // 着色器翻译细节、管线创建失败原因、GPU fault 完整上下文。配合 Mithril
+    // 自身的 OOM 尸检转储，一次真机测试即可定位红屏/设备丢失根因。
+    if (getenv("MITHRIL_DEBUG")) {
+        setenv("MVK_CONFIG_LOG_LEVEL", "4", 1);
+        MITHRIL_LOG_WARN("vk", "MITHRIL_DEBUG set: MoltenVK log level -> 4 "
+                          "(debug), Mithril ring buffer verbose");
+    }
+
     // ---- Instance ----
     std::vector<VkExtensionProperties> instExtProps;
     uint32_t extCount = 0;
