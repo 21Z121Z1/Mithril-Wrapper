@@ -1,0 +1,209 @@
+name: GL semantic closure
+
+on:
+  push:
+    branches:
+      - 'fix/gl-semantic-closure-*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gl-semantic-closure-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  semantic-oracles:
+    name: DirectMetal semantic oracles
+    runs-on: macos-26
+    timeout-minutes: 20
+    env:
+      MITHRIL_BACKEND: metal
+      MTL_DEBUG_LAYER: '1'
+      MTL_SHADER_VALIDATION: '0'
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Install native dependencies
+        run: brew install vulkan-loader molten-vk ninja
+
+      - name: Build dual-backend Mithril
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-semantic -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-semantic --target mithril --parallel
+          find build-semantic -type f -name libmithril.dylib -print -quit > /tmp/mithril-path
+          test -s /tmp/mithril-path
+          file "$(cat /tmp/mithril-path)"
+          git diff --check
+
+      - name: Compile semantic oracles
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang -std=gnu11 -O0 -g -Wall -Wextra -Werror \
+            -IMithril-Wrapper-cpp/include tests/directmetal_terrain_semantics_smoke.c \
+            -o build-semantic/directmetal_terrain_semantics_smoke -ldl
+          clang -std=gnu11 -O0 -g -Wall -Wextra -Werror \
+            -DGL_VERTEX_ATTRIB_ARRAY_BUFFER_BINDING=0x889F \
+            -IMithril-Wrapper-cpp/include tests/directmetal_vertex_binding_smoke.c \
+            -o build-semantic/directmetal_vertex_binding_smoke -ldl
+          clang -std=gnu11 -O0 -g -Wall -Wextra -Werror \
+            -IMithril-Wrapper-cpp/include tests/directmetal_state_semantics_smoke.c \
+            -o build-semantic/directmetal_state_semantics_smoke -ldl
+
+      - name: Run indexed clip and indirect GPU semantics
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DYLD_LIBRARY_PATH="$(brew --prefix)/lib"
+          build-semantic/directmetal_terrain_semantics_smoke "$(cat /tmp/mithril-path)" \
+            | tee build-semantic/terrain-semantics.log
+
+      - name: Run ARB vertex binding GPU semantics
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DYLD_LIBRARY_PATH="$(brew --prefix)/lib"
+          build-semantic/directmetal_vertex_binding_smoke "$(cat /tmp/mithril-path)" \
+            | tee build-semantic/vertex-binding.log
+
+      - name: Run GL error and ProgramUniform semantics
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DYLD_LIBRARY_PATH="$(brew --prefix)/lib"
+          build-semantic/directmetal_state_semantics_smoke "$(cat /tmp/mithril-path)" \
+            | tee build-semantic/state-semantics.log
+
+      - name: Enforce advertised capability contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 ci/e2e/check_gl_semantic_contract.py \
+            --manifest ci/e2e/gl_semantic_contract.json \
+            --getter Mithril-Wrapper-cpp/MG_Impl/Getter.cpp \
+            --dylib "$(cat /tmp/mithril-path)" \
+            --report build-semantic/contract-report.json
+
+      - name: Upload semantic evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: directmetal-gl-semantic-${{ github.sha }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            build-semantic/*.log
+            build-semantic/contract-report.json
+
+  minecraft-semantic-e2e:
+    name: Minecraft 26.2 production semantic trace
+    needs: semantic-oracles
+    runs-on: macos-26
+    timeout-minutes: 30
+    env:
+      E2E_ROOT: ${{ github.workspace }}/build/minecraft-semantic-e2e
+      MITHRIL_BACKEND: metal
+      MTL_DEBUG_LAYER: '1'
+      MTL_SHADER_VALIDATION: '0'
+      GRADLE_OPTS: -Dorg.gradle.caching=true
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Setup Java 25
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - name: Setup Gradle 9.4.1
+        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb
+        with:
+          gradle-version: '9.4.1'
+          cache-read-only: true
+
+      - name: Install native dependencies
+        run: brew install glfw vulkan-loader molten-vk ninja
+
+      - name: Build Mithril production dylib
+        id: mithril
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$E2E_ROOT"
+          cmake -S . -B build-minecraft-semantic -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_FLAGS="-Wno-error" -DCMAKE_CXX_FLAGS="-Wno-error"
+          cmake --build build-minecraft-semantic --target mithril --parallel
+          dylib=$(find build-minecraft-semantic -type f -name libmithril.dylib -print -quit)
+          test -s "$dylib"
+          dylib="$(cd "$(dirname "$dylib")" && pwd)/$(basename "$dylib")"
+          echo "dylib=$dylib" >> "$GITHUB_OUTPUT"
+          shasum -a 256 "$dylib" | tee "$E2E_ROOT/mithril.sha256"
+
+      - name: Build GLFW EGL CAMetalLayer bridge
+        id: bridge
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build-minecraft-semantic/bridge
+          GLFW_PREFIX=$(brew --prefix glfw)
+          GLFW_REAL="$GLFW_PREFIX/lib/libglfw.3.dylib"
+          [[ -f "$GLFW_REAL" ]] || GLFW_REAL="$GLFW_PREFIX/lib/libglfw.dylib"
+          BRIDGE="$PWD/build-minecraft-semantic/bridge/libglfw_mithril.dylib"
+          clang++ -std=c++20 -fobjc-arc -dynamiclib -Wall -Wextra -Werror \
+            ci/minecraft-e2e/native/glfw_mithril_bridge.mm \
+            ci/minecraft-e2e/native/prepresent_capture.mm \
+            -I"$GLFW_PREFIX/include" -IMithril-Wrapper-cpp/include \
+            -framework AppKit -framework QuartzCore -framework Foundation \
+            -Wl,-reexport_library,"$GLFW_REAL" -o "$BRIDGE"
+          echo "bridge=$BRIDGE" >> "$GITHUB_OUTPUT"
+          echo "glfw_real=$GLFW_REAL" >> "$GITHUB_OUTPUT"
+
+      - name: Run real Minecraft production Client GameTest with semantic trace
+        shell: bash
+        env:
+          MITHRIL_GL_SEMANTIC_TRACE: ${{ github.workspace }}/build/minecraft-semantic-e2e/gl-semantic-trace.tsv
+        run: |
+          set -euo pipefail
+          rm -f "$MITHRIL_GL_SEMANTIC_TRACE"
+          gradle -p .github/ci/minecraft-e2e --build-cache --stacktrace \
+            -PmithrilDylib="${{ steps.mithril.outputs.dylib }}" \
+            -PglfwBridge="${{ steps.bridge.outputs.bridge }}" \
+            -PglfwDelegate="${{ steps.bridge.outputs.glfw_real }}" \
+            -PevidenceRoot="$E2E_ROOT" \
+            runProductionClientGameTest
+
+      - name: Fail on observed but unproven GL semantics
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DYLD_LIBRARY_PATH="$(brew --prefix)/lib"
+          python3 ci/e2e/check_gl_semantic_contract.py \
+            --manifest ci/e2e/gl_semantic_contract.json \
+            --getter Mithril-Wrapper-cpp/MG_Impl/Getter.cpp \
+            --dylib "${{ steps.mithril.outputs.dylib }}" \
+            --trace "$E2E_ROOT/gl-semantic-trace.tsv" \
+            --require-trace \
+            --report "$E2E_ROOT/gl-semantic-contract-report.json"
+
+      - name: Upload Minecraft semantic evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: minecraft-gl-semantic-${{ github.sha }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            build/minecraft-semantic-e2e/
+            .github/ci/minecraft-e2e/build/run/clientGameTest/logs/
