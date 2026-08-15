@@ -1,0 +1,31 @@
+name: Apply bridge identity evidence fix
+
+on:
+  push:
+    branches:
+      - 'fix/gl-semantic-closure-*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: true
+          fetch-depth: 0
+      - name: Apply reviewed bridge evidence transformation
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 ci/e2e/apply_bridge_identity_fix.py
+          git diff --check
+          if git diff --quiet; then exit 0; fi
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add ci/minecraft-e2e/native/glfw_mithril_bridge.mm
+          git commit -m 'fix(ci): preserve production GL identity through teardown'
+          git push origin HEAD:${GITHUB_REF_NAME}
