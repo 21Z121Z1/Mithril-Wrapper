@@ -526,6 +526,9 @@ struct Sync {
     void*       handle = nullptr;
     GLenum      condition = GL_SYNC_GPU_COMMANDS_COMPLETE;
     GLbitfield  flags = 0;
+    // Vulkan submission serial that must complete before this GL fence signals.
+    // Zero means there was no submitted GPU work before the fence.
+    uint64_t    submitSerial = 0;
     bool        signaled = false;
     bool        markedForDeletion = false;
 };
