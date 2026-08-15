@@ -130,10 +130,15 @@ extern "C" void mithril_e2e_capture_before_present(int width, int height, void* 
         return;
     }
 
-    char stem[96];
-    std::snprintf(stem, sizeof(stem), "%s/render/prepresent-frame-%04d", root.c_str(), frame);
-    const std::string raw_path = std::string(stem) + ".rgba";
-    const std::string meta_path = std::string(stem) + ".meta";
+    // Do not put the absolute path in a fixed-size C buffer: GitHub hosted
+    // workspaces are long enough that a 96-byte stem silently truncates
+    // "prepresent-frame-0001" into "prepres", making the producer and Java
+    // consumer disagree even though readback itself succeeded.
+    char frame_name[40];
+    std::snprintf(frame_name, sizeof(frame_name), "prepresent-frame-%04d", frame);
+    const std::string stem = root + "/render/" + frame_name;
+    const std::string raw_path = stem + ".rgba";
+    const std::string meta_path = stem + ".meta";
     if (!write_atomic(raw_path, rgba.data(), rgba.size())) {
         append_event(root, "prepresent_capture_failed", frame, "could not persist RGBA readback");
         return;
