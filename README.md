@@ -1,23 +1,17 @@
 # Mithril-Wrapper
 
-> OpenGL 4.6 Core Profile → **双后端**（DirectMetal / Vulkan+MoltenVK）翻译层，
-> 让依赖桌面 OpenGL 的应用能在仅有 Metal 后端的 iOS 上运行。
+[![iOS build](https://github.com/MithrilWrapper-Dev/Mithril-Wrapper/actions/workflows/build.yml/badge.svg?branch=feat%2Fdual-backend-metal)](https://github.com/MithrilWrapper-Dev/Mithril-Wrapper/actions/workflows/build.yml?query=branch%3Afeat%2Fdual-backend-metal)
 
-Mithril-Wrapper 把宿主程序发出的 **OpenGL 4.6 Core Profile** 调用实时翻译为
-**Metal** 或 **Vulkan 1.2**（经 MoltenVK 转 Metal）调用。库自带一套基于
-**CAMetalLayer** 的 **EGL 1.5** 实现，让 LWJGL 3 / PojavLauncher /
-Amethyst-iOS 这类靠 `eglCreateContext` 等 EGL 入口拉起 GL 上下文的启动器
-可以直接 `dlopen` 本库。
+Mithril-Wrapper 是面向 iOS / macOS 的 OpenGL 4.6 Core 兼容层。它导出可由
+LWJGL、PojavLauncher、Amethyst-iOS 等宿主加载的 OpenGL 与 EGL 1.5 入口，
+再把渲染命令交给同一个动态库内的两套 Apple GPU 后端：
 
-当前有两条显式 backend 路径：
+- **DirectMetal**：GL → SPIR-V → SPIRV-Cross → MSL → Metal，Apple 平台默认使用。
+- **Vulkan**：GL → SPIR-V → Vulkan 1.2 → MoltenVK → Metal，作为兼容与回退路径。
 
-- **DirectMetal**：GL frontend/state → 共享 SPIR-V → SPIRV-Cross MSL → Metal；
-  不调用 Vulkan/MoltenVK。Apple 构建默认选择。
-- **Vulkan**：GL → SPIR-V → `vkCreateShaderModule` → MoltenVK 内部 SPIR-V→MSL → Metal；
-  可用 `MITHRIL_BACKEND=vulkan` 显式选择。
-
-可用 `MITHRIL_BACKEND=metal|vulkan` 覆盖默认选择。未知名称或非 Apple 构建请求
-`metal` 会明确失败，不会静默切换 backend。
+Apple 构建默认同时包含两套后端。运行时可设置
+`MITHRIL_BACKEND=metal|vulkan` 强制选择；指定后端初始化失败时会尝试另一套
+后端并输出明确日志。非 Apple 构建仅提供 Vulkan 后端。
 
 ```
 DirectMetal 路径:
@@ -33,7 +27,8 @@ Vulkan 路径:
   `glBindBuffer`、`glTexImage2D`、`glUniform*`、`glGetString*` 等，~850 个符号），
   可作为动态库 `libmithril.dylib` 被 `dlopen` 注入。
 - `glGetString(GL_VERSION)` 返回
-  `4.6 §bMithril-Wrapper§r 1.0 (Vulkan 1.2 / MoltenVK)`，
+  `4.6.0 §bMithril-Wrapper§r 1.0 (...)`，尾部会标明当前实际使用的
+  `Metal 3 (DirectMetal)` 或 `Vulkan 1.2 (MoltenVK)` 后端；
   `glGetIntegerv(GL_MAJOR_VERSION/GL_MINOR_VERSION)` 返回 `4 / 6`，
   `GL_CONTEXT_PROFILE_MASK` 返回 `GL_CONTEXT_CORE_PROFILE_BIT`。
 - **自带 EGL 1.5**：`egl/egl.cpp` 导出 ~44 个 `egl*` 入口
@@ -62,7 +57,7 @@ Vulkan 路径:
 | 系统 | **iOS / iPadOS 15.0** 及以上 | CI 默认部署目标 `15.0` |
 | 架构 | **arm64** | CI 仅构建 `PLATFORM=OS64` |
 | Metal | **Metal 2.3**（MSL 2.3） | iOS 15 对应的 Metal Shading Language 版本 |
-| Vulkan | Vulkan 1.2（仅 Vulkan 后端需要） | MoltenVK 静态链接；DirectMetal 后端不需要 |
+| Vulkan | Vulkan 1.2（运行 Vulkan 后端时需要） | Apple 构建仍会打包 MoltenVK 作为回退后端 |
 
 ## 架构分层
 
@@ -122,17 +117,15 @@ framebuffer、VAO），以及 EGL 默认帧缓冲的附件。每个 `EGLContext`
 
 ## 后端选择
 
-构建时通过 CMake 选项控制：
+Apple 构建默认启用双后端。当前 CMake 只提供 DirectMetal 的编译开关；
+Vulkan 后端始终参与构建：
 
 ```bash
-# Apple 构建：默认 DirectMetal（不需要 MoltenVK）
+# 默认：DirectMetal + Vulkan，运行时默认 DirectMetal
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 
-# Apple 构建：显式选择 Vulkan 后端（需要 MoltenVK.xcframework）
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DMITHRIL_BACKEND=vulkan
-
-# Apple 构建：双后端（运行时通过 MITHRIL_BACKEND 环境变量选择）
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DMITHRIL_BACKEND=dual
+# Vulkan-only：不编译 DirectMetal
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DMITHRIL_METAL_BACKEND=OFF
 ```
 
 运行时通过环境变量选择：
@@ -166,7 +159,8 @@ export MITHRIL_BACKEND=vulkan  # Vulkan + MoltenVK
 - **CMake ≥ 3.22**
 - **C++20** 编译器（clang / Apple clang）
 - **Metal 框架**（DirectMetal 后端）— 直接使用 `MTLDevice` / `MTLCommandQueue` 等
-- **MoltenVK.xcframework**（仅 Vulkan 后端）— CI 自动下载 v1.4.2
+- **MoltenVK.xcframework + Vulkan headers** — 当前 Apple 构建始终包含 Vulkan
+  回退后端，因此即使默认运行 DirectMetal，构建时仍需要 MoltenVK；CI 自动下载 v1.4.2
 - Git 子模块：glslang、SPIRV-Cross、SPIRV-Headers
 
 ## 本地构建
@@ -178,7 +172,20 @@ git clone --recursive https://github.com/MithrilWrapper-Dev/Mithril-Wrapper.git
 cd Mithril-Wrapper
 ```
 
-### 2. 配置 & 构建（macOS 原生，DirectMetal 后端）
+### 2. 准备 MoltenVK
+
+iOS 交叉编译需要把 MoltenVK 的静态 xcframework 与 headers 放在仓库根目录：
+
+```bash
+MOLTENVK_TAG="v1.4.2"
+curl -fsSL -o MoltenVK-ios.tar \
+  "https://github.com/KhronosGroup/MoltenVK/releases/download/${MOLTENVK_TAG}/MoltenVK-ios.tar"
+tar -xf MoltenVK-ios.tar
+mv MoltenVK/MoltenVK/static/MoltenVK.xcframework ./MoltenVK.xcframework
+mv MoltenVK/MoltenVK/include ./MoltenVK-Headers
+```
+
+### 3. 配置 & 构建（macOS 原生，默认双后端）
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -186,7 +193,7 @@ cmake --build build -j
 # 产物：build/libmithril.dylib
 ```
 
-### 3. 交叉编译 iOS arm64
+### 4. 交叉编译 iOS arm64
 
 ```bash
 curl -fsSL -o ios.toolchain.cmake \

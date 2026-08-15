@@ -140,8 +140,7 @@ void swapchain_realloc_depth(MetalSwapchain* sc, int w, int h) {
     // Discrete: Managed gives the GPU a private fast copy; GPU->CPU sync
     // happens automatically at command-buffer completion, which is all the
     // depth path ever needs (it is written by GPU, read only for debug).
-    desc.storageMode = b->unifiedMemory ? MTLStorageModeShared
-                                        : MTLStorageModeManaged;
+    desc.storageMode = MITHRIL_DMT_STORAGE_MODE(!b->unifiedMemory);
 
     id<MTLTexture> tex = [b->device newTextureWithDescriptor:desc];
     if (tex == nil) {

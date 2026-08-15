@@ -313,7 +313,7 @@ static void ensure_default_texture() {
     MTLTextureDescriptor* d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
                                                                                   width:1 height:1 mipmapped:NO];
     d.usage = MTLTextureUsageShaderRead;
-    d.storageMode = b->unifiedMemory ? MTLStorageModeShared : MTLStorageModeManaged;
+    d.storageMode = MITHRIL_DMT_STORAGE_MODE(!b->unifiedMemory);
     id<MTLTexture> tex = [b->device newTextureWithDescriptor:d];
     if (!tex) return;
     uint32_t black = 0;
@@ -397,7 +397,7 @@ MetalTexture* get_or_create_texture(GLuint name, int width, int height,
     // generation needs ShaderWrite. Cover all three — costs nothing.
     d.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite |
               MTLTextureUsageRenderTarget;
-    d.storageMode = b->unifiedMemory ? MTLStorageModeShared : MTLStorageModeManaged;
+    d.storageMode = MITHRIL_DMT_STORAGE_MODE(!b->unifiedMemory);
 
     id<MTLTexture> tex = [b->device newTextureWithDescriptor:d];
     if (tex == nil) {
@@ -433,7 +433,7 @@ void dmt_internal_texture_upload(GLuint name, int level, int x, int y, int z,
     const uint8_t* base = (const uint8_t*)pixels +
                           (NSUInteger)(skipPixels * bpp) +
                           (NSUInteger)skipRows * rowBytes;
-    NSUInteger imageBytes = (NSUInteger)d * rowBytes * h;
+    NSUInteger imageBytes = rowBytes * (NSUInteger)h;
     if (skipImages) base += (NSUInteger)skipImages * imageBytes;
 
     MTLRegion region;
@@ -442,18 +442,27 @@ void dmt_internal_texture_upload(GLuint name, int level, int x, int y, int z,
 
     // Per-face upload for cube maps: z is the face index.
     if (mt->glTarget == GL_TEXTURE_CUBE_MAP) {
-        NSUInteger slice = (NSUInteger)(z & 5);
+        region.origin.z = 0;
+        region.size.depth = 1;
+        NSUInteger slice = (NSUInteger)((z >= 0) ? (z % 6) : 0);
         [mt->tex replaceRegion:region mipmapLevel:(NSUInteger)level slice:slice
                       withBytes:base bytesPerRow:rowBytes bytesPerImage:imageBytes];
-    } else if (mt->glTarget == GL_TEXTURE_2D_ARRAY || mt->glTarget == GL_TEXTURE_3D) {
-        [mt->tex replaceRegion:region mipmapLevel:(NSUInteger)level
+    } else if (mt->glTarget == GL_TEXTURE_2D_ARRAY ||
+               mt->glTarget == GL_TEXTURE_1D_ARRAY) {
+        region.origin.z = 0;
+        region.size.depth = 1;
+        for (int layer = 0; layer < d; ++layer) {
+            [mt->tex replaceRegion:region mipmapLevel:(NSUInteger)level
+                             slice:(NSUInteger)(z + layer)
+                         withBytes:base + (NSUInteger)layer * imageBytes
+                        bytesPerRow:rowBytes bytesPerImage:imageBytes];
+        }
+    } else if (mt->glTarget == GL_TEXTURE_3D) {
+        [mt->tex replaceRegion:region mipmapLevel:(NSUInteger)level slice:0
                       withBytes:base bytesPerRow:rowBytes bytesPerImage:imageBytes];
     } else {
         [mt->tex replaceRegion:region mipmapLevel:(NSUInteger)level
                       withBytes:base bytesPerRow:rowBytes];
-    }
-    if (!backend()->unifiedMemory && mt->tex.storageMode == MTLStorageModeManaged) {
-        // replaceRegion already makes CPU-written bytes visible to the GPU.
     }
 }
 
@@ -581,10 +590,9 @@ void dmt_internal_blit_images_raw(MetalTexture* src, MetalTexture* dst,
     run_scaled_blit(src, dst, p, filter == GL_LINEAR);
 }
 
-/* MSAA resolve（glBlitFramebuffer 多采样 → 单采样）。Metal 的 blit 编码器原生
- * 支持 resolveFromTexture:toTexture:（1:1 平均，与 GL resolve 语义一致），且
- * depth/stencil 格式也能解析（Vulkan 核心做不到、需要 VK_KHR_depth_stencil_
- * resolve 扩展）。
+/* MSAA resolve（glBlitFramebuffer 多采样 → 单采样）。Metal 通过 render-pass
+ * attachment 的 resolveTexture + MTLStoreActionMultisampleResolve 完成解析；
+ * MTLBlitCommandEncoder 没有纹理 resolve API。
  *
  * 限制：blit resolve 只有整纹理形式（无子矩形 API）。GL 的子矩形 resolve 在此
  * 退化为整纹理解析 —— 实际用法（MC/Sodium 的 cascade、后处理 downsample）几乎
@@ -613,9 +621,37 @@ void dmt_internal_resolve_images(MetalTexture* src, MetalTexture* dst,
         }
     }
     if (!ensure_command_buffer()) return;
-    id<MTLBlitCommandEncoder> blit = [backend()->cmd blitCommandEncoder];
-    [blit resolveFromTexture:src->tex toTexture:dst->tex];
-    [blit endEncoding];
+    MTLRenderPassDescriptor* pass = [MTLRenderPassDescriptor renderPassDescriptor];
+    const bool hasStencil = format_has_stencil(src->vkFormat);
+    const bool isDepth = src->vkFormat == VK_FORMAT_D16_UNORM ||
+                         src->vkFormat == VK_FORMAT_X8_D24_UNORM_PACK32 ||
+                         src->vkFormat == VK_FORMAT_D32_SFLOAT ||
+                         src->vkFormat == VK_FORMAT_D24_UNORM_S8_UINT ||
+                         src->vkFormat == VK_FORMAT_D32_SFLOAT_S8_UINT;
+    if (isDepth) {
+        pass.depthAttachment.texture = src->tex;
+        pass.depthAttachment.resolveTexture = dst->tex;
+        pass.depthAttachment.loadAction = MTLLoadActionLoad;
+        pass.depthAttachment.storeAction = MTLStoreActionMultisampleResolve;
+    } else if (!hasStencil) {
+        pass.colorAttachments[0].texture = src->tex;
+        pass.colorAttachments[0].resolveTexture = dst->tex;
+        pass.colorAttachments[0].loadAction = MTLLoadActionLoad;
+        pass.colorAttachments[0].storeAction = MTLStoreActionMultisampleResolve;
+    }
+    if (hasStencil) {
+        pass.stencilAttachment.texture = src->tex;
+        pass.stencilAttachment.resolveTexture = dst->tex;
+        pass.stencilAttachment.loadAction = MTLLoadActionLoad;
+        pass.stencilAttachment.storeAction = MTLStoreActionMultisampleResolve;
+    }
+    id<MTLRenderCommandEncoder> enc =
+        [backend()->cmd renderCommandEncoderWithDescriptor:pass];
+    if (enc == nil) {
+        MITHRIL_LOG_WARN("mtl", "MSAA resolve encoder creation failed");
+        return;
+    }
+    [enc endEncoding];
     note_non_render_commands();
 }
 
@@ -651,7 +687,9 @@ int dmt_internal_read_pixels(MetalTexture* colorSrc, int x, int y, int w, int h,
         destinationOffset:0
    destinationBytesPerRow:rowBytes
  destinationBytesPerImage:total];
+#if TARGET_OS_OSX
     if (!b->unifiedMemory) [blit synchronizeResource:rb];
+#endif
     [blit endEncoding];
     [cb commit];
     [cb waitUntilCompleted];

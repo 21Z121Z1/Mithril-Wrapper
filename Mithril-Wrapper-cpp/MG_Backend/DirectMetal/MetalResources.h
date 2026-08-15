@@ -92,9 +92,8 @@ void dmt_internal_blit_images_raw(MetalTexture* src, MetalTexture* dst,
                                   int dstX0, int dstY0, int dstX1, int dstY1,
                                   GLbitfield mask, GLenum filter,
                                   int is_dst_default_fbo, int dst_height);
-// Whole-texture MSAA resolve (multisample src -> single-sample dst) via the
-// blit encoder's native resolveFromTexture:toTexture: (color AND depth). See
-// MetalResources.mm for the sub-rect caveat.
+// Whole-texture MSAA resolve (multisample src -> single-sample dst) via a
+// resolve render pass. See MetalResources.mm for the sub-rect caveat.
 void dmt_internal_resolve_images(MetalTexture* src, MetalTexture* dst,
                                  int x, int y, int width, int height);
 // Synchronous RGBA8 (or Depth32Float) readback from a texture into the

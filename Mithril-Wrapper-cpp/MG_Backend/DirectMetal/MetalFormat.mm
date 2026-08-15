@@ -130,30 +130,9 @@ MTLVertexFormat vertex_format_from_gl(GLenum type, int size, int normalized, int
         }
         return MTLVertexFormatInvalid;
     }
-    // MTLVertexFormat{Int,UInt}{,2,3,4}Normalized are macOS-only;
-    // iOS does not have these single/certain normalized int vertex formats.
-    // On iOS, fall back to the non-normalized integer format (the shader
-    // can normalize manually, or the pipeline will report mismatch).
-#if TARGET_OS_OSX
-    if (type == GL_INT && !integer) {
-        switch (size) {
-            case 1: return norm ? MTLVertexFormatIntNormalized : MTLVertexFormatInt;
-            case 2: return norm ? MTLVertexFormatInt2Normalized : MTLVertexFormatInt2;
-            case 3: return norm ? MTLVertexFormatInt3Normalized : MTLVertexFormatInt3;
-            case 4: return norm ? MTLVertexFormatInt4Normalized : MTLVertexFormatInt4;
-        }
-    }
-    if (type == GL_UNSIGNED_INT && !integer) {
-        switch (size) {
-            case 1: return norm ? MTLVertexFormatUIntNormalized : MTLVertexFormatUInt;
-            case 2: return norm ? MTLVertexFormatUInt2Normalized : MTLVertexFormatUInt2;
-            case 3: return norm ? MTLVertexFormatUInt3Normalized : MTLVertexFormatUInt3;
-            case 4: return norm ? MTLVertexFormatUInt4Normalized : MTLVertexFormatUInt4;
-        }
-    }
-#else
-    // iOS: normalized int/uint vertex formats are not available.
-    // Use the integer format; the caller should handle conversion.
+    // Metal has no normalized 32-bit signed/unsigned integer vertex formats
+    // on either Apple platform. Keep the existing fallback to the matching
+    // integer format; shader-side conversion handles float inputs.
     if (type == GL_INT && !integer) {
         switch (size) {
             case 1: return MTLVertexFormatInt;
@@ -170,7 +149,6 @@ MTLVertexFormat vertex_format_from_gl(GLenum type, int size, int normalized, int
             case 4: return MTLVertexFormatUInt4;
         }
     }
-#endif
     if (type == GL_INT && integer) {
         switch (size) {
             case 1: return MTLVertexFormatInt;
@@ -285,7 +263,6 @@ NSUInteger vertex_format_bytes(MTLVertexFormat f) {
         case MTLVertexFormatHalf2: case MTLVertexFormatUShort2Normalized:
         case MTLVertexFormatShort2Normalized: case MTLVertexFormatUShort2:
         case MTLVertexFormatShort2: case MTLVertexFormatFloat:
-        case MTLVertexFormatUIntNormalized: case MTLVertexFormatIntNormalized:
         case MTLVertexFormatUInt: case MTLVertexFormatInt:
         case MTLVertexFormatUInt1010102Normalized:
         case MTLVertexFormatInt1010102Normalized:
@@ -297,15 +274,12 @@ NSUInteger vertex_format_bytes(MTLVertexFormat f) {
         case MTLVertexFormatUShort4: case MTLVertexFormatShort4:
         case MTLVertexFormatUShort3Normalized: case MTLVertexFormatShort3Normalized:
         case MTLVertexFormatUShort3: case MTLVertexFormatShort3:
-        case MTLVertexFormatUInt2Normalized: case MTLVertexFormatInt2Normalized:
         case MTLVertexFormatUInt2: case MTLVertexFormatInt2:
             return 8;
         case MTLVertexFormatFloat3:
-        case MTLVertexFormatUInt3Normalized: case MTLVertexFormatInt3Normalized:
         case MTLVertexFormatUInt3: case MTLVertexFormatInt3:
             return 12;
         case MTLVertexFormatFloat4:
-        case MTLVertexFormatUInt4Normalized: case MTLVertexFormatInt4Normalized:
         case MTLVertexFormatUInt4: case MTLVertexFormatInt4:
             return 16;
         default:

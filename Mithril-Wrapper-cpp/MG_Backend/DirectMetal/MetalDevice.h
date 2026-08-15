@@ -54,9 +54,12 @@
     } while (0)
     #define MITHRIL_DMT_STORAGE(managed) \
         ((managed) ? MTLResourceStorageModeManaged : MTLResourceStorageModeShared)
+    #define MITHRIL_DMT_STORAGE_MODE(managed) \
+        ((managed) ? MTLStorageModeManaged : MTLStorageModeShared)
 #else
     #define MITHRIL_DMT_SYNC(mb, off, len) ((void)0)
     #define MITHRIL_DMT_STORAGE(managed) MTLResourceStorageModeShared
+    #define MITHRIL_DMT_STORAGE_MODE(managed) MTLStorageModeShared
 #endif
 
 namespace mithril {

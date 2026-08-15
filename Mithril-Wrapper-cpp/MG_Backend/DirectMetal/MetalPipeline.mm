@@ -179,8 +179,8 @@ bool compile_msl_function(MetalProgramResources* pr,
         // separate module, so SPIRV-Cross must not apply either again — a
         // double flip would put every default-FBO frame upside down.
         spirv_cross::CompilerGLSL::Options copts = compiler.get_common_options();
-        copts.fixup_clipspace = false;
-        copts.flip_vert_y = false;
+        copts.vertex.fixup_clipspace = false;
+        copts.vertex.flip_vert_y = false;
         compiler.set_common_options(copts);
 
         const spirv_cross::ShaderResources res = compiler.get_shader_resources();
@@ -1552,7 +1552,7 @@ bool ensure_builtin_functions() {
 
     struct Stage {
         const char* src;
-        id<MTLFunction>* out;
+        id<MTLFunction> __strong *out;
         const char* name;
     };
     Stage stages[6] = {

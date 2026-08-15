@@ -598,8 +598,8 @@ void dmt_blit_images(VkImage src_image, VkFormat src_format,
 
 /* MSAA resolve（Backend.h 契约的 Metal 侧实现）。resolve 是 1:1 全纹理操作，
  * 无缩放无镜像 —— is_dst_default_fbo/dst_height 的 Y 翻转对全高度矩形等价于
- * 恒等变换，故不参与。mask 无需分派：Metal 的 blit resolve 对颜色与深度模板
- * 附件一视同仁（Vulkan 核心反而做不到）。 */
+ * 恒等变换，故不参与。mask 无需分派：实现根据附件格式建立 color 或
+ * depth/stencil resolve render pass。 */
 void dmt_resolve_images(VkImage src_image, VkFormat src_format,
                         VkImage dst_image, VkFormat dst_format,
                         int x, int y, int width, int height,
