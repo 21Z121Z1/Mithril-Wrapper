@@ -22,6 +22,8 @@ GLuint g_bound_vao = 0;
 GLuint g_bound_array_buffer = 0;
 GLuint g_bound_element_buffer = 0;
 GLuint g_bound_uniform_buffer = 0;
+GLuint g_bound_copy_read_buffer = 0;
+GLuint g_bound_copy_write_buffer = 0;
 GLuint g_bound_pixel_pack_buffer = 0;
 GLuint g_bound_pixel_unpack_buffer = 0;
 std::array<IndexedBufferBinding, kMaxUniformBufferBindings>
@@ -228,6 +230,8 @@ void APIENTRY glDeleteBuffers(GLsizei n, const GLuint* buffers) {
         if (g_bound_array_buffer == buffers[i]) g_bound_array_buffer = 0;
         if (g_bound_element_buffer == buffers[i]) g_bound_element_buffer = 0;
         if (g_bound_uniform_buffer == buffers[i]) g_bound_uniform_buffer = 0;
+        if (g_bound_copy_read_buffer == buffers[i]) g_bound_copy_read_buffer = 0;
+        if (g_bound_copy_write_buffer == buffers[i]) g_bound_copy_write_buffer = 0;
         if (g_bound_pixel_pack_buffer == buffers[i])
             g_bound_pixel_pack_buffer = 0;
         if (g_bound_pixel_unpack_buffer == buffers[i])
@@ -248,6 +252,8 @@ void APIENTRY glBindBuffer(GLenum target, GLuint buffer) {
         case GL_ARRAY_BUFFER: g_bound_array_buffer = buffer; break;
         case GL_ELEMENT_ARRAY_BUFFER: g_bound_element_buffer = buffer; break;
         case GL_UNIFORM_BUFFER: g_bound_uniform_buffer = buffer; break;
+        case GL_COPY_READ_BUFFER: g_bound_copy_read_buffer = buffer; break;
+        case GL_COPY_WRITE_BUFFER: g_bound_copy_write_buffer = buffer; break;
         case GL_PIXEL_PACK_BUFFER: g_bound_pixel_pack_buffer = buffer; break;
         case GL_PIXEL_UNPACK_BUFFER: g_bound_pixel_unpack_buffer = buffer; break;
         default:
@@ -263,6 +269,8 @@ void APIENTRY glBufferData(GLenum target, GLsizeiptr size, const void* data, GLe
         case GL_ARRAY_BUFFER: bound = &g_bound_array_buffer; break;
         case GL_ELEMENT_ARRAY_BUFFER: bound = &g_bound_element_buffer; break;
         case GL_UNIFORM_BUFFER: bound = &g_bound_uniform_buffer; break;
+        case GL_COPY_READ_BUFFER: bound = &g_bound_copy_read_buffer; break;
+        case GL_COPY_WRITE_BUFFER: bound = &g_bound_copy_write_buffer; break;
         case GL_PIXEL_PACK_BUFFER: bound = &g_bound_pixel_pack_buffer; break;
         case GL_PIXEL_UNPACK_BUFFER: bound = &g_bound_pixel_unpack_buffer; break;
         default: PUSH_ERROR(GL_INVALID_ENUM); return;
@@ -286,6 +294,8 @@ void APIENTRY glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, c
         case GL_ARRAY_BUFFER: bound = &g_bound_array_buffer; break;
         case GL_ELEMENT_ARRAY_BUFFER: bound = &g_bound_element_buffer; break;
         case GL_UNIFORM_BUFFER: bound = &g_bound_uniform_buffer; break;
+        case GL_COPY_READ_BUFFER: bound = &g_bound_copy_read_buffer; break;
+        case GL_COPY_WRITE_BUFFER: bound = &g_bound_copy_write_buffer; break;
         case GL_PIXEL_PACK_BUFFER: bound = &g_bound_pixel_pack_buffer; break;
         case GL_PIXEL_UNPACK_BUFFER: bound = &g_bound_pixel_unpack_buffer; break;
         default: PUSH_ERROR(GL_INVALID_ENUM); return;
@@ -315,6 +325,8 @@ BufferData* BoundBufferForTarget(GLenum target, GLenum* error) {
         case GL_ARRAY_BUFFER: bound = &g_bound_array_buffer; break;
         case GL_ELEMENT_ARRAY_BUFFER: bound = &g_bound_element_buffer; break;
         case GL_UNIFORM_BUFFER: bound = &g_bound_uniform_buffer; break;
+        case GL_COPY_READ_BUFFER: bound = &g_bound_copy_read_buffer; break;
+        case GL_COPY_WRITE_BUFFER: bound = &g_bound_copy_write_buffer; break;
         case GL_PIXEL_PACK_BUFFER: bound = &g_bound_pixel_pack_buffer; break;
         case GL_PIXEL_UNPACK_BUFFER: bound = &g_bound_pixel_unpack_buffer; break;
         default: *error = GL_INVALID_ENUM; return nullptr;

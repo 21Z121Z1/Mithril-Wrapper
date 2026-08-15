@@ -84,6 +84,8 @@ extern GLuint g_bound_vao;           // default VAO is 0
 extern GLuint g_bound_array_buffer;
 extern GLuint g_bound_element_buffer;
 extern GLuint g_bound_uniform_buffer;
+extern GLuint g_bound_copy_read_buffer;
+extern GLuint g_bound_copy_write_buffer;
 extern GLuint g_bound_pixel_pack_buffer;
 extern GLuint g_bound_pixel_unpack_buffer;
 
