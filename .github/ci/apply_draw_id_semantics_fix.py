@@ -9,6 +9,18 @@ def replace_once(path: str, old: str, new: str) -> None:
         raise SystemExit(f"{path}: expected exactly one match, found {n}: {old[:80]!r}")
     p.write_text(text.replace(old, new, 1))
 
+
+def replace_first_with_count(path: str, old: str, new: str, expected: int) -> None:
+    p = Path(path)
+    text = p.read_text()
+    n = text.count(old)
+    if n != expected:
+        raise SystemExit(
+            f"{path}: expected exactly {expected} matches before first replacement, "
+            f"found {n}: {old[:80]!r}"
+        )
+    p.write_text(text.replace(old, new, 1))
+
 # Carry the GL multi-draw ordinal through the frontend. Direct backends that
 # lower a Multi* call to multiple native draws need this to preserve gl_DrawID.
 replace_once(
@@ -41,13 +53,17 @@ replace_once(
     "                                     (VkDeviceSize)(intptr_t)indices[i]);\n"
     "            }\n"
 )
-replace_once(
+# This exact staging snippet occurs once in glMultiDrawElements and once in
+# glMultiDrawElementsBaseVertex. Replace only the first occurrence here; the
+# BaseVertex branch gets its ordinal via the more specific context below.
+replace_first_with_count(
     p,
     "                if (staged != VK_NULL_HANDLE)\n                    backend_draw_indexed((int)mode, (int)count[i], idx_type, staged, 0);\n",
     "                if (staged != VK_NULL_HANDLE) {\n"
     "                    g_state->currentDrawID = (uint32_t)i;\n"
     "                    backend_draw_indexed((int)mode, (int)count[i], idx_type, staged, 0);\n"
     "                }\n",
+    2,
 )
 # The preceding client-pointer replacement occurs in glMultiDrawElements first;
 # reset after both VBO/client branches at the shared end.
