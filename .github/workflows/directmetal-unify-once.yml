@@ -28,20 +28,82 @@ jobs:
             echo 'skip=false' >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Fetch DirectMetal source branches
+      - name: Fetch DirectMetal source branch
         if: steps.guard.outputs.skip != 'true'
         run: git fetch origin agent/directmetal-fbo-sampling-a17pro
 
-      - name: Apply reviewed GL buffer binding fix
+      - name: Apply minimal COPY_READ/COPY_WRITE buffer semantics
         if: steps.guard.outputs.skip != 'true'
         shell: bash
         run: |
           set -euo pipefail
-          git diff cfecc600e1fd50de6d02920337d44793e3ddb2da^ \
-            cfecc600e1fd50de6d02920337d44793e3ddb2da -- \
-            src/gl/internal.h src/gl/vertex.cpp | git apply --3way --index
+          python3 - <<'PY'
+          from pathlib import Path
 
-      - name: Apply reviewed FBO and fail-closed semantics
+          internal = Path('src/gl/internal.h')
+          text = internal.read_text()
+          old = '''extern GLuint g_bound_array_buffer;
+          extern GLuint g_bound_element_buffer;
+          extern GLuint g_bound_uniform_buffer;
+          extern GLuint g_bound_pixel_pack_buffer;'''
+          new = '''extern GLuint g_bound_array_buffer;
+          extern GLuint g_bound_element_buffer;
+          extern GLuint g_bound_uniform_buffer;
+          extern GLuint g_bound_copy_read_buffer;
+          extern GLuint g_bound_copy_write_buffer;
+          extern GLuint g_bound_pixel_pack_buffer;'''
+          if old not in text:
+              raise SystemExit('internal.h buffer binding anchor not found')
+          internal.write_text(text.replace(old, new, 1))
+
+          vertex = Path('src/gl/vertex.cpp')
+          text = vertex.read_text()
+          replacements = [
+              ('''GLuint g_bound_element_buffer = 0;
+          GLuint g_bound_uniform_buffer = 0;
+          GLuint g_bound_pixel_pack_buffer = 0;''',
+               '''GLuint g_bound_element_buffer = 0;
+          GLuint g_bound_uniform_buffer = 0;
+          GLuint g_bound_copy_read_buffer = 0;
+          GLuint g_bound_copy_write_buffer = 0;
+          GLuint g_bound_pixel_pack_buffer = 0;'''),
+              ('''        if (g_bound_uniform_buffer == buffers[i]) g_bound_uniform_buffer = 0;
+                  if (g_bound_pixel_pack_buffer == buffers[i])''',
+               '''        if (g_bound_uniform_buffer == buffers[i]) g_bound_uniform_buffer = 0;
+                  if (g_bound_copy_read_buffer == buffers[i]) g_bound_copy_read_buffer = 0;
+                  if (g_bound_copy_write_buffer == buffers[i]) g_bound_copy_write_buffer = 0;
+                  if (g_bound_pixel_pack_buffer == buffers[i])'''),
+          ]
+          for old, new in replacements:
+              if old not in text:
+                  raise SystemExit(f'vertex.cpp anchor not found: {old!r}')
+              text = text.replace(old, new, 1)
+
+          # These three switch blocks occur in glBindBuffer, glBufferData,
+          # glBufferSubData and BoundBufferForTarget. Insert the two GL 3.3
+          # copy-buffer targets everywhere without importing the agent branch's
+          # device-specific TRACE instrumentation.
+          bind_old = '        case GL_UNIFORM_BUFFER: g_bound_uniform_buffer = buffer; break;\n'
+          bind_new = bind_old + '''        case GL_COPY_READ_BUFFER: g_bound_copy_read_buffer = buffer; break;
+                  case GL_COPY_WRITE_BUFFER: g_bound_copy_write_buffer = buffer; break;
+          '''
+          if text.count(bind_old) != 1:
+              raise SystemExit(f'unexpected glBindBuffer anchor count: {text.count(bind_old)}')
+          text = text.replace(bind_old, bind_new, 1)
+
+          ptr_old = '        case GL_UNIFORM_BUFFER: bound = &g_bound_uniform_buffer; break;\n'
+          ptr_new = ptr_old + '''        case GL_COPY_READ_BUFFER: bound = &g_bound_copy_read_buffer; break;
+                  case GL_COPY_WRITE_BUFFER: bound = &g_bound_copy_write_buffer; break;
+          '''
+          count = text.count(ptr_old)
+          if count != 3:
+              raise SystemExit(f'unexpected bound-target anchor count: {count}')
+          text = text.replace(ptr_old, ptr_new)
+          vertex.write_text(text)
+          PY
+          git add src/gl/internal.h src/gl/vertex.cpp
+
+      - name: Apply reviewed FBO, lifecycle and fail-closed semantics
         if: steps.guard.outputs.skip != 'true'
         shell: bash
         run: |
@@ -52,6 +114,7 @@ jobs:
             src/gl/stub.cpp \
             tests/fbo_smoke.c \
             tests/amethyst_egl_smoke.mm \
+            tests/layered_fbo_smoke.c \
             tests/unsupported_stub_smoke.c \
             cmake/MithrilSmokeTests.cmake | git apply --3way --index
 
@@ -62,6 +125,7 @@ jobs:
           set -euo pipefail
           git diff --cached --check
           git diff --cached --stat
+          ! git diff --cached | grep -E 'TRACE BUFFER|GUI VBO 33|TRACE FBO|TRACE SHADER'
           git diff --cached -- src/gl/internal.h src/gl/vertex.cpp src/gl/fbo.cpp src/gl/stub.cpp
 
       - name: Fetch DirectMetal shader submodules only
