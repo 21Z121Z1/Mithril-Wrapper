@@ -67,6 +67,10 @@ jobs:
             -IMithril-Wrapper-cpp/include \
             tests/directmetal_restart_disabled_strip_smoke.c \
             -o build-terrain-semantics/directmetal_restart_disabled_strip_smoke -ldl
+          clang -std=gnu11 -O0 -g -Wall -Wextra -Werror \
+            -IMithril-Wrapper-cpp/include \
+            tests/directmetal_u32_max_index_smoke.c \
+            -o build-terrain-semantics/directmetal_u32_max_index_smoke -ldl
 
       - name: Run indexed and clip semantics on real hosted Metal GPU
         shell: bash
@@ -108,6 +112,14 @@ jobs:
           build-terrain-semantics/directmetal_restart_disabled_strip_smoke "$(cat /tmp/mithril-path)" \
             | tee build-terrain-semantics/restart-disabled-strip.log
 
+      - name: Run U32 max-index representability on real hosted Metal GPU
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DYLD_LIBRARY_PATH="$(brew --prefix)/lib"
+          build-terrain-semantics/directmetal_u32_max_index_smoke "$(cat /tmp/mithril-path)" \
+            | tee build-terrain-semantics/u32-max-index.log
+
       - name: Upload semantics logs
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -121,3 +133,4 @@ jobs:
             build-terrain-semantics/sodium-terrain-contract.log
             build-terrain-semantics/draw-parameters.log
             build-terrain-semantics/restart-disabled-strip.log
+            build-terrain-semantics/u32-max-index.log
