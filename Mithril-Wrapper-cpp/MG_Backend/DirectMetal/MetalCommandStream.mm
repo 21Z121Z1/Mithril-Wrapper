@@ -177,7 +177,8 @@ constexpr NSUInteger kScratchInitialBytes = 256 * 1024;
 // Bump-allocate `bytes` (256-aligned) in the current frame slot's scratch
 // buffer, growing it when needed. Returns the buffer + offset; *outPtr is the
 // CPU write pointer (null on failure).
-bool scratch_alloc(NSUInteger bytes, id<MTLBuffer>& outBuf, NSUInteger& outOff,
+bool scratch_alloc(NSUInteger bytes, id<MTLBuffer> __strong& outBuf,
+                   NSUInteger& outOff,
                    void*& outPtr) {
     Backend* b = backend();
     if (!b->initialized || !b->device || bytes == 0) return false;
@@ -231,8 +232,8 @@ MTLViewport make_viewport(int x, int y, int w, int h, double zn, double zf) {
     // DOWN exactly like Vulkan, and window-space winding is NOT reversed
     // relative to Vulkan (the winding flip lives in set_front_face instead).
     MTLViewport vp;
-    vp.x = (double)x;
-    vp.y = (double)(y + h);
+    vp.originX = (double)x;
+    vp.originY = (double)(y + h);
     vp.width = (double)w;
     vp.height = (double)-h;
     vp.znear = zn;
