@@ -22,7 +22,7 @@ concurrency:
 jobs:
   native-vs-mithril:
     runs-on: macos-26
-    timeout-minutes: 45
+    timeout-minutes: 40
     env:
       DIFF_ROOT: ${{ github.workspace }}/build/minecraft-render-differential
       MTL_DEBUG_LAYER: '1'
@@ -92,7 +92,8 @@ jobs:
         run: |
           set -euo pipefail
           ROOT="$DIFF_ROOT/native-vanilla"; rm -rf "$ROOT"; mkdir -p "$ROOT/render"
-          gradle -p .github/ci/minecraft-e2e --build-cache --stacktrace \
+          python3 ci/minecraft-e2e/run-lane.py --timeout 360 --log "$ROOT/runner.log" -- \
+            gradle --no-daemon -p .github/ci/minecraft-e2e --build-cache --stacktrace \
             -Pe2eBackend=native -Pe2eSodium=false -PevidenceRoot="$ROOT" \
             -PnativeGlfwBridge="${{ steps.native.outputs.native_bridge }}" \
             -PglfwDelegate="${{ steps.native.outputs.glfw_real }}" \
@@ -103,7 +104,8 @@ jobs:
         run: |
           set -euo pipefail
           ROOT="$DIFF_ROOT/mithril-vanilla"; rm -rf "$ROOT"; mkdir -p "$ROOT/render"
-          gradle -p .github/ci/minecraft-e2e --build-cache --stacktrace \
+          python3 ci/minecraft-e2e/run-lane.py --timeout 360 --log "$ROOT/runner.log" -- \
+            gradle --no-daemon -p .github/ci/minecraft-e2e --build-cache --stacktrace \
             -Pe2eBackend=mithril -Pe2eSodium=false -PevidenceRoot="$ROOT" \
             -PmithrilDylib="${{ steps.native.outputs.mithril }}" \
             -PglfwBridge="${{ steps.native.outputs.mithril_bridge }}" \
@@ -115,7 +117,8 @@ jobs:
         run: |
           set -euo pipefail
           ROOT="$DIFF_ROOT/native-sodium"; rm -rf "$ROOT"; mkdir -p "$ROOT/render"
-          gradle -p .github/ci/minecraft-e2e --build-cache --stacktrace \
+          python3 ci/minecraft-e2e/run-lane.py --timeout 360 --log "$ROOT/runner.log" -- \
+            gradle --no-daemon -p .github/ci/minecraft-e2e --build-cache --stacktrace \
             -Pe2eBackend=native -Pe2eSodium=true -PevidenceRoot="$ROOT" \
             -PnativeGlfwBridge="${{ steps.native.outputs.native_bridge }}" \
             -PglfwDelegate="${{ steps.native.outputs.glfw_real }}" \
@@ -126,7 +129,8 @@ jobs:
         run: |
           set -euo pipefail
           ROOT="$DIFF_ROOT/mithril-sodium"; rm -rf "$ROOT"; mkdir -p "$ROOT/render"
-          gradle -p .github/ci/minecraft-e2e --build-cache --stacktrace \
+          python3 ci/minecraft-e2e/run-lane.py --timeout 360 --log "$ROOT/runner.log" -- \
+            gradle --no-daemon -p .github/ci/minecraft-e2e --build-cache --stacktrace \
             -Pe2eBackend=mithril -Pe2eSodium=true -PevidenceRoot="$ROOT" \
             -PmithrilDylib="${{ steps.native.outputs.mithril }}" \
             -PglfwBridge="${{ steps.native.outputs.mithril_bridge }}" \
