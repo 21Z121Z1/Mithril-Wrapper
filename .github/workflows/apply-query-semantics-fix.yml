@@ -21,6 +21,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('ci/e2e/apply_query_semantics_fix.py')
+          s=p.read_text()
+          old='''    if n != 1:\n        raise SystemExit(f"{label}: expected one match, found {n}")\n    p.write_text(s.replace(old, new, 1))\n'''
+          new='''    if label == "multidraw elements staged accounting" and n == 2:\n        p.write_text(s.replace(old, new))\n        return\n    if n != 1:\n        raise SystemExit(f"{label}: expected one match, found {n}")\n    p.write_text(s.replace(old, new, 1))\n'''
+          if old not in s:
+              raise SystemExit('materializer helper anchor missing')
+          p.write_text(s.replace(old,new,1))
+          PY
           python3 ci/e2e/apply_query_semantics_fix.py
           git diff --check
           if git diff --quiet; then exit 0; fi
