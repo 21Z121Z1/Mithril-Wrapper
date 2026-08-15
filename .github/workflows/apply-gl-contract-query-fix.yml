@@ -1,0 +1,44 @@
+name: Apply GL contract query consistency fix
+
+on:
+  push:
+    branches:
+      - 'fix/gl-semantic-closure-*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: true
+          fetch-depth: 0
+      - name: Make string and integer version contracts identical
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('Mithril-Wrapper-cpp/MG_Impl/Getter.cpp')
+          s=p.read_text()
+          reps={
+            'case GL_MAJOR_VERSION:                *params = 4; break;':'case GL_MAJOR_VERSION:                *params = 3; break;',
+            'case GL_MINOR_VERSION:                *params = 6; break;':'case GL_MINOR_VERSION:                *params = 3; break;',
+            'case GL_SHADING_LANGUAGE_VERSION:     *params = 460; break;':'case GL_SHADING_LANGUAGE_VERSION:     *params = 330; break;',
+          }
+          for old,new in reps.items():
+              if old in s: s=s.replace(old,new,1)
+              elif new not in s: raise SystemExit(f'missing expected version query: {old}')
+          p.write_text(s)
+          PY
+          git diff --check
+          if git diff --quiet; then exit 0; fi
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add Mithril-Wrapper-cpp/MG_Impl/Getter.cpp
+          git commit -m 'fix(gl): keep integer version queries within capability contract'
+          git push origin HEAD:${GITHUB_REF_NAME}
