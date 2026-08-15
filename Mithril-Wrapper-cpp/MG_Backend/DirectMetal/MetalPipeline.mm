@@ -283,6 +283,11 @@ bool compile_msl_function(MetalProgramResources* pr,
             compiler.add_msl_resource_binding(rb);
         }
 
+        // MSL reserves the entry-point name `main`; SPIRV-Cross therefore
+        // cleanses the SPIR-V entry point during compile (typically to
+        // `main0`). Keep the original name and ask SPIRV-Cross for the final
+        // backend name instead of assuming the GLSL spelling survives.
+        const std::string entryName = compiler.get_entry_point().name;
         const std::string msl = compiler.compile();
 
         if (stage == spv::ExecutionModelGLCompute) {
@@ -311,10 +316,15 @@ bool compile_msl_function(MetalProgramResources* pr,
                               err ? err.localizedDescription.UTF8String : "unknown");
             return false;
         }
-        out.function = [lib newFunctionWithName:@"main"]; // SPIRV-Cross entry name
+        const std::string cleansedName =
+            compiler.get_cleansed_entry_point_name(entryName, stage);
+        out.function = [lib newFunctionWithName:
+            [NSString stringWithUTF8String:cleansedName.c_str()]];
         if (out.function == nil) {
-            MITHRIL_LOG_ERROR("mtl", "newFunctionWithName:@\"main\" returned nil "
+            MITHRIL_LOG_ERROR("mtl", "newFunctionWithName '%s' returned nil "
+                              "(SPIRV-Cross entry '%s') "
                               "(%s stage)",
+                              cleansedName.c_str(), entryName.c_str(),
                               stage == spv::ExecutionModelVertex ? "vertex" :
                               stage == spv::ExecutionModelFragment ? "fragment" : "compute");
             return false;
