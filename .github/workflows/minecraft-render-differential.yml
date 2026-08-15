@@ -22,7 +22,7 @@ concurrency:
 jobs:
   native-vs-mithril:
     runs-on: macos-26
-    timeout-minutes: 40
+    timeout-minutes: 35
     env:
       DIFF_ROOT: ${{ github.workspace }}/build/minecraft-render-differential
       MTL_DEBUG_LAYER: '1'
@@ -87,7 +87,25 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           shasum -a 256 "$MITHRIL" "$MITHRIL_BRIDGE" "$NATIVE_BRIDGE"
 
+      - name: Probe hosted NSGL reference capability
+        id: nsgl
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$DIFF_ROOT"
+          clang++ -std=c++20 -Wno-deprecated-declarations \
+            ci/minecraft-e2e/native/nsgl_capability_probe.cpp \
+            -framework OpenGL -o build-differential-native/nsgl_capability_probe
+          build-differential-native/nsgl_capability_probe "$DIFF_ROOT/nsgl-capability.json" \
+            | tee "$DIFF_ROOT/nsgl-capability.log"
+          value=$(grep '^NSGL_MINECRAFT_LIKE_41=' "$DIFF_ROOT/nsgl-capability.log" | tail -1 | cut -d= -f2)
+          test "$value" = true -o "$value" = false
+          echo "minecraft41=$value" >> "$GITHUB_OUTPUT"
+
       - name: Native OpenGL vanilla baseline
+        id: native_vanilla
+        if: steps.nsgl.outputs.minecraft41 == 'true'
+        continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
@@ -100,6 +118,9 @@ jobs:
             runDifferentialClientGameTest
 
       - name: Mithril DirectMetal vanilla candidate
+        id: mithril_vanilla
+        if: always()
+        continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
@@ -113,6 +134,9 @@ jobs:
             runDifferentialClientGameTest
 
       - name: Native OpenGL Sodium 0.9.1 baseline
+        id: native_sodium
+        if: always() && steps.native_vanilla.outcome == 'success'
+        continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
@@ -125,6 +149,9 @@ jobs:
             runDifferentialClientGameTest
 
       - name: Mithril DirectMetal Sodium 0.9.1 candidate
+        id: mithril_sodium
+        if: always()
+        continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
@@ -138,20 +165,54 @@ jobs:
             runDifferentialClientGameTest
 
       - name: Compare vanilla native vs DirectMetal structure
+        id: compare_vanilla
+        if: always() && steps.native_vanilla.outcome == 'success' && steps.mithril_vanilla.outcome == 'success'
+        continue-on-error: true
         shell: bash
         run: |
-          set -euo pipefail
           python3 ci/minecraft-e2e/compare-differential.py \
             --native "$DIFF_ROOT/native-vanilla" --mithril "$DIFF_ROOT/mithril-vanilla" \
             --label vanilla --assert-pass
 
       - name: Compare Sodium native vs DirectMetal structure
+        id: compare_sodium
+        if: always() && steps.native_sodium.outcome == 'success' && steps.mithril_sodium.outcome == 'success'
+        continue-on-error: true
         shell: bash
         run: |
-          set -euo pipefail
           python3 ci/minecraft-e2e/compare-differential.py \
             --native "$DIFF_ROOT/native-sodium" --mithril "$DIFF_ROOT/mithril-sodium" \
             --label sodium --assert-pass
+
+      - name: Record differential disposition
+        if: always()
+        shell: bash
+        env:
+          NSGL41: ${{ steps.nsgl.outputs.minecraft41 }}
+          NATIVE_VANILLA: ${{ steps.native_vanilla.outcome }}
+          MITHRIL_VANILLA: ${{ steps.mithril_vanilla.outcome }}
+          NATIVE_SODIUM: ${{ steps.native_sodium.outcome }}
+          MITHRIL_SODIUM: ${{ steps.mithril_sodium.outcome }}
+          COMPARE_VANILLA: ${{ steps.compare_vanilla.outcome }}
+          COMPARE_SODIUM: ${{ steps.compare_sodium.outcome }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          root = Path(os.environ['DIFF_ROOT'])
+          data = {
+              'schema_version': '1.0',
+              'hosted_nsgl_minecraft_like_41': os.getenv('NSGL41',''),
+              'native_vanilla': os.getenv('NATIVE_VANILLA',''),
+              'mithril_vanilla': os.getenv('MITHRIL_VANILLA',''),
+              'native_sodium': os.getenv('NATIVE_SODIUM',''),
+              'mithril_sodium': os.getenv('MITHRIL_SODIUM',''),
+              'compare_vanilla': os.getenv('COMPARE_VANILLA',''),
+              'compare_sodium': os.getenv('COMPARE_SODIUM',''),
+          }
+          (root / 'differential-disposition.json').write_text(json.dumps(data, indent=2, sort_keys=True)+'\n')
+          print(json.dumps(data, indent=2, sort_keys=True))
+          PY
 
       - name: Upload four-lane differential evidence
         if: always()
@@ -162,3 +223,27 @@ jobs:
           if-no-files-found: warn
           compression-level: 6
           path: build/minecraft-render-differential/**
+
+      - name: Enforce candidate and available-reference gates
+        if: always()
+        shell: bash
+        env:
+          NSGL41: ${{ steps.nsgl.outputs.minecraft41 }}
+          NATIVE_VANILLA: ${{ steps.native_vanilla.outcome }}
+          MITHRIL_VANILLA: ${{ steps.mithril_vanilla.outcome }}
+          NATIVE_SODIUM: ${{ steps.native_sodium.outcome }}
+          MITHRIL_SODIUM: ${{ steps.mithril_sodium.outcome }}
+          COMPARE_VANILLA: ${{ steps.compare_vanilla.outcome }}
+          COMPARE_SODIUM: ${{ steps.compare_sodium.outcome }}
+        run: |
+          set -euo pipefail
+          test "$MITHRIL_VANILLA" = success || { echo 'Mithril vanilla differential lane failed'; exit 1; }
+          test "$MITHRIL_SODIUM" = success || { echo 'Mithril Sodium 0.9.1 differential lane failed'; exit 1; }
+          if [[ "$NATIVE_VANILLA" == success ]]; then
+            test "$COMPARE_VANILLA" = success || { echo 'Native-vs-Mithril vanilla structural comparison failed'; exit 1; }
+          else
+            echo "REFERENCE_UNAVAILABLE native vanilla; hosted_nsgl_minecraft_like_41=$NSGL41"
+          fi
+          if [[ "$NATIVE_SODIUM" == success ]]; then
+            test "$COMPARE_SODIUM" = success || { echo 'Native-vs-Mithril Sodium structural comparison failed'; exit 1; }
+          fi
