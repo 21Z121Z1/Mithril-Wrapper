@@ -225,11 +225,15 @@ struct VertexAttrib {
     GLenum    type       = GL_FLOAT;
     bool      normalized = false;
     bool      integer    = false;
+    // Legacy VertexAttribPointer query state. Separate-format commands do
+    // not overload these fields: format-relative offset and buffer binding are
+    // represented explicitly below/by VertexBinding.
     GLsizei   stride     = 0;
-    const void* pointer  = nullptr;      // offset when a VBO is bound
-    GLuint    boundBuffer = 0;           // GL_ARRAY_BUFFER at bind time
+    const void* pointer  = nullptr;
+    GLuint    boundBuffer = 0;
     GLuint    divisor    = 0;
-    GLuint    bindingIndex = 0;          // vertex buffer binding this attrib reads from
+    GLuint    bindingIndex = 0;
+    GLuint    relativeOffset = 0;
 };
 
 // ---- Vertex buffer binding point (per VAO) ----
@@ -242,7 +246,7 @@ struct VertexAttrib {
 struct VertexBinding {
     GLuint   buffer  = 0;   // buffer object bound to this binding point
     GLintptr offset  = 0;   // byte offset of the first element
-    GLsizei  stride  = 0;   // byte stride between elements
+    GLsizei  stride  = 16;  // ARB_vertex_attrib_binding initial value
     GLuint   divisor = 0;   // 0 = per-vertex, >0 = per-instance
 };
 

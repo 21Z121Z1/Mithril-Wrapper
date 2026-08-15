@@ -241,17 +241,22 @@ static bool prepare_draw(GLenum mode) {
     for (int i = 0; i < mithril::kMaxVertexAttribs; ++i) {
         const mithril::VertexAttrib& a = vao->attribs[i];
         if (!a.enabled) continue;
+        if (a.bindingIndex >= (GLuint)mithril::kMaxVertexBindings) {
+            mithril::state_set_error(GL_INVALID_OPERATION);
+            continue;
+        }
+        const mithril::VertexBinding& binding = vao->bindings[a.bindingIndex];
         MGVertexAttrib& m = attribs[attrib_count++];
         m.location     = i;
         m.size         = a.size;
         m.type         = a.type;
         m.normalized   = a.normalized ? 1 : 0;
         m.integer      = a.integer ? 1 : 0;
-        m.stride       = a.stride;
-        m.offset       = (int)(intptr_t)a.pointer;
+        m.stride       = binding.stride;
+        m.offset       = (int)a.relativeOffset;
         m.enabled      = 1;
-        m.buffer_name  = a.boundBuffer;
-        m.divisor      = a.divisor;
+        m.buffer_name  = binding.buffer;
+        m.divisor      = (int)binding.divisor;
     }
 
     // Get-or-create the VkGraphicsPipeline. Blend state + colorWriteMask are
@@ -451,7 +456,14 @@ static bool prepare_draw(GLenum mode) {
 // 偏移会被应用两次 → 有效地址 = buffer + 2*m.offset，导致交错顶点格式（如
 // position@0/color@12/uv@24）的属性读取错位 → 加载界面红屏/花屏。
 // 参考 MobileGL VkglVertexAttribBindingState：binding offset 恒为 0，偏移由属性描述处理。
-            backend_set_vertex_buffer(m.location, buf, 0);
+            const mithril::VertexAttrib& sourceAttrib = vao->attribs[m.location];
+            const mithril::VertexBinding& sourceBinding =
+                vao->bindings[sourceAttrib.bindingIndex];
+            // GL fetch address = binding.offset + vertex*binding.stride +
+            // attribute.relativeOffset. The latter is in the pipeline vertex
+            // descriptor; only binding.offset belongs in the dynamic buffer bind.
+            backend_set_vertex_buffer(m.location, buf,
+                                      (VkDeviceSize)sourceBinding.offset);
             if (m.location < 16) bound_slots[m.location] = true;
         }
     }

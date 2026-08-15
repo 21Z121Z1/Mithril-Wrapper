@@ -39,6 +39,47 @@
 #ifndef GL_VERTEX_ATTRIB_ARRAY_DIVISOR
 #define GL_VERTEX_ATTRIB_ARRAY_DIVISOR         0x88FE
 #endif
+#ifndef GL_VERTEX_ATTRIB_BINDING
+#define GL_VERTEX_ATTRIB_BINDING               0x82D4
+#endif
+#ifndef GL_VERTEX_ATTRIB_RELATIVE_OFFSET
+#define GL_VERTEX_ATTRIB_RELATIVE_OFFSET       0x82D5
+#endif
+
+namespace {
+GLsizei vertex_element_bytes(GLint size, GLenum type) {
+    switch (type) {
+        case GL_BYTE:
+        case GL_UNSIGNED_BYTE:  return (GLsizei)size;
+        case GL_SHORT:
+        case GL_UNSIGNED_SHORT:
+        case GL_HALF_FLOAT:     return (GLsizei)(size * 2);
+        case GL_INT:
+        case GL_UNSIGNED_INT:
+        case GL_FLOAT:          return (GLsizei)(size * 4);
+#ifdef GL_FIXED
+        case GL_FIXED:          return (GLsizei)(size * 4);
+#endif
+#ifdef GL_DOUBLE
+        case GL_DOUBLE:         return (GLsizei)(size * 8);
+#endif
+#ifdef GL_INT_2_10_10_10_REV
+        case GL_INT_2_10_10_10_REV: return 4;
+#endif
+#ifdef GL_UNSIGNED_INT_2_10_10_10_REV
+        case GL_UNSIGNED_INT_2_10_10_10_REV: return 4;
+#endif
+#ifdef GL_UNSIGNED_INT_10F_11F_11F_REV
+        case GL_UNSIGNED_INT_10F_11F_11F_REV: return 4;
+#endif
+        default: return 0;
+    }
+}
+
+GLsizei effective_vertex_stride(GLint size, GLenum type, GLsizei stride) {
+    return stride != 0 ? stride : vertex_element_bytes(size, type);
+}
+} // namespace
 
 extern "C" {
 
@@ -95,55 +136,95 @@ void glDisableVertexAttribArray(GLuint index) {
 void glVertexAttribPointer(GLuint index, GLint size, GLenum type,
                            GLboolean normalized, GLsizei stride, const void* pointer) {
     MITHRIL_ENSURE_INIT();
+    if (index >= mithril::kMaxVertexAttribs || stride < 0) {
+        mithril::state_set_error(GL_INVALID_VALUE);
+        return;
+    }
+    mithril::VertexArray* vao = mithril::state_get_vao(g_state->currentVAO);
+    if (!vao) return;
+    const GLuint buffer = g_state->bufferBindings[(int)mithril::BufferTarget::Array].name;
+    if (buffer == 0 && pointer != nullptr) {
+        mithril::state_set_error(GL_INVALID_OPERATION);
+        return;
+    }
+    const GLsizei effective = effective_vertex_stride(size, type, stride);
+    if (effective <= 0) {
+        mithril::state_set_error(GL_INVALID_ENUM);
+        return;
+    }
+    mithril::VertexAttrib& a = vao->attribs[index];
+    a.size = size;
+    a.type = type;
+    a.normalized = (normalized != 0);
+    a.integer = false;
+    a.stride = stride;                  // legacy query state keeps caller value
+    a.pointer = pointer;                // legacy pointer query state
+    a.boundBuffer = buffer;
+    a.bindingIndex = index;             // required legacy->separate equivalence
+    a.relativeOffset = 0;
+    mithril::VertexBinding& binding = vao->bindings[index];
+    binding.buffer = buffer;
+    binding.offset = (GLintptr)(uintptr_t)pointer;
+    binding.stride = effective;
+    a.divisor = binding.divisor;
+    ++vao->attribVersions[index];
+    ++vao->configVersion;
+}
+
+void glVertexAttribIPointer(GLuint index, GLint size, GLenum type,
+                            GLsizei stride, const void* pointer) {
+    MITHRIL_ENSURE_INIT();
+    if (index >= mithril::kMaxVertexAttribs || stride < 0) {
+        mithril::state_set_error(GL_INVALID_VALUE);
+        return;
+    }
+    mithril::VertexArray* vao = mithril::state_get_vao(g_state->currentVAO);
+    if (!vao) return;
+    const GLuint buffer = g_state->bufferBindings[(int)mithril::BufferTarget::Array].name;
+    if (buffer == 0 && pointer != nullptr) {
+        mithril::state_set_error(GL_INVALID_OPERATION);
+        return;
+    }
+    const GLsizei effective = effective_vertex_stride(size, type, stride);
+    if (effective <= 0) {
+        mithril::state_set_error(GL_INVALID_ENUM);
+        return;
+    }
+    mithril::VertexAttrib& a = vao->attribs[index];
+    a.size = size;
+    a.type = type;
+    a.normalized = false;
+    a.integer = true;
+    a.stride = stride;
+    a.pointer = pointer;
+    a.boundBuffer = buffer;
+    a.bindingIndex = index;
+    a.relativeOffset = 0;
+    mithril::VertexBinding& binding = vao->bindings[index];
+    binding.buffer = buffer;
+    binding.offset = (GLintptr)(uintptr_t)pointer;
+    binding.stride = effective;
+    a.divisor = binding.divisor;
+    ++vao->attribVersions[index];
+    ++vao->configVersion;
+}
+
+void glVertexAttribDivisor(GLuint index, GLuint divisor) {
+    MITHRIL_ENSURE_INIT();
     if (index >= mithril::kMaxVertexAttribs) {
         mithril::state_set_error(GL_INVALID_VALUE);
         return;
     }
     mithril::VertexArray* vao = mithril::state_get_vao(g_state->currentVAO);
     if (!vao) return;
-    mithril::VertexAttrib& a = vao->attribs[index];
-    a.size         = size;
-    a.type         = type;
-    a.normalized   = (normalized != 0);
-    a.integer      = false;
-    a.stride       = stride;
-    a.pointer      = pointer;
-    a.boundBuffer  = g_state->bufferBindings[(int)mithril::BufferTarget::Array].name;
-}
-
-void glVertexAttribIPointer(GLuint index, GLint size, GLenum type,
-                            GLsizei stride, const void* pointer) {
-    MITHRIL_ENSURE_INIT();
-    if (index >= mithril::kMaxVertexAttribs) return;
-    mithril::VertexArray* vao = mithril::state_get_vao(g_state->currentVAO);
-    if (!vao) return;
-    mithril::VertexAttrib& a = vao->attribs[index];
-    a.size         = size;
-    a.type         = type;
-    a.normalized   = false;
-    a.integer      = true;
-    a.stride       = stride;
-    a.pointer      = pointer;
-    a.boundBuffer  = g_state->bufferBindings[(int)mithril::BufferTarget::Array].name;
-}
-
-void glVertexAttribDivisor(GLuint index, GLuint divisor) {
-    MITHRIL_ENSURE_INIT();
-    if (index >= mithril::kMaxVertexAttribs) return;
-    mithril::VertexArray* vao = mithril::state_get_vao(g_state->currentVAO);
-    if (!vao) return;
-    /* The GL spec defines glVertexAttribDivisor(i, d) as shorthand for
-     * glVertexBindingDivisor(binding of attrib i, d). The backend reads the
-     * divisor off the *binding* (Pipeline.cpp attrib_divisor), so writing only
-     * the attribute copy would leave instanced draws stepping per-vertex —
-     * silently wrong geometry rather than a clean failure. Keep both in sync:
-     * the attribute copy still backs glGetVertexAttribiv(..._DIVISOR) and the
-     * MGVertexAttrib fill in Drawing.cpp. */
+    // ARB_vertex_attrib_binding explicitly defines this legacy entry point as:
+    //   VertexAttribBinding(index,index); VertexBindingDivisor(index,divisor)
+    // It does NOT apply to the attribute's previously selected binding.
+    vao->attribs[index].bindingIndex = index;
     vao->attribs[index].divisor = divisor;
-    const GLuint bi = vao->attribs[index].bindingIndex;
-    if (bi < (GLuint)mithril::kMaxVertexBindings) {
-        vao->bindings[bi].divisor = divisor;
-    }
+    vao->bindings[index].divisor = divisor;
+    ++vao->attribVersions[index];
+    ++vao->configVersion;
 }
 
 // ---------------------------------------------------------------------------
@@ -165,7 +246,8 @@ void glVertexAttribDivisor(GLuint index, GLuint divisor) {
 
 void glBindVertexBuffer(GLuint bindingindex, GLuint buffer, GLintptr offset, GLsizei stride) {
     MITHRIL_ENSURE_INIT();
-    if (bindingindex >= (GLuint)mithril::kMaxVertexBindings) {
+    if (bindingindex >= (GLuint)mithril::kMaxVertexBindings ||
+        offset < 0 || stride < 0) {
         mithril::state_set_error(GL_INVALID_VALUE);
         return;
     }
@@ -207,10 +289,9 @@ void glVertexAttribFormat(GLuint attribindex, GLint size, GLenum type,
     a.type = type;
     a.normalized = (normalized != 0);
     a.integer = false;
-    // relativeoffset is the byte offset within the vertex buffer binding's
-    // stride where this attribute's data begins. Stored in pointer field
-    // (same as glVertexAttribPointer's pointer-as-offset convention).
-    a.pointer = (const void*)(uintptr_t)relativeoffset;
+    // Format-relative state is independent of the binding's base offset
+    // and of legacy GL_VERTEX_ATTRIB_ARRAY_POINTER query state.
+    a.relativeOffset = relativeoffset;
     vao->attribVersions[attribindex]++;
     vao->configVersion++;
 }
@@ -228,7 +309,7 @@ void glVertexAttribIFormat(GLuint attribindex, GLint size, GLenum type, GLuint r
     a.type = type;
     a.normalized = false;
     a.integer = true;
-    a.pointer = (const void*)(uintptr_t)relativeoffset;
+    a.relativeOffset = relativeoffset;
     vao->attribVersions[attribindex]++;
     vao->configVersion++;
 }
@@ -307,15 +388,20 @@ void glGetVertexAttribiv(GLuint index, GLenum pname, GLint* params) {
     mithril::VertexArray* vao = mithril::state_get_vao(g_state->currentVAO);
     if (!vao) { *params = 0; return; }
     const mithril::VertexAttrib& a = vao->attribs[index];
+    const GLuint bi = a.bindingIndex < (GLuint)mithril::kMaxVertexBindings
+                        ? a.bindingIndex : 0;
+    const mithril::VertexBinding& binding = vao->bindings[bi];
     switch (pname) {
         case GL_VERTEX_ATTRIB_ARRAY_ENABLED:        *params = a.enabled ? GL_TRUE : GL_FALSE; break;
         case GL_VERTEX_ATTRIB_ARRAY_SIZE:           *params = a.size; break;
         case GL_VERTEX_ATTRIB_ARRAY_TYPE:           *params = (GLint)a.type; break;
         case GL_VERTEX_ATTRIB_ARRAY_NORMALIZED:     *params = a.normalized ? GL_TRUE : GL_FALSE; break;
         case GL_VERTEX_ATTRIB_ARRAY_STRIDE:         *params = a.stride; break;
-        case GL_VERTEX_ATTRIB_ARRAY_BUFFER_BINDING: *params = (GLint)a.boundBuffer; break;
-        case GL_VERTEX_ATTRIB_ARRAY_DIVISOR:        *params = (GLint)a.divisor; break;
+        case GL_VERTEX_ATTRIB_ARRAY_BUFFER_BINDING: *params = (GLint)binding.buffer; break;
+        case GL_VERTEX_ATTRIB_ARRAY_DIVISOR:        *params = (GLint)binding.divisor; break;
         case GL_VERTEX_ATTRIB_ARRAY_INTEGER:        *params = a.integer ? GL_TRUE : GL_FALSE; break;
+        case GL_VERTEX_ATTRIB_BINDING:              *params = (GLint)a.bindingIndex; break;
+        case GL_VERTEX_ATTRIB_RELATIVE_OFFSET:      *params = (GLint)a.relativeOffset; break;
         default:                                    *params = 0; break;
     }
 }
