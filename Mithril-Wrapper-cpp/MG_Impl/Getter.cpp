@@ -192,8 +192,8 @@ void glGetIntegerv(GLenum pname, GLint* params) {
         case GL_NUM_EXTENSIONS:
             *params = (GLint)(sizeof(kExtensions)/sizeof(kExtensions[0]));
             break;
-        case GL_MAJOR_VERSION:                *params = 4; break;
-        case GL_MINOR_VERSION:                *params = 6; break;
+        case GL_MAJOR_VERSION:                *params = 3; break;
+        case GL_MINOR_VERSION:                *params = 3; break;
         case GL_CONTEXT_FLAGS:
             *params = GL_CONTEXT_FLAG_FORWARD_COMPATIBLE_BIT;
             break;
@@ -350,7 +350,7 @@ void glGetIntegerv(GLenum pname, GLint* params) {
         case GL_STENCIL_FAIL:                 *params = (GLint)g_state->stencilSfail; break;
         case GL_STENCIL_PASS_DEPTH_FAIL:     *params = (GLint)g_state->stencilDpfail; break;
         case GL_STENCIL_PASS_DEPTH_PASS:     *params = (GLint)g_state->stencilDppass; break;
-        case GL_SHADING_LANGUAGE_VERSION:     *params = 460; break;
+        case GL_SHADING_LANGUAGE_VERSION:     *params = 330; break;
         /* GL 4.5 ARB_clip_control: queryable clip volume state.
          * Required for completeness since we advertise GL_ARB_clip_control and
          * implement glClipControl. MC/Sodium may query these to decide whether
