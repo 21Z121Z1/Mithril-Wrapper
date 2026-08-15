@@ -162,6 +162,19 @@ bool compile_msl_function(MetalProgramResources* pr,
 
     try {
         spirv_cross::CompilerMSL compiler(spirv, static_cast<size_t>(words));
+        std::string entryName;
+        for (const auto& entry : compiler.get_entry_points_and_stages()) {
+            if (entry.execution_model == stage) {
+                entryName = entry.name;
+                break;
+            }
+        }
+        if (entryName.empty()) {
+            MITHRIL_LOG_ERROR("mtl", "SPIR-V has no entry point for stage %u",
+                              static_cast<unsigned>(stage));
+            return false;
+        }
+        compiler.set_entry_point(entryName, stage);
 
         // MSL options: match the language version the MTLCompileOptions below
         // will request, and pick the platform profile from the memory model
@@ -287,7 +300,6 @@ bool compile_msl_function(MetalProgramResources* pr,
         // cleanses the SPIR-V entry point during compile (typically to
         // `main0`). Keep the original name and ask SPIRV-Cross for the final
         // backend name instead of assuming the GLSL spelling survives.
-        const std::string entryName = compiler.get_entry_point().name;
         const std::string msl = compiler.compile();
 
         if (stage == spv::ExecutionModelGLCompute) {
