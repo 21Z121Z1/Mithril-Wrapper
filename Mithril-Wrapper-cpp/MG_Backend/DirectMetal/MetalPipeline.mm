@@ -37,6 +37,8 @@
 #include "../../MG_State/State.h"
 #include "../../MG_Impl/Log.h"
 
+#include <TargetConditionals.h>
+
 #include <spirv_cross.hpp>
 #include <spirv_msl.hpp>
 
@@ -164,15 +166,16 @@ bool compile_msl_function(MetalProgramResources* pr,
     try {
         spirv_cross::CompilerMSL compiler(spirv, static_cast<size_t>(words));
 
-        // MSL options: match the language version the MTLCompileOptions below
-        // will request, and pick the platform profile from the memory model
-        // (Apple-Silicon-style unified GPUs take the iOS profile, discrete
-        // Mac GPUs the macOS one) — this mirrors how MoltenVK chooses.
+        // MSL platform is an OS/ABI choice, not a memory-architecture choice.
+        // Apple-Silicon Macs are unified-memory devices but still require the
+        // macOS SPIRV-Cross profile; using iOS here produces the wrong MSL ABI.
         spirv_cross::CompilerMSL::Options mopts = compiler.get_msl_options();
         mopts.msl_version = spv_msl_version_from_device();
-        mopts.platform = b->unifiedMemory
-            ? spirv_cross::CompilerMSL::Options::iOS
-            : spirv_cross::CompilerMSL::Options::macOS;
+#if TARGET_OS_OSX
+        mopts.platform = spirv_cross::CompilerMSL::Options::macOS;
+#else
+        mopts.platform = spirv_cross::CompilerMSL::Options::iOS;
+#endif
         // Metal validates fragment color outputs against the PSO's attached
         // color targets. A depth-only FBO still needs its fragment stage for
         // discard, gl_FragDepth and storage side effects, so suppress only
@@ -669,12 +672,22 @@ MetalProgramResources* resources_get(GLuint program) {
     return it == tbl.end() ? nullptr : it->second;
 }
 
+static void delete_pipeline_entry(MetalPipelineEntry* entry) {
+    if (!entry) return;
+    EncoderState& e = enc();
+    if (e.boundPipeline == &entry->pipe) {
+        e.boundPipeline = nullptr;
+        e.descriptorsBound = false;
+    }
+    delete entry;
+}
+
 void delete_program_resources(GLuint program) {
     auto& tbl = program_tbl();
     auto it = tbl.find(program);
     if (it == tbl.end()) return;
     MetalProgramResources* pr = it->second;
-    for (auto& kv : pr->pipes) delete kv.second;
+    for (auto& kv : pr->pipes) delete_pipeline_entry(kv.second);
     delete pr->computePipe;
     delete pr;
     tbl.erase(it);
@@ -687,7 +700,7 @@ void purge_pipeline_caches() {
     // be poisoned by whatever killed the device in the first place.
     for (auto& kv : program_tbl()) {
         MetalProgramResources* pr = kv.second;
-        for (auto& p : pr->pipes) delete p.second;
+        for (auto& p : pr->pipes) delete_pipeline_entry(p.second);
         pr->pipes.clear();
         delete pr->computePipe;
         pr->computePipe = nullptr;
@@ -703,7 +716,7 @@ void purge_pipeline_caches() {
     failed_sig_tbl().clear();
 
     BuiltinCache& c = builtin_cache();
-    for (auto& kv : c.clearPipes) delete kv.second;
+    for (auto& kv : c.clearPipes) delete_pipeline_entry(kv.second);
     c.clearPipes.clear();
     for (int i = 0; i < 4; ++i) c.clearDSS[i] = nil;
     c.blitPipes.clear();
