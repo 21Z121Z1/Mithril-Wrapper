@@ -1,0 +1,110 @@
+name: directmetal-unify-once
+
+on:
+  push:
+    branches:
+      - integration/directmetal-unified-20260815
+
+permissions:
+  contents: write
+
+jobs:
+  consolidate:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          submodules: false
+
+      - name: Skip after integration commit
+        id: guard
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git log -1 --pretty=%B | grep -q '\[directmetal-unify-applied\]'; then
+            echo 'skip=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'skip=false' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Fetch DirectMetal source branches
+        if: steps.guard.outputs.skip != 'true'
+        run: git fetch origin agent/directmetal-fbo-sampling-a17pro
+
+      - name: Apply reviewed GL buffer binding fix
+        if: steps.guard.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff cfecc600e1fd50de6d02920337d44793e3ddb2da^ \
+            cfecc600e1fd50de6d02920337d44793e3ddb2da -- \
+            src/gl/internal.h src/gl/vertex.cpp | git apply --3way --index
+
+      - name: Apply reviewed FBO and fail-closed semantics
+        if: steps.guard.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff f223cd4d0d8da9051ffd3cfc293c39407c14e538^ \
+            f223cd4d0d8da9051ffd3cfc293c39407c14e538 -- \
+            src/gl/fbo.cpp \
+            src/gl/stub.cpp \
+            tests/fbo_smoke.c \
+            tests/amethyst_egl_smoke.mm \
+            tests/unsupported_stub_smoke.c \
+            cmake/MithrilSmokeTests.cmake | git apply --3way --index
+
+      - name: Review staged diff mechanically
+        if: steps.guard.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --cached --check
+          git diff --cached --stat
+          git diff --cached -- src/gl/internal.h src/gl/vertex.cpp src/gl/fbo.cpp src/gl/stub.cpp
+
+      - name: Fetch DirectMetal shader submodules only
+        if: steps.guard.outputs.skip != 'true'
+        run: >-
+          git submodule update --init --depth=1
+          third_party/SPIRV-Cross
+          third_party/SPIRV-Headers
+          third_party/glslang
+
+      - name: Configure DirectMetal
+        if: steps.guard.outputs.skip != 'true'
+        run: >-
+          cmake -S . -B build-direct -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DMITHRIL_BUILD_LEGACY=OFF
+          -DMITHRIL_BUILD_DIRECT=ON
+          -DMITHRIL_ENABLE_SHADER_TOOLCHAIN=ON
+          -DMITHRIL_OUTPUT_DIRECTORY="$GITHUB_WORKSPACE/build-direct/artifacts"
+
+      - name: Build DirectMetal and tests
+        if: steps.guard.outputs.skip != 'true'
+        run: cmake --build build-direct --parallel
+
+      - name: Run DirectMetal semantic suite
+        if: steps.guard.outputs.skip != 'true'
+        run: ctest --test-dir build-direct -L directmetal --output-on-failure
+
+      - name: Verify shipping boundary
+        if: steps.guard.outputs.skip != 'true'
+        run: |
+          chmod +x scripts/verify_directmetal_artifact.sh
+          scripts/verify_directmetal_artifact.sh \
+            build-direct/artifacts/libmithril.dylib \
+            build-direct/mithril_direct.boundary.json
+
+      - name: Commit validated consolidation
+        if: steps.guard.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git status --short
+          git commit -m 'DirectMetal: absorb validated branch semantics [directmetal-unify-applied]'
+          git push origin HEAD:integration/directmetal-unified-20260815
