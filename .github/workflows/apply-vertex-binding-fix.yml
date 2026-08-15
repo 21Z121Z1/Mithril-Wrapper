@@ -5,7 +5,7 @@ on:
     branches:
       - ci/minecraft-on-mithril-e2e-20260815
     paths:
-      - ci/e2e/apply_vertex_binding_fix.py
+      - ci/e2e/run_vertex_binding_fix.py
 
 permissions:
   contents: write
@@ -23,7 +23,7 @@ jobs:
       - name: Materialize reviewed ARB vertex binding fix
         run: |
           set -euo pipefail
-          python3 ci/e2e/apply_vertex_binding_fix.py
+          python3 ci/e2e/run_vertex_binding_fix.py
           git diff --check
           git diff --stat
           test -n "$(git status --short)"
