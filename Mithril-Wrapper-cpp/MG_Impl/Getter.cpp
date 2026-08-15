@@ -66,15 +66,27 @@ static const char* kVendor   = "EternityQwQ, yitenchen123";
 #else
 static const char* kRenderer = "Mithril-Wrapper (Vulkan 1.2 / MoltenVK backend)";
 #endif
-// Target desktop OpenGL 4.6 Core Profile. The Vulkan 1.2 / MoltenVK backend
-// implements the full Core Profile 4.6 entry-point set (compute shaders,
-// SSBO, image load/store, ARB_buffer_storage persistent maps, DSA,
-// ARB_vertex_attrib_binding, indirect multi-draw, sample shading, …) that
-// modern Minecraft + Sodium + Iris actually exercise. Metal's hard limits
-// (no geometry/tessellation stages, no fp64) are reported honestly below.
+// Target desktop OpenGL 4.6 Core Profile. Both backends (DirectVulkan via
+// MoltenVK, DirectMetal direct) implement the full Core Profile 4.6
+// entry-point set (compute shaders, SSBO, image load/store,
+// ARB_buffer_storage persistent maps, DSA, ARB_vertex_attrib_binding,
+// indirect multi-draw, sample shading, …) that modern Minecraft + Sodium +
+// Iris actually exercise. Metal's hard limits (no geometry/tessellation
+// stages, no fp64) are reported honestly below.
 // The §b (cyan) Minecraft formatting code highlights Mithril in the F3 screen.
-static const char* kVersion  = "4.6.0 §bMithril-Wrapper§r 1.0 (Vulkan 1.2 / MoltenVK)";
+//
+// F3 PARITY REQUIREMENT: the version string differs between backends ONLY in
+// the trailing API tag — "Vulkan 1.2 (MoltenVK)" vs "Metal 3 (DirectMetal)"
+// — so the two backends' F3 output stays line-for-line comparable.
 static const char* kShadingLangVer = "4.60 Mithril-Wrapper (glslang -> SPIR-V)";
+static const char* gl_version_string(void) {
+    static std::string cached;
+    if (cached.empty()) {
+        cached = std::string("4.6.0 §bMithril-Wrapper§r 1.0 (")
+               + backend_api_string() + ")";
+    }
+    return cached.c_str();
+}
 
 // Full Core Profile 4.6 extension advertisement. LWJGL capability detection
 // resolves EVERY function pointer of an extension via the platform
@@ -555,7 +567,7 @@ const GLubyte* glGetString(GLenum name) {
 #else
             return (const GLubyte*)kRenderer;
 #endif
-        case GL_VERSION:                  return (const GLubyte*)kVersion;
+        case GL_VERSION:                  return (const GLubyte*)gl_version_string();
         case GL_SHADING_LANGUAGE_VERSION: return (const GLubyte*)kShadingLangVer;
         case GL_EXTENSIONS: {
             // Concatenate into a single space-separated string.
@@ -587,9 +599,11 @@ const GLubyte* glGetString(GLenum name) {
             return (const GLubyte*)"Mithril-Wrapper (no device)";
 #endif
         case MITHRIL_BACKEND_GETTER + GL_VERSION:
-            return (const GLubyte*)"Vulkan 1.2 (MoltenVK)";
+            return (const GLubyte*)backend_api_string();
         case MITHRIL_BACKEND_GETTER + GL_VENDOR:
-            return (const GLubyte*)"Khronos MoltenVK";
+            return (const GLubyte*)(backend_active_kind() == MITHRIL_BACKEND_KIND_METAL
+                                        ? "Apple Metal"
+                                        : "Khronos MoltenVK");
         case MITHRIL_BACKEND_GETTER + GL_SHADING_LANGUAGE_VERSION:
             return (const GLubyte*)"SPIR-V 1.5 (glslang -> SPIR-V)";
         default: return nullptr;

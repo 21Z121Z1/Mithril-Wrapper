@@ -445,6 +445,27 @@ Renderbuffer* state_get_renderbuffer(GLuint id) {
     return it == g_state->renderbuffers.end() ? nullptr : &it->second;
 }
 
+int draw_fbo_sample_count() {
+    if (!g_state || g_state->currentDrawFBO == 0) return 1;
+    auto it = g_state->framebuffers.find(g_state->currentDrawFBO);
+    if (it == g_state->framebuffers.end()) return 1;
+    Framebuffer* fbo = &it->second;
+    int s = 1;
+    auto bump = [&](const FBOAttachment& a) {
+        if (a.texture != 0) {
+            Texture* t = state_get_texture(a.texture);
+            if (t && t->samples > s) s = t->samples;
+        } else if (a.renderbuffer != 0) {
+            Renderbuffer* r = state_get_renderbuffer(a.renderbuffer);
+            if (r && r->samples > s) s = r->samples;
+        }
+    };
+    for (int i = 0; i < kMaxColorAttachments; ++i) bump(fbo->colors[i]);
+    bump(fbo->depth);
+    bump(fbo->stencil);
+    return s;
+}
+
 TransformFeedback* state_get_transform_feedback(GLuint id) {
     if (!g_state) return nullptr;
     auto it = g_state->transformFeedbacks.find(id);

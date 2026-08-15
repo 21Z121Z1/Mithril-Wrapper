@@ -27,6 +27,12 @@
 #ifndef GL_TEXTURE_MAX_ANISOTROPY_EXT
 #define GL_TEXTURE_MAX_ANISOTROPY_EXT 0x84FE
 #endif
+#ifndef GL_TEXTURE_2D_MULTISAMPLE
+#define GL_TEXTURE_2D_MULTISAMPLE          0x9100
+#endif
+#ifndef GL_PROXY_TEXTURE_2D_MULTISAMPLE
+#define GL_PROXY_TEXTURE_2D_MULTISAMPLE    0x9101
+#endif
 
 extern "C" {
 
@@ -156,7 +162,7 @@ static const void* resolve_unpack_pixels(const void* pixels,
         return nullptr;
     }
 
-    const int bpp = mithril::vk::host_texel_bytes(format, type);
+    const int bpp = backend_host_texel_bytes(format, type);
     if (width < 0 || height < 0 || depth < 0 || bpp <= 0 ||
         g_state->pixelStore.unpackAlignment <= 0 ||
         g_state->pixelStore.unpackRowLength < 0 ||
@@ -443,6 +449,15 @@ void glTexImage2DMultisample(GLenum target, GLsizei samples, GLenum internalform
                              GLsizei width, GLsizei height,
                              GLboolean fixedsamplelocations) {
     MITHRIL_ENSURE_INIT();
+    if (target != GL_TEXTURE_2D_MULTISAMPLE && target != GL_PROXY_TEXTURE_2D_MULTISAMPLE) {
+        mithril::state_set_error(GL_INVALID_ENUM);
+        return;
+    }
+    if (target == GL_PROXY_TEXTURE_2D_MULTISAMPLE) return;  // proxy: no storage
+    if (width < 0 || height < 0 || samples < 0) {
+        mithril::state_set_error(GL_INVALID_VALUE);
+        return;
+    }
     mithril::Texture* t = bound_texture_for_target(target);
     if (!t) return;
     t->internalFormat = internalformat;
@@ -450,7 +465,12 @@ void glTexImage2DMultisample(GLenum target, GLsizei samples, GLenum internalform
     t->height = height;
     t->depth  = 1;
     t->samples = samples;
+    t->target = target;
+    t->levels = 1;
+    t->immutable = true;   // multisample 纹理没有无 mipmap、不可再 glTexImage
+    t->immutableLevels = 1;
     t->fixedSampleLocations = fixedsamplelocations != 0;
+    t->contentVersion++;
     backend_get_or_create_texture(t->id, width, height, 1, 1,
                                   internalformat, target, samples > 1 ? samples : 1);
 }

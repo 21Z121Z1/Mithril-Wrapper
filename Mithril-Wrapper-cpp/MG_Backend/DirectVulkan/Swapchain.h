@@ -92,7 +92,7 @@ struct Swapchain {
     // under MoltenVK this manifests as a black screen (the rendered contents
     // land in a stale/owned-by-presenter image and never reach the display).
     //
-    // Mid-frame flushes (eglWaitClient -> backend_commit) call commit_frame
+    // Mid-frame flushes (eglWaitClient -> dvk_commit) call commit_frame
     // multiple times per frame; only the first submit waits on imageAvailable.
     // Subsequent submits must NOT wait (the semaphore was already consumed;
     // waiting again would deadlock). This mirrors MobileGL's
@@ -155,7 +155,7 @@ VkImageView swapchain_acquire_color(Swapchain* sc);
 VkImageView swapchain_acquire_depth(Swapchain* sc);
 
 // Present the current image to the queue and acquire the next one. Called by
-// backend_present_and_acquire().
+// dvk_present_and_acquire().
 void swapchain_present_and_acquire(Swapchain* sc);
 
 } // namespace vk

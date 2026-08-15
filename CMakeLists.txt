@@ -125,16 +125,23 @@ set(SKIP_GLSLANG_INSTALL       ON  CACHE BOOL "" FORCE)
 set(GLSLANG_TESTS              OFF CACHE BOOL "" FORCE)
 add_subdirectory(Mithril-Wrapper-cpp/3rdparty/glslang)
 
-# SPIRV-Cross: used for SPIR-V reflection (spirv_cross::Compiler +
-# get_shader_resources) in MG_Backend/DirectVulkan/DescriptorSet.cpp. Only the
-# core library is needed (no GLSL/HLSL/MSL/CPP backends, no CLI, no tests).
+# SPIRV-Cross: two roles in the dual-backend build.
+#   * core: SPIR-V reflection (spirv_cross::Compiler + get_shader_resources)
+#     for DirectVulkan/DescriptorSet.cpp and the shared Reflect logic.
+#   * MSL backend (spirv-cross-msl): DirectMetal/MetalPipeline.mm translates
+#     the frontend's SPIR-V to Metal Shading Language at runtime (the job
+#     MoltenVK does internally on the Vulkan path).
+# GLSL stays ON as well: SPIRV-Cross's CMakeLists hard-requires the GLSL
+# backend whenever MSL is enabled ("Must enable GLSL support to enable MSL
+# support") — CompilerMSL derives from CompilerGLSL. No extra cost beyond a
+# few more objects in libspirv-cross-core consumers.
 # SPIRV-Headers (sibling submodule) provides <spirv.h> for the spv:: enums.
 set(SPIRV_CROSS_STATIC                 ON  CACHE BOOL "" FORCE)
 set(SPIRV_CROSS_CLI                    OFF CACHE BOOL "" FORCE)
 set(SPIRV_CROSS_ENABLE_TESTS           OFF CACHE BOOL "" FORCE)
-set(SPIRV_CROSS_ENABLE_GLSL            OFF CACHE BOOL "" FORCE)
+set(SPIRV_CROSS_ENABLE_GLSL            ON  CACHE BOOL "" FORCE)
 set(SPIRV_CROSS_ENABLE_HLSL            OFF CACHE BOOL "" FORCE)
-set(SPIRV_CROSS_ENABLE_MSL             OFF CACHE BOOL "" FORCE)
+set(SPIRV_CROSS_ENABLE_MSL             ON  CACHE BOOL "" FORCE)
 set(SPIRV_CROSS_ENABLE_CPP             OFF CACHE BOOL "" FORCE)
 set(SPIRV_CROSS_ENABLE_REFLECT         OFF CACHE BOOL "" FORCE)
 set(SPIRV_CROSS_ENABLE_C_API           OFF CACHE BOOL "" FORCE)
@@ -160,8 +167,76 @@ add_subdirectory(Mithril-Wrapper-cpp/3rdparty/SPIRV-Cross)
 #                        by the APPLE guard below)
 #     include/         — public GL/EGL headers
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# DirectVulkan sources (see MITHRIL_SOURCES below for why this is a separate
+# list). Compiled with -Dbackend_=dvk_ so their C API definitions/declarations
+# become dvk_* symbols; MG_Backend/Dispatch.cpp provides the unrenamed
+# backend_* entry points and forwards to the active backend.
+# ---------------------------------------------------------------------------
+set(MITHRIL_DVK_SOURCES
+    Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Device.cpp
+    Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Resources.cpp
+    Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/FormatMap.cpp
+    Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Reflect.cpp
+    Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Std140.cpp
+    Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/UniformArena.cpp
+    Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Pipeline.cpp
+    Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/DescriptorSet.cpp
+    Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/CommandStream.cpp
+    Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/ImageOps.cpp
+    # Queries.cpp: GL query-object backing (VkQueryPool) — glBeginQuery/
+    # glEndQuery/glQueryCounter/glGetQueryObject*/glGetQueryBufferObject*
+    Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Queries.cpp
+    # SwapchainCommon.cpp: shared post-surface swapchain creation logic
+    # (format query / vkCreateSwapchainKHR / image views / depth-stencil /
+    # destroy / acquire / present). Platform-specific files
+    # (SwapchainMetal.mm / SwapchainHeadless.cpp) call
+    # create_swapchain_post_surface after creating the VkSurfaceKHR.
+    Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/SwapchainCommon.cpp
+)
+
+# ---------------------------------------------------------------------------
+# DirectMetal sources (Metal 3 direct backend, no MoltenVK). ON by default so
+# Apple builds are TRUE dual-backend: Dispatch.cpp picks Metal unless
+# MITHRIL_BACKEND=vulkan says otherwise (and falls back to Vulkan if Metal
+# fails to come up). Non-Apple builds ignore this flag entirely (the guard
+# below is APPLE-scoped), so Linux CI keeps building the pure Vulkan dylib.
+# MITHRIL_DMT_SOURCES being non-empty additionally defines
+# MITHRIL_ENABLE_METAL_BACKEND, which gates the metal forwarding branch in
+# Dispatch.cpp.
+# ---------------------------------------------------------------------------
+set(MITHRIL_METAL_BACKEND ON CACHE BOOL
+    "Build the DirectMetal backend alongside DirectVulkan (dual backend)")
+
+set(MITHRIL_DMT_SOURCES "")
+if(APPLE AND MITHRIL_METAL_BACKEND)
+    list(APPEND MITHRIL_DMT_SOURCES
+        # Entry layer: defines every dmt_* C entry point of the Backend.h
+        # contract. Includes the build-generated BackendMetalDecls.h so the
+        # compiler (not review) enforces signature parity with Backend.h.
+        Mithril-Wrapper-cpp/MG_Backend/DirectMetal/MetalBackend.mm
+        # Device bring-up / command queue / UBO arena / sync serials / limits.
+        Mithril-Wrapper-cpp/MG_Backend/DirectMetal/MetalDevice.mm
+        # Pure enum tables (VkFormat tag <-> MTLPixelFormat, GL <-> Metal).
+        Mithril-Wrapper-cpp/MG_Backend/DirectMetal/MetalFormat.mm
+        # Buffer/texture/sampler tables + uploads / clears / mipmaps / blits /
+        # readback.
+        Mithril-Wrapper-cpp/MG_Backend/DirectMetal/MetalResources.mm
+        # SPIR-V -> MSL (SPIRV-Cross), PSO caches, draw-time descriptor
+        # binding, built-in clear/blit shaders.
+        Mithril-Wrapper-cpp/MG_Backend/DirectMetal/MetalPipeline.mm
+        # Render/compute encoders, shadow dynamic state, draw recording,
+        # frame commit + present.
+        Mithril-Wrapper-cpp/MG_Backend/DirectMetal/MetalCommandStream.mm
+        # Occlusion / timestamp query backing (MTLCounterSampleBuffer with a
+        # CPU-clock fallback).
+        Mithril-Wrapper-cpp/MG_Backend/DirectMetal/MetalQueries.mm
+        # CAMetalLayer drawable management + persistent depth/stencil texture.
+        Mithril-Wrapper-cpp/MG_Backend/DirectMetal/MetalSwapchain.mm
+    )
+endif()
+
 set(MITHRIL_SOURCES
-    # MG_Impl: OpenGL 3.3 Core Profile entry points
     Mithril-Wrapper-cpp/MG_Impl/init.cpp
     Mithril-Wrapper-cpp/MG_Impl/Log.cpp
     Mithril-Wrapper-cpp/MG_Impl/gl.cpp
@@ -194,26 +269,18 @@ set(MITHRIL_SOURCES
     # the dylib rather than vendored as a submodule.
     Mithril-Wrapper-cpp/3rdparty/SPIRV-Reflect/spirv_reflect.c
 
-    # MG_Backend: Vulkan 1.2 + MoltenVK direct backend (platform-agnostic core)
-    Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Device.cpp
-    Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Resources.cpp
-    Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/FormatMap.cpp
-    Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Reflect.cpp
-    Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Std140.cpp
-    Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/UniformArena.cpp
-    Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Pipeline.cpp
-    Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/DescriptorSet.cpp
-    Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/CommandStream.cpp
-    Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/ImageOps.cpp
-    # Queries.cpp: GL query-object backing (VkQueryPool) — glBeginQuery/
-    # glEndQuery/glQueryCounter/glGetQueryObject*/glGetQueryBufferObject*
-    Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Queries.cpp
-    # SwapchainCommon.cpp: shared post-surface swapchain creation logic
-    # (format query / vkCreateSwapchainKHR / image views / depth-stencil /
-    # destroy / acquire / present). Platform-specific files
-# (SwapchainMetal.mm) call create_swapchain_post_surface
-    # after creating the VkSurfaceKHR.
-    Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/SwapchainCommon.cpp
+    # MG_Backend/DirectVulkan: Vulkan 1.2 + MoltenVK direct backend
+    # (platform-agnostic core). Collected in MITHRIL_DVK_SOURCES so the
+    # backend_=dvk_ compile-time symbol rewrite below can be applied to every
+    # DirectVulkan TU in one place — the dispatcher (MG_Backend/Dispatch.cpp)
+    # owns the real backend_* symbols; these TUs export dvk_* instead.
+    ${MITHRIL_DVK_SOURCES}
+
+    # MG_Backend dual-backend dispatcher: implements the global backend_* C
+    # API, selects the backend from MITHRIL_BACKEND (metal|vulkan) and
+    # forwards to dvk_* / dmt_*. Compiled WITHOUT the prefix rewrite.
+    Mithril-Wrapper-cpp/MG_Backend/Dispatch.cpp
+    ${MITHRIL_DMT_SOURCES}
 
     # MG_Impl: pure-logic EGL config table extracted from the EGL layer so it
     # can be unit-tested without an ObjC++ toolchain. Compiled into every
@@ -256,8 +323,58 @@ endif()
 
 add_library(${PROJECT_NAME} SHARED ${MITHRIL_SOURCES})
 
+# ---------------------------------------------------------------------------
+# Backend symbol separation.
+#
+# DirectVulkan's sources are renamed at the SOURCE level: every backend_ token
+# became dvk_ (perl -pi -e 's/\bbackend_/dvk_/g' over DirectVulkan/*), so the
+# backend's exported symbols are dvk_* and cannot collide with Dispatch.cpp's
+# global backend_* entry points. DirectMetal sources are NEW code and simply
+# define dmt_* directly.
+#
+# Dispatch.cpp needs the renamed prototypes without hand-copying ~110
+# signatures: two prefixed variants of Backend.h are generated at build time
+# from the single source of truth (perl word-boundary replace of backend_ and
+# of the include guard). Regenerating on Backend.h edits is automatic via the
+# DEPENDS line.
+# ---------------------------------------------------------------------------
+set(MITHRIL_GEN_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated)
+file(MAKE_DIRECTORY ${MITHRIL_GEN_DIR})
+add_custom_command(
+    OUTPUT ${MITHRIL_GEN_DIR}/BackendVulkanDecls.h
+    COMMAND perl -pe "s/\\bbackend_/dvk_/g; s/MITHRIL_BACKEND_H/MITHRIL_BACKEND_DVK_H/g"
+            "${CMAKE_CURRENT_SOURCE_DIR}/Mithril-Wrapper-cpp/MG_Backend/Backend.h"
+            > ${MITHRIL_GEN_DIR}/BackendVulkanDecls.h
+    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/Mithril-Wrapper-cpp/MG_Backend/Backend.h"
+    COMMENT "gen BackendVulkanDecls.h (dvk_* prototypes)"
+    VERBATIM
+)
+add_custom_command(
+    OUTPUT ${MITHRIL_GEN_DIR}/BackendMetalDecls.h
+    COMMAND perl -pe "s/\\bbackend_/dmt_/g; s/MITHRIL_BACKEND_H/MITHRIL_BACKEND_DMT_H/g"
+            "${CMAKE_CURRENT_SOURCE_DIR}/Mithril-Wrapper-cpp/MG_Backend/Backend.h"
+            > ${MITHRIL_GEN_DIR}/BackendMetalDecls.h
+    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/Mithril-Wrapper-cpp/MG_Backend/Backend.h"
+    COMMENT "gen BackendMetalDecls.h (dmt_* prototypes)"
+    VERBATIM
+)
+add_custom_target(mithril_backend_decls DEPENDS
+    ${MITHRIL_GEN_DIR}/BackendVulkanDecls.h
+    ${MITHRIL_GEN_DIR}/BackendMetalDecls.h)
+add_dependencies(${PROJECT_NAME} mithril_backend_decls)
+
+if(MITHRIL_DMT_SOURCES)
+    # Gates the metal forwarding branch inside Dispatch.cpp.
+    target_compile_definitions(${PROJECT_NAME} PRIVATE
+        MITHRIL_ENABLE_METAL_BACKEND=1)
+endif()
+
 target_include_directories(${PROJECT_NAME}
     PRIVATE
+        ${MITHRIL_GEN_DIR}
+        # MG_Backend itself: the generated BackendVulkanDecls.h / BackendMetalDecls.h
+        # #include "BackendTypes.h" relative to the source tree.
+        ${CMAKE_CURRENT_SOURCE_DIR}/Mithril-Wrapper-cpp/MG_Backend
         ${CMAKE_CURRENT_SOURCE_DIR}/Mithril-Wrapper-cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Mithril-Wrapper-cpp/include
 )
@@ -271,11 +388,15 @@ target_include_directories(${PROJECT_NAME}
 # spirv-cross-core: SPIR-V reflection API (spirv_cross::Compiler,
 # get_shader_resources) used by DescriptorSet.cpp to build descriptor set
 # layouts. The SPIRV-Headers include dir supplies <spirv.h> (spv::Decoration*).
+# spirv-cross-msl: CompilerMSL for DirectMetal/MetalPipeline.mm (SPIR-V ->
+# MSL translation at runtime). Linked unconditionally — harmless on the Linux
+# Vulkan-only build (unused objects are stripped by the linker).
 target_link_libraries(${PROJECT_NAME} PRIVATE
     glslang::glslang
     glslang::SPIRV
     glslang::glslang-default-resource-limits
     spirv-cross-core
+    spirv-cross-msl
 )
 target_include_directories(${PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Mithril-Wrapper-cpp/3rdparty/SPIRV-Cross
@@ -367,12 +488,23 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE
     MITHRIL_COMMIT_ID="${MITHRIL_COMMIT_ID}"
 )
 
-# ARC for Objective-C++ translation units (EGL surface, GPU info, Vulkan swapchain).
+# ARC for Objective-C++ translation units (EGL surface, GPU info, Vulkan
+# swapchain + the whole DirectMetal backend: its wrapper structs hold strong
+# id<> members and rely on ARC retains, e.g. MetalSwapchain's documented
+# "ARC strong assign — retains the layer").
 if(APPLE)
     set_source_files_properties(
         Mithril-Wrapper-cpp/egl/SurfaceMetal.mm
         Mithril-Wrapper-cpp/MG_Impl/Getter_gpu.mm
         Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/SwapchainMetal.mm
+        Mithril-Wrapper-cpp/MG_Backend/DirectMetal/MetalBackend.mm
+        Mithril-Wrapper-cpp/MG_Backend/DirectMetal/MetalDevice.mm
+        Mithril-Wrapper-cpp/MG_Backend/DirectMetal/MetalFormat.mm
+        Mithril-Wrapper-cpp/MG_Backend/DirectMetal/MetalResources.mm
+        Mithril-Wrapper-cpp/MG_Backend/DirectMetal/MetalPipeline.mm
+        Mithril-Wrapper-cpp/MG_Backend/DirectMetal/MetalCommandStream.mm
+        Mithril-Wrapper-cpp/MG_Backend/DirectMetal/MetalQueries.mm
+        Mithril-Wrapper-cpp/MG_Backend/DirectMetal/MetalSwapchain.mm
         PROPERTIES COMPILE_FLAGS "-fobjc-arc"
     )
 else()

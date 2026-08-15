@@ -1,8 +1,8 @@
 // Mithril-Wrapper - MG_Backend/DirectVulkan/Pipeline.h
 // VkShaderModule creation (from SPIR-V) + VkGraphicsPipeline caching keyed by
 // a hash signature built from (program, vertex format, attachment formats,
-// blend state, primitive mode). Implements backend_get_or_create_pipeline()
-// and backend_delete_program_resources() declared in MG_Backend/Backend.h.
+// blend state, primitive mode). Implements dvk_get_or_create_pipeline()
+// and dvk_delete_program_resources() declared in MG_Backend/Backend.h.
 #ifndef MITHRIL_DIRECTVULKAN_PIPELINE_H
 #define MITHRIL_DIRECTVULKAN_PIPELINE_H
 
@@ -17,7 +17,7 @@
 #include "DescriptorSet.h"
 #include "Device.h"       // kMaxFramesInFlight
 #include "Std140.h"       // Std140Slot (dependency-free; used by UboMemberPlan)
-#include "../Backend.h"   // defines ::MGVertexAttrib (extern "C", global scope)
+#include "BackendVulkanDecls.h"   // defines ::MGVertexAttrib (extern "C", global scope)
 
 namespace mithril {
 
@@ -42,7 +42,7 @@ namespace vk {
  * guarantees that pointers and references to elements stay valid across
  * inserts and rehashes; only erase() invalidates them. Program::uniforms is
  * only ever cleared wholesale by glLinkProgram (Program.cpp:340), which also
- * bumps linkVersion (Program.cpp:359) AND calls backend_delete_program_
+ * bumps linkVersion (Program.cpp:359) AND calls dvk_delete_program_
  * resources() — so a stale plan cannot survive a relink.
  */
 struct UboMemberPlan {
@@ -224,7 +224,7 @@ struct ProgramResources {
 std::unordered_map<GLuint, ProgramResources>& program_table();
 
 // Build (or fetch from cache) a VkPipeline for the given configuration.
-// All arguments mirror backend_get_or_create_pipeline() in Backend.h.
+// All arguments mirror dvk_get_or_create_pipeline() in Backend.h.
 //   color_write_mask : 4-bit RGBA mask (bit0=R, bit1=G, bit2=B, bit3=A) from
 //                      g_state->colorMask; part of the pipeline signature so
 //                      glColorMask changes create distinct pipelines.
@@ -259,7 +259,7 @@ VkPipeline get_or_create_compute_pipeline(GLuint program,
 void delete_program_resources(GLuint program);
 
 // FIX (红屏根因): 清除所有 program 的 failedSignatures 负缓存 + 销毁所有
-// 已创建的 VkPipeline。在 backend_reset_device_lost() 时调用，让着色器在
+// 已创建的 VkPipeline。在 dvk_reset_device_lost() 时调用，让着色器在
 // 设备恢复后有机会重新编译。deviceLost 期间 MoltenVK 着色器缓存可能损坏，
 // 不清除会导致 draw 永久跳过 → 红屏/黑屏。
 void clear_all_pipeline_caches();

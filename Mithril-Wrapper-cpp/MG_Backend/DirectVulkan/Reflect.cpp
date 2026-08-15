@@ -66,6 +66,14 @@ std::vector<DescriptorBinding> reflect_stage(const uint32_t* spirv, int words,
                 case spv::Dim1D:    b.samplerTarget = t.image.arrayed ? GL_TEXTURE_1D_ARRAY : GL_TEXTURE_1D; break;
                 case spv::Dim3D:    b.samplerTarget = GL_TEXTURE_3D; break;
                 case spv::DimCube:  b.samplerTarget = t.image.arrayed ? 0x9009u /* GL_TEXTURE_CUBE_MAP_ARRAY */ : GL_TEXTURE_CUBE_MAP; break;
+                case spv::DimBuffer:
+                    // samplerBuffer（GL_TEXTURE_BUFFER）：Vulkan 侧是
+                    // UNIFORM_TEXEL_BUFFER + VkBufferView（不是 image
+                    // sampler），Metal 侧经 SPIRV-Cross 映射为 texture_buffer。
+                    // Sodium/Iris 用它读 per-section 元数据。
+                    b.type = VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER;
+                    b.samplerTarget = GL_TEXTURE_BUFFER;
+                    break;
                 case spv::Dim2D:
                 default:            b.samplerTarget = t.image.arrayed ? GL_TEXTURE_2D_ARRAY : GL_TEXTURE_2D; break;
             }

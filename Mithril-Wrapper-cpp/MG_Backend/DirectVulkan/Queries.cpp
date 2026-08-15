@@ -16,7 +16,7 @@
 //          GL_TIME_ELAPSED 的 GL->Vulkan 映射同此。
 //   * GL_PRIMITIVES_GENERATED / GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN
 //       -> Metal 无管线统计查询（MoltenVK pipelineStatisticsQuery=VK_FALSE），
-//          在 GL 层用录制期软件计数（backend_draw_* 汇入 g_state 的累加器），
+//          在 GL 层用录制期软件计数（dvk_draw_* 汇入 g_state 的累加器），
 //          语义精确（draw 参数已知），非 stub。
 //
 // 生命周期：pool 按 GL 查询对象 id 存表；glDeleteQueries 时若查询命令可能
@@ -25,12 +25,12 @@
 //
 // MoltenVK 能力：occlusion 查询全支持；timestamp 取决于
 // queueFamilyProperties.timestampValidBits（A13+/M1+ 为 64，老 GPU 为 0）。
-// validBits == 0 时 backend_query_pool_create 对时间戳类 kind 返回 false，
+// validBits == 0 时 dvk_query_pool_create 对时间戳类 kind 返回 false，
 // GL 层回退到单调 CPU 时钟（真实流逝时间，仅基准不同，文档化回退）。
 #include "Device.h"
 #include "CommandStream.h"  // ensure_command_buffer_recording
-#include "Resources.h"      // backend_get_buffer
-#include "../Backend.h"
+#include "Resources.h"      // dvk_get_buffer
+#include "BackendVulkanDecls.h"
 #include "../../MG_Impl/Log.h"
 
 #include <cstdint>
@@ -75,7 +75,7 @@ uint64_t now_ns() {
 
 } // namespace
 
-extern "C" uint32_t backend_query_timestamp_valid_bits() {
+extern "C" uint32_t dvk_query_timestamp_valid_bits() {
     Backend* b = backend();
     if (!b || !b->initialized || !b->physicalDevice) return 0;
     // 缓存进 Backend？queue 属性不变，取一次存静态即可（单物理设备进程单例）。
@@ -94,14 +94,14 @@ extern "C" uint32_t backend_query_timestamp_valid_bits() {
     return cached;
 }
 
-extern "C" bool backend_query_pool_create(uint64_t query_id, int kind) {
+extern "C" bool dvk_query_pool_create(uint64_t query_id, int kind) {
     Backend* b = backend();
     if (!b || !b->initialized || !b->device) return false;
 
     VkQueryType type = kind_to_vk_type(kind);
     if (type == VK_QUERY_TYPE_MAX_ENUM) return false;
     // Metal 无时间戳计数器（老 GPU）：如实告知 GL 层走 CPU 时钟回退。
-    if (type == VK_QUERY_TYPE_TIMESTAMP && backend_query_timestamp_valid_bits() == 0)
+    if (type == VK_QUERY_TYPE_TIMESTAMP && dvk_query_timestamp_valid_bits() == 0)
         return false;
 
     auto& table = query_pool_table();
@@ -109,7 +109,7 @@ extern "C" bool backend_query_pool_create(uint64_t query_id, int kind) {
     if (it != table.end()) {
         if (it->second.kind == kind) return true;   // 幂等
         // 类型变化：退役旧池（走延迟销毁），下面重建。
-        backend_query_pool_destroy(query_id);
+        dvk_query_pool_destroy(query_id);
     }
 
     VkQueryPoolCreateInfo ci{};
@@ -135,7 +135,7 @@ extern "C" bool backend_query_pool_create(uint64_t query_id, int kind) {
     return true;
 }
 
-extern "C" void backend_query_pool_destroy(uint64_t query_id) {
+extern "C" void dvk_query_pool_destroy(uint64_t query_id) {
     Backend* b = backend();
     auto& table = query_pool_table();
     auto it = table.find(query_id);
@@ -151,7 +151,7 @@ extern "C" void backend_query_pool_destroy(uint64_t query_id) {
     b->disposalQueue[b->currentFrame].push_back(d);
 }
 
-extern "C" void backend_query_begin(uint64_t query_id) {
+extern "C" void dvk_query_begin(uint64_t query_id) {
     Backend* b = backend();
     if (!b || !b->initialized) return;
     auto& table = query_pool_table();
@@ -172,7 +172,7 @@ extern "C" void backend_query_begin(uint64_t query_id) {
     }
 }
 
-extern "C" void backend_query_end(uint64_t query_id) {
+extern "C" void dvk_query_end(uint64_t query_id) {
     Backend* b = backend();
     if (!b || !b->initialized) return;
     auto& table = query_pool_table();
@@ -190,7 +190,7 @@ extern "C" void backend_query_end(uint64_t query_id) {
     }
 }
 
-extern "C" void backend_query_write_timestamp(uint64_t query_id) {
+extern "C" void dvk_query_write_timestamp(uint64_t query_id) {
     Backend* b = backend();
     if (!b || !b->initialized) return;
     auto& table = query_pool_table();
@@ -205,7 +205,7 @@ extern "C" void backend_query_write_timestamp(uint64_t query_id) {
                         it->second.pool, 0);
 }
 
-extern "C" bool backend_query_get_results(uint64_t query_id, bool wait,
+extern "C" bool dvk_query_get_results(uint64_t query_id, bool wait,
                                      uint64_t* out, bool* available) {
     Backend* b = backend();
     if (!b || !b->initialized) return false;
@@ -269,7 +269,7 @@ extern "C" bool backend_query_get_results(uint64_t query_id, bool wait,
     return true;
 }
 
-extern "C" void backend_query_copy_results(uint64_t query_id, uint32_t gl_buffer_id,
+extern "C" void dvk_query_copy_results(uint64_t query_id, uint32_t gl_buffer_id,
                                       VkDeviceSize offset, bool with_availability) {
     Backend* b = backend();
     if (!b || !b->initialized) return;
@@ -277,7 +277,7 @@ extern "C" void backend_query_copy_results(uint64_t query_id, uint32_t gl_buffer
     auto it = table.find(query_id);
     if (it == table.end() || !it->second.pool) return;
 
-    VkBuffer dst = backend_get_buffer(gl_buffer_id);
+    VkBuffer dst = dvk_get_buffer(gl_buffer_id);
     if (!dst) {
         MITHRIL_LOG_WARN("vk", "glGetQueryBufferObject: buffer %u has no "
                           "VkBuffer backend", gl_buffer_id);
@@ -302,13 +302,13 @@ extern "C" void backend_query_copy_results(uint64_t query_id, uint32_t gl_buffer
 // 时基（与 glQueryCounter 同源即可）。实现：临时池写一枚 timestamp、提交、
 // 阻塞读回、延迟销毁。罕见路径（性能仪表初始化），开销可接受。设备无
 // timestamp 计数器时回退 CPU 单调时钟（ns）。
-extern "C" uint64_t backend_query_timestamp_now_ns(void) {
+extern "C" uint64_t dvk_query_timestamp_now_ns(void) {
     Backend* b = backend();
     if (!b || !b->initialized) return now_ns();
-    if (backend_query_timestamp_valid_bits() == 0) return now_ns();
+    if (dvk_query_timestamp_valid_bits() == 0) return now_ns();
 
     const uint64_t key = UINT64_MAX;   // 保留键，不与 GL 查询名冲突
-    if (!backend_query_pool_create(key, MITHRIL_QUERY_TIMESTAMP)) return now_ns();
+    if (!dvk_query_pool_create(key, MITHRIL_QUERY_TIMESTAMP)) return now_ns();
     if (!ensure_command_buffer_recording()) return now_ns();
     note_query_commands();
 
@@ -319,12 +319,12 @@ extern "C" uint64_t backend_query_timestamp_now_ns(void) {
     vkCmdResetQueryPool(b->commandBuffer, it->second.pool, 0, 1);
     vkCmdWriteTimestamp(b->commandBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                         it->second.pool, 0);
-    backend_end_render_pass();
-    backend_commit();
+    dvk_end_render_pass();
+    dvk_commit();
 
     uint64_t v = 0; bool avail = false;
-    backend_query_get_results(key, true, &v, &avail);
-    backend_query_pool_destroy(key);   // 走延迟销毁（命令可能刚提交）
+    dvk_query_get_results(key, true, &v, &avail);
+    dvk_query_pool_destroy(key);   // 走延迟销毁（命令可能刚提交）
     return avail ? v : now_ns();
 }
 

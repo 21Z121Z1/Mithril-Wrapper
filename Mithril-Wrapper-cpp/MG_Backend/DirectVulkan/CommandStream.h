@@ -1,8 +1,8 @@
 // Mithril-Wrapper - MG_Backend/DirectVulkan/CommandStream.h
 // Render-pass orchestration (dynamic rendering) + encoder dynamic-state setters
 // + draw command recording + per-frame submit/present. Implements the
-// backend_begin_render_pass / backend_end_render_pass / backend_commit /
-// backend_set_* / backend_draw_* family declared in MG_Backend/Backend.h.
+// dvk_begin_render_pass / dvk_end_render_pass / dvk_commit /
+// dvk_set_* / dvk_draw_* family declared in MG_Backend/Backend.h.
 #ifndef MITHRIL_DIRECTVULKAN_COMMANDSTREAM_H
 #define MITHRIL_DIRECTVULKAN_COMMANDSTREAM_H
 
@@ -24,7 +24,7 @@ bool render_pass_active();
 // buffer since the last command-buffer boundary (fresh begin / memo flush /
 // pool growth). bind_program_descriptors() sets it true right before issuing
 // vkCmdBindDescriptorSets; every command-buffer boundary resets it false.
-// backend_draw_* refuses to record a vkCmdDraw when it is false, because a
+// dvk_draw_* refuses to record a vkCmdDraw when it is false, because a
 // draw with an unbound / garbage descriptor set makes MoltenVK sample
 // undefined memory (pure-red geometry) and, on A11's Metal 2, can fault the
 // GPU (kIOGPUCommandBufferCallbackErrorPageFault) at the next vkQueueSubmit.
@@ -87,20 +87,20 @@ void clear_attachments(uint32_t mask, int x, int y, int w, int h);
 bool ensure_command_buffer_recording();
 
 // Submit the recorded command buffer to the graphics queue and wait on the
-// per-frame fence. Called by backend_commit() and backend_present_and_acquire().
+// per-frame fence. Called by dvk_commit() and dvk_present_and_acquire().
 void commit_frame();
 
 /*
  * Reset the encoder state (passActive, boundPipeline, hasCommands, FBO
  * attachment registrations) to a clean "no pass active" state.
  *
- * Called by backend_reset_device_lost() after a successful swapchain rebuild.
+ * Called by dvk_reset_device_lost() after a successful swapchain rebuild.
  *
  * Root cause (VK_NOT_READY storm after deviceLost recovery):
  * When deviceLost is set mid-frame, commit_frame() returns early WITHOUT
  * calling end_render_pass(), so encoder().passActive stays true. The next
  * frame's GL calls (glClear -> clear_attachments -> vkCmdClearAttachments,
- * backend_bind_pipeline -> vkCmdBindPipeline) see passActive=true and record
+ * dvk_bind_pipeline -> vkCmdBindPipeline) see passActive=true and record
  * into b->commandBuffer — but the command buffer was never vkBeginCommandBuffer'd
  * (ensure_command_buffer_recording returned false during deviceLost, and after
  * recovery the alias b->commandBuffer may point at a stale/pending slot).
@@ -151,7 +151,7 @@ void retire_framebuffers_referencing(VkImageView view);
 // VkFramebuffer and VkRenderPass. Only call with the device idle.
 void destroy_all_cached_framebuffers_and_render_passes();
 
-// GPU fault 诊断：backend_draw_*（全局 extern "C" 作用域）调用的帧 draw
+// GPU fault 诊断：dvk_draw_*（全局 extern "C" 作用域）调用的帧 draw
 // 计数递增（实现见 CommandStream.cpp，供 commit_frame 的帧摘要记录）。
 void frame_draw_count_inc();
 

@@ -43,6 +43,9 @@ struct DeferredDestroy {
     VkImageView    view = VK_NULL_HANDLE;
     VkDeviceMemory memory = VK_NULL_HANDLE;
     VkSampler      sampler = VK_NULL_HANDLE;
+    // GL_TEXTURE_BUFFER 的 VkBufferView（samplerBuffer 采样视图）。源
+    // VkBuffer orphan/内容更新后旧视图必须随帧延迟销毁。
+    VkBufferView   bufferView = VK_NULL_HANDLE;
     // FIX (descriptor pool UAF - P0): a VkDescriptorPool whose sets may still
     // be referenced by an in-flight command buffer. When a per-program pool is
     // exhausted MID-RECORDING (see DescriptorSet.cpp), we now grow a secondary
@@ -72,7 +75,7 @@ struct DeferredDestroy {
 };
 
 // Global Vulkan backend state. A single instance lives for the process; it is
-// created by backend_init() and torn down by backend_shutdown().
+// created by dvk_init() and torn down by dvk_shutdown().
 struct Backend {
     bool initialized = false;
 
@@ -331,13 +334,13 @@ Backend* backend();
 
 // 返回 backend 是否进入持久性故障状态。一旦置位，渲染线程的 submit/present/
 // acquire/swapchain-rebuild 全部跳过，避免死循环刷屏。
-bool backend_is_device_lost();
+bool dvk_is_device_lost();
 
 // 重置 deviceLost 状态为 false，并清零 consecutiveSubmitFailures 计数器。
 // 由 EGL 的 deviceLost 恢复路径调用：当 swapchain 重建成功后，给设备一次
 // 恢复渲染的机会。GPU 超时通常是暂时的（资源压力释放后可恢复），不应永久
 // 终止渲染（原实现一旦置位就永不恢复，导致进程永久卡死）。
-void backend_reset_device_lost();
+void dvk_reset_device_lost();
 
 // FIX (黑屏根因): 在 deviceLost 期间（恢复尝试前）排空所有 disposalQueue，
 // 释放被延迟销毁的 VkBuffer/VkImage/VkDeviceMemory。deviceLost 期间
@@ -345,7 +348,7 @@ void backend_reset_device_lost();
 // 导致显存持续占用，swapchain 重建也因显存不足而失败。
 // 此函数不重置 deviceLost 标志（仅释放资源），让 swapchain 重建有显存可用。
 // 参考 MobileGL TryDrainFrameTransients（VulkanRenderer.cpp:7239-7313）。
-void backend_reset_device_lost_pending_resources();
+void dvk_reset_device_lost_pending_resources();
 
 // FIX (swapchain rebuild death loop): Purge ALL recreatable cached Vulkan
 // resources (VkPipeline objects, VkDescriptorSet objects, disposal queues)
@@ -354,7 +357,7 @@ void backend_reset_device_lost_pending_resources();
 // This breaks the chicken-and-egg: free memory first, then rebuild succeeds.
 // Reference: MobileGL RecreateSwapchain calls pipelineFactory->DestroyAll()
 // + uniformManager->ResetAllPools() BEFORE creating the new swapchain.
-void backend_purge_cached_resources_for_recovery();
+void dvk_purge_cached_resources_for_recovery();
 
 // One-time init of the instance/device/queue/command pool/pipeline cache.
 // Idempotent; sets Backend::initialized on success.
@@ -400,17 +403,17 @@ void safe_device_wait_idle();
 // Advance the per-submission serial. Called once per vkQueueSubmit in
 // commit_frame(). Records the current frame slot so a sync object stamped with
 // the returned serial can be completed exactly when that slot's fence signals.
-uint64_t backend_frame_serial_advance(int frameSlot);
+uint64_t dvk_frame_serial_advance(int frameSlot);
 // extern "C"：与 Backend.h 的全局 C 声明合并（MG_Impl/Drawing.cpp、egl/egl.cpp
 // 跨命名空间以 mithril::vk:: 限定名调用同一 C 链接符号）。
 // Returns the latest serial that has actually been submitted to the queue.
-extern "C" uint64_t backend_current_submit_serial();
+extern "C" uint64_t dvk_current_submit_serial();
 // Returns the highest serial whose GPU submission has definitely completed.
-extern "C" uint64_t backend_last_completed_serial();
+extern "C" uint64_t dvk_last_completed_serial();
 // Block (or, with timeout==0, poll) until the submission bearing `serial` has
 // completed. Returns true if completed, false if still pending (timeout==0) or
 // the wait failed.
-extern "C" bool     backend_wait_serial(uint64_t serial, uint64_t timeout_ns);
+extern "C" bool     dvk_wait_serial(uint64_t serial, uint64_t timeout_ns);
 
 // FIX (显存耗尽根因 - 主动式 GC，深度参考 MobileGL):
 //
@@ -432,7 +435,7 @@ extern "C" bool     backend_wait_serial(uint64_t serial, uint64_t timeout_ns);
 // 开头调用，在新帧分配资源前释放已完成帧的资源。
 //
 // 返回 drain 的 slot 数（仅用于诊断日志）。
-int backend_poll_completed_frames();
+int dvk_poll_completed_frames();
 
 // FIX (显存耗尽根因 - 内存压力主动 GC):
 //
@@ -447,7 +450,7 @@ int backend_poll_completed_frames();
 // 的 per-slot drain 不够及时，所以需要这个压力触发的主动 GC。
 //
 // 返回 true 表示触发了 GC（调用方可记录日志）。
-bool backend_proactive_gc_if_needed();
+bool dvk_proactive_gc_if_needed();
 
 } // namespace vk
 } // namespace mithril

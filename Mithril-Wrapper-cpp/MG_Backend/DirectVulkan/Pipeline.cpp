@@ -8,7 +8,7 @@
 #include "Resources.h"
 #include "DescriptorSet.h"
 #include "CommandStream.h"  // get_template_render_pass (traditional render pass)
-#include "../Backend.h"
+#include "BackendVulkanDecls.h"
 #include "../../MG_Impl/Log.h"
 // FIX (root cause AF - Primitive Restart): 读取 g_state->primitiveRestart /
 // primitiveRestartFixedIndex 以动态设置 ia.primitiveRestartEnable，并将其
@@ -312,6 +312,13 @@ uint64_t hash_signature(GLuint program, const MGVertexAttrib* attribs, int attri
     bool prfi = (mithril::g_state && mithril::g_state->primitiveRestartFixedIndex);
     mix(&pr, sizeof(pr));
     mix(&prfi, sizeof(prfi));
+    /* MSAA：rasterizationSamples 被烘焙进管线且属于 render-pass 兼容性规则
+     * 的一环（同格式的 1x 与 Nx pass 不兼容），必须参与缓存键 —— 否则单采样
+     * FBO 与多采样 FBO 交替绑定时复用错采样数管线 → validation error / 渲染
+     * 崩溃。与 get_or_create_pipeline 的 ms.rasterizationSamples 同一来源
+     * （draw_fbo_sample_count：当前绘制 FBO 附件的最大采样数）。 */
+    int samples = mithril::draw_fbo_sample_count();
+    mix(&samples, sizeof(samples));
     return h;
 }
 
@@ -410,7 +417,7 @@ VkPipeline get_or_create_pipeline(GLuint program,
     // Reflect SPIR-V + build VkDescriptorSetLayout / VkPipelineLayout /
     // VkDescriptorPool once per program (idempotent). The pipeline below binds
     // against pr.pipelineLayout (or the empty fallback for binding-less
-    // shaders), and prepare_draw later calls backend_bind_program_descriptors
+    // shaders), and prepare_draw later calls dvk_bind_program_descriptors
     // to populate the descriptor set from Program.uniforms + bound textures.
     // Y flip only modifies gl_Position (a builtin), so both SPIR-V variants
     // share the same descriptor layout — reflecting either is correct.
@@ -651,7 +658,16 @@ VkPipeline get_or_create_pipeline(GLuint program,
     // ---- Multisample ----
     VkPipelineMultisampleStateCreateInfo ms{};
     ms.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-    ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    /* MSAA：采样数来自当前绘制 FBO（draw_fbo_sample_count —— 附件最大采样数，
+     * FBO 0 恒为 1），与 begin_render_pass 的 pass 采样数及管线缓存键同一来源，
+     * 保证 pass / pipeline / 附件三者一致（Vulkan render-pass 兼容性规则强制，
+     * 深度对照 MobileGL VulkanRenderer.cpp 的 rasterizationSamples 组装）。 */
+    const int samples = mithril::draw_fbo_sample_count();
+    ms.rasterizationSamples = (samples >= 16) ? VK_SAMPLE_COUNT_16_BIT
+                            : (samples >= 8)  ? VK_SAMPLE_COUNT_8_BIT
+                            : (samples >= 4)  ? VK_SAMPLE_COUNT_4_BIT
+                            : (samples >= 2)  ? VK_SAMPLE_COUNT_2_BIT
+                                              : VK_SAMPLE_COUNT_1_BIT;
     ms.minSampleShading = 1.0f;
     /* GL 4.0 ARB_sample_shading. Only meaningful once the attachment is
      * actually multisampled — requesting sampleShadingEnable at
@@ -797,7 +813,7 @@ VkPipeline get_or_create_pipeline(GLuint program,
     VkFormat colorFmts[8] = {};
     for (int i = 0; i < color_count && i < 8; ++i) colorFmts[i] = color_formats[i];
     VkRenderPass templateRP = mithril::vk::get_template_render_pass(
-        colorFmts, color_count, depth_format, /*samples=*/1);
+        colorFmts, color_count, depth_format, samples);
 
     // ---- Graphics pipeline ----
     VkGraphicsPipelineCreateInfo gi{};
@@ -863,7 +879,7 @@ VkPipeline get_or_create_pipeline(GLuint program,
                            r == VK_ERROR_DEVICE_LOST ||
                            b->deviceLost);
         // 当 pipeline 创建返回 VK_ERROR_DEVICE_LOST 时，主动设置 deviceLost 标志，
-        // 让 EGL 恢复路径（backend_reset_device_lost → clear_all_pipeline_caches）
+        // 让 EGL 恢复路径（dvk_reset_device_lost → clear_all_pipeline_caches）
         // 清除负缓存并重建 pipeline。否则设备已死但标志未设置，恢复永远不会触发。
         if (r == VK_ERROR_DEVICE_LOST && !b->deviceLost) {
             b->deviceLost = true;
@@ -974,7 +990,7 @@ VkPipeline get_or_create_compute_pipeline(GLuint program,
 // 如果这些失败被加入 failedSignatures 负缓存，即使设备恢复后着色器
 // 可以正常编译，draw 也会被永久跳过，导致物体消失/红屏。
 //
-// 此函数在 backend_reset_device_lost() 时调用，清除所有 program 的
+// 此函数在 dvk_reset_device_lost() 时调用，清除所有 program 的
 // failedSignatures，让着色器在设备恢复后有机会重新编译。
 // 同时也清除已创建的 pipeline 缓存（pipeline 可能引用了损坏的着色器），
 // 让 get_or_create_pipeline 在下次 draw 时重新创建。
@@ -1076,7 +1092,7 @@ void delete_program_resources(GLuint program) {
 // ===========================================================================
 extern "C" {
 
-VkPipeline backend_get_or_create_pipeline(GLuint program,
+VkPipeline dvk_get_or_create_pipeline(GLuint program,
                                           const uint32_t* vertex_spirv, int vertex_word_count,
                                           const uint32_t* fragment_spirv, int fragment_word_count,
                                           const MGVertexAttrib* attribs, int attrib_count,
@@ -1102,14 +1118,14 @@ VkPipeline backend_get_or_create_pipeline(GLuint program,
 // dispatch only knows the currently-bound GL program, and the compute stage
 // has no per-draw variants (no Y-flip, no vertex format) to choose between.
 // Fetch it straight from the linked program.
-VkPipeline backend_get_or_create_compute_pipeline(GLuint program) {
+VkPipeline dvk_get_or_create_compute_pipeline(GLuint program) {
     mithril::Program* p = mithril::state_get_program(program);
     if (!p || !p->linked || p->computeSpirv.empty()) return VK_NULL_HANDLE;
     return mithril::vk::get_or_create_compute_pipeline(
         program, p->computeSpirv.data(), (int)p->computeSpirv.size());
 }
 
-void backend_delete_program_resources(GLuint program) {
+void dvk_delete_program_resources(GLuint program) {
     mithril::vk::delete_program_resources(program);
 }
 

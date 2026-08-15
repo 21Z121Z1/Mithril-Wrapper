@@ -1,6 +1,6 @@
 // Mithril-Wrapper - MG_Backend/DirectVulkan/Resources.cpp
 // VkBuffer / VkImage / VkImageView / VkSampler lifecycle + GL internalFormat
-// -> VkFormat mapping + staging upload. Implements the backend_get_or_create_*
+// -> VkFormat mapping + staging upload. Implements the dvk_get_or_create_*
 // family declared in MG_Backend/Backend.h.
 #include "Resources.h"
 #include "Device.h"
@@ -8,7 +8,8 @@
 #include "Pipeline.h"       // clear_all_pipeline_caches — OOM 时驱逐 pipeline
 #include "DescriptorSet.h"  // reset_all_descriptor_pools — OOM 时驱逐 descriptor
 #include "LogRing.h"      // 资源操作环形日志（GPU fault 时 dump）
-#include "../Backend.h"
+#include "BackendVulkanDecls.h"
+#include "../../MG_State/State.h"
 #include "../../MG_Impl/Log.h"
 
 #include <cstring>
@@ -48,17 +49,22 @@ std::unordered_map<GLuint, SamplerEntry>& sampler_table() { static std::unordere
 // GL buffer 对象无类型 —— 同一个名字今天绑 GL_ARRAY_BUFFER，明天绑
 // GL_SHADER_STORAGE_BUFFER，GL 从不提前告知。Vulkan 要求在创建时声明一切
 // 可能的用途，因此这里把 GL 可能用到的 usage 全部加上（与
-// backend_get_or_create_buffer 创建路径保持一致）。
+// dvk_get_or_create_buffer 创建路径保持一致）。
 static constexpr VkBufferUsageFlags kAllGlBufferUsage =
     VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
     VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
     VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
-    VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    VK_BUFFER_USAGE_TRANSFER_DST_BIT |
+    // GL_TEXTURE_BUFFER（samplerBuffer/usamplerBuffer）→ VkBufferView 需要
+    // UNIFORM_TEXEL_BUFFER；usamplerBuffer（storage texel）同加 STORAGE 位，
+    // GL buffer 无类型，创建时无法预知用途。
+    VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT |
+    VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT;
 
 // 该 buffer 是否可能仍被 GPU 引用（其最近一次 CPU 写入尚未完成在飞）。
-// 非阻塞：backend_last_completed_serial() 内部只做 vkGetFenceStatus 轮询。
+// 非阻塞：dvk_last_completed_serial() 内部只做 vkGetFenceStatus 轮询。
 static inline bool buffer_maybe_inflight(const BufferEntry& e) {
-    return e.lastWriteSerial > backend_last_completed_serial();
+    return e.lastWriteSerial > dvk_last_completed_serial();
 }
 
 // 标记一次 CPU 写入：它将被"下一次 vkQueueSubmit"携带。
@@ -560,7 +566,7 @@ void defer_destroy_sampler_entry(SamplerEntry& e) {
     for (auto& kv : e.byParams) {
         VkSampler s = kv.second;
         if (s == VK_NULL_HANDLE) continue;
-        DeferredDestroy d;
+        mithril::vk::DeferredDestroy d;
         d.sampler = s;
         b->disposalQueue[b->currentFrame].push_back(d);
     }
@@ -1045,7 +1051,7 @@ static VkSamplerMipmapMode to_vk_mipmap(GLenum f) {
     // FIX (纯红 + GPU page fault): 非 mipmap 的 min filter（GL_NEAREST / GL_LINEAR）
     // 必须映射为 NEAREST mip 模式，否则配合 maxLod=12 会请求跨不存在的 mip 层
     // 采样 → A11/MoltenVK 采样越界。mip 模式只在 LOD 范围跨多层时才有意义；
-    // 非 mipmap filter 应在 backend_get_or_create_sampler 里把 minLod=maxLod=0。
+    // 非 mipmap filter 应在 dvk_get_or_create_sampler 里把 minLod=maxLod=0。
     if (f == GL_NEAREST_MIPMAP_NEAREST || f == GL_LINEAR_MIPMAP_NEAREST ||
         f == GL_NEAREST || f == GL_LINEAR) return VK_SAMPLER_MIPMAP_MODE_NEAREST;
     return VK_SAMPLER_MIPMAP_MODE_LINEAR;
@@ -1215,7 +1221,7 @@ bool format_is_depth_stencil(VkFormat fmt) {
 // ===========================================================================
 extern "C" {
 
-VkBuffer backend_get_or_create_buffer(GLuint name, const void* data, size_t size) {
+VkBuffer dvk_get_or_create_buffer(GLuint name, const void* data, size_t size) {
     mithril::vk::Backend* b = mithril::vk::backend();
     if (!b->initialized || name == 0 || size == 0) return VK_NULL_HANDLE;
     auto& tbl = mithril::vk::buffer_table();
@@ -1311,21 +1317,121 @@ VkBuffer backend_get_or_create_buffer(GLuint name, const void* data, size_t size
     return e.buffer;
 }
 
+/* ---- GL_TEXTURE_BUFFER（samplerBuffer）VkBufferView 缓存 ------------------
+ * GL 侧状态（MG_State Texture::texBuffer* + Buffer::data/contentVersion）是
+ * 唯一事实源；这里只持有派生的 VkBufferView。缓存键 = 源 VkBuffer 句柄 +
+ * GL buffer contentVersion + (offset,size,format)，任一变化即重建（旧视图
+ * 进当前帧 disposal 队列 —— 它可能仍被在飞 command buffer 引用）。 */
+namespace {
+struct TexelViewEntry {
+    VkBufferView view = VK_NULL_HANDLE;
+    VkBuffer     srcBuffer = VK_NULL_HANDLE;
+    uint64_t     srcContentVersion = 0;
+    GLintptr     offset = 0;
+    GLsizeiptr   size = 0;
+    GLenum       internalFormat = 0;
+};
+std::unordered_map<GLuint, TexelViewEntry>& texel_view_table() {
+    static std::unordered_map<GLuint, TexelViewEntry> t;
+    return t;
+}
+} // namespace
+
+VkBufferView get_or_create_texel_buffer_view(GLuint texName) {
+    mithril::vk::Backend* b = mithril::vk::backend();
+    if (!b->initialized || texName == 0) return VK_NULL_HANDLE;
+
+    mithril::Texture* tex = mithril::state_get_texture(texName);
+    if (!tex || tex->texBuffer == 0) return VK_NULL_HANDLE;
+    mithril::Buffer* glbuf = mithril::state_get_buffer(tex->texBuffer);
+    if (!glbuf || glbuf->data.empty()) {
+        // 源 buffer 已删除（GL 侧清了 texBuffer）或从未有数据：作废缓存视图，
+        // 防止引用已释放/将释放的 VkBuffer。
+        auto& dt = texel_view_table();
+        auto dit = dt.find(texName);
+        if (dit != dt.end() && dit->second.view != VK_NULL_HANDLE) {
+            mithril::vk::DeferredDestroy d;
+            d.bufferView = dit->second.view;
+            b->disposalQueue[b->currentFrame].push_back(d);
+            dit->second.view = VK_NULL_HANDLE;
+        }
+        return VK_NULL_HANDLE;
+    }
+
+    // 确保后端 VkBuffer 存在且是最新内容（首次绑定 / 内容更新时上传）。
+    VkBuffer vkbuf = dvk_get_or_create_buffer(
+        tex->texBuffer, glbuf->data.data(), (size_t)glbuf->data.size());
+    if (vkbuf == VK_NULL_HANDLE) return VK_NULL_HANDLE;
+
+    auto& tbl = texel_view_table();
+    auto it = tbl.find(texName);
+    if (it != tbl.end()) {
+        if (it->second.view != VK_NULL_HANDLE &&
+            it->second.srcBuffer == vkbuf &&
+            it->second.srcContentVersion == glbuf->contentVersion &&
+            it->second.offset == tex->texBufferOffset &&
+            it->second.size == tex->texBufferSize &&
+            it->second.internalFormat == tex->internalFormat) {
+            return it->second.view;   // 缓存命中
+        }
+        // 源变了：旧视图延迟销毁（GPU 可能还在采样它）。
+        if (it->second.view != VK_NULL_HANDLE) {
+            mithril::vk::DeferredDestroy d;
+            d.bufferView = it->second.view;
+            b->disposalQueue[b->currentFrame].push_back(d);
+            it->second.view = VK_NULL_HANDLE;
+        }
+    }
+
+    const VkFormat fmt = mithril::vk::gl_internal_to_vk(
+        (GLenum)tex->internalFormat);
+    if (fmt == VK_FORMAT_UNDEFINED) {
+        MITHRIL_LOG_WARN("vk", "tex buffer 0x%x: unsupported internalformat "
+                         "0x%x — no view", (unsigned)texName,
+                         (unsigned)tex->internalFormat);
+        return VK_NULL_HANDLE;
+    }
+
+    VkBufferViewCreateInfo bvi{};
+    bvi.sType = VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO;
+    bvi.buffer = vkbuf;
+    bvi.format = fmt;
+    bvi.offset = (VkDeviceSize)tex->texBufferOffset;
+    bvi.range  = (tex->texBufferSize > 0)
+        ? (VkDeviceSize)tex->texBufferSize : VK_WHOLE_SIZE;
+    VkBufferView view = VK_NULL_HANDLE;
+    if (vkCreateBufferView(b->device, &bvi, nullptr, &view) != VK_SUCCESS) {
+        MITHRIL_LOG_WARN("vk", "vkCreateBufferView failed (tex %u -> buf %u)",
+                         (unsigned)texName, (unsigned)tex->texBuffer);
+        return VK_NULL_HANDLE;
+    }
+
+    TexelViewEntry e;
+    e.view = view;
+    e.srcBuffer = vkbuf;
+    e.srcContentVersion = glbuf->contentVersion;
+    e.offset = tex->texBufferOffset;
+    e.size = tex->texBufferSize;
+    e.internalFormat = tex->internalFormat;
+    tbl[texName] = e;
+    return view;
+}
+
 /*
  * Immutable, possibly persistently-mapped storage (GL_ARB_buffer_storage).
- * Mirrors backend_get_or_create_buffer but keeps the host mapping live when
+ * Mirrors dvk_get_or_create_buffer but keeps the host mapping live when
  * `persistent` is set, so the app can write through the pointer returned by
  * glMapBufferRange without re-mapping each frame. Backing memory is always
  * HOST_VISIBLE | HOST_COHERENT, so a persistent+coherent buffer needs no flush.
  */
-VkBuffer backend_create_buffer_storage(GLuint name, VkDeviceSize size,
+VkBuffer dvk_create_buffer_storage(GLuint name, VkDeviceSize size,
                                        VkBufferUsageFlags extra_usage,
                                        bool persistent, bool coherent) {
     mithril::vk::Backend* b = mithril::vk::backend();
     if (!b->initialized || name == 0 || size == 0) return VK_NULL_HANDLE;
     auto& tbl = mithril::vk::buffer_table();
     auto it = tbl.find(name);
-    // FIX (真机主菜单 GPU page fault 根因，同 backend_get_or_create_buffer):
+    // FIX (真机主菜单 GPU page fault 根因，同 dvk_get_or_create_buffer):
     // 先 create 成功再 defer 旧的，create 失败保留旧 handle，绝不置空 tbl。
     mithril::vk::BufferEntry e;
     VkBufferUsageFlags usage =
@@ -1359,7 +1465,7 @@ VkBuffer backend_create_buffer_storage(GLuint name, VkDeviceSize size,
     return e.buffer;
 }
 
-void backend_buffer_upload(GLuint name, GLintptr offset, const void* data, size_t size) {
+void dvk_buffer_upload(GLuint name, GLintptr offset, const void* data, size_t size) {
     mithril::vk::Backend* b = mithril::vk::backend();
     if (!b->initialized) return;
     auto& tbl = mithril::vk::buffer_table();
@@ -1417,7 +1523,7 @@ void backend_buffer_upload(GLuint name, GLintptr offset, const void* data, size_
             static int uploadDropCount = 0;
             uploadDropCount++;
             if (uploadDropCount <= 5 || uploadDropCount % 200 == 0) {
-                MITHRIL_LOG_WARN("vk", "backend_buffer_upload: buffer %u (offset %lld, "
+                MITHRIL_LOG_WARN("vk", "dvk_buffer_upload: buffer %u (offset %lld, "
                                   "%zu bytes) still in flight after safe_device_wait_idle "
                                   "and staging FAILED — DROPPING upload (drop #%d)",
                                   name, (long long)offset, size, uploadDropCount);
@@ -1441,7 +1547,7 @@ void backend_buffer_upload(GLuint name, GLintptr offset, const void* data, size_
     mithril::vk::stamp_buffer_write(it->second);
 }
 
-VkBuffer backend_get_buffer(GLuint name) {
+VkBuffer dvk_get_buffer(GLuint name) {
     auto& tbl = mithril::vk::buffer_table();
     auto it = tbl.find(name);
     return it == tbl.end() ? VK_NULL_HANDLE : it->second.buffer;
@@ -1450,20 +1556,20 @@ VkBuffer backend_get_buffer(GLuint name) {
 // 查询后端 VkBuffer 实际分配容量（含 256 对齐 padding）。
 // DRAW-VB-GROW / DRAW-IBO-GROW 用此值判断是否需要真正调用后端扩容：
 // 若后端容量已 >= need，仅需更新 GL 层 allocSize，避免不必要的 orphan。
-VkDeviceSize backend_get_buffer_capacity(GLuint name) {
+VkDeviceSize dvk_get_buffer_capacity(GLuint name) {
     auto& tbl = mithril::vk::buffer_table();
     auto it = tbl.find(name);
     return it == tbl.end() ? 0 : it->second.size;
 }
 
-void* backend_get_buffer_mapped_pointer(GLuint name) {
+void* dvk_get_buffer_mapped_pointer(GLuint name) {
     auto& tbl = mithril::vk::buffer_table();
     auto it = tbl.find(name);
     if (it == tbl.end()) return nullptr;
     return it->second.persistentlyMapped ? it->second.mapped : nullptr;
 }
 
-void backend_delete_buffer(GLuint name) {
+void dvk_delete_buffer(GLuint name) {
     auto& tbl = mithril::vk::buffer_table();
     auto it = tbl.find(name);
     if (it == tbl.end()) return;
@@ -1471,15 +1577,15 @@ void backend_delete_buffer(GLuint name) {
     tbl.erase(it);
 }
 
-VkBuffer backend_get_zero_buffer(void) {
+VkBuffer dvk_get_zero_buffer(void) {
     static GLuint zero_name = 0x40000000u;  // sentinel name for the shared zero buffer
     static bool tried = false;
     if (!tried) {
         tried = true;
         static const uint8_t zeros[16] = {0};
-        backend_get_or_create_buffer(zero_name, zeros, sizeof(zeros));
+        dvk_get_or_create_buffer(zero_name, zeros, sizeof(zeros));
     }
-    return backend_get_buffer(zero_name);
+    return dvk_get_buffer(zero_name);
 }
 
 /*
@@ -1496,16 +1602,16 @@ VkBuffer backend_get_zero_buffer(void) {
  */
 static const GLuint kGenericAttribBufferName = 0x40000001u;
 
-VkBuffer backend_get_generic_attrib_buffer(void) {
-    return backend_get_buffer(kGenericAttribBufferName);
+VkBuffer dvk_get_generic_attrib_buffer(void) {
+    return dvk_get_buffer(kGenericAttribBufferName);
 }
 
-void backend_update_generic_attribs(const float* values, int count) {
+void dvk_update_generic_attribs(const float* values, int count) {
     if (!values || count <= 0) return;
     const size_t bytes = (size_t)count * 4 * sizeof(float);
-    VkBuffer existing = backend_get_buffer(kGenericAttribBufferName);
+    VkBuffer existing = dvk_get_buffer(kGenericAttribBufferName);
     if (existing == VK_NULL_HANDLE) {
-        backend_get_or_create_buffer(kGenericAttribBufferName, values, bytes);
+        dvk_get_or_create_buffer(kGenericAttribBufferName, values, bytes);
         return;
     }
     // FIX (容量防御): 若新数据超过当前分配（首帧 attrib count 小于后续帧），
@@ -1521,10 +1627,10 @@ void backend_update_generic_attribs(const float* values, int count) {
         }
         return;
     }
-    backend_buffer_upload(kGenericAttribBufferName, 0, values, bytes);
+    dvk_buffer_upload(kGenericAttribBufferName, 0, values, bytes);
 }
 
-VkImage backend_get_or_create_texture(GLuint name, int width, int height, int depth,
+VkImage dvk_get_or_create_texture(GLuint name, int width, int height, int depth,
                                       int levels, GLenum internal_format, GLenum target,
                                       int samples) {
     mithril::vk::Backend* b = mithril::vk::backend();
@@ -1546,7 +1652,7 @@ VkImage backend_get_or_create_texture(GLuint name, int width, int height, int de
         static std::unordered_set<GLenum> warnedFormats;
         if (warnedFormats.find(internal_format) == warnedFormats.end()) {
             warnedFormats.insert(internal_format);
-            MITHRIL_LOG_WARN("vk", "backend_get_or_create_texture: unsupported "
+            MITHRIL_LOG_WARN("vk", "dvk_get_or_create_texture: unsupported "
                               "internalFormat 0x%x (falling back to RGBA8, "
                               "further occurrences of this format suppressed)",
                               internal_format);
@@ -1806,7 +1912,7 @@ VkImage backend_get_or_create_texture(GLuint name, int width, int height, int de
     return e.image;
 }
 
-void backend_texture_upload(GLuint name, int level, int x, int y, int z,
+void dvk_texture_upload(GLuint name, int level, int x, int y, int z,
                             int w, int h, int d, GLenum format, GLenum type,
                             const void* pixels, const MGUnpackParams* unpack,
                             int is_full_upload) {
@@ -1825,7 +1931,7 @@ void backend_texture_upload(GLuint name, int level, int x, int y, int z,
  * packed) and imageExtent = (w,h,d). For block-compressed formats Vulkan
  * interprets the buffer as a sequence of compressed blocks, so a direct
  * memcpy is correct. */
-void backend_texture_upload_compressed(GLuint name, int level, int x, int y, int z,
+void dvk_texture_upload_compressed(GLuint name, int level, int x, int y, int z,
                                        int w, int h, int d,
                                        GLenum internalFormat,
                                        GLsizei dataLen, const void* pixels,
@@ -1935,18 +2041,18 @@ void backend_texture_upload_compressed(GLuint name, int level, int x, int y, int
     }
 }
 
-void backend_texture_set_params(GLuint name, GLint min_filter, GLint mag_filter,
+void dvk_texture_set_params(GLuint name, GLint min_filter, GLint mag_filter,
                                 GLint wrap_s, GLint wrap_t, GLint wrap_r,
                                 const float* border_color) {
     // Vulkan samplers are immutable; params are applied when the sampler is
-    // fetched via backend_get_or_create_sampler (which caches per (name,param)).
+    // fetched via dvk_get_or_create_sampler (which caches per (name,param)).
     // Record nothing here — the sampler table is keyed by name and rebuilt on
-    // demand. (See backend_get_or_create_sampler.)
+    // demand. (See dvk_get_or_create_sampler.)
     (void)name; (void)min_filter; (void)mag_filter;
     (void)wrap_s; (void)wrap_t; (void)wrap_r; (void)border_color;
 }
 
-VkImageView backend_get_texture_view(GLuint name) {
+VkImageView dvk_get_texture_view(GLuint name) {
     auto& tbl = mithril::vk::texture_table();
     auto it = tbl.find(name);
     if (it == tbl.end()) return VK_NULL_HANDLE;
@@ -1958,13 +2064,13 @@ VkImageView backend_get_texture_view(GLuint name) {
     return it->second.view;
 }
 
-VkImage backend_get_texture_image(GLuint name) {
+VkImage dvk_get_texture_image(GLuint name) {
     auto& tbl = mithril::vk::texture_table();
     auto it = tbl.find(name);
     return it == tbl.end() ? VK_NULL_HANDLE : it->second.image;
 }
 
-void backend_delete_texture(GLuint name) {
+void dvk_delete_texture(GLuint name) {
     auto& tbl = mithril::vk::texture_table();
     auto it = tbl.find(name);
     if (it == tbl.end()) return;
@@ -1972,7 +2078,7 @@ void backend_delete_texture(GLuint name) {
     tbl.erase(it);
 }
 
-void backend_invalidate_sampler_cache(GLuint name) {
+void dvk_invalidate_sampler_cache(GLuint name) {
     auto& tbl = mithril::vk::sampler_table();
     auto it = tbl.find(name);
     if (it == tbl.end()) return;
@@ -1980,7 +2086,7 @@ void backend_invalidate_sampler_cache(GLuint name) {
     tbl.erase(it);
 }
 
-void backend_transition_texture_layout(GLuint name, VkImageLayout target_layout) {
+void dvk_transition_texture_layout(GLuint name, VkImageLayout target_layout) {
     mithril::vk::Backend* b = mithril::vk::backend();
     if (!b->initialized) return;
     auto& tbl = mithril::vk::texture_table();
@@ -1989,7 +2095,7 @@ void backend_transition_texture_layout(GLuint name, VkImageLayout target_layout)
     mithril::vk::transition_image_layout(it->second, target_layout);
 }
 
-VkSampler backend_get_or_create_sampler(GLuint name, GLint min_filter, GLint mag_filter,
+VkSampler dvk_get_or_create_sampler(GLuint name, GLint min_filter, GLint mag_filter,
                                         GLint wrap_s, GLint wrap_t, GLint wrap_r,
                                         const float* border_color) {
     mithril::vk::Backend* b = mithril::vk::backend();
@@ -2116,7 +2222,7 @@ VkSampler backend_get_or_create_sampler(GLuint name, GLint min_filter, GLint mag
     return s;
 }
 
-VkFormat backend_vk_format_for_gl(GLenum internal_format) {
+VkFormat dvk_vk_format_for_gl(GLenum internal_format) {
     return mithril::vk::gl_internal_to_vk(internal_format);
 }
 

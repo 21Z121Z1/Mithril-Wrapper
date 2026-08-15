@@ -815,7 +815,7 @@ EGLBoolean eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
     //
     // 注意：在 deviceLost 检查之前调用，确保即使 deviceLost 恢复路径也能
     // 释放已完成帧的资源（poll 只处理 fencePending=true 且 fence=signaled 的 slot）。
-    mithril::vk::backend_poll_completed_frames();
+    backend_poll_completed_frames();
 
     // 持久性 GPU 故障挂起守卫：一旦 backend 进入 deviceLost 状态，立即静默返回，
     // 跳过 ensure_swapchain 重建、present、commit 等所有 GPU 操作，避免每帧尝试
@@ -827,7 +827,7 @@ EGLBoolean eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
     // swapchain 重建（vkDeviceWaitIdle + 重建），如果重建成功则重置 deviceLost，
     // 给设备恢复的机会。这是 MobileGL 的恢复策略：GPU 超时通常是暂时的（资源
     // 压力释放后可恢复），不应永久终止渲染。
-    if (mithril::vk::backend_is_device_lost()) {
+    if (backend_is_device_lost()) {
         // 尝试恢复：每隔 10 帧尝试一次 swapchain 重建（约 0.17 秒 @ 60fps）
         // 原 60 帧间隔太长，Minecraft 可能在等待期间检测到渲染失败而 exit(0)
         static int recoveryAttemptCounter = 0;
@@ -863,7 +863,7 @@ EGLBoolean eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
             // Reference: MobileGL RecreateSwapchain (VulkanRenderer.cpp:8579)
             // calls pipelineFactory->DestroyAll() + uniformManager->ResetAllPools()
             // BEFORE creating the new swapchain.
-            mithril::vk::backend_purge_cached_resources_for_recovery();
+            backend_purge_cached_resources_for_recovery();
             // 强制重建 swapchain，如果成功则重置 deviceLost
             if (s->swapchain_state) {
                 backend_destroy_swapchain(s->swapchain_state);
@@ -872,7 +872,7 @@ EGLBoolean eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
             if (ensure_swapchain(s) && s->swapchain_state) {
                 // 重建成功：重置 deviceLost，恢复渲染
                 // backend_reset_device_lost 会再次 drain + 清除 pipeline 缓存
-                mithril::vk::backend_reset_device_lost();
+                backend_reset_device_lost();
                 if (t_currentDraw == s) {
                     install_surface_on_state(s);
                 }
@@ -1035,13 +1035,13 @@ EGLBoolean eglSwapInterval(EGLDisplay dpy, EGLint interval) {
 EGLBoolean eglWaitClient(void) {
     backend_end_render_pass();
     backend_commit();
-    mithril::vk::safe_device_wait_idle();
+    backend_wait_idle_safe();
     return EGL_TRUE;
 }
 EGLBoolean eglWaitGL(void) {
     backend_end_render_pass();
     backend_commit();
-    mithril::vk::safe_device_wait_idle();
+    backend_wait_idle_safe();
     return EGL_TRUE;
 }
 EGLBoolean eglWaitNative(EGLint) { return EGL_TRUE; }
@@ -1106,9 +1106,9 @@ EGLSync eglCreateSync(EGLDisplay dpy, EGLenum type, const EGLAttrib* attrib_list
     sync.dpy = dpy;
     sync.type = EGL_SYNC_FENCE;
     sync.condition = EGL_SYNC_PRIOR_COMMANDS_COMPLETE;
-    sync.submitSerial = mithril::vk::backend_current_submit_serial();
+    sync.submitSerial = backend_current_submit_serial();
     if (sync.submitSerial == 0 ||
-        sync.submitSerial <= mithril::vk::backend_last_completed_serial()) {
+        sync.submitSerial <= backend_last_completed_serial()) {
         sync.status = EGL_SIGNALED;
         sync.submitSerial = 0;
     }
@@ -1144,7 +1144,7 @@ EGLint eglClientWaitSync(EGLDisplay dpy, EGLSync sync, EGLint flags, EGLTime tim
     }
     EglSync& s = it->second;
     if (s.status == EGL_SIGNALED || s.submitSerial == 0 ||
-        s.submitSerial <= mithril::vk::backend_last_completed_serial()) {
+        s.submitSerial <= backend_last_completed_serial()) {
         s.status = EGL_SIGNALED;
         s.submitSerial = 0;
         return EGL_CONDITION_SATISFIED;
@@ -1153,7 +1153,7 @@ EGLint eglClientWaitSync(EGLDisplay dpy, EGLSync sync, EGLint flags, EGLTime tim
         backend_end_render_pass();
         backend_commit();
     }
-    if (mithril::vk::backend_wait_serial(s.submitSerial, (uint64_t)timeout)) {
+    if (backend_wait_serial(s.submitSerial, (uint64_t)timeout)) {
         s.status = EGL_SIGNALED;
         s.submitSerial = 0;
         return EGL_CONDITION_SATISFIED;
@@ -1172,7 +1172,7 @@ EGLBoolean eglWaitSync(EGLDisplay dpy, EGLSync sync, EGLint flags) {
     }
     EglSync& s = it->second;
     if (s.status == EGL_SIGNALED || s.submitSerial == 0 ||
-        mithril::vk::backend_wait_serial(s.submitSerial, UINT64_MAX)) {
+        backend_wait_serial(s.submitSerial, UINT64_MAX)) {
         s.status = EGL_SIGNALED;
         s.submitSerial = 0;
         return EGL_TRUE;
@@ -1192,7 +1192,7 @@ EGLBoolean eglGetSyncAttrib(EGLDisplay dpy, EGLSync sync, EGLint attribute, EGLA
     EglSync& s = it->second;
     if (s.status != EGL_SIGNALED &&
         (s.submitSerial == 0 ||
-         s.submitSerial <= mithril::vk::backend_last_completed_serial())) {
+         s.submitSerial <= backend_last_completed_serial())) {
         s.status = EGL_SIGNALED;
         s.submitSerial = 0;
     }

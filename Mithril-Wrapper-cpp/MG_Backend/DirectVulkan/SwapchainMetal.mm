@@ -13,7 +13,7 @@
 // Objective-C only). Device.h stores the function pointer as PFN_vkVoidFunction
 // to stay metal-free; this file casts it to PFN_vkCreateMetalSurfaceEXT here.
 //
-// The public C API (backend_* wrappers) is defined here on Apple platforms.
+// The public C API (dvk_* wrappers) is defined here on Apple platforms.
 #define VK_USE_PLATFORM_METAL_EXT 1
 #include "Swapchain.h"
 #include "Device.h"
@@ -100,74 +100,74 @@ Swapchain* create_swapchain(void* native_window, int width, int height,
 // ===========================================================================
 extern "C" {
 
-void* backend_create_swapchain(void* native_window, int width, int height,
+void* dvk_create_swapchain(void* native_window, int width, int height,
                                int want_depth_stencil, int platform_hint) {
     return mithril::vk::create_swapchain(native_window, width, height,
                                          want_depth_stencil, platform_hint);
 }
 
-void backend_destroy_swapchain(void* swapchain_state) {
+void dvk_destroy_swapchain(void* swapchain_state) {
     mithril::vk::destroy_swapchain((mithril::vk::Swapchain*)swapchain_state);
 }
 
-VkImageView backend_swapchain_acquire_color(void* swapchain_state) {
+VkImageView dvk_swapchain_acquire_color(void* swapchain_state) {
     return mithril::vk::swapchain_acquire_color((mithril::vk::Swapchain*)swapchain_state);
 }
 
-VkImageView backend_swapchain_acquire_depth(void* swapchain_state) {
+VkImageView dvk_swapchain_acquire_depth(void* swapchain_state) {
     return mithril::vk::swapchain_acquire_depth((mithril::vk::Swapchain*)swapchain_state);
 }
 
-int backend_swapchain_width(void* swapchain_state) {
+int dvk_swapchain_width(void* swapchain_state) {
     auto* sc = (mithril::vk::Swapchain*)swapchain_state;
     return sc ? sc->width : 0;
 }
 
-int backend_swapchain_height(void* swapchain_state) {
+int dvk_swapchain_height(void* swapchain_state) {
     auto* sc = (mithril::vk::Swapchain*)swapchain_state;
     return sc ? sc->height : 0;
 }
 
-void backend_present_and_acquire(void* swapchain_state) {
+void dvk_present_and_acquire(void* swapchain_state) {
     mithril::vk::swapchain_present_and_acquire((mithril::vk::Swapchain*)swapchain_state);
 }
 
-int backend_swapchain_needs_rebuild(void* swapchain_state) {
+int dvk_swapchain_needs_rebuild(void* swapchain_state) {
     auto* sc = (mithril::vk::Swapchain*)swapchain_state;
     return sc && sc->needsRebuild ? 1 : 0;
 }
 
-void backend_swapchain_set_drawable_size(void* swapchain_state, int w, int h) {
+void dvk_swapchain_set_drawable_size(void* swapchain_state, int w, int h) {
     auto* sc = (mithril::vk::Swapchain*)swapchain_state;
     if (!sc) return;
     sc->actualDrawableWidth = w;
     sc->actualDrawableHeight = h;
 }
 
-void backend_swapchain_mark_rebuild(void* swapchain_state) {
+void dvk_swapchain_mark_rebuild(void* swapchain_state) {
     auto* sc = (mithril::vk::Swapchain*)swapchain_state;
     if (!sc) return;
     sc->needsRebuild = true;
 }
 
-VkImage backend_swapchain_current_color_image(void* swapchain_state) {
+VkImage dvk_swapchain_current_color_image(void* swapchain_state) {
     auto* sc = (mithril::vk::Swapchain*)swapchain_state;
     if (!sc || sc->currentImage < 0 || sc->currentImage >= (int)sc->images.size())
         return VK_NULL_HANDLE;
     return sc->images[sc->currentImage];
 }
 
-VkFormat backend_swapchain_color_format(void* swapchain_state) {
+VkFormat dvk_swapchain_color_format(void* swapchain_state) {
     auto* sc = (mithril::vk::Swapchain*)swapchain_state;
     return sc ? sc->format : VK_FORMAT_UNDEFINED;
 }
 
-VkImage backend_swapchain_current_depth_image(void* swapchain_state) {
+VkImage dvk_swapchain_current_depth_image(void* swapchain_state) {
     auto* sc = (mithril::vk::Swapchain*)swapchain_state;
     return sc ? sc->depthImage : VK_NULL_HANDLE;
 }
 
-VkFormat backend_swapchain_depth_format(void* swapchain_state) {
+VkFormat dvk_swapchain_depth_format(void* swapchain_state) {
     auto* sc = (mithril::vk::Swapchain*)swapchain_state;
     // The depth image is always created as VK_FORMAT_D32_SFLOAT_S8_UINT in
     // create_swapchain_post_surface(); there is no per-swapchain field

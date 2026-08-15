@@ -677,6 +677,135 @@ void glGetQueryObjectui64v(GLuint id, GLenum pname, GLuint64* params) {
     *params = (GLuint64)r;
 }
 
+/* ---- Conditional render（GL 3.0 core / NV_conditional_render）-----------
+ * 门控 draw / glClear / glClearBuffer*：遮挡查询结果非零才执行。与参考
+ * DirectMetal 语义矩阵的 exact 行为一致：
+ *   - WAIT / BY_REGION_WAIT     ：BEGIN 时阻塞取结果并缓存决策；
+ *   - NO_WAIT / BY_REGION_NO_WAIT：结果未就绪时放行（draw 照画）；就绪后
+ *                                  按结果门控；
+ *   - INVERTED 变体             ：结果取反（零样本 → 放行）。
+ * BY_REGION_* 与 WAIT/NO_WAIT 同义处理 —— 我们的 draw 粒度是整条命令，
+ * 无区域重叠细分（对 MC 的用法等价）。 */
+#ifndef GL_QUERY_WAIT
+#define GL_QUERY_WAIT                       0x8E15
+#endif
+#ifndef GL_QUERY_NO_WAIT
+#define GL_QUERY_NO_WAIT                    0x8E16
+#endif
+#ifndef GL_QUERY_BY_REGION_WAIT
+#define GL_QUERY_BY_REGION_WAIT             0x8E17
+#endif
+#ifndef GL_QUERY_BY_REGION_NO_WAIT
+#define GL_QUERY_BY_REGION_NO_WAIT          0x8E18
+#endif
+#ifndef GL_QUERY_WAIT_INVERTED
+#define GL_QUERY_WAIT_INVERTED              0x8E19
+#endif
+#ifndef GL_QUERY_NO_WAIT_INVERTED
+#define GL_QUERY_NO_WAIT_INVERTED           0x8E1A
+#endif
+#ifndef GL_QUERY_BY_REGION_WAIT_INVERTED
+#define GL_QUERY_BY_REGION_WAIT_INVERTED    0x8E1B
+#endif
+#ifndef GL_QUERY_BY_REGION_NO_WAIT_INVERTED
+#define GL_QUERY_BY_REGION_NO_WAIT_INVERTED 0x8E1C
+#endif
+
+/* 评估门控决策。wait=1 时阻塞取遮挡结果；否则结果未就绪 → 放行（NO_WAIT
+ * 语义）并固化决策，避免同一 BEGIN 周期内反复轮询。 */
+static int conditional_evaluate(bool wait, bool inverted) {
+    mithril::Query* q = mithril::state_get_query(g_state->conditionalRenderQuery);
+    if (!q || !q->ended) {
+        // 查询未结束（GL 允许：结果到评估时才需要）。WAIT 模式阻塞等待
+        // glEndQuery 提交完成 —— 先 flush 再取。
+        if (wait) {
+            backend_commit();
+            for (;;) {
+                q = mithril::state_get_query(g_state->conditionalRenderQuery);
+                if (q && q->ended) break;
+                struct timespec ts = {0, 200 * 1000};
+                nanosleep(&ts, nullptr);
+            }
+        } else {
+            return 1;   // 未结束 = 未就绪：放行
+        }
+    }
+    uint64_t r = 0;
+    if (q->usesPool) {
+        bool avail = false;
+        backend_query_get_results(q->id, wait, &r, &avail);
+        if (!wait && !avail) return 1;      // NO_WAIT：未就绪放行
+    } else {
+        r = q->cachedResult;
+    }
+    bool pass = (r != 0);
+    if (inverted) pass = !pass;
+    return pass ? 1 : 0;
+}
+
+bool mg_conditional_render_allows(void) {
+    if (!g_state || !g_state->conditionalRenderActive) return true;
+    if (g_state->conditionalDecision >= 0)
+        return g_state->conditionalDecision == 1;
+    const GLenum m = g_state->conditionalRenderMode;
+    const bool wait = (m == GL_QUERY_WAIT || m == GL_QUERY_BY_REGION_WAIT ||
+                       m == GL_QUERY_WAIT_INVERTED ||
+                       m == GL_QUERY_BY_REGION_WAIT_INVERTED);
+    const bool inverted = (m == GL_QUERY_WAIT_INVERTED ||
+                           m == GL_QUERY_NO_WAIT_INVERTED ||
+                           m == GL_QUERY_BY_REGION_WAIT_INVERTED ||
+                           m == GL_QUERY_BY_REGION_NO_WAIT_INVERTED);
+    g_state->conditionalDecision = conditional_evaluate(wait, inverted);
+    return g_state->conditionalDecision == 1;
+}
+
+void glBeginConditionalRender(GLuint id, GLenum mode) {
+    MITHRIL_ENSURE_INIT();
+    // GL 语义：条件渲染已激活 / id 不是遮挡类查询对象 → INVALID_OPERATION。
+    if (g_state->conditionalRenderActive) {
+        mithril::state_set_error(GL_INVALID_OPERATION);
+        return;
+    }
+    switch (mode) {
+        case GL_QUERY_WAIT: case GL_QUERY_NO_WAIT:
+        case GL_QUERY_BY_REGION_WAIT: case GL_QUERY_BY_REGION_NO_WAIT:
+        case GL_QUERY_WAIT_INVERTED: case GL_QUERY_NO_WAIT_INVERTED:
+        case GL_QUERY_BY_REGION_WAIT_INVERTED:
+        case GL_QUERY_BY_REGION_NO_WAIT_INVERTED:
+            break;
+        default:
+            mithril::state_set_error(GL_INVALID_ENUM);
+            return;
+    }
+    mithril::Query* q = mithril::state_get_query(id);
+    if (!q || (q->target != mithril::QueryTarget::SamplesPassed &&
+               q->target != mithril::QueryTarget::AnySamplesPassed)) {
+        mithril::state_set_error(GL_INVALID_OPERATION);
+        return;
+    }
+    g_state->conditionalRenderActive = true;
+    g_state->conditionalRenderQuery  = id;
+    g_state->conditionalRenderMode   = mode;
+    g_state->conditionalDecision     = -1;
+    // WAIT 族模式立即评估（阻塞取结果）并缓存；NO_WAIT 族推迟到首次门控。
+    const bool wait = (mode == GL_QUERY_WAIT || mode == GL_QUERY_BY_REGION_WAIT ||
+                       mode == GL_QUERY_WAIT_INVERTED ||
+                       mode == GL_QUERY_BY_REGION_WAIT_INVERTED);
+    if (wait) mg_conditional_render_allows();
+}
+
+void glEndConditionalRender(void) {
+    MITHRIL_ENSURE_INIT();
+    if (!g_state->conditionalRenderActive) {
+        mithril::state_set_error(GL_INVALID_OPERATION);
+        return;
+    }
+    g_state->conditionalRenderActive = false;
+    g_state->conditionalRenderQuery  = 0;
+    g_state->conditionalRenderMode   = 0;
+    g_state->conditionalDecision     = -1;
+}
+
 /* glGetQueryBufferObject*（GL 4.4 ARB_query_buffer_object）：
  * vkCmdCopyQueryPoolResults 把结果拷进当前绑定的 GL buffer —— 但 GL 入口的
  * buffer 参数是显式 buffer 名，不走 PIXEL_PACK 绑定。offset 单位字节。

@@ -22,6 +22,10 @@ namespace mithril {
 int collect_draw_fbo_attachments(VkImageView out_color[8], VkImageView* out_depth,
                                  int* out_w, int* out_h);
 
+// FBO 附件的后端纹理名（纹理附件 = 纹理名；renderbuffer 附件 = 影子纹理名，
+// 见 Framebuffer.cpp 的 renderbuffer_allocate_storage）。0 = 无附件。
+GLuint fbo_attachment_texture(const struct FBOAttachment& a);
+
 } // namespace mithril
 
 #endif // MITHRIL_FRAMEBUFFER_H

@@ -22,6 +22,9 @@
 #ifndef GL_ACTIVE_PROGRAM
 #define GL_ACTIVE_PROGRAM 0x8259
 #endif
+#ifndef GL_PROXY_TEXTURE_2D_MULTISAMPLE
+#define GL_PROXY_TEXTURE_2D_MULTISAMPLE 0x9101
+#endif
 #ifndef GL_FRAMEBUFFER_DEFAULT_WIDTH
 #define GL_FRAMEBUFFER_DEFAULT_WIDTH 0x9310
 #endif
@@ -338,16 +341,74 @@ void glGetCompressedTexImage(GLenum target, GLint level, void* img) {
 
 /* 12. glTexBufferRange - Bind a buffer range as a texel buffer for the
  * texture. Store the buffer/offset/size on the texture record so that
- * subsequent sampler accesses see the bound buffer. */
+ * subsequent sampler accesses see the bound buffer.
+ * 采样视图由后端派生：Vulkan = VkBufferView + UNIFORM_TEXEL_BUFFER（dvk
+ * get_or_create_texel_buffer_view），Metal = MTLBuffer 派生 texture_buffer
+ * （dmt get_or_create_buffer_texture）。Sodium/Iris 用它读 per-section 元数据。 */
+static bool tex_buffer_format_valid(GLenum internalformat) {
+    switch (internalformat) {
+        case GL_R8: case GL_R16: case GL_R16F: case GL_R32F:
+        case GL_R8I: case GL_R16I: case GL_R32I:
+        case GL_R8UI: case GL_R16UI: case GL_R32UI:
+            return true;
+        default:
+            return false;
+    }
+}
+
+static void tex_buffer_attach(mithril::Texture* tex, GLenum internalformat,
+                              GLuint buffer, GLintptr offset, GLsizeiptr size,
+                              bool explicitRange) {
+    if (!tex) { mithril::state_set_error(GL_INVALID_OPERATION); return; }
+    if (!tex_buffer_format_valid(internalformat)) {
+        mithril::state_set_error(GL_INVALID_ENUM);
+        return;
+    }
+    if (buffer != 0) {
+        mithril::Buffer* buf = mithril::state_get_buffer(buffer);
+        if (!buf || buf->data.empty()) {
+            mithril::state_set_error(GL_INVALID_OPERATION);
+            return;
+        }
+        if (explicitRange) {
+            // 与 glGetIntegerv(GL_TEXTURE_BUFFER_OFFSET_ALIGNMENT) 报告一致。
+            const GLintptr kAlign = 256;
+            if (size <= 0 || offset < 0 ||
+                (offset % kAlign) != 0 ||
+                offset + size > (GLsizeiptr)buf->data.size()) {
+                mithril::state_set_error(GL_INVALID_VALUE);
+                return;
+            }
+        } else {
+            offset = 0;
+            size = (GLsizeiptr)buf->data.size();
+        }
+    } else {
+        offset = 0;
+        size = 0;
+    }
+    tex->texBuffer       = buffer;
+    tex->texBufferOffset = (GLintptr)offset;
+    tex->texBufferSize   = (GLsizeiptr)size;
+    tex->internalFormat  = (GLint)internalformat;
+    tex->target          = GL_TEXTURE_BUFFER;
+    tex->immutable       = true;   // 存储由 buffer 定义，不可再 glTexImage
+    tex->immutableLevels = 1;
+    tex->width           = (GLsizei)(size > 0 ? size : 0);
+    tex->height          = 1;
+    tex->depth           = 1;
+    tex->contentVersion++;
+}
+
 void glTexBufferRange(GLenum target, GLenum internalformat, GLuint buffer,
                       GLintptr offset, GLsizeiptr size) {
     MITHRIL_ENSURE_INIT();
-    auto* tex = mithril::state_get_texture_by_target(target);
-    if (!tex) return;
-    tex->internalFormat = internalformat;
-    tex->texBuffer = buffer;
-    tex->texBufferOffset = offset;
-    tex->texBufferSize = size;
+    if (target != GL_TEXTURE_BUFFER) {
+        mithril::state_set_error(GL_INVALID_ENUM);
+        return;
+    }
+    tex_buffer_attach(mithril::state_get_texture_by_target(target),
+                      internalformat, buffer, offset, size, true);
 }
 
 /* 13. glTextureView - Create a texture view referencing an existing source
@@ -2509,14 +2570,8 @@ void glFramebufferTexture3D(GLenum target, GLenum attachment, GLenum textarget,
 }
 
 /* ---- Transform feedback / conditional render / indexed queries ---- */
-void glBeginConditionalRender(GLuint id, GLenum mode) {
-    MITHRIL_ENSURE_INIT();
-    (void)id; (void)mode;
-}
-
-void glEndConditionalRender(void) {
-    MITHRIL_ENSURE_INIT();
-}
+/* glBeginConditionalRender / glEndConditionalRender：真实实现移至
+ * Stubs.cpp（复用遮挡查询取结果路径，门控 draw/clear）。 */
 
 void glBeginQueryIndexed(GLenum target, GLuint index, GLuint id) {
     MITHRIL_ENSURE_INIT();
@@ -2557,21 +2612,30 @@ void glTransformFeedbackVaryings(GLuint program, GLsizei count,
     (void)program; (void)count; (void)varyings; (void)bufferMode;
 }
 
-/* ---- Buffer textures / multisample textures (not exercised by MC) ---- */
+/* ---- Buffer textures / multisample textures ----
+ * glTexBufferRange/glTexBuffer 的状态记录与派生视图见上方
+ * tex_buffer_attach；DSA 变体直接按名解析纹理。 */
 void glTexBuffer(GLenum target, GLenum internalformat, GLuint buffer) {
     MITHRIL_ENSURE_INIT();
-    (void)target; (void)internalformat; (void)buffer;
+    if (target != GL_TEXTURE_BUFFER) {
+        mithril::state_set_error(GL_INVALID_ENUM);
+        return;
+    }
+    tex_buffer_attach(mithril::state_get_texture_by_target(target),
+                      internalformat, buffer, 0, 0, false);
 }
 
 void glTextureBuffer(GLuint texture, GLenum internalformat, GLuint buffer) {
     MITHRIL_ENSURE_INIT();
-    (void)texture; (void)internalformat; (void)buffer;
+    tex_buffer_attach(mithril::state_get_texture(texture),
+                      internalformat, buffer, 0, 0, false);
 }
 
 void glTextureBufferRange(GLuint texture, GLenum internalformat, GLuint buffer,
                           GLintptr offset, GLsizeiptr size) {
     MITHRIL_ENSURE_INIT();
-    (void)texture; (void)internalformat; (void)buffer; (void)offset; (void)size;
+    tex_buffer_attach(mithril::state_get_texture(texture),
+                      internalformat, buffer, offset, size, true);
 }
 
 void glTexImage3DMultisample(GLenum target, GLsizei samples, GLenum internalformat,
@@ -2582,12 +2646,28 @@ void glTexImage3DMultisample(GLenum target, GLsizei samples, GLenum internalform
     (void)width; (void)height; (void)depth; (void)fixedsamplelocations;
 }
 
+/* glTexStorage2DMultisample：不可变 multisample 存储。与
+ * glTexImage2DMultisample 等价（multisample 纹理本就不可变、单 level），
+ * 差别仅在规约层面（重复调用是 INVALID_OPERATION 而非重定义）。 */
 void glTexStorage2DMultisample(GLenum target, GLsizei samples, GLenum internalformat,
                                GLsizei width, GLsizei height,
                                GLboolean fixedsamplelocations) {
     MITHRIL_ENSURE_INIT();
-    (void)target; (void)samples; (void)internalformat;
-    (void)width; (void)height; (void)fixedsamplelocations;
+    if (target != GL_TEXTURE_2D_MULTISAMPLE &&
+        target != GL_PROXY_TEXTURE_2D_MULTISAMPLE) {
+        mithril::state_set_error(GL_INVALID_ENUM);
+        return;
+    }
+    if (target == GL_PROXY_TEXTURE_2D_MULTISAMPLE) return;
+    mithril::Texture* t = mithril::state_get_texture_by_target(target);
+    if (!t) { mithril::state_set_error(GL_INVALID_OPERATION); return; }
+    if (t->immutable && t->width > 0) {
+        // 不可变纹理已分配存储（GL 4.6 §8.19：重复 glTexStorage* 非法）。
+        mithril::state_set_error(GL_INVALID_OPERATION);
+        return;
+    }
+    glTexImage2DMultisample(target, samples, internalformat, width, height,
+                            fixedsamplelocations);
 }
 
 void glTexStorage3DMultisample(GLenum target, GLsizei samples, GLenum internalformat,

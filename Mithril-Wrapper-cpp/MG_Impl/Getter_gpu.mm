@@ -48,7 +48,9 @@ extern "C" const char* mithril_get_vulkan_device_name(void) {
 }
 
 extern "C" const char* mithril_get_vulkan_api_string(void) {
-    return "Vulkan 1.2 (MoltenVK)";
+    // Dual-backend: reports the ACTIVE backend's API string so the F3 line
+    // reads "Vulkan 1.2 (MoltenVK)" or "Metal 3 (DirectMetal)".
+    return backend_api_string();
 }
 
 extern "C" uint64_t mithril_get_vram_bytes(void) {
@@ -60,8 +62,8 @@ extern "C" const char* mithril_get_gpu_renderer_string(void) {
     if (!cached.empty()) return cached.c_str();
 
     if (!backend_available()) {
-        cached = "Mithril-Wrapper (Vulkan backend, no device)";
-        return cached.c_str();
+        cached = "Mithril-Wrapper (no device)";
+        return cached;
     }
 
     std::string gpuName = friendly_gpu_name(backend_physical_device_name());
@@ -92,9 +94,12 @@ extern "C" const char* mithril_get_settings_dump(void) {
     if (!dump.empty()) return dump.c_str();
 
     std::ostringstream ss;
+    const bool is_metal =
+        backend_active_kind() == MITHRIL_BACKEND_KIND_METAL;
 
-    ss << "Mithril-Wrapper 1.0 (OpenGL 3.3 -> Vulkan 1.2 / MoltenVK)\n";
-    ss << "  Backend: Vulkan 1.2 (MoltenVK static link)\n";
+    ss << "Mithril-Wrapper 1.0 (OpenGL 4.6 -> " << backend_api_string()
+       << ")\n";
+    ss << "  Backend: " << backend_api_string() << "\n";
 
     if (backend_available()) {
         ss << "  GPU: " << backend_physical_device_name() << "\n";
@@ -102,20 +107,28 @@ extern "C" const char* mithril_get_settings_dump(void) {
         uint64_t vram = backend_vram_bytes();
         if (vram > 0) {
             ss << "  VRAM: " << (vram / (1024ULL * 1024ULL))
-               << " MB (device-local heaps, unified memory)\n";
+               << " MB (unified memory)\n";
         }
     } else {
-        ss << "  GPU: (no Vulkan device)\n";
+        ss << "  GPU: (no device)\n";
     }
 
-    ss << "  Shader pipeline: GLSL -> SPIR-V (glslang) -> [MoltenVK SPIR-V->MSL]\n";
-    ss << "  Depth/stencil: VK_FORMAT_D32_SFLOAT_S8_UINT\n";
-    ss << "  Color format: VK_FORMAT_B8G8R8A8_UNORM (CAMetalLayer)\n";
-    ss << "  Surface: VK_EXT_metal_surface (vkCreateMetalSurfaceEXT)\n";
-    ss << "  Portability: VK_KHR_portability_enumeration + VK_KHR_portability_subset\n";
-    ss << "  EGL: 1.5 (Vulkan-backed)\n";
-    ss << "  GL version: 3.3 Core Profile\n";
-    ss << "  GLSL version: 3.30\n";
+    if (is_metal) {
+        ss << "  Shader pipeline: GLSL -> SPIR-V (glslang) -> MSL (SPIRV-Cross)\n";
+        ss << "  Depth/stencil: MTLPixelFormatDepth32Float_Stencil8\n";
+        ss << "  Color format: MTLPixelFormatBGRA8Unorm (CAMetalLayer)\n";
+        ss << "  Surface: CAMetalLayer (direct drawable)\n";
+        ss << "  Portability: native Metal 3 (no MoltenVK)\n";
+    } else {
+        ss << "  Shader pipeline: GLSL -> SPIR-V (glslang) -> [MoltenVK SPIR-V->MSL]\n";
+        ss << "  Depth/stencil: VK_FORMAT_D32_SFLOAT_S8_UINT\n";
+        ss << "  Color format: VK_FORMAT_B8G8R8A8_UNORM (CAMetalLayer)\n";
+        ss << "  Surface: VK_EXT_metal_surface (vkCreateMetalSurfaceEXT)\n";
+        ss << "  Portability: VK_KHR_portability_enumeration + VK_KHR_portability_subset\n";
+    }
+    ss << "  EGL: 1.5 (backend-backed)\n";
+    ss << "  GL version: 4.6 Core Profile\n";
+    ss << "  GLSL version: 4.60\n";
 
     dump = ss.str();
     return dump.c_str();

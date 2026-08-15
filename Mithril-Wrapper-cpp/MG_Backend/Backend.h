@@ -1,27 +1,47 @@
 // Mithril-Wrapper - MG_Backend/Backend.h
-// Abstract backend interface (C API) for the Vulkan 1.2 / MoltenVK backend.
+// Abstract backend interface (C API) for the DUAL backend build:
 //
-// This is the Vulkan equivalent of the former metal/metal_context.h +
-// metal_objects.h + metal_pipeline.h trio. The implementation lives in
-// MG_Backend/DirectVulkan/ and talks to Vulkan directly; MoltenVK then
-// cross-translates the SPIR-V shaders and Vulkan commands to Metal 2
-// internally, so no Metal code remains in this project.
+//   DirectVulkan/  — Vulkan 1.2, via MoltenVK on Apple platforms.
+//   DirectMetal/   — Metal 3 direct (no MoltenVK): SPIR-V -> MSL via
+//                    SPIRV-Cross, CAMetalLayer drawables, MTLRenderPipelineState.
 //
-// Handles passed across this boundary (VkBuffer / VkImage / VkImageView /
-// VkSampler / VkPipeline) are real Vulkan handles. The GL frontend never
-// creates or destroys them directly — it goes through backend_get_or_create_*.
+// Backend selection (MG_Backend/Dispatch.cpp): the MITHRIL_BACKEND env var
+// ("metal" | "vulkan"; platform default when unset — Metal on Apple, Vulkan
+// elsewhere). Dispatch.cpp implements every backend_* entry point below and
+// forwards to the active backend's dvk_* / dmt_* implementation. The backend
+// TUs are compiled with the preprocessor rule `backend_=dvk_` (resp. dmt_),
+// so a backend source file simply defines `backend_init` etc. and its symbol
+// is renamed at compile time — no source-level renaming needed.
+//
+// HANDLES ARE BACKEND-OPAQUE COOKIES. The GL frontend (MG_Impl) never
+// dereferences the VkBuffer / VkImage / VkImageView / VkSampler / VkPipeline
+// values crossing this boundary — it only obtains them from one backend_*
+// call and hands them back to another. DirectVulkan passes real Vulkan
+// handles; DirectMetal passes equivalent Metal object wrappers with the same
+// pointer width. The VkFormat ENUM VALUES are kept as a backend-neutral
+// format tag space: every backend must understand the VkFormat numbering used
+// by the frontend (0 == VK_FORMAT_UNDEFINED means "absent" in several
+// frontend checks, so that value is load-bearing). VkImageLayout / usage-flag
+// parameters are Vulkan semantics only; the Metal backend treats them as
+// hints (no-ops) where layouts do not apply.
+//
+// TYPE DEFINITIONS live in BackendTypes.h (they must survive multiple
+// re-inclusion of this header by the dispatcher's prefix-rewrite trick).
 #ifndef MITHRIL_BACKEND_H
 #define MITHRIL_BACKEND_H
 
-#include <cstdint>
-#include <cstddef>
-
-#include <vulkan/vulkan.h>
-#include <GL/gl.h>
+#include "BackendTypes.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/* ---- Backend identity / selection ------------------------------------ */
+/* Which backend the dispatcher selected. Valid after backend_init(). */
+MGBackendKind backend_active_kind(void);
+/* Human-facing API string for F3/debug output, e.g. "Vulkan 1.2 (MoltenVK)"
+ * or "Metal 3 (DirectMetal)". Same lifetime rules as a literal. */
+const char* backend_api_string(void);
 
 /* EXT_texture_filter_anisotropic exposes a floating-point limit. Keep this
  * separate from backend_device_limit so glGetFloatv does not lose precision
@@ -326,22 +346,7 @@ void     backend_update_generic_attribs(const float* values, int count);
 VkBuffer backend_get_generic_attrib_buffer(void);
 
 /* ---- Textures ---- */
-
-/*
- * Unpack (pixel-store) parameters handed to backend_texture_upload. Mirrors the
- * glPixelStorei UNPACK_* state kept in g_state->pixelStore. The struct form lets
- * the MG_Impl layer build the params once and pass a stable pointer instead of
- * a single alignment integer, so the backend can honour
- * UNPACK_ROW_LENGTH / UNPACK_SKIP_* for sub-image uploads.
- */
-struct MGUnpackParams {
-    GLint unpackAlignment;
-    GLint unpackRowLength;
-    GLint unpackSkipPixels;
-    GLint unpackSkipRows;
-    GLint unpackImageHeight;
-    GLint unpackSkipImages;
-};
+/* struct MGUnpackParams is defined in BackendTypes.h. */
 
 VkImage     backend_get_or_create_texture(GLuint name, int width, int height, int depth,
                                           int levels, GLenum internal_format, GLenum target,
@@ -467,6 +472,27 @@ void        backend_blit_images(VkImage src_image, VkFormat src_format,
                                 GLbitfield mask, GLenum filter,
                                 int is_dst_default_fbo, int dst_height);
 
+/*
+ * MSAA resolve（glBlitFramebuffer 从多采样读缓冲 → 单采样绘制缓冲）。
+ * 把 src_image（多采样）的矩形区域平均/取值到 dst_image（单采样）。布局
+ * 转换与 blit_images 相同（src → TRANSFER_SRC_OPTIMAL、dst →
+ * TRANSFER_DST_OPTIMAL，完成后转回采样友好布局）。
+ *
+ *   src_image / dst_image : VkImage 句柄（src 多采样、dst 单采样）
+ *   src_format / dst_format : 各自的 VkFormat（aspect 选择 + Vulkan 校验）
+ *   x, y, width, height : 目标矩形（GL 坐标；resolve 是 1:1，源矩形同尺寸）
+ *   mask : GL_COLOR_BUFFER_BIT / GL_DEPTH_BUFFER_BIT / GL_STENCIL_BUFFER_BIT
+ *          （depth/stencil resolve：Vulkan 核心不支持 → 后端内告警跳过；
+ *            Metal 原生支持。stencil resolve 两后端均不支持。）
+ *   is_dst_default_fbo / dst_height : 与 backend_blit_images 相同的 Y 翻转
+ *          参数（dst 为默认帧缓冲时 GL bottom-left → 后端 top-left）。
+ */
+void        backend_resolve_images(VkImage src_image, VkFormat src_format,
+                                   VkImage dst_image, VkFormat dst_format,
+                                   int x, int y, int width, int height,
+                                   GLbitfield mask,
+                                   int is_dst_default_fbo, int dst_height);
+
 /* ---- Samplers ---- */
 VkSampler backend_get_or_create_sampler(GLuint name, GLint min_filter, GLint mag_filter,
                                         GLint wrap_s, GLint wrap_t, GLint wrap_r,
@@ -480,21 +506,9 @@ VkSampler backend_get_or_create_sampler(GLuint name, GLint min_filter, GLint mag
 VkFormat backend_vk_format_for_gl(GLenum internal_format);
 
 /* ---- Pipeline cache ----
- * Description of one bound vertex attribute used to build the
- * VkPipelineVertexInputStateCreateInfo.
+ * struct MGVertexAttrib is defined in BackendTypes.h; one bound vertex
+ * attribute used to build the pipeline vertex-input state.
  */
-struct MGVertexAttrib {
-    int     location;     /* GL attribute index */
-    int     size;         /* 1..4 */
-    GLenum  type;         /* GL_FLOAT, GL_UNSIGNED_BYTE, etc. */
-    int     normalized;   /* 0/1 */
-    int     integer;      /* 0/1 (integer attribs) */
-    int     stride;
-    int     offset;       /* byte offset within the bound vertex buffer */
-    int     enabled;      /* 0/1 */
-    GLuint  buffer_name;  /* GL VBO name backing this attrib */
-    int     divisor;      /* instance-step divisor (0 = per-vertex) */
-};
 
 /*
  * Build a VkShaderModule from SPIR-V words (cached on the program) and a
@@ -588,18 +602,12 @@ bool     backend_wait_serial(uint64_t serial, uint64_t timeout_ns);
 
 /*
  * GL query-object backing (glBeginQuery/glEndQuery/glQueryCounter/
- * glGetQueryObject / glGetQueryBufferObject families). Implemented in
- * MG_Backend/DirectVulkan/Queries.cpp — REAL VkQueryPool implementations,
- * not stubs. MoltenVK/Metal supports occlusion + timestamp queries
- * (timestampValidBits > 0 on A13+/M1+; older GPUs report 0 and the
- * GL layer falls back to a monotonic CPU clock for GL_TIMESTAMP).
+ * glGetQueryObject / glGetQueryBufferObject families). Implemented per
+ * backend (DirectVulkan/Queries.cpp — VkQueryPool; DirectMetal — Metal
+ * visibility-result buffers + GPU counters). kind is one of the
+ * MITHRIL_QUERY_* constants in BackendTypes.h.
  */
-enum {
-    MITHRIL_QUERY_OCCLUSION    = 0, /* VK_QUERY_TYPE_OCCLUSION, 1 slot */
-    MITHRIL_QUERY_TIMESTAMP    = 1, /* VK_QUERY_TYPE_TIMESTAMP, 1 slot (glQueryCounter) */
-    MITHRIL_QUERY_TIME_ELAPSED = 2  /* timestamp pool, 2 slots (begin/end), result = t1 - t0 */
-};
-/* 为 GL 查询对象创建底层 VkQueryPool。kind 见上。幂等：已存在且类型一致返回 true；
+/* 为 GL 查询对象创建底层 VkQueryPool。幂等：已存在且类型一致返回 true；
  * 类型不一致（GL 禁止查询对象换 target，GL 层已拦）销毁重建。失败返回 false。 */
 bool     backend_query_pool_create(uint64_t query_id, int kind);
 /* glDeleteQueries：销毁 pool（在飞时推入 slot disposalQueue 延迟销毁）。 */
@@ -699,42 +707,49 @@ VkFormat    backend_swapchain_depth_format(void* swapchain_state);
 
 /*
  * FIX (P1 - GL 上限硬编码):
- * 查询真实的 VkPhysicalDeviceLimits，供 glGetIntegerv 汇报 GL_MAX_* 使用。
+ * 查询真实的设备上限，供 glGetIntegerv 汇报 GL_MAX_* 使用。
  *
  * 之前 Getter.cpp 把 GL_MAX_TEXTURE_SIZE 写死成 16384，而 A9/A10 这类老
- * iOS GPU 的上限只有 8192（由 Metal 2 的 GPUFamily 决定）。上报一个设备做
- * 不到的值，Sodium/Iris 会照着分配超大纹理或阴影贴图 → vkCreateImage 失败
- * → 纹理丢失甚至崩溃。宁可少报，绝不能多报。
+ * iOS GPU 的上限只有 8192（由 GPUFamily 决定）。上报一个设备做不到的值，
+ * Sodium/Iris 会照着分配超大纹理或阴影贴图 → 创建失败 → 纹理丢失甚至
+ * 崩溃。宁可少报，绝不能多报。
  *
- * 同理 GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS 之前写死 80，却和内部的
- * kMaxTextureUnits=32 自相矛盾 —— 上层按 80 个单位绑定，后端数组只有 32
- * 个槽位，越界部分被静默丢弃。
- *
- * `which` 取下面的 MITHRIL_LIMIT_* 常量。后端未初始化或该项无对应 Vulkan
- * 上限时返回 fallback，调用方因此不需要额外判空。
+ * `which` 取 BackendTypes.h 的 MITHRIL_LIMIT_* 常量。后端未初始化或该项
+ * 无对应上限时返回 fallback，调用方因此不需要额外判空。
  */
-#define MITHRIL_LIMIT_MAX_TEXTURE_SIZE            1
-#define MITHRIL_LIMIT_MAX_3D_TEXTURE_SIZE         2
-#define MITHRIL_LIMIT_MAX_CUBE_MAP_TEXTURE_SIZE   3
-#define MITHRIL_LIMIT_MAX_ARRAY_TEXTURE_LAYERS    4
-#define MITHRIL_LIMIT_MAX_RENDERBUFFER_SIZE       5
-#define MITHRIL_LIMIT_MAX_VIEWPORT_WIDTH          6
-#define MITHRIL_LIMIT_MAX_VIEWPORT_HEIGHT         7
-#define MITHRIL_LIMIT_MAX_TEXTURE_IMAGE_UNITS     8   /* per-stage sampled images */
-#define MITHRIL_LIMIT_MAX_COMBINED_TEX_UNITS      9
-#define MITHRIL_LIMIT_MAX_UNIFORM_BLOCK_SIZE      10
-#define MITHRIL_LIMIT_UNIFORM_BUFFER_ALIGNMENT    11
-#define MITHRIL_LIMIT_MAX_UNIFORM_BUFFER_BINDINGS 12
-#define MITHRIL_LIMIT_MAX_COLOR_ATTACHMENTS       13
-#define MITHRIL_LIMIT_MAX_SAMPLES                 14
-#define MITHRIL_LIMIT_MAX_VERTEX_ATTRIBS          15
-#define MITHRIL_LIMIT_MAX_SSBO_BINDINGS           16
-#define MITHRIL_LIMIT_MAX_SSBO_SIZE               17
-#define MITHRIL_LIMIT_MAX_COMPUTE_WG_INVOCATIONS  18
-#define MITHRIL_LIMIT_MAX_COMPUTE_WG_COUNT_X      19
-#define MITHRIL_LIMIT_MAX_COMPUTE_WG_SIZE_X       20
-
 int backend_device_limit(int which, int fallback);
+
+/*
+ * ---- Device-lost / frame-polling recovery family ---------------------
+ * Backs eglSwapBuffers' OOM-recovery loop. Vulkan: real VK_ERROR_DEVICE_LOST
+ * detection. Metal: no hard device-lost exists, but command-buffer errors and
+ * allocator OOM set the same flag so the frontend recovery path is uniform.
+ */
+/* Poll per-frame completion slots; returns number of frames retired this call
+ * (used to advance the EGL frame pacing). */
+int  backend_poll_completed_frames(void);
+/* True when the device hit a fatal error (OOM / device lost) since the last
+ * reset; EGL then drains, purges caches and rebuilds the swapchain. */
+int  backend_is_device_lost(void);
+/* Clear the device-lost flag after recovery completed. */
+void backend_reset_device_lost(void);
+/* Drop all lazily-cached GPU objects (pipelines / samplers / framebuffers)
+ * to free VRAM before the recovery attempt. */
+void backend_purge_cached_resources_for_recovery(void);
+
+/*
+ * glFinish backing: block until every submitted command buffer has completed,
+ * safely ending the active render pass first (see DirectVulkan Device.cpp
+ * safe_device_wait_idle — mid-frame flush invalidates cached encoder state).
+ */
+void backend_wait_idle_safe(void);
+
+/*
+ * Bytes-per-texel for a GL (format, type) client pixel pair — pure logic,
+ * implemented once in the dispatcher (no backend involvement). Mirrors
+ * FormatMap.cpp host_texel_bytes for the MG_Impl texture paths.
+ */
+int backend_host_texel_bytes(GLenum format, GLenum type);
 
 #ifdef __cplusplus
 }

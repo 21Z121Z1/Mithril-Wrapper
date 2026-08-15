@@ -26,7 +26,7 @@
 #include "FormatMap.h"  // sampled_layout_for_format (root cause AH)
 #include "UniformArena.h"  // transient per-frame UBO storage (see below)
 #include "LogRing.h"      // sampler 兜底打点（GPU fault 诊断）
-#include "../Backend.h"
+#include "BackendVulkanDecls.h"
 #include "../../MG_State/State.h"
 #include "../../MG_Impl/Log.h"
 
@@ -81,18 +81,27 @@ static VkDescriptorPool create_program_pool(const ProgramResources& pr, uint32_t
     if (!b->device) return VK_NULL_HANDLE;
 
     uint32_t uboPerSet = 0, imgPerSet = 0, ssboPerSet = 0, stImgPerSet = 0;
+    uint32_t texelPerSet = 0;
     for (const auto& db : pr.bindings) {
         const uint32_t n = db.descriptorCount ? db.descriptorCount : 1u;
         if (db.type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER)              uboPerSet += n;
         else if (db.type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) imgPerSet += n;
         else if (db.type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER)         ssboPerSet += n;
         else if (db.type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)          stImgPerSet += n;
+        else if (db.type == VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER)   texelPerSet += n;
     }
     std::vector<VkDescriptorPoolSize> poolSizes;
     if (uboPerSet) {
         VkDescriptorPoolSize ps{};
         ps.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
         ps.descriptorCount = maxSets * uboPerSet;
+        poolSizes.push_back(ps);
+    }
+    // samplerBuffer（GL_TEXTURE_BUFFER / glTexBuffer）的 VkBufferView 描述符。
+    if (texelPerSet) {
+        VkDescriptorPoolSize ps{};
+        ps.type = VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER;
+        ps.descriptorCount = maxSets * texelPerSet;
         poolSizes.push_back(ps);
     }
     if (imgPerSet) {
@@ -507,6 +516,62 @@ bool ensure_default_texture_ready() {
     return dt.view != VK_NULL_HANDLE && dt.sampler != VK_NULL_HANDLE;
 }
 
+/* samplerBuffer（UNIFORM_TEXEL_BUFFER）binding 的兜底视图：一个 16 字节
+ * 全零的 R32UI buffer + 它的 VkBufferView。与 default_texture 同理 ——
+ * binding 没有真实 tex buffer 可绑时绝不能留空描述符（MoltenVK 会采样
+ * 随机地址 → GPU page fault）。惰性创建，进程生命周期不销毁。 */
+VkBufferView zero_texel_buffer_view() {
+    static VkBuffer      buf  = VK_NULL_HANDLE;
+    static VkDeviceMemory mem  = VK_NULL_HANDLE;
+    static VkBufferView  view = VK_NULL_HANDLE;
+    if (view != VK_NULL_HANDLE) return view;
+    Backend* b = backend();
+    if (!b->device) return VK_NULL_HANDLE;
+
+    VkBufferCreateInfo bci{};
+    bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bci.size = 16;
+    bci.usage = VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT;
+    if (vkCreateBuffer(b->device, &bci, nullptr, &buf) != VK_SUCCESS) {
+        buf = VK_NULL_HANDLE;
+        return VK_NULL_HANDLE;
+    }
+    VkMemoryRequirements mr;
+    vkGetBufferMemoryRequirements(b->device, buf, &mr);
+    VkMemoryAllocateInfo mai{};
+    mai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    mai.allocationSize = mr.size;
+    mai.memoryTypeIndex = find_memory_type(mr.memoryTypeBits,
+                                           VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                           VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    if (mai.memoryTypeIndex == 0xFFFFFFFFu ||
+        vkAllocateMemory(b->device, &mai, nullptr, &mem) != VK_SUCCESS) {
+        vkDestroyBuffer(b->device, buf, nullptr); buf = VK_NULL_HANDLE;
+        if (mem) { vkFreeMemory(b->device, mem, nullptr); mem = VK_NULL_HANDLE; }
+        return VK_NULL_HANDLE;
+    }
+    vkBindBufferMemory(b->device, buf, mem, 0);
+    void* mapped = nullptr;
+    static const uint32_t zeros[4] = {0, 0, 0, 0};
+    if (vkMapMemory(b->device, mem, 0, 16, 0, &mapped) == VK_SUCCESS && mapped) {
+        std::memcpy(mapped, zeros, 16);
+        vkUnmapMemory(b->device, mem);
+    }
+
+    VkBufferViewCreateInfo bvi{};
+    bvi.sType = VK_STRUCTURE_TYPE_BUFFER_VIEW_CREATE_INFO;
+    bvi.buffer = buf;
+    bvi.format = VK_FORMAT_R32_UINT;
+    bvi.offset = 0;
+    bvi.range = 16;
+    if (vkCreateBufferView(b->device, &bvi, nullptr, &view) != VK_SUCCESS) {
+        vkDestroyBuffer(b->device, buf, nullptr);  buf = VK_NULL_HANDLE;
+        vkFreeMemory(b->device, mem, nullptr);     mem = VK_NULL_HANDLE;
+        return VK_NULL_HANDLE;
+    }
+    return view;
+}
+
 // ---------------------------------------------------------------------------
 // Per-draw fast path: hashing, link-time packing plans, bind deduplication
 // ---------------------------------------------------------------------------
@@ -553,7 +618,7 @@ inline uint64_t handle_bits(H h) {
  * Holding `const Uniform*` is safe: unordered_map keeps pointers to elements
  * valid across inserts and rehashes, and Program::uniforms is only ever
  * cleared wholesale by glLinkProgram — which also calls
- * backend_delete_program_resources(), erasing the ProgramResources (and this
+ * dvk_delete_program_resources(), erasing the ProgramResources (and this
  * plan) outright. The linkVersion check below is the belt to that braces.
  */
 void build_ubo_plans(ProgramResources& pr, const mithril::Program* prog) {
@@ -638,7 +703,7 @@ void on_command_buffer_boundary() {
     // A command-buffer boundary means the buffer was flushed/re-begun or its
     // cached descriptor sets were dropped; no valid set is bound until
     // bind_program_descriptors() issues a fresh vkCmdBindDescriptorSets. Clear
-    // the flag so backend_draw_* refuses a draw with unbound descriptors.
+    // the flag so dvk_draw_* refuses a draw with unbound descriptors.
     mithril::vk::set_descriptors_bound(false);
 }
 
@@ -665,7 +730,7 @@ void bind_program_descriptors(GLuint program, VkPipelineBindPoint bindPoint) {
     // state for such a program. If we let the layout/pool guard below run
     // first, it would wrongly treat this program as unready and bail without
     // calling set_descriptors_bound(true), leaving descriptorsBound=false so
-    // backend_draw_* drops every draw for this program -> nothing rasterizes
+    // dvk_draw_* drops every draw for this program -> nothing rasterizes
     // (silent black framebuffer, no GL error). Handle it here instead.
     if (pr.bindings.empty()) {
         // No descriptor bindings reflected for this program -> its pipeline uses
@@ -679,7 +744,7 @@ void bind_program_descriptors(GLuint program, VkPipelineBindPoint bindPoint) {
     if (!pr.layoutsBuilt || pr.pipelineLayout == VK_NULL_HANDLE ||
         pr.descriptorPools[slot] == VK_NULL_HANDLE) {
         // Program not ready (layouts not built / no layout / no pool). Bail: the
-        // descriptors_bound() guard in backend_draw_* will drop the draw, which is
+        // descriptors_bound() guard in dvk_draw_* will drop the draw, which is
         // safer than recording it with an unbound descriptor set (red + possible
         // GPU page fault).
         return;
@@ -757,10 +822,12 @@ void bind_program_descriptors(GLuint program, VkPipelineBindPoint bindPoint) {
     static std::vector<VkWriteDescriptorSet>   writes;
     static std::vector<VkDescriptorBufferInfo> bufInfos;
     static std::vector<VkDescriptorImageInfo>  imgInfos;
+    static std::vector<VkBufferView>           viewInfos;   // texel-buffer writes
     static std::vector<uint32_t>               dynOffsets;
     writes.clear();
     bufInfos.clear();
     imgInfos.clear();
+    viewInfos.clear();
     dynOffsets.clear();
     bufInfos.reserve(pr.bindings.size());
     imgInfos.reserve(pr.bindings.size());
@@ -816,7 +883,7 @@ void bind_program_descriptors(GLuint program, VkPipelineBindPoint bindPoint) {
                     const auto& sl = mithril::g_state->indexedBufferBindings
                                          [(int)mithril::IndexedBufferTarget::Uniform][point];
                     if (sl.name) {
-                        ubuf = backend_get_buffer(sl.name);
+                        ubuf = dvk_get_buffer(sl.name);
                         if (ubuf != VK_NULL_HANDLE && sl.hasExplicitRange) {
                             uoff   = (VkDeviceSize)sl.offset;
                             urange = (VkDeviceSize)sl.size;
@@ -867,7 +934,7 @@ void bind_program_descriptors(GLuint program, VkPipelineBindPoint bindPoint) {
                                                      : (db.bufferSize ? db.bufferSize : 16u);
                     std::vector<uint8_t> zeros(zsz, 0);
                     GLuint zname = program * 1000000u + db.binding + 1u;
-                    ubuf = backend_get_or_create_buffer(zname, zeros.data(), zeros.size());
+                    ubuf = dvk_get_or_create_buffer(zname, zeros.data(), zeros.size());
                     uoff = 0;
                     urange = VK_WHOLE_SIZE;
                     static int warned = 0;
@@ -1002,6 +1069,42 @@ void bind_program_descriptors(GLuint program, VkPipelineBindPoint bindPoint) {
             sig = fnv1a_u64(handle_bits(bi.buffer), sig);
             sig = fnv1a_u64((uint64_t)bi.offset, sig);
             sig = fnv1a_u64((uint64_t)bi.range, sig);
+        } else if (db.type == VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER) {
+            /* samplerBuffer（GL_TEXTURE_BUFFER，glTexBuffer/glTexBufferRange）。
+             * unit 解析与 image sampler 相同（glUniform1i 记录的映射），纹理
+             * 从 Buffer target slot 取；句柄是 VkBufferView 而非 image。 */
+            GLint unit = -1;
+            auto uit_tb = prog->samplerUnitForBinding.find(db.binding);
+            if (uit_tb != prog->samplerUnitForBinding.end()) {
+                unit = uit_tb->second;
+            } else {
+                unit = static_cast<GLint>(db.binding);  // legacy fallback
+            }
+            GLuint tex_id = 0;
+            if (unit >= 0 && unit < mithril::kMaxTextureUnits) {
+                tex_id = mithril::g_state->boundTextureForUnit(
+                    (GLuint)unit, mithril::TextureTarget::Buffer);
+                if (tex_id == 0)
+                    tex_id = mithril::g_state->boundTextureForUnit((GLuint)unit);
+            }
+            VkBufferView view = tex_id ? get_or_create_texel_buffer_view(tex_id)
+                                       : VK_NULL_HANDLE;
+            if (view == VK_NULL_HANDLE) continue;   // 无绑定：跳过该 binding 写
+
+            viewInfos.push_back(view);
+            VkWriteDescriptorSet w{};
+            w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            w.dstSet = VK_NULL_HANDLE;
+            w.dstBinding = db.binding;
+            w.dstArrayElement = 0;
+            w.descriptorCount = 1;
+            w.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER;
+            w.pTexelBufferView = &viewInfos.back();
+            writes.push_back(w);
+
+            sig = fnv1a_u64(((uint64_t)db.binding << 32) |
+                            (uint64_t)VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, sig);
+            sig = fnv1a_u64(handle_bits(view), sig);
         } else if (db.type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
             /* Resolve descriptor binding -> GL texture unit.
              *
@@ -1062,7 +1165,7 @@ void bind_program_descriptors(GLuint program, VkPipelineBindPoint bindPoint) {
             VkImageView view = VK_NULL_HANDLE;
             VkSampler samp = VK_NULL_HANDLE;
             if (tex_id) {
-                view = backend_get_texture_view(tex_id);
+                view = dvk_get_texture_view(tex_id);
                 // FIX (Root Cause M - 采样器参数硬编码): 旧代码硬编码 GL_LINEAR/GL_REPEAT，
                 // 完全忽略纹理通过 glTexParameteri 设置的真实 sampler 参数。
                 // Minecraft 像素风纹理（GL_NEAREST）被双线性插值，图集纹理
@@ -1077,7 +1180,7 @@ void bind_program_descriptors(GLuint program, VkPipelineBindPoint bindPoint) {
                 GLenum wrapS = tex ? (GLenum)tex->wrapS : GL_REPEAT;
                 GLenum wrapT = tex ? (GLenum)tex->wrapT : GL_REPEAT;
                 GLenum wrapR = tex ? (GLenum)tex->wrapR : GL_REPEAT;
-                samp = backend_get_or_create_sampler(
+                samp = dvk_get_or_create_sampler(
                     tex_id, minF, magF, wrapS, wrapT, wrapR, nullptr);
             }
             // FIX (root cause L): if no texture is bound (or the bound texture
@@ -1231,7 +1334,7 @@ void bind_program_descriptors(GLuint program, VkPipelineBindPoint bindPoint) {
                 const auto& sl = mithril::g_state->indexedBufferBindings
                                      [(int)mithril::IndexedBufferTarget::ShaderStorage][point];
                 if (sl.name) {
-                    ssbo = backend_get_buffer(sl.name);
+                    ssbo = dvk_get_buffer(sl.name);
                     if (ssbo != VK_NULL_HANDLE && sl.hasExplicitRange) {
                         ssboOff   = (VkDeviceSize)sl.offset;
                         ssboRange = (VkDeviceSize)sl.size;
@@ -1273,7 +1376,7 @@ void bind_program_descriptors(GLuint program, VkPipelineBindPoint bindPoint) {
                 uint32_t zsz = db.bufferSize ? db.bufferSize : 16u;
                 std::vector<uint8_t> zeros(zsz, 0);
                 GLuint zname = program * 1000000u + db.binding + 1u;
-                ssbo = backend_get_or_create_buffer(zname, zeros.data(), zeros.size());
+                ssbo = dvk_get_or_create_buffer(zname, zeros.data(), zeros.size());
                 ssboOff = 0;
                 ssboRange = VK_WHOLE_SIZE;
                 static int warnedSsbo = 0;
@@ -1329,14 +1432,14 @@ void bind_program_descriptors(GLuint program, VkPipelineBindPoint bindPoint) {
             VkImageView view = VK_NULL_HANDLE;
             VkSampler samp = VK_NULL_HANDLE;
             if (tex_id) {
-                view = backend_get_texture_view(tex_id);
+                view = dvk_get_texture_view(tex_id);
                 mithril::Texture* tex = mithril::state_get_texture(tex_id);
                 GLenum minF = tex ? (GLenum)tex->minFilter : GL_NEAREST;
                 GLenum magF = tex ? (GLenum)tex->magFilter : GL_NEAREST;
                 GLenum wrapS = tex ? (GLenum)tex->wrapS : GL_CLAMP_TO_EDGE;
                 GLenum wrapT = tex ? (GLenum)tex->wrapT : GL_CLAMP_TO_EDGE;
                 GLenum wrapR = tex ? (GLenum)tex->wrapR : GL_CLAMP_TO_EDGE;
-                samp = backend_get_or_create_sampler(
+                samp = dvk_get_or_create_sampler(
                     tex_id, minF, magF, wrapS, wrapT, wrapR, nullptr);
             }
             // A storage image ignores the sampler, but the descriptor write
@@ -1491,6 +1594,39 @@ void bind_program_descriptors(GLuint program, VkPipelineBindPoint bindPoint) {
             bool incomplete = false;
             DefaultTexture& dt = default_texture();
             for (const auto& db : pr.bindings) {
+                if (db.type == VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER) {
+                    // samplerBuffer 补齐：无真实 view 的 binding 用全零
+                    // R32UI 兜底视图（绝不能留未写入的 texel 描述符）。
+                    bool found_tb = false;
+                    for (const auto& w : writes) {
+                        if (w.dstBinding == db.binding) { found_tb = true; break; }
+                    }
+                    if (found_tb) continue;
+                    VkBufferView zv = zero_texel_buffer_view();
+                    if (zv != VK_NULL_HANDLE) {
+                        viewInfos.push_back(zv);
+                        VkWriteDescriptorSet w{};
+                        w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                        w.dstSet = set;
+                        w.dstBinding = db.binding;
+                        w.dstArrayElement = 0;
+                        w.descriptorCount = 1;
+                        w.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER;
+                        w.pTexelBufferView = &viewInfos.back();
+                        writes.push_back(w);
+                        sig = fnv1a_u64(((uint64_t)db.binding << 32) |
+                                        (uint64_t)VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, sig);
+                        sig = fnv1a_u64(handle_bits(zv), sig);
+                    } else {
+                        incomplete = true;
+                        MITHRIL_LOG_WARN("vk", "descriptor set incomplete: binding %u "
+                                          "(texel buffer) has no view AND zero-texel "
+                                          "fallback unavailable (program %u) — aborting bind",
+                                          db.binding, program);
+                        break;
+                    }
+                    continue;
+                }
                 if (db.type != VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) continue;
                 bool found = false;
                 for (const auto& w : writes) {
@@ -1563,7 +1699,7 @@ void bind_program_descriptors(GLuint program, VkPipelineBindPoint bindPoint) {
      * failure, incomplete-set guard — are above). Whether we then bind it here
      * or a prior identical draw already bound it (sameAsBound below), the
      * current command buffer now has a valid descriptor set bound. Publish that
-     * so backend_draw_* (via descriptors_bound()) refuses to record a vkCmdDraw
+     * so dvk_draw_* (via descriptors_bound()) refuses to record a vkCmdDraw
      * with an unbound descriptor set (the pure-red + GPU page-fault hazard).
      */
     mithril::vk::set_descriptors_bound(true);
@@ -1708,7 +1844,7 @@ void process_pending_purge() {
 // ===========================================================================
 extern "C" {
 
-void backend_ensure_program_layouts(GLuint program,
+void dvk_ensure_program_layouts(GLuint program,
                                     const uint32_t* vs, int vs_words,
                                     const uint32_t* fs, int fs_words) {
     // The C ABI in MG_Backend/Backend.h is graphics-only (shared across groups,
@@ -1718,7 +1854,7 @@ void backend_ensure_program_layouts(GLuint program,
                                         nullptr, 0);
 }
 
-void backend_bind_program_descriptors(GLuint program) {
+void dvk_bind_program_descriptors(GLuint program) {
     mithril::vk::bind_program_descriptors(program, VK_PIPELINE_BIND_POINT_GRAPHICS);
 }
 

@@ -36,6 +36,9 @@
 #ifndef GL_SRGB
 #define GL_SRGB                             0x8C40
 #endif
+#ifndef GL_FRAMEBUFFER_INCOMPLETE_MULTISAMPLE
+#define GL_FRAMEBUFFER_INCOMPLETE_MULTISAMPLE 0x8D56
+#endif
 #ifndef GL_RG32I
 #define GL_RG32I                            0x823B
 #endif
@@ -384,9 +387,11 @@ GLenum glCheckFramebufferStatus(GLenum target) {
     if (!fbo) return GL_FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT;
 
     // Walk every attachment: at least one must be present, and all attached
-    // images must share the same dimensions.
+    // images must share the same dimensions AND the same sample count
+    // (GL_FRAMEBUFFER_INCOMPLETE_MULTISAMPLE).
     bool hasAttachment = false;
     GLsizei refW = 0, refH = 0;
+    GLsizei refSamples = -1;
     bool haveRefDims = false;
 
     auto checkTex = [&](GLuint tex) -> bool {
@@ -398,6 +403,9 @@ GLenum glCheckFramebufferStatus(GLenum target) {
         } else if (t->width != refW || t->height != refH) {
             return false;
         }
+        const GLsizei s = t->samples > 1 ? t->samples : 1;
+        if (refSamples < 0) refSamples = s;
+        else if (s != refSamples) { refSamples = -2; return false; }
         return true;
     };
     auto checkRb = [&](GLuint rb) -> bool {
@@ -409,32 +417,41 @@ GLenum glCheckFramebufferStatus(GLenum target) {
         } else if (r->width != refW || r->height != refH) {
             return false;
         }
+        const GLsizei s = r->samples > 1 ? r->samples : 1;
+        if (refSamples < 0) refSamples = s;
+        else if (s != refSamples) { refSamples = -2; return false; }
         return true;
     };
 
+    // checkTex/checkRb 失败时：refSamples == -2 表示采样数不一致，否则是
+    // 尺寸不一致。（延迟求值 —— refSamples 在下面的检查中才被置位。）
+    auto incompl = [&]() {
+        return (refSamples == -2) ? GL_FRAMEBUFFER_INCOMPLETE_MULTISAMPLE
+                                  : GL_FRAMEBUFFER_INCOMPLETE_DIMENSIONS;
+    };
     for (int i = 0; i < mithril::kMaxColorAttachments; ++i) {
         const mithril::FBOAttachment& a = fbo->colors[i];
         if (a.texture) {
             hasAttachment = true;
-            if (!checkTex(a.texture)) return GL_FRAMEBUFFER_INCOMPLETE_DIMENSIONS;
+            if (!checkTex(a.texture)) return incompl();
         } else if (a.renderbuffer) {
             hasAttachment = true;
-            if (!checkRb(a.renderbuffer)) return GL_FRAMEBUFFER_INCOMPLETE_DIMENSIONS;
+            if (!checkRb(a.renderbuffer)) return incompl();
         }
     }
     if (fbo->depth.texture) {
         hasAttachment = true;
-        if (!checkTex(fbo->depth.texture)) return GL_FRAMEBUFFER_INCOMPLETE_DIMENSIONS;
+        if (!checkTex(fbo->depth.texture)) return incompl();
     } else if (fbo->depth.renderbuffer) {
         hasAttachment = true;
-        if (!checkRb(fbo->depth.renderbuffer)) return GL_FRAMEBUFFER_INCOMPLETE_DIMENSIONS;
+        if (!checkRb(fbo->depth.renderbuffer)) return incompl();
     }
     if (fbo->stencil.texture) {
         hasAttachment = true;
-        if (!checkTex(fbo->stencil.texture)) return GL_FRAMEBUFFER_INCOMPLETE_DIMENSIONS;
+        if (!checkTex(fbo->stencil.texture)) return incompl();
     } else if (fbo->stencil.renderbuffer) {
         hasAttachment = true;
-        if (!checkRb(fbo->stencil.renderbuffer)) return GL_FRAMEBUFFER_INCOMPLETE_DIMENSIONS;
+        if (!checkRb(fbo->stencil.renderbuffer)) return incompl();
     }
 
     if (!hasAttachment) return GL_FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT;
@@ -461,6 +478,7 @@ void glBlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1,
         VkImage dsrc = VK_NULL_HANDLE, ddst = VK_NULL_HANDLE;
         VkFormat dsrc_fmt = VK_FORMAT_UNDEFINED, ddst_fmt = VK_FORMAT_UNDEFINED;
         int ddst_h = 0;
+        int dsrc_samples = 1, ddst_samples = 1;
         bool d_dst_default = (g_state->currentDrawFBO == 0);
 
         if (g_state->currentReadFBO == 0) {
@@ -468,10 +486,14 @@ void glBlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1,
             dsrc_fmt = g_state->eglDefaultDepthFormat;
         } else {
             mithril::Framebuffer* sf = mithril::state_get_framebuffer(g_state->currentReadFBO);
-            if (sf && sf->depth.texture) {
-                dsrc = backend_get_texture_image(sf->depth.texture);
-                mithril::Texture* t = mithril::state_get_texture(sf->depth.texture);
-                if (t) dsrc_fmt = backend_vk_format_for_gl((GLenum)t->internalFormat);
+            GLuint dtex = sf ? mithril::fbo_attachment_texture(sf->depth) : 0;
+            if (sf && dtex) {
+                dsrc = backend_get_texture_image(dtex);
+                mithril::Texture* t = mithril::state_get_texture(dtex);
+                if (t) {
+                    dsrc_fmt = backend_vk_format_for_gl((GLenum)t->internalFormat);
+                    dsrc_samples = t->samples > 1 ? t->samples : 1;
+                }
             }
         }
         if (d_dst_default) {
@@ -480,19 +502,46 @@ void glBlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1,
             ddst_h = g_state->eglDefaultHeight;
         } else {
             mithril::Framebuffer* df = mithril::state_get_framebuffer(g_state->currentDrawFBO);
-            if (df && df->depth.texture) {
-                ddst = backend_get_texture_image(df->depth.texture);
-                mithril::Texture* t = mithril::state_get_texture(df->depth.texture);
-                if (t) { ddst_fmt = backend_vk_format_for_gl((GLenum)t->internalFormat); ddst_h = t->height; }
+            GLuint dtex = df ? mithril::fbo_attachment_texture(df->depth) : 0;
+            if (df && dtex) {
+                ddst = backend_get_texture_image(dtex);
+                mithril::Texture* t = mithril::state_get_texture(dtex);
+                if (t) {
+                    ddst_fmt = backend_vk_format_for_gl((GLenum)t->internalFormat);
+                    ddst_h = t->height;
+                    ddst_samples = t->samples > 1 ? t->samples : 1;
+                }
             }
         }
         if (dsrc != VK_NULL_HANDLE && ddst != VK_NULL_HANDLE &&
             dsrc_fmt != VK_FORMAT_UNDEFINED && ddst_fmt != VK_FORMAT_UNDEFINED) {
-            backend_blit_images(dsrc, dsrc_fmt, ddst, ddst_fmt,
-                                srcX0, srcY0, srcX1, srcY1,
-                                dstX0, dstY0, dstX1, dstY1,
-                                mask & (GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT),
-                                GL_NEAREST, d_dst_default ? 1 : 0, ddst_h);
+            if (dsrc_samples > 1 && ddst_samples == 1) {
+                // MSAA depth resolve（GL spec：矩形必须 1:1、filter 会被
+                // 忽略成 NEAREST）。Vulkan 核心不支持 depth resolve → 后端
+                // 内部告警并跳过；Metal 原生支持。
+                backend_resolve_images(dsrc, dsrc_fmt, ddst, ddst_fmt,
+                                       dstX0, dstY0,
+                                       dstX1 - dstX0, dstY1 - dstY0,
+                                       mask & (GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT),
+                                       d_dst_default ? 1 : 0, ddst_h);
+            } else if (dsrc_samples == 1 && ddst_samples == 1) {
+                backend_blit_images(dsrc, dsrc_fmt, ddst, ddst_fmt,
+                                    srcX0, srcY0, srcX1, srcY1,
+                                    dstX0, dstY0, dstX1, dstY1,
+                                    mask & (GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT),
+                                    GL_NEAREST, d_dst_default ? 1 : 0, ddst_h);
+            } else {
+                // MS→MS（等采样数）blit：Vulkan/Metal 的 blit 与 resolve 均不
+                // 接受多采样目的图像。GL 规格允许，此处按不支持处理（一次性
+                // 告警 + INVALID_OPERATION）。
+                static bool warnedMsMs = false;
+                if (!warnedMsMs) {
+                    warnedMsMs = true;
+                    MITHRIL_LOG_WARN("gl", "glBlitFramebuffer: MS->MS depth blit "
+                                     "is not supported by the backends — skipped");
+                }
+                mithril::state_set_error(GL_INVALID_OPERATION);
+            }
         }
         // 若同时有 color bit，继续走下面的 color 路径；否则返回。
         if (!(mask & GL_COLOR_BUFFER_BIT)) return;
@@ -509,8 +558,10 @@ void glBlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1,
     //   - FBO 0 (EGL default): use the swapchain image installed on g_state.
     //   - User FBO: use the texture attached to GL_COLOR_ATTACHMENT0 (or the
     //     buffer selected by glReadBuffer, but MC Java only uses attachment 0).
+    //     renderbuffer 附件取其影子纹理（fbo_attachment_texture）。
     VkImage src_image = VK_NULL_HANDLE;
     VkFormat src_format = VK_FORMAT_UNDEFINED;
+    int src_samples = 1;
     if (g_state->currentReadFBO == 0) {
         src_image  = g_state->eglDefaultColorImage;
         src_format = g_state->eglDefaultColorFormat;
@@ -522,16 +573,19 @@ void glBlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1,
             // Default is GL_COLOR_ATTACHMENT0. MC Java doesn't change this.
             if (g_state->currentReadFBO == g_state->currentDrawFBO &&
                 fbo->readBuffer >= GL_COLOR_ATTACHMENT0 && fbo->readBuffer <= GL_COLOR_ATTACHMENT7) {
-                tex = fbo->colors[fbo->readBuffer - GL_COLOR_ATTACHMENT0].texture;
+                tex = mithril::fbo_attachment_texture(fbo->colors[fbo->readBuffer - GL_COLOR_ATTACHMENT0]);
             } else if (fbo->readBuffer >= GL_COLOR_ATTACHMENT0 && fbo->readBuffer <= GL_COLOR_ATTACHMENT7) {
-                tex = fbo->colors[fbo->readBuffer - GL_COLOR_ATTACHMENT0].texture;
+                tex = mithril::fbo_attachment_texture(fbo->colors[fbo->readBuffer - GL_COLOR_ATTACHMENT0]);
             } else {
-                tex = fbo->colors[0].texture;
+                tex = mithril::fbo_attachment_texture(fbo->colors[0]);
             }
             if (tex) {
                 src_image = backend_get_texture_image(tex);
                 mithril::Texture* t = mithril::state_get_texture(tex);
-                if (t) src_format = backend_vk_format_for_gl((GLenum)t->internalFormat);
+                if (t) {
+                    src_format = backend_vk_format_for_gl((GLenum)t->internalFormat);
+                    src_samples = t->samples > 1 ? t->samples : 1;
+                }
             }
         }
     }
@@ -542,6 +596,7 @@ void glBlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1,
     VkImage dst_image = VK_NULL_HANDLE;
     VkFormat dst_format = VK_FORMAT_UNDEFINED;
     int dst_height = 0;
+    int dst_samples = 1;
     bool is_dst_default_fbo = (g_state->currentDrawFBO == 0);
     if (is_dst_default_fbo) {
         dst_image  = g_state->eglDefaultColorImage;
@@ -550,13 +605,14 @@ void glBlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1,
     } else {
         mithril::Framebuffer* fbo = mithril::state_get_framebuffer(g_state->currentDrawFBO);
         if (fbo) {
-            GLuint tex = fbo->colors[0].texture;
+            GLuint tex = mithril::fbo_attachment_texture(fbo->colors[0]);
             if (tex) {
                 dst_image = backend_get_texture_image(tex);
                 mithril::Texture* t = mithril::state_get_texture(tex);
                 if (t) {
                     dst_format = backend_vk_format_for_gl((GLenum)t->internalFormat);
                     dst_height = t->height;
+                    dst_samples = t->samples > 1 ? t->samples : 1;
                 }
             }
         }
@@ -565,6 +621,36 @@ void glBlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1,
     if (src_image == VK_NULL_HANDLE || dst_image == VK_NULL_HANDLE) return;
     if (src_format == VK_FORMAT_UNDEFINED) src_format = VK_FORMAT_R8G8B8A8_UNORM;
     if (dst_format == VK_FORMAT_UNDEFINED) dst_format = VK_FORMAT_R8G8B8A8_UNORM;
+
+    // MSAA resolve 分支（GL 4.6 §17.4.3.2）：多采样读缓冲 → 单采样绘制缓冲
+    // 就是 resolve。规格强制：filter 必须是 NEAREST、源/目的矩形尺寸一致、
+    // 格式一致，违规即 GL_INVALID_OPERATION。MS→MS（等采样）与 SS→MS 后端
+    // 均不支持（vkCmdResolveImage/MTLStoreActionMultisampleResolve 都只接受
+    // 单采样目的），显式报错并一次性告警。
+    if (src_samples > 1 && dst_samples == 1) {
+        if (filter != GL_NEAREST ||
+            (srcX1 - srcX0) != (dstX1 - dstX0) ||
+            (srcY1 - srcY0) != (dstY1 - dstY0) ||
+            src_format != dst_format) {
+            mithril::state_set_error(GL_INVALID_OPERATION);
+            return;
+        }
+        backend_resolve_images(src_image, src_format, dst_image, dst_format,
+                               dstX0, dstY0, dstX1 - dstX0, dstY1 - dstY0,
+                               GL_COLOR_BUFFER_BIT,
+                               is_dst_default_fbo ? 1 : 0, dst_height);
+        return;
+    }
+    if (src_samples > 1 || dst_samples > 1) {
+        static bool warnedMsMsColor = false;
+        if (!warnedMsMsColor) {
+            warnedMsMsColor = true;
+            MITHRIL_LOG_WARN("gl", "glBlitFramebuffer: MS->MS / SS->MS color "
+                             "blit is not supported by the backends — rejected");
+        }
+        mithril::state_set_error(GL_INVALID_OPERATION);
+        return;
+    }
 
     // Y-flip handling: the draw path now flips vertex Y in the shader for
     // default-FBO rendering (MVK_CONFIG_SHADER_CONVERSION_FLIP_VERTEX_Y=0),
@@ -610,6 +696,13 @@ void glDeleteRenderbuffers(GLsizei n, const GLuint* rbs) {
         GLuint name = rbs[i];
         if (name == 0) continue;
         if (g_state->currentRenderbuffer == name) g_state->currentRenderbuffer = 0;
+        // 影子纹理随 renderbuffer 一起销毁（后端资源 + 纹理命名空间的名字）。
+        mithril::Renderbuffer* rb = mithril::state_get_renderbuffer(name);
+        if (rb && rb->shadowTexture != 0) {
+            backend_delete_texture(rb->shadowTexture);
+            g_state->textures.erase(rb->shadowTexture);
+            g_state->textureNames.release(rb->shadowTexture);
+        }
         g_state->renderbuffers.erase(name);
         g_state->renderbufferNames.release(name);
     }
@@ -631,6 +724,46 @@ void glBindRenderbuffer(GLenum target, GLuint renderbuffer) {
     g_state->currentRenderbuffer = renderbuffer;
 }
 
+/* glRenderbufferStorage(Multisample) 的共享实现：记录状态并（重）建影子
+ * 纹理。renderbuffer 的存储由一张 GL 不可见的纹理承载（名字取自纹理命名
+ * 空间，避免与纹理名撞车）；FBO 附件解析处统一把 rb 附件替换成它。
+ * 尺寸/格式/采样数变化时 backend_get_or_create_texture 自动重建后端资源。 */
+static void renderbuffer_allocate_storage(mithril::Renderbuffer* rb,
+                                          GLenum internalformat, GLsizei width,
+                                          GLsizei height, GLsizei samples) {
+    rb->internalFormat = internalformat;
+    rb->width = width;
+    rb->height = height;
+    rb->samples = samples;
+
+    const GLenum target =
+        samples > 1 ? GL_TEXTURE_2D_MULTISAMPLE : GL_TEXTURE_2D;
+    if (rb->shadowTexture == 0) {
+        GLuint name = 0;
+        mithril::state_gen_names("texture", 1, &name);
+        rb->shadowTexture = name;
+        mithril::Texture t{};
+        t.id = name;
+        g_state->textures[name] = t;
+    }
+    mithril::Texture* t = mithril::state_get_texture(rb->shadowTexture);
+    if (t) {
+        t->internalFormat = (GLint)internalformat;
+        t->width  = width;
+        t->height = height;
+        t->depth  = 1;
+        t->target = target;
+        t->samples = samples;
+        t->immutable = true;      // renderbuffer 存储不可再 glTexImage
+        t->immutableLevels = 1;
+        t->levels = 1;
+        t->contentVersion++;
+    }
+    backend_get_or_create_texture(rb->shadowTexture, width, height, 1, 1,
+                                  internalformat, target,
+                                  samples > 1 ? samples : 1);
+}
+
 void glRenderbufferStorage(GLenum target, GLenum internalformat,
                            GLsizei width, GLsizei height) {
     MITHRIL_ENSURE_INIT();
@@ -647,10 +780,7 @@ void glRenderbufferStorage(GLenum target, GLenum internalformat,
         mithril::state_set_error(GL_INVALID_OPERATION);
         return;
     }
-    rb->internalFormat = internalformat;
-    rb->width = width;
-    rb->height = height;
-    rb->samples = 0;
+    renderbuffer_allocate_storage(rb, internalformat, width, height, 0);
 }
 
 void glRenderbufferStorageMultisample(GLenum target, GLsizei samples,
@@ -670,10 +800,7 @@ void glRenderbufferStorageMultisample(GLenum target, GLsizei samples,
         mithril::state_set_error(GL_INVALID_OPERATION);
         return;
     }
-    rb->internalFormat = internalformat;
-    rb->width = width;
-    rb->height = height;
-    rb->samples = samples;
+    renderbuffer_allocate_storage(rb, internalformat, width, height, samples);
 }
 
 void glFramebufferRenderbuffer(GLenum target, GLenum attachment,
@@ -954,6 +1081,17 @@ void glInvalidateSubFramebuffer(GLenum target, GLsizei numAttachments,
 
 namespace mithril {
 
+/* FBO 附件的后端纹理名：纹理附件直接用纹理名；renderbuffer 附件用其影子
+ * 纹理（renderbuffer 存储的载体，见 renderbuffer_allocate_storage）。 */
+GLuint fbo_attachment_texture(const FBOAttachment& a) {
+    if (a.texture != 0) return a.texture;
+    if (a.renderbuffer != 0) {
+        Renderbuffer* rb = state_get_renderbuffer(a.renderbuffer);
+        if (rb) return rb->shadowTexture;
+    }
+    return 0;
+}
+
 int collect_draw_fbo_attachments(VkImageView out_color[8], VkImageView* out_depth,
                                  int* out_w, int* out_h) {
     for (int i = 0; i < 8; ++i) out_color[i] = VK_NULL_HANDLE;
@@ -984,7 +1122,7 @@ int collect_draw_fbo_attachments(VkImageView out_color[8], VkImageView* out_dept
     for (int i = 0; i < 8; ++i) {
         if (i >= fbo->drawBufferCount) break;
         if (fbo->drawBuffers[i] == GL_NONE) break;
-        GLuint tex = fbo->colors[i].texture;
+        GLuint tex = fbo_attachment_texture(fbo->colors[i]);
         if (tex == 0) { out_color[i] = VK_NULL_HANDLE; continue; }
         VkImageView view = backend_get_texture_view(tex);
         out_color[i] = view;
@@ -994,10 +1132,11 @@ int collect_draw_fbo_attachments(VkImageView out_color[8], VkImageView* out_dept
             if (t) { w = t->width; h = t->height; }
         }
     }
-    if (fbo->depth.texture) {
-        *out_depth = backend_get_texture_view(fbo->depth.texture);
+    GLuint depth_tex = fbo_attachment_texture(fbo->depth);
+    if (depth_tex) {
+        *out_depth = backend_get_texture_view(depth_tex);
         if (w == 0) {
-            Texture* t = state_get_texture(fbo->depth.texture);
+            Texture* t = state_get_texture(depth_tex);
             if (t) { w = t->width; h = t->height; }
         }
     }

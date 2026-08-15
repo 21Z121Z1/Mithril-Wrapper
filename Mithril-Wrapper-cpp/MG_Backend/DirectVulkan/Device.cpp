@@ -23,7 +23,7 @@
 #include "Pipeline.h"     // clear_all_pipeline_caches() for deviceLost recovery
 #include "DescriptorSet.h"  // reset_all_descriptor_pools() for swapchain rebuild recovery
 #include "UniformArena.h"  // ubo_arena_shutdown() — transient UBO arena teardown
-#include "../../MG_State/State.h"  // kMaxTextureUnits 等容量常量（backend_device_limit 用来夹紧上报值）
+#include "../../MG_State/State.h"  // kMaxTextureUnits 等容量常量（dvk_device_limit 用来夹紧上报值）
 #include "../../MG_Impl/Log.h"
 
 #include <cstring>
@@ -168,7 +168,7 @@ void safe_device_wait_idle() {
 
     // 4b. FIX (delayed-release OOM pressure - P1): with every fencePending
     //     cleared, the normal drain path (ensure_command_buffer_recording /
-    //     backend_poll_completed_frames) skips its wait-block entirely, so
+    //     dvk_poll_completed_frames) skips its wait-block entirely, so
     //     nothing would ever drain the disposal queues again until each slot
     //     is re-submitted and re-waited. glGenerateMipmap-heavy sequences
     //     (every safe_device_wait_idle call) therefore piled deferred
@@ -188,11 +188,11 @@ void safe_device_wait_idle() {
     }
 }
 
-bool backend_is_device_lost() {
+bool dvk_is_device_lost() {
     return backend()->deviceLost;
 }
 
-void backend_reset_device_lost() {
+void dvk_reset_device_lost() {
     Backend* b = backend();
     // FIX (OOM 反馈循环): deviceLost 期间 disposalQueue 不会被排空
     // （ensure_command_buffer_recording 在 deviceLost 时早退），导致延迟
@@ -217,7 +217,7 @@ void backend_reset_device_lost() {
     // commandBufferRecording. Without this, the post-recovery frame inherits
     // passActive=true from the pre-deviceLost frame (commit_frame returned
     // early without calling end_render_pass), and GL calls like glClear /
-    // backend_bind_pipeline record vkCmd* into a command buffer that was never
+    // dvk_bind_pipeline record vkCmd* into a command buffer that was never
     // vkBeginCommandBuffer'd -> MoltenVK spams "Command buffer cannot accept
     // commands before vkBeginCommandBuffer() is called" (VK_NOT_READY).
     reset_encoder_state();
@@ -225,7 +225,7 @@ void backend_reset_device_lost() {
     b->consecutiveSubmitFailures = 0;
 }
 
-void backend_reset_device_lost_pending_resources() {
+void dvk_reset_device_lost_pending_resources() {
     Backend* b = backend();
     if (!b->device) return;
     // vkDeviceWaitIdle 在 deviceLost 时可能返回 VK_ERROR_DEVICE_LOST，
@@ -238,7 +238,7 @@ void backend_reset_device_lost_pending_resources() {
         static int drainFailLogCount = 0;
         drainFailLogCount++;
         if (drainFailLogCount <= 3) {
-            MITHRIL_LOG_WARN("vk", "backend_reset_device_lost_pending_resources: "
+            MITHRIL_LOG_WARN("vk", "dvk_reset_device_lost_pending_resources: "
                               "vkDeviceWaitIdle returned %d (expected during "
                               "deviceLost), draining disposal queues anyway",
                               (int)waitResult);
@@ -254,7 +254,7 @@ void backend_reset_device_lost_pending_resources() {
  *
  * Root cause of the death loop:
  *   The old recovery path only called clear_all_pipeline_caches() AFTER the
- *   swapchain rebuild succeeded (inside backend_reset_device_lost). But the
+ *   swapchain rebuild succeeded (inside dvk_reset_device_lost). But the
  *   rebuild FAILED because there wasn't enough memory — and the pipeline
  *   caches (holding hundreds of VkPipeline objects, each backed by a Metal
  *   MTLRenderPipelineState that can be several MB) and descriptor pools
@@ -279,7 +279,7 @@ void backend_reset_device_lost_pending_resources() {
  * pipelineFactory->DestroyAll() + uniformManager->ResetAllPools() BEFORE
  * creating the new swapchain.
  */
-void backend_purge_cached_resources_for_recovery() {
+void dvk_purge_cached_resources_for_recovery() {
     Backend* b = backend();
     if (!b->device) return;
 
@@ -310,7 +310,7 @@ void backend_purge_cached_resources_for_recovery() {
     // 6. Reset the encoder state so the post-recovery frame starts clean.
     reset_encoder_state();
 
-    MITHRIL_LOG_WARN("vk", "backend_purge_cached_resources_for_recovery: "
+    MITHRIL_LOG_WARN("vk", "dvk_purge_cached_resources_for_recovery: "
                       "purged pipelines + descriptor pools + framebuffers + "
                       "render passes + disposal queues "
                       "(freeing memory for swapchain rebuild)");
@@ -337,6 +337,9 @@ void drain_disposal_queue(int slot) {
             }
         }
         if (d.sampler) vkDestroySampler(b->device, d.sampler, nullptr);
+        // GL_TEXTURE_BUFFER 采样视图（get_or_create_texel_buffer_view 重建
+        // 时推入）。销毁顺序晚于源 buffer 无碍 —— 同一队列按帧 fence 统一放行。
+        if (d.bufferView) vkDestroyBufferView(b->device, d.bufferView, nullptr);
         // FIX (descriptor pool UAF - P0): 次级池扩容时退役的 VkDescriptorPool。
         // 只能在此处（slot fence 已等待，所有引用其 set 的 command buffer 完成）
         // 销毁 —— vkDestroyDescriptorPool 隐式释放池内所有 set。
@@ -372,7 +375,7 @@ void drain_disposal_queues_except(int skip) {
 }
 
 // FIX (显存耗尽根因 - 主动式 GC，深度参考 MobileGL):
-// 实现 backend_poll_completed_frames：非阻塞轮询所有帧槽位的 fence，
+// 实现 dvk_poll_completed_frames：非阻塞轮询所有帧槽位的 fence，
 // 对已完成的 slot 立即 drain 其 disposalQueue。
 //
 // MobileGL 的 RefreshCompletedSubmits（VulkanRenderer.cpp:7199-7237）用
@@ -387,7 +390,7 @@ void drain_disposal_queues_except(int skip) {
 // 注意：drain 后 fencePending[s] 被清除，但 ensure_command_buffer_recording
 // 复用该 slot 时仍会检查 fencePending——为 false 时跳过 vkWaitForFences，
 // 这是正确的（fence 已 signaled，无需等待）。
-int backend_poll_completed_frames() {
+int dvk_poll_completed_frames() {
     Backend* b = backend();
     if (!b->initialized || !b->device) return 0;
 
@@ -453,7 +456,7 @@ int backend_poll_completed_frames() {
 // 旧字节级方案用 80% 阈值，但预算设为 1.5GB → 阈值 1.2GB，iPhone X GPU 在此
 // 之前就 OOM fault。现在预算降到 ≤256MB，阈值降到 50%（≤128MB），确保 GC
 // 在驱动 fault 前触发。
-bool backend_proactive_gc_if_needed() {
+bool dvk_proactive_gc_if_needed() {
     Backend* b = backend();
     if (!b->initialized || !b->device) return false;
     if (b->vramPressureThreshold == 0) return false;  // VRAM budget 未初始化
@@ -482,7 +485,7 @@ bool backend_proactive_gc_if_needed() {
     }
 
     // 先非阻塞 poll（可能已经完成，无需 vkDeviceWaitIdle 阻塞）
-    backend_poll_completed_frames();
+    dvk_poll_completed_frames();
 
     // 如果 poll 后仍超阈值，且仍有 deferred 资源，才阻塞等待
     bool stillHasDeferred = false;
@@ -512,7 +515,7 @@ bool backend_proactive_gc_if_needed() {
         //
         // Fix: drain ALL slots EXCEPT currentFrame. The current slot's queue is
         // left for the normal fence-wait drain (ensure_command_buffer_recording /
-        // backend_poll_completed_frames) AFTER this frame commits and the slot is
+        // dvk_poll_completed_frames) AFTER this frame commits and the slot is
         // recycled — by then no live descriptor set references those resources.
         drain_disposal_queues_except(b->currentFrame);
         // safe_device_wait_idle 已清除 fencePending，但重复清除无害（防御性）
@@ -1015,7 +1018,7 @@ bool init_device() {
     // VK_EXT_extended_dynamic_state: vkCmdSetCullMode/FrontFace/DepthTestEnable/
     // DepthWriteEnable/DepthCompareOp etc. without rebuilding pipelines.
     //
-    // 同样是硬依赖。CommandStream.cpp 的 backend_set_cull_mode /
+    // 同样是硬依赖。CommandStream.cpp 的 dvk_set_cull_mode /
     // set_front_face / set_depth_test 是**直接调用** vkCmdSetCullMode 那一族，
     // 而不是通过 vkGetDeviceProcAddr 取指针后判空。在 Vulkan 1.2 上这些符号
     // 由 loader 解析：扩展没启用时它们是空指针，直接调用 = 段错误崩溃，
@@ -1432,7 +1435,7 @@ bool init_device() {
         MITHRIL_LOG_INFO("vk", "  queue: family=%u timestampValidBits=%u "
                           "maxTex=%u maxColorAttach=%u maxUniformRange=%u",
                          b->graphicsFamily,
-                         backend_query_timestamp_valid_bits(),
+                         dvk_query_timestamp_valid_bits(),
                          pdp.limits.maxImageDimension2D,
                          pdp.limits.maxColorAttachments,
                          (unsigned)pdp.limits.maxUniformBufferRange);
@@ -1500,7 +1503,7 @@ static void refresh_completed_serials() {
 }
 
 // 每次真实 vkQueueSubmit 后调用：领取一个新序号并挂到该 slot 上。
-uint64_t backend_frame_serial_advance(int frameSlot) {
+uint64_t dvk_frame_serial_advance(int frameSlot) {
     Backend* b = backend();
     const uint64_t s = ++b->submitSerial;
     if (frameSlot >= 0 && frameSlot < kMaxFramesInFlight) {
@@ -1510,17 +1513,17 @@ uint64_t backend_frame_serial_advance(int frameSlot) {
     return s;
 }
 
-extern "C" uint64_t backend_last_completed_serial() {
+extern "C" uint64_t dvk_last_completed_serial() {
     refresh_completed_serials();
     return backend()->completedSerial;
 }
 
 // 已发出的提交总数。glFenceSync 用它判断"我这个 fence 要等的是哪一次提交"。
-extern "C" uint64_t backend_current_submit_serial() {
+extern "C" uint64_t dvk_current_submit_serial() {
     return backend()->submitSerial;
 }
 
-extern "C" bool backend_wait_serial(uint64_t serial, uint64_t timeout_ns) {
+extern "C" bool dvk_wait_serial(uint64_t serial, uint64_t timeout_ns) {
     Backend* b = backend();
     if (!b->initialized) return true;
     refresh_completed_serials();
@@ -1594,24 +1597,24 @@ void shutdown_device() {
 // ===========================================================================
 extern "C" {
 
-void backend_init(void) {
+void dvk_init(void) {
     mithril::vk::init_device();
 }
 
-void backend_shutdown(void) {
+void dvk_shutdown(void) {
     mithril::vk::shutdown_device();
 }
 
-int backend_available(void) {
+int dvk_available(void) {
     return mithril::vk::backend()->initialized ? 1 : 0;
 }
 
-const char* backend_physical_device_name(void) {
+const char* dvk_physical_device_name(void) {
     mithril::vk::Backend* b = mithril::vk::backend();
     return b->initialized ? b->props.deviceName : "Vulkan (MoltenVK)";
 }
 
-uint64_t backend_vram_bytes(void) {
+uint64_t dvk_vram_bytes(void) {
     mithril::vk::Backend* b = mithril::vk::backend();
     if (!b->initialized) return 0;
     // MoltenVK reports maxMemoryAllocationCount but not total VRAM reliably;
@@ -1629,7 +1632,7 @@ uint64_t backend_vram_bytes(void) {
 
 // FIX (P1): 用真实的 VkPhysicalDeviceLimits 回答 GL_MAX_*，不再硬编码。
 // 详见 Backend.h 中 MITHRIL_LIMIT_* 的说明。
-int backend_device_limit(int which, int fallback) {
+int dvk_device_limit(int which, int fallback) {
     mithril::vk::Backend* b = mithril::vk::backend();
     if (!b || !b->initialized) return fallback;
     const VkPhysicalDeviceLimits& L = b->props.limits;
@@ -1703,7 +1706,7 @@ int backend_device_limit(int which, int fallback) {
     }
 }
 
-float backend_device_max_sampler_anisotropy(float fallback) {
+float dvk_device_max_sampler_anisotropy(float fallback) {
     mithril::vk::Backend* b = mithril::vk::backend();
     if (!b || !b->initialized) return fallback;
 

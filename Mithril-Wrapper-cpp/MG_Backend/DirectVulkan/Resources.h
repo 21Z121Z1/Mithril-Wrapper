@@ -71,7 +71,7 @@ struct TextureEntry {
 // MoltenVK 1.2.9 采样越界 → 纯红 / kIOGPUCommandBufferCallbackErrorPageFault。
 // 因此同一纹理名下按参数哈希缓存多个 VkSampler。
 struct SamplerEntry {
-    // GL 纹理名。仍保留给 backend_invalidate_sampler_cache 按名批量作废。
+    // GL 纹理名。仍保留给 dvk_invalidate_sampler_cache 按名批量作废。
     GLuint name = 0;
     // 参数哈希 -> VkSampler。同一纹理名的不同采样参数各持有一份采样器。
     // 所有采样器都只存在这里，避免同一 handle 被重复引用/重复销毁。
@@ -135,6 +135,13 @@ void destroy_texture_entry(TextureEntry& e);
 void defer_destroy_buffer_entry(BufferEntry& e);
 void defer_destroy_texture_entry(TextureEntry& e);
 void defer_destroy_sampler_entry(SamplerEntry& e);
+
+/* GL_TEXTURE_BUFFER（glTexBuffer/glTexBufferRange）：按纹理名取（或建）
+ * VkBufferView。视图覆盖 Texture::texBuffer{Offset,Size}；缓存键包含源
+ * VkBuffer 句柄 + Buffer::contentVersion —— orphan 换 buffer 或内容更新
+ * 后自动重建（旧视图进当前帧延迟销毁队列）。内部给
+ * DescriptorSet.cpp 的 UNIFORM_TEXEL_BUFFER 写路径用。 */
+VkBufferView get_or_create_texel_buffer_view(GLuint texName);
 
 // One-shot staging buffer -> image copy. Records into the active command
 // buffer (caller must have a recording command buffer). `format`/`type` are

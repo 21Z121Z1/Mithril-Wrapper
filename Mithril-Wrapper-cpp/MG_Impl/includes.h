@@ -23,6 +23,11 @@ extern "C" {
 
 void proc_init(void);
 
+/* Conditional-render 门控（Stubs.cpp 实现，复用 query_get_result64 取遮挡
+ * 查询结果）。draw / glClear / glClearBuffer* 入口先问它：false = 按
+ * glBeginConditionalRender 语义丢弃本次操作。无条件渲染时恒 true。 */
+bool mg_conditional_render_allows(void);
+
 #ifdef __cplusplus
 }
 #endif

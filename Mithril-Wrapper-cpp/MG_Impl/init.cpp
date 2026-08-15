@@ -62,18 +62,19 @@ void proc_init(void) {
     backend_init();
 
     if (backend_available()) {
-        MITHRIL_LOG_INFO("init", "Mithril-Wrapper initialised (Vulkan 1.2 backend, MoltenVK static link)");
+        MITHRIL_LOG_INFO("init", "Mithril-Wrapper initialised (%s)",
+                         backend_api_string());
         const char* gpu = backend_physical_device_name();
         if (gpu) {
             MITHRIL_LOG_INFO("renderer", "GPU: %s", gpu);
         }
         uint64_t vram = backend_vram_bytes();
         if (vram > 0) {
-            MITHRIL_LOG_INFO("renderer", "VRAM (device-local heaps): %llu MB",
+            MITHRIL_LOG_INFO("renderer", "VRAM (unified memory): %llu MB",
                              (unsigned long long)(vram / (1024ULL * 1024ULL)));
         }
     } else {
-        MITHRIL_LOG_WARN("init", "Vulkan backend did not come up; GL calls will be no-ops");
+        MITHRIL_LOG_WARN("init", "backend did not come up; GL calls will be no-ops");
     }
 }
 

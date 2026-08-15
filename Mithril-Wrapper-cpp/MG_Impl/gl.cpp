@@ -54,6 +54,8 @@ void glClearStencil(GLint s) {
 
 void glClear(GLbitfield mask) {
     MITHRIL_ENSURE_INIT();
+    // Conditional render 门控：被门控的 clear 与 draw 一样丢弃。
+    if (!mg_conditional_render_allows()) return;
     // Resolve current draw framebuffer attachments.
     VkImageView colors[8] = {VK_NULL_HANDLE};
     VkImageView depth = VK_NULL_HANDLE;
@@ -74,7 +76,7 @@ void glClear(GLbitfield mask) {
     // 同时保留 LOAD+vkCmdClearAttachments 模式（旧 FIX）：只清除 mask 指定的 aspect，
     // 避免 glClear(GL_DEPTH_BUFFER_BIT) 误清颜色缓冲。
     backend_set_load_load();
-    backend_begin_render_pass(colors, n, depth, w, h, 1);
+    backend_begin_render_pass(colors, n, depth, w, h, mithril::draw_fbo_sample_count());
     backend_clear_attachments(mask, 0, 0, w, h);
     backend_end_render_pass();
     // 不调用 backend_commit() — 帧提交由 eglSwapBuffers 统一处理。
@@ -90,6 +92,7 @@ void glClear(GLbitfield mask) {
 void glClearBufferfv(GLenum buffer, GLint drawbuffer, const GLfloat* value) {
     MITHRIL_ENSURE_INIT();
     if (!value) return;
+    if (!mg_conditional_render_allows()) return;   // conditional render 门控
     (void)drawbuffer;  // backend_clear_attachments clears all color attachments
 
     VkImageView colors[8] = {VK_NULL_HANDLE};
@@ -106,7 +109,7 @@ void glClearBufferfv(GLenum buffer, GLint drawbuffer, const GLfloat* value) {
         g_state->clearColor[2] = value[2]; g_state->clearColor[3] = value[3];
         mask = GL_COLOR_BUFFER_BIT;
         backend_set_load_load();
-        backend_begin_render_pass(colors, n, depth, w, h, 1);
+        backend_begin_render_pass(colors, n, depth, w, h, mithril::draw_fbo_sample_count());
         backend_clear_attachments(mask, 0, 0, w, h);
         backend_end_render_pass();
         g_state->clearColor[0] = save[0]; g_state->clearColor[1] = save[1];
@@ -118,7 +121,7 @@ void glClearBufferfv(GLenum buffer, GLint drawbuffer, const GLfloat* value) {
         g_state->clearDepth = (GLclampd)value[0];
         mask = GL_DEPTH_BUFFER_BIT;
         backend_set_load_load();
-        backend_begin_render_pass(colors, n, depth, w, h, 1);
+        backend_begin_render_pass(colors, n, depth, w, h, mithril::draw_fbo_sample_count());
         backend_clear_attachments(mask, 0, 0, w, h);
         backend_end_render_pass();
         g_state->clearDepth = save;
@@ -129,6 +132,7 @@ void glClearBufferfv(GLenum buffer, GLint drawbuffer, const GLfloat* value) {
 void glClearBufferiv(GLenum buffer, GLint drawbuffer, const GLint* value) {
     MITHRIL_ENSURE_INIT();
     if (!value) return;
+    if (!mg_conditional_render_allows()) return;   // conditional render 门控
     (void)drawbuffer;
 
     VkImageView colors[8] = {VK_NULL_HANDLE};
@@ -145,7 +149,7 @@ void glClearBufferiv(GLenum buffer, GLint drawbuffer, const GLint* value) {
         g_state->clearColor[2] = (float)value[2]; g_state->clearColor[3] = (float)value[3];
         mask = GL_COLOR_BUFFER_BIT;
         backend_set_load_load();
-        backend_begin_render_pass(colors, n, depth, w, h, 1);
+        backend_begin_render_pass(colors, n, depth, w, h, mithril::draw_fbo_sample_count());
         backend_clear_attachments(mask, 0, 0, w, h);
         backend_end_render_pass();
         g_state->clearColor[0] = save[0]; g_state->clearColor[1] = save[1];
@@ -157,7 +161,7 @@ void glClearBufferiv(GLenum buffer, GLint drawbuffer, const GLint* value) {
         g_state->clearStencil = value[0];
         mask = GL_STENCIL_BUFFER_BIT;
         backend_set_load_load();
-        backend_begin_render_pass(colors, n, depth, w, h, 1);
+        backend_begin_render_pass(colors, n, depth, w, h, mithril::draw_fbo_sample_count());
         backend_clear_attachments(mask, 0, 0, w, h);
         backend_end_render_pass();
         g_state->clearStencil = save;
@@ -168,6 +172,7 @@ void glClearBufferiv(GLenum buffer, GLint drawbuffer, const GLint* value) {
 void glClearBufferuiv(GLenum buffer, GLint drawbuffer, const GLuint* value) {
     MITHRIL_ENSURE_INIT();
     if (!value) return;
+    if (!mg_conditional_render_allows()) return;   // conditional render 门控
     (void)drawbuffer;
 
     VkImageView colors[8] = {VK_NULL_HANDLE};
@@ -182,7 +187,7 @@ void glClearBufferuiv(GLenum buffer, GLint drawbuffer, const GLuint* value) {
         g_state->clearColor[0] = (float)value[0]; g_state->clearColor[1] = (float)value[1];
         g_state->clearColor[2] = (float)value[2]; g_state->clearColor[3] = (float)value[3];
         backend_set_load_load();
-        backend_begin_render_pass(colors, n, depth, w, h, 1);
+        backend_begin_render_pass(colors, n, depth, w, h, mithril::draw_fbo_sample_count());
         backend_clear_attachments(GL_COLOR_BUFFER_BIT, 0, 0, w, h);
         backend_end_render_pass();
         g_state->clearColor[0] = save[0]; g_state->clearColor[1] = save[1];
@@ -193,6 +198,7 @@ void glClearBufferuiv(GLenum buffer, GLint drawbuffer, const GLuint* value) {
 
 void glClearBufferfi(GLenum buffer, GLint drawbuffer, GLfloat depth_val, GLint stencil_val) {
     MITHRIL_ENSURE_INIT();
+    if (!mg_conditional_render_allows()) return;   // conditional render 门控
     (void)drawbuffer;
 
     if (buffer != GL_DEPTH_STENCIL) return;
@@ -210,7 +216,7 @@ void glClearBufferfi(GLenum buffer, GLint drawbuffer, GLfloat depth_val, GLint s
     g_state->clearStencil = stencil_val;
 
     backend_set_load_load();
-    backend_begin_render_pass(colors, n, depthView, w, h, 1);
+    backend_begin_render_pass(colors, n, depthView, w, h, mithril::draw_fbo_sample_count());
     backend_clear_attachments(GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT, 0, 0, w, h);
     backend_end_render_pass();
 
@@ -632,7 +638,7 @@ void glFinish(void) {
     backend_commit();
     // GL requires glFinish to return only after all prior effects are
     // complete. backend_commit alone is glFlush semantics.
-    mithril::vk::safe_device_wait_idle();
+    backend_wait_idle_safe();
 }
 
 void glPrimitiveRestartIndex(GLuint index) {

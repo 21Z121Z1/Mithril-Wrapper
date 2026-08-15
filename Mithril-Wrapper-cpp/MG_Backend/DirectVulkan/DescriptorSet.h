@@ -5,8 +5,8 @@
 // This closes the gap left by Pipeline.cpp's former empty pipeline layout:
 // uniform buffers (GLSL `uniform` globals -> UBOs) and sampled images
 // (`uniform sampler2D` etc.) now reach the shader. Reflection runs once at
-// link time (inside backend_get_or_create_pipeline); descriptor set binding
-// runs per draw (inside prepare_draw, right after backend_bind_pipeline).
+// link time (inside dvk_get_or_create_pipeline); descriptor set binding
+// runs per draw (inside prepare_draw, right after dvk_bind_pipeline).
 #ifndef MITHRIL_DIRECTVULKAN_DESCRIPTOR_SET_H
 #define MITHRIL_DIRECTVULKAN_DESCRIPTOR_SET_H
 
@@ -46,7 +46,7 @@ void ensure_program_layouts(GLuint program,
  * and vkCmdBindDescriptorSets it to the active command buffer. No-op when the
  * program has no descriptor bindings (or no pipeline layout).
  *
- * Must be called after backend_bind_pipeline() and before the draw, with a
+ * Must be called after dvk_bind_pipeline() and before the draw, with a
  * recording command buffer active.
  */
 void bind_program_descriptors(GLuint program, VkPipelineBindPoint bindPoint);
@@ -79,7 +79,7 @@ void invalidate_descriptor_memo();
  * programs and ALL frame-in-flight slots. Frees every allocated
  * VkDescriptorSet, releasing the Metal descriptor resources they hold.
  *
- * Called by backend_purge_cached_resources_for_recovery() BEFORE a swapchain
+ * Called by dvk_purge_cached_resources_for_recovery() BEFORE a swapchain
  * rebuild attempt during deviceLost recovery. Without this, hundreds of
  * VkDescriptorSet objects (each backed by MoltenVK/Metal descriptor resources)
  * remain allocated, consuming memory that the swapchain creation needs.

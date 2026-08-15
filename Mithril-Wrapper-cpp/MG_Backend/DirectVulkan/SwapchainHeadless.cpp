@@ -4,11 +4,11 @@
 // The Apple Metal swapchain (SwapchainMetal.mm) creates a VkSurfaceKHR from
 // a CAMetalLayer. On Linux there is no such surface; instead we create a
 // memory-backed VkImage (R8G8B8A8_UNORM) that stands in for the swapchain
-// color, and a depth image. backend_swapchain_acquire_color returns the
+// color, and a depth image. dvk_swapchain_acquire_color returns the
 // color view; present is a no-op (there is no display). This is enough for
 // the offscreen render smoke test to exercise the full GL -> Vulkan draw
 // path (render pass, pipeline, descriptors, readback).
-#include "../Backend.h"
+#include "BackendVulkanDecls.h"
 #include "Device.h"
 #include "Swapchain.h"
 
@@ -84,7 +84,7 @@ VkImage create_image(VkFormat fmt, int w, int h, VkImageUsageFlags usage) {
 
 // ---- exported backend swapchain API (Linux headless) ----
 
-void* backend_create_swapchain(void* native_window, int width, int height,
+void* dvk_create_swapchain(void* native_window, int width, int height,
                                int want_depth_stencil, int platform_hint) {
     (void)native_window; (void)platform_hint;
     auto* sc = new mithril::vk::HeadlessSwapchain();
@@ -111,7 +111,7 @@ void* backend_create_swapchain(void* native_window, int width, int height,
     return sc;
 }
 
-void backend_destroy_swapchain(void* swapchain_state) {
+void dvk_destroy_swapchain(void* swapchain_state) {
     auto* sc = (mithril::vk::HeadlessSwapchain*)swapchain_state;
     if (!sc) return;
     VkDevice dev = mithril::vk::backend()->device;
@@ -126,7 +126,7 @@ void backend_destroy_swapchain(void* swapchain_state) {
     delete sc;
 }
 
-VkImageView backend_swapchain_acquire_color(void* swapchain_state) {
+VkImageView dvk_swapchain_acquire_color(void* swapchain_state) {
     auto* sc = (mithril::vk::HeadlessSwapchain*)swapchain_state;
     if (!sc) return VK_NULL_HANDLE;
     VkDevice dev = mithril::vk::backend()->device;
@@ -144,7 +144,7 @@ VkImageView backend_swapchain_acquire_color(void* swapchain_state) {
     return sc->colorView;
 }
 
-VkImageView backend_swapchain_acquire_depth(void* swapchain_state) {
+VkImageView dvk_swapchain_acquire_depth(void* swapchain_state) {
     auto* sc = (mithril::vk::HeadlessSwapchain*)swapchain_state;
     if (!sc) return VK_NULL_HANDLE;
     VkDevice dev = mithril::vk::backend()->device;
@@ -161,54 +161,54 @@ VkImageView backend_swapchain_acquire_depth(void* swapchain_state) {
     return sc->depthView;
 }
 
-int backend_swapchain_width(void* swapchain_state) {
+int dvk_swapchain_width(void* swapchain_state) {
     auto* sc = (mithril::vk::HeadlessSwapchain*)swapchain_state;
     return sc ? sc->width : 0;
 }
 
-int backend_swapchain_height(void* swapchain_state) {
+int dvk_swapchain_height(void* swapchain_state) {
     auto* sc = (mithril::vk::HeadlessSwapchain*)swapchain_state;
     return sc ? sc->height : 0;
 }
 
-void backend_present_and_acquire(void* swapchain_state) {
+void dvk_present_and_acquire(void* swapchain_state) {
     // No display on headless Linux; nothing to present.
-    backend_swapchain_acquire_color(swapchain_state);
+    dvk_swapchain_acquire_color(swapchain_state);
 }
 
-int backend_swapchain_needs_rebuild(void* swapchain_state) {
+int dvk_swapchain_needs_rebuild(void* swapchain_state) {
     auto* sc = (mithril::vk::HeadlessSwapchain*)swapchain_state;
     int r = sc ? sc->needsRebuild : 0;
     if (sc) sc->needsRebuild = false;
     return r;
 }
 
-void backend_swapchain_set_drawable_size(void* swapchain_state, int w, int h) {
+void dvk_swapchain_set_drawable_size(void* swapchain_state, int w, int h) {
     auto* sc = (mithril::vk::HeadlessSwapchain*)swapchain_state;
     if (sc) { sc->actualDrawableWidth = w; sc->actualDrawableHeight = h; }
 }
 
-void backend_swapchain_mark_rebuild(void* swapchain_state) {
+void dvk_swapchain_mark_rebuild(void* swapchain_state) {
     auto* sc = (mithril::vk::HeadlessSwapchain*)swapchain_state;
     if (sc) sc->needsRebuild = true;
 }
 
-VkImage backend_swapchain_current_color_image(void* swapchain_state) {
+VkImage dvk_swapchain_current_color_image(void* swapchain_state) {
     auto* sc = (mithril::vk::HeadlessSwapchain*)swapchain_state;
     return sc ? sc->colorImage : VK_NULL_HANDLE;
 }
 
-VkFormat backend_swapchain_color_format(void* swapchain_state) {
+VkFormat dvk_swapchain_color_format(void* swapchain_state) {
     auto* sc = (mithril::vk::HeadlessSwapchain*)swapchain_state;
     return sc ? sc->colorFormat : VK_FORMAT_UNDEFINED;
 }
 
-VkImage backend_swapchain_current_depth_image(void* swapchain_state) {
+VkImage dvk_swapchain_current_depth_image(void* swapchain_state) {
     auto* sc = (mithril::vk::HeadlessSwapchain*)swapchain_state;
     return sc ? sc->depthImage : VK_NULL_HANDLE;
 }
 
-VkFormat backend_swapchain_depth_format(void* swapchain_state) {
+VkFormat dvk_swapchain_depth_format(void* swapchain_state) {
     auto* sc = (mithril::vk::HeadlessSwapchain*)swapchain_state;
     return sc ? sc->depthFormat : VK_FORMAT_UNDEFINED;
 }

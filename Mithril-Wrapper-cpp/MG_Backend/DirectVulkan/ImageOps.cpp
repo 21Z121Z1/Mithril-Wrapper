@@ -1,8 +1,8 @@
 // Mithril-Wrapper - MG_Backend/DirectVulkan/ImageOps.cpp
 // Image-level operations that need their own command-buffer submission:
-//   * backend_generate_mipmaps  — vkCmdBlitImage cascade across mip levels
-//   * backend_read_pixels       — vkCmdCopyImage -> host-visible staging -> fence
-//   * backend_blit_texture      — vkCmdBlitImage between two user textures
+//   * dvk_generate_mipmaps  — vkCmdBlitImage cascade across mip levels
+//   * dvk_read_pixels       — vkCmdCopyImage -> host-visible staging -> fence
+//   * dvk_blit_texture      — vkCmdBlitImage between two user textures
 //
 // These differ from the staging upload path in Resources.cpp because they
 // cannot ride on the per-frame command buffer:
@@ -19,7 +19,7 @@
 #include "Device.h"
 #include "Resources.h"
 #include "LogRing.h"   // mipmap 资源操作打点（GPU fault dump）
-#include "../Backend.h"
+#include "BackendVulkanDecls.h"
 #include "../../MG_State/State.h"
 #include "../../MG_Impl/Log.h"
 
@@ -235,7 +235,7 @@ void generate_mipmaps(GLuint name) {
             }
             // FIX (重建纹理采样黑屏 - CRITICAL cross-command-buffer 同步):
             // old image 的 level0 数据通常由 glTexImage2D 记录到「主 command
-            // buffer」（backend_texture_upload → b->commandBuffer），并只在
+            // buffer」（dvk_texture_upload → b->commandBuffer），并只在
             // draw / glFinish 时才提交。而下面重建分支用独立的 one-shot command
             // buffer 去 vkCmdCopyImage 读 old level0。若 one-shot 先于主 command
             // buffer 提交执行，old image 的 level0 在 GPU 上还【未初始化】，
@@ -664,8 +664,8 @@ int read_pixels(int x, int y, int w, int h, GLenum format, GLenum type, void* ou
         }
         if (srcImage == VK_NULL_HANDLE || srcFmt == VK_FORMAT_UNDEFINED) return 0;
 
-        backend_end_render_pass();
-        backend_commit();
+        dvk_end_render_pass();
+        dvk_commit();
         if (readFboName != 0 && srcTexId != 0) {
             auto& tbl = texture_table();
             auto it = tbl.find(srcTexId);
@@ -808,7 +808,7 @@ int read_pixels(int x, int y, int w, int h, GLenum format, GLenum type, void* ou
         mithril::Framebuffer* fbo = mithril::state_get_framebuffer(readFboName);
         if (!fbo || !fbo->colors[0].texture) return 0;
         src_tex_id = fbo->colors[0].texture;
-        src_image = backend_get_texture_image(src_tex_id);
+        src_image = dvk_get_texture_image(src_tex_id);
         mithril::Texture* t = mithril::state_get_texture(src_tex_id);
         if (t) src_fmt = gl_internal_to_vk((GLenum)t->internalFormat);
     }
@@ -816,11 +816,11 @@ int read_pixels(int x, int y, int w, int h, GLenum format, GLenum type, void* ou
 
     // Flush any pending rendering into the colour attachment so the readback
     // sees the latest pixels.
-    backend_end_render_pass();
-    backend_commit();
+    dvk_end_render_pass();
+    dvk_commit();
 
     // Resolve the source image's layout AFTER the flush above. If a render pass
-    // was active when read_pixels() was entered, backend_end_render_pass() just
+    // was active when read_pixels() was entered, dvk_end_render_pass() just
     // transitioned the user-FBO color attachment back to a read-only layout
     // (SHADER_READ_ONLY_OPTIMAL for color) and recorded it in
     // TextureEntry::currentLayout. Reading it here guarantees the barrier below
@@ -1239,16 +1239,16 @@ void blit_images_impl(VkImage src_image, VkFormat src_format,
 // ===========================================================================
 extern "C" {
 
-void backend_generate_mipmaps(GLuint name) {
+void dvk_generate_mipmaps(GLuint name) {
     mithril::vk::generate_mipmaps(name);
 }
 
-int backend_read_pixels(int x, int y, int w, int h,
+int dvk_read_pixels(int x, int y, int w, int h,
                         GLenum format, GLenum type, void* out_pixels) {
     return mithril::vk::read_pixels(x, y, w, h, format, type, out_pixels);
 }
 
-void backend_blit_texture(GLuint src_name, GLuint dst_name,
+void dvk_blit_texture(GLuint src_name, GLuint dst_name,
                           int srcX0, int srcY0, int srcX1, int srcY1,
                           int dstX0, int dstY0, int dstX1, int dstY1,
                           GLbitfield mask, GLenum filter) {
@@ -1258,7 +1258,7 @@ void backend_blit_texture(GLuint src_name, GLuint dst_name,
                               mask, filter);
 }
 
-void backend_blit_images(VkImage src_image, VkFormat src_format,
+void dvk_blit_images(VkImage src_image, VkFormat src_format,
                          VkImage dst_image, VkFormat dst_format,
                          int srcX0, int srcY0, int srcX1, int srcY1,
                          int dstX0, int dstY0, int dstX1, int dstY1,
@@ -1286,7 +1286,121 @@ void backend_blit_images(VkImage src_image, VkFormat src_format,
                                   is_dst_default_fbo != 0, dst_height);
 }
 
-void backend_clear_texture(GLuint name, int level,
+/* MSAA resolve（glBlitFramebuffer MS→SS）：vkCmdResolveImage。Vulkan 核心
+ * 只支持颜色/深度？—— 实际上 vkCmdResolveImage 明确禁止 depth/stencil
+ * 目的图像（需要 VK_KHR_depth_stencil_resolve / Vulkan 1.2 subpass
+ * resolve），所以 depth/stencil mask 在此告警并跳过（Metal 后端原生支持）。
+ * 布局往返与 blit_images_impl 相同（COLOR_ATTACHMENT_OPTIMAL ↔
+ * TRANSFER_*_OPTIMAL）。 */
+void dvk_resolve_images(VkImage src_image, VkFormat src_format,
+                        VkImage dst_image, VkFormat dst_format,
+                        int x, int y, int width, int height,
+                        GLbitfield mask,
+                        int is_dst_default_fbo, int dst_height) {
+    mithril::vk::Backend* b = mithril::vk::backend();
+    if (!b->initialized) return;
+    if (src_image == VK_NULL_HANDLE || dst_image == VK_NULL_HANDLE) return;
+    if (width <= 0 || height <= 0) return;
+    if (!(mask & GL_COLOR_BUFFER_BIT)) {
+        static bool warnedDepth = false;
+        if (!warnedDepth) {
+            warnedDepth = true;
+            MITHRIL_LOG_WARN("vk", "dvk_resolve_images: depth/stencil MSAA "
+                             "resolve is not supported by Vulkan core "
+                             "(VK_KHR_depth_stencil_resolve not enabled) — "
+                             "skipped");
+        }
+        return;
+    }
+
+    // 与 blit 相同的默认帧缓冲 Y 翻转（GL bottom-left → Vulkan top-left）。
+    int dstY0 = y, dstY1 = y + height;
+    if (is_dst_default_fbo && dst_height > 0) {
+        dstY0 = dst_height - dstY0;
+        dstY1 = dst_height - dstY1;
+    }
+
+    mithril::vk::OneShotCtx c;
+    if (!mithril::vk::begin_one_shot(c)) return;
+
+    const VkImageAspectFlags aspect = mithril::vk::aspect_for_format(src_format);
+
+    // src: COLOR_ATTACHMENT_OPTIMAL -> TRANSFER_SRC_OPTIMAL
+    VkImageMemoryBarrier sb{};
+    sb.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    sb.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    sb.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    sb.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    sb.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    sb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    sb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    sb.image = src_image;
+    sb.subresourceRange.aspectMask = aspect;
+    sb.subresourceRange.levelCount = 1;
+    sb.subresourceRange.layerCount = 1;
+    vkCmdPipelineBarrier(c.cmd, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+                         0, nullptr, 0, nullptr, 1, &sb);
+
+    // dst: COLOR_ATTACHMENT_OPTIMAL -> TRANSFER_DST_OPTIMAL
+    VkImageMemoryBarrier db{};
+    db.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    db.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    db.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    db.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    db.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    db.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    db.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    db.image = dst_image;
+    db.subresourceRange.aspectMask = mithril::vk::aspect_for_format(dst_format);
+    db.subresourceRange.levelCount = 1;
+    db.subresourceRange.layerCount = 1;
+    vkCmdPipelineBarrier(c.cmd, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+                         0, nullptr, 0, nullptr, 1, &db);
+
+    // Resolve 是 1:1：src 矩形与 dst 矩形同尺寸（前端已按 GL spec 校验）。
+    VkImageResolve region{};
+    region.srcSubresource.aspectMask = aspect;
+    region.srcSubresource.mipLevel = 0;
+    region.srcSubresource.baseArrayLayer = 0;
+    region.srcSubresource.layerCount = 1;
+    region.srcOffset = { x, y, 0 };
+    region.dstSubresource.aspectMask = db.subresourceRange.aspectMask;
+    region.dstSubresource.mipLevel = 0;
+    region.dstSubresource.baseArrayLayer = 0;
+    region.dstSubresource.layerCount = 1;
+    region.dstOffset = { std::min(dstY0, dstY1), x, 0 };
+    region.extent = { (uint32_t)width, (uint32_t)height, 1 };
+    vkCmdResolveImage(c.cmd,
+                      src_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                      dst_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                      1, &region);
+
+    // 转回 COLOR_ATTACHMENT_OPTIMAL（与 blit 的启发式一致：FBO 渲染目标
+    // resolve 后通常继续被渲染或采样，COLOR_ATTACHMENT_OPTIMAL 是
+    // begin_render_pass 会重新 barrier 的安全落点）。
+    sb.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    sb.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
+                       VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    sb.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    sb.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    vkCmdPipelineBarrier(c.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0,
+                         0, nullptr, 0, nullptr, 1, &sb);
+    db.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    db.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
+                       VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    db.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    db.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    vkCmdPipelineBarrier(c.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0,
+                         0, nullptr, 0, nullptr, 1, &db);
+
+    mithril::vk::end_one_shot(c);
+}
+
+void dvk_clear_texture(GLuint name, int level,
                            int x, int y, int z,
                            int w, int h, int d,
                            GLenum format, GLenum type,

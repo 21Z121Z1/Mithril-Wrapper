@@ -105,6 +105,11 @@ static void log_prepare_draw_miss(const char* why, GLuint prog_id) {
 }
 
 static bool prepare_draw(GLenum mode) {
+    // Conditional render 门控（glBeginConditionalRender）：遮挡查询结果为
+    // 零 → 丢弃。所有 draw 变体（direct/indirect/multi）都汇聚到
+    // prepare_draw，这一处即可覆盖全部。决策在 BEGIN 或首次评估时缓存，
+    // 这里只是 O(1) 检查。
+    if (!mg_conditional_render_allows()) return false;
     // Resolve current program + its SPIR-V.
     mithril::Program* prog = mithril::state_get_program(g_state->currentProgram);
     if (!prog || !prog->linked) {
@@ -187,7 +192,8 @@ static bool prepare_draw(GLenum mode) {
     mithril::Framebuffer* fbo = mithril::state_get_framebuffer(g_state->currentDrawFBO);
     if (fbo) {
         for (int i = 0; i < color_count; ++i) {
-            GLuint t = fbo->colors[i].texture;
+            // renderbuffer 附件取影子纹理（fbo_attachment_texture）。
+            GLuint t = mithril::fbo_attachment_texture(fbo->colors[i]);
             mithril::Texture* tex = mithril::state_get_texture(t);
             if (tex) color_formats[i] = backend_vk_format_for_gl((GLenum)tex->internalFormat);
         }
@@ -216,8 +222,9 @@ static bool prepare_draw(GLenum mode) {
     // the GL texture table. For user FBOs, derive the VkFormat from the GL
     // internalFormat.
     VkFormat depth_format = VK_FORMAT_UNDEFINED;
-    if (fbo && fbo->depth.texture) {
-        mithril::Texture* dt = mithril::state_get_texture(fbo->depth.texture);
+    GLuint depth_tex_name = fbo ? mithril::fbo_attachment_texture(fbo->depth) : 0;
+    if (fbo && depth_tex_name) {
+        mithril::Texture* dt = mithril::state_get_texture(depth_tex_name);
         if (dt) depth_format = backend_vk_format_for_gl((GLenum)dt->internalFormat);
     } else if (depth_view != VK_NULL_HANDLE) {
         // EGL default framebuffer: depth is always D32_SFLOAT_S8_UINT.
@@ -291,17 +298,20 @@ static bool prepare_draw(GLenum mode) {
     if (fbo) {
         GLuint color_tex_ids[8] = {0};
         for (int i = 0; i < color_count && i < 8; ++i) {
-            color_tex_ids[i] = fbo->colors[i].texture;
+            color_tex_ids[i] = mithril::fbo_attachment_texture(fbo->colors[i]);
         }
-        GLuint depth_tex_id = fbo->depth.texture;
+        GLuint depth_tex_id = mithril::fbo_attachment_texture(fbo->depth);
         backend_set_fbo_attachment_tex_ids(color_tex_ids, color_count, depth_tex_id);
     } else {
         backend_set_fbo_attachment_tex_ids(nullptr, 0, 0);
     }
 
-    // Begin render pass (Load action preserves previous contents).
+    // Begin render pass (Load action preserves previous contents). 采样数取
+    // 当前绘制 FBO 附件的最大值（multisample FBO 用多采样 pass；管线构建
+    // 侧从同一来源取值，保证 pass/pipeline/附件三者一致）。
     backend_set_load_load();
-    backend_begin_render_pass(colors, color_count, depth_view, w, h, 1);
+    backend_begin_render_pass(colors, color_count, depth_view, w, h,
+                              mithril::draw_fbo_sample_count());
 
     // Bind pipeline + set dynamic state via vkCmdSet*.
     backend_bind_pipeline(pipeline);
@@ -1326,8 +1336,8 @@ GLsync glFenceSync(GLenum condition, GLbitfield flags) {
     sync.handle = g_state->nextSyncHandle;
     sync.condition = condition;
     sync.flags = flags;
-    sync.submitSerial = mithril::vk::backend_current_submit_serial();
-    sync.signaled = sync.submitSerial <= mithril::vk::backend_last_completed_serial();
+    sync.submitSerial = backend_current_submit_serial();
+    sync.signaled = sync.submitSerial <= backend_last_completed_serial();
     if (sync.signaled) sync.submitSerial = 0;
     sync.markedForDeletion = false;
     g_state->syncObjects[sync.handle] = sync;
@@ -1367,7 +1377,7 @@ GLenum glClientWaitSync(GLsync sync, GLbitfield flags, GLuint64 timeout) {
     mithril::Sync& s = it->second;
 
     if (s.signaled || s.submitSerial == 0 ||
-        s.submitSerial <= mithril::vk::backend_last_completed_serial()) {
+        s.submitSerial <= backend_last_completed_serial()) {
         s.signaled = true;
         s.submitSerial = 0;
         return GL_ALREADY_SIGNALED;
@@ -1380,7 +1390,7 @@ GLenum glClientWaitSync(GLsync sync, GLbitfield flags, GLuint64 timeout) {
         backend_commit();
     }
 
-    if (mithril::vk::backend_wait_serial(s.submitSerial, (uint64_t)timeout)) {
+    if (backend_wait_serial(s.submitSerial, (uint64_t)timeout)) {
         s.signaled = true;
         s.submitSerial = 0;
         return GL_CONDITION_SATISFIED;
@@ -1404,7 +1414,7 @@ void glWaitSync(GLsync sync, GLbitfield flags, GLuint64 timeout) {
     // conservative but preserves GL server-wait semantics across thread/context
     // hand-offs until a native VkSemaphore-backed cross-context path exists.
     if (it->second.signaled || it->second.submitSerial == 0 ||
-        mithril::vk::backend_wait_serial(it->second.submitSerial, UINT64_MAX)) {
+        backend_wait_serial(it->second.submitSerial, UINT64_MAX)) {
         it->second.signaled = true;
         it->second.submitSerial = 0;
     }
@@ -1442,7 +1452,7 @@ void glGetSynciv(GLsync sync, GLenum pname, GLsizei bufSize, GLsizei* length, GL
     }
     mithril::Sync& s = it->second;
     if (s.submitSerial != 0 &&
-        s.submitSerial <= mithril::vk::backend_last_completed_serial()) {
+        s.submitSerial <= backend_last_completed_serial()) {
         s.submitSerial = 0;
         s.signaled = true;
     }

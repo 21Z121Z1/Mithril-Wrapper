@@ -373,6 +373,12 @@ struct Renderbuffer {
     GLsizei   height = 0;
     GLsizei   samples = 0;
     bool      markedForDeletion = false;
+    // 后端资源代理：renderbuffer 的存储由一张（对 GL 不可见的）影子纹理
+    // 承载，名字来自纹理命名空间。GL renderbuffer 名与纹理名分属两个
+    // 命名空间、数值会撞车，绝不能直接拿 rb 名当后端纹理键。FBO 附件解析
+    // （collect_draw_fbo_attachments / blit / readback）把 rb 附件统一替换
+    // 成这个名字。0 = 尚未分配存储。
+    GLuint    shadowTexture = 0;
 };
 
 // ---- Shader ----
@@ -658,6 +664,15 @@ struct GLState {
     uint64_t swPrimAccum = 0;
     uint64_t swTfbWrittenAccum = 0;
 
+    // ---- NV/ARB conditional render（glBeginConditionalRender）----
+    // 门控 draw / glClear / glClearBuffer*：非零遮挡样本数才执行。
+    // decision: -1 未决（NO_WAIT 模式结果未就绪时首次评估取 pass），
+    // 0 丢弃，1 放行。BEGIN 时按模式决定是否阻塞取结果并缓存决策。
+    bool   conditionalRenderActive = false;
+    GLuint conditionalRenderQuery  = 0;
+    GLenum conditionalRenderMode   = 0;
+    int    conditionalDecision     = -1;
+
     // ---- Buffer bindings (per-target, non-indexed) ----
     // Indexed by BufferTarget enum. ElementArray is NOT here (lives in VAO).
     BindingSlot bufferBindings[kBufferTargetCount];
@@ -906,6 +921,14 @@ void state_gen_names(const char* kind, GLsizei n, GLuint* out);
 
 // ---- Capability check helper (for glIsEnabled) ----
 bool state_is_capability_enabled(GLenum cap);
+
+// ---- Multisample helper ----
+/* 当前绘制 FBO 的采样数（所有颜色/深度附件 samples 的最大值；FBO 0 恒为
+ * 1）。前端 begin_render_pass / clear 和双后端的管线构建（rasterizationSamples
+ * / rasterSampleCount + 管线缓存键）都用它，保证 pass、pipeline、附件三者
+ * 采样数一致 —— Vulkan 的 render-pass 兼容性规则和 Metal 的 PSO 校验都强制
+ * 这一点。null state 或无附件时返回 1。 */
+int draw_fbo_sample_count();
 
 } // namespace mithril
 
