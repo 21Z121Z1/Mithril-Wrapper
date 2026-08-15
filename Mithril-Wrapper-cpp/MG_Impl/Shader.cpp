@@ -685,12 +685,22 @@ bool shader_link_program(const std::string& vs_source, const std::string& fs_sou
     // The flip only edits gl_Position math inside main(), so the resource
     // set (declarations) is identical and an independent walk assigns the
     // same bindings. verify/shader_link_probe.cpp pins this invariant.
+    //
+    // FIX (红屏安全网第一道): 非 flip 变体编译成功而 flip 变体失败时（glslang
+    // 仅对 rename+wrapper 后的源拒绝，极罕见），不再让整个链接失败（那会
+    // 触发 fallback 灰屏/跳 draw），而是复用非 flip SPIR-V —— FBO 0 内容
+    // 上下颠倒但可见。draw 永不因 flip 变体而消失。
     std::string vs_flip = vs;
     inject_position_fixup(vs_flip, GL_VERTEX_SHADER, /*flip_y=*/true);
     std::vector<uint32_t> vsFlipSpv, fsFlipSpv;
     if (!compile_program(vs_flip, fs, attrib_bindings, nullptr,
                          vsFlipSpv, fsFlipSpv, out_info_log)) {
-        return false;
+        MITHRIL_LOG_WARN("shader", "Y-flipped variant failed to compile "
+                          "(plain variant succeeded) — reusing non-flipped "
+                          "SPIR-V; default-framebuffer content will be "
+                          "upside-down but drawn. Info: %s",
+                          out_info_log.c_str());
+        vsFlipSpv = vsSpv;
     }
 
     out.vertexSpirv = std::move(vsSpv);

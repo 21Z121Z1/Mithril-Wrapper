@@ -140,6 +140,10 @@ VkRenderPass get_template_render_pass(const VkFormat* color_formats, int color_c
 // 计数递增（实现见 CommandStream.cpp，供 commit_frame 的帧摘要记录）。
 void frame_draw_count_inc();
 
+// 查询对象路径（Queries.cpp）在 render pass 之外录制 vkCmd*；置位
+// hasCommands，确保 glFinish/commit_frame 不会因"空帧"跳过提交。
+void note_query_commands();
+
 } // namespace vk
 } // namespace mithril
 

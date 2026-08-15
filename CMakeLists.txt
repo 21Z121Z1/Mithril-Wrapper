@@ -205,6 +205,9 @@ set(MITHRIL_SOURCES
     Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/DescriptorSet.cpp
     Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/CommandStream.cpp
     Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/ImageOps.cpp
+    # Queries.cpp: GL query-object backing (VkQueryPool) — glBeginQuery/
+    # glEndQuery/glQueryCounter/glGetQueryObject*/glGetQueryBufferObject*
+    Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Queries.cpp
     # SwapchainCommon.cpp: shared post-surface swapchain creation logic
     # (format query / vkCreateSwapchainKHR / image views / depth-stencil /
     # destroy / acquire / present). Platform-specific files

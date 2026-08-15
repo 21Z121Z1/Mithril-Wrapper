@@ -582,6 +582,47 @@ uint64_t backend_current_submit_serial(void);
 bool     backend_wait_serial(uint64_t serial, uint64_t timeout_ns);
 
 /*
+ * GL query-object backing (glBeginQuery/glEndQuery/glQueryCounter/
+ * glGetQueryObject / glGetQueryBufferObject families). Implemented in
+ * MG_Backend/DirectVulkan/Queries.cpp — REAL VkQueryPool implementations,
+ * not stubs. MoltenVK/Metal supports occlusion + timestamp queries
+ * (timestampValidBits > 0 on A13+/M1+; older GPUs report 0 and the
+ * GL layer falls back to a monotonic CPU clock for GL_TIMESTAMP).
+ */
+enum {
+    MITHRIL_QUERY_OCCLUSION    = 0, /* VK_QUERY_TYPE_OCCLUSION, 1 slot */
+    MITHRIL_QUERY_TIMESTAMP    = 1, /* VK_QUERY_TYPE_TIMESTAMP, 1 slot (glQueryCounter) */
+    MITHRIL_QUERY_TIME_ELAPSED = 2  /* timestamp pool, 2 slots (begin/end), result = t1 - t0 */
+};
+/* 为 GL 查询对象创建底层 VkQueryPool。kind 见上。幂等：已存在且类型一致返回 true；
+ * 类型不一致（GL 禁止查询对象换 target，GL 层已拦）销毁重建。失败返回 false。 */
+bool     backend_query_pool_create(uint64_t query_id, int kind);
+/* glDeleteQueries：销毁 pool（在飞时推入 slot disposalQueue 延迟销毁）。 */
+void     backend_query_pool_destroy(uint64_t query_id);
+/* 录制 vkCmdResetQueryPool + vkCmdBeginQuery（OCCLUSION）或 begin 时间戳
+ * （TIME_ELAPSED slot0）。必须在 ensure_command_buffer_recording 之后调用；
+ * 内部自行确保录制状态。 */
+void     backend_query_begin(uint64_t query_id);
+/* 录制 vkCmdEndQuery（OCCLUSION）或 end 时间戳（TIME_ELAPSED slot1）。 */
+void     backend_query_end(uint64_t query_id);
+/* glQueryCounter(GL_TIMESTAMP)：录制 vkCmdWriteTimestamp。 */
+void     backend_query_write_timestamp(uint64_t query_id);
+/* 取结果。wait=true 时阻塞到可用（GL_QUERY_RESULT 语义），否则非阻塞。
+ * *available 写可用性。TIME_ELAPSED 自动做 t1-t0。返回 false = pool 不存在。 */
+bool     backend_query_get_results(uint64_t query_id, bool wait,
+                                   uint64_t* out, bool* available);
+/* glGetQueryBufferObject*：录制 vkCmdCopyQueryPoolResults 到 GL buffer。
+ * with_availability 写入 [result:u64, available:u64]（stride 16），否则只写
+ * 8 字节结果。NO_WAIT 语义由 with_availability 承载（GPU 端无法阻塞）。 */
+void     backend_query_copy_results(uint64_t query_id, uint32_t gl_buffer_id,
+                                    VkDeviceSize offset, bool with_availability);
+/* 图形队列的 timestampValidBits（0 = 不支持时间戳查询）。 */
+uint32_t backend_query_timestamp_valid_bits(void);
+/* glGetInteger64v(GL_TIMESTAMP)：当前 GPU 时间戳（ns）。临时池写一枚
+ * timestamp + 提交 + 阻塞读回；无时间戳计数器时回退 CPU 单调时钟。 */
+uint64_t backend_query_timestamp_now_ns(void);
+
+/*
  * Reflect the vertex + fragment SPIR-V of `program` (via SPIRV-Cross), merge
  * the VS/FS binding sets, and build + cache a VkDescriptorSetLayout /
  * VkPipelineLayout / VkDescriptorPool on the program. Idempotent (runs once

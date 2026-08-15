@@ -209,6 +209,21 @@ void glLinkProgram(GLuint program) {
         p->vertexSpirv = std::move(linkOut.vertexSpirv);
         p->vertexSpirvYFlipped = std::move(linkOut.vertexSpirvFlipped);
         p->fragmentSpirv = std::move(linkOut.fragmentSpirv);
+
+        // FIX (红屏安全网, d2a8e49 回退恢复): 链接成功但 flip 变体为空时（glslang
+        // 仅在 inject_position_fixup 包装后拒绝该 shader 的罕见构造），用非 flip
+        // 变体补位。prepare_draw 对 FBO 0 选 flip 变体，为空则跳过 draw —— 只剩
+        // glClearColor（MC 加载屏纯红、无 Mojang 字标）。补位后 Y 方向颠倒但
+        // 内容可见；正确解法是让 flip 编译成功（inject_position_fixup 是语法安全
+        // 的 rename+wrapper，失败只可能是 shader 自身与 wrapper 名冲突）。
+        if (p->vertexSpirvYFlipped.empty() && !p->vertexSpirv.empty()) {
+            p->vertexSpirvYFlipped = p->vertexSpirv;
+            MITHRIL_LOG_WARN("program", "vertexSpirvYFlipped was empty for "
+                              "program %u, falling back to non-flipped variant "
+                              "(%zu words) — Y orientation will be wrong but "
+                              "draws will not be skipped",
+                              program, p->vertexSpirv.size());
+        }
     } else {
         // Link failed (uncompiled stage, glslang rejection, SPIR-V remap
         // failure). Substitute the fallback shader pair so the program still

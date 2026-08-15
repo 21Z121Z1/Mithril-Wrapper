@@ -162,7 +162,10 @@ static const char* kExtensions[] = {
     "GL_ARB_shader_precision",
     "GL_ARB_shader_texture_image_samples",
     "GL_ARB_shader_texture_lod",
-    "GL_ARB_sparse_texture",
+    /* GL_ARB_sparse_texture 不上报：Metal/MoltenVK 无 sparse residency
+     * （vkCreateImage 不接受 VK_IMAGE_CREATE_SPARSE_BINDING_BIT），且
+     * glTexPageCommitmentARB 无任何实现 — 上报即假扩展。LWJGL 解析不到
+     * 入口点会整体禁用，但诚实上报让 mod 走非 sparse 路径更稳。*/
     "GL_ARB_explicit_uniform_location",
     "GL_ARB_program_interface_query",
     "GL_ARB_seamless_cubemap_per_texture",
@@ -474,9 +477,20 @@ void glGetDoublev(GLenum pname, GLdouble* params) {
     for (int i = 0; i < 4; ++i) params[i] = (GLdouble)f[i];
 }
 
+/* GL 时间源的"当前"值（Queries.cpp）：真实 GPU 时间戳，无计数器设备回退
+ * CPU 单调时钟，与 glQueryCounter 同源。 */
+extern "C" uint64_t backend_query_timestamp_now_ns(void);
+
 void glGetInteger64v(GLenum pname, GLint64* params) {
     MITHRIL_ENSURE_INIT();
     if (!params) return;
+#ifndef GL_TIMESTAMP
+#define GL_TIMESTAMP 0x8E28
+#endif
+    if (pname == GL_TIMESTAMP) {
+        params[0] = (GLint64)backend_query_timestamp_now_ns();
+        return;
+    }
     GLint ip[4] = {0,0,0,0};
     glGetIntegerv(pname, ip);
     for (int i = 0; i < 4; ++i) params[i] = (GLint64)ip[i];

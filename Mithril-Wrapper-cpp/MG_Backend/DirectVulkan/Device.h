@@ -52,6 +52,12 @@ struct DeferredDestroy {
     // fault (kIOGPUCommandBufferCallbackErrorPageFault). The retired pool is
     // deferred here and destroyed only after the slot's fence signals.
     VkDescriptorPool pool = VK_NULL_HANDLE;
+    // GL query-object backing (glBeginQuery/glEndQuery/glQueryCounter): the
+    // VkQueryPool of a deleted GL query object. A query may have pending
+    // begin/end commands recorded on the current slot's command buffer, so the
+    // pool cannot be destroyed at glDeleteQueries time — it rides the same
+    // deferred-destruction path as buffers/textures.
+    VkQueryPool     queryPool = VK_NULL_HANDLE;
     // FIX (MobileGL-style VRAM monitoring): byte size of the memory allocation
     // being freed, so drain_disposal_queue can decrement currentVramBytes.
     // Only set for entries that own a VkDeviceMemory (buffer/texture main alloc
@@ -389,12 +395,12 @@ void safe_device_wait_idle();
 // commit_frame(). Records the current frame slot so a sync object stamped with
 // the returned serial can be completed exactly when that slot's fence signals.
 uint64_t backend_frame_serial_advance(int frameSlot);
-// Returns the highest serial whose GPU submission has definitely completed.
-uint64_t backend_last_completed_serial();
+// extern "C"：与 Backend.h 的全局 C 声明合并（MG_Impl/Drawing.cpp 跨命名空间调用）。
+extern "C" uint64_t backend_last_completed_serial();
 // Block (or, with timeout==0, poll) until the submission bearing `serial` has
 // completed. Returns true if completed, false if still pending (timeout==0) or
 // the wait failed.
-bool     backend_wait_serial(uint64_t serial, uint64_t timeout_ns);
+extern "C" bool     backend_wait_serial(uint64_t serial, uint64_t timeout_ns);
 
 // FIX (显存耗尽根因 - 主动式 GC，深度参考 MobileGL):
 //

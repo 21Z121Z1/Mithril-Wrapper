@@ -291,6 +291,9 @@ void drain_disposal_queue(int slot) {
         // 只能在此处（slot fence 已等待，所有引用其 set 的 command buffer 完成）
         // 销毁 —— vkDestroyDescriptorPool 隐式释放池内所有 set。
         if (d.pool) vkDestroyDescriptorPool(b->device, d.pool, nullptr);
+        // GL 查询对象退役的 VkQueryPool（glDeleteQueries 推入）。查询的
+        // begin/end/timestamp 命令可能仍在该 slot 的 command buffer 里。
+        if (d.queryPool) vkDestroyQueryPool(b->device, d.queryPool, nullptr);
     }
     q.clear();
 }
@@ -1397,17 +1400,17 @@ uint64_t backend_frame_serial_advance(int frameSlot) {
     return s;
 }
 
-uint64_t backend_last_completed_serial() {
+extern "C" uint64_t backend_last_completed_serial() {
     refresh_completed_serials();
     return backend()->completedSerial;
 }
 
 // 已发出的提交总数。glFenceSync 用它判断"我这个 fence 要等的是哪一次提交"。
-uint64_t backend_current_submit_serial() {
+extern "C" uint64_t backend_current_submit_serial() {
     return backend()->submitSerial;
 }
 
-bool backend_wait_serial(uint64_t serial, uint64_t timeout_ns) {
+extern "C" bool backend_wait_serial(uint64_t serial, uint64_t timeout_ns) {
     Backend* b = backend();
     if (!b->initialized) return true;
     refresh_completed_serials();

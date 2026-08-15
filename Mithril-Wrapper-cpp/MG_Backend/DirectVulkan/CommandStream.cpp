@@ -598,6 +598,14 @@ void record_layout_barrier(VkCommandBuffer cb, VkImage image, VkFormat format,
 // 的帧摘要记录使用。
 void frame_draw_count_inc() { encoder().frameDrawCount++; }
 
+// GL 查询对象路径（Queries.cpp）：vkCmdBeginQuery / vkCmdEndQuery /
+// vkCmdWriteTimestamp / vkCmdResetQueryPool / vkCmdCopyQueryPoolResults 都在
+// render pass 之外录制，不会经过 begin_render_pass 的 hasCommands=true 标记。
+// 不置位的话 commit_frame 会因 hasCommands=false 跳过提交 —— glFinish 之后
+// 查询命令仍在从未提交的 command buffer 里，vkGetQueryPoolResults 读到的是
+// 未定义内存（观察到：第二个 glQueryCounter 池返回 0 / 脏数据）。
+void note_query_commands() { encoder().hasCommands = true; }
+
 // Public render-pass cache API (declared in CommandStream.h; used by
 // Pipeline.cpp to build pipelines against the compatible template pass).
 VkRenderPass get_or_create_render_pass(const VkFormat* color_formats, int color_count,
@@ -2611,10 +2619,13 @@ void backend_set_stencil_state(int enabled, int func, int ref, int mask,
 }
 
 void backend_draw_arrays(int primitive, int first, int count) {
-    (void)primitive;
+    (void)first;
     mithril::vk::Backend* b = mithril::vk::backend();
     if (!b->commandBuffer) return;
     if (!mithril::vk::draw_recording_allowed("backend_draw_arrays")) return;
+    // GL_PRIMITIVES_GENERATED / GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN 的
+    // 软件计数（Metal 无管线统计查询）：draw 参数已知，录制期精确累计。
+    mithril::account_draw_primitives(primitive, count, 1);
     // Root cause AG (CRITICAL): pass firstInstance from g_state. glDrawArrays
     // itself has no baseInstance, but glDrawArraysInstancedBaseInstance /
     // glDrawArraysInstancedBaseVertexBaseInstance (rare) set
@@ -2636,6 +2647,7 @@ void backend_draw_indexed(int primitive, int count, int index_type,
     mithril::vk::Backend* b = mithril::vk::backend();
     if (!b->commandBuffer || !index_buffer) return;
     if (!mithril::vk::draw_recording_allowed("backend_draw_indexed")) return;
+    mithril::account_draw_primitives(primitive, count, 1);  // 软件图元计数（见 backend_draw_arrays）
     // FIX (root cause AE, CRITICAL): GL_UNSIGNED_BYTE index support.
     // Drawing.cpp maps GL_UNSIGNED_BYTE → 2 (index_type_to_int), but the
     // previous code only handled 0 (UINT16) and 1 (UINT32), treating
@@ -2671,10 +2683,11 @@ void backend_draw_indexed(int primitive, int count, int index_type,
 }
 
 void backend_draw_arrays_instanced(int primitive, int first, int count, int primcount) {
-    (void)primitive;
+    (void)first;
     mithril::vk::Backend* b = mithril::vk::backend();
     if (!b->commandBuffer) return;
     if (!mithril::vk::draw_recording_allowed("backend_draw_arrays_instanced")) return;
+    mithril::account_draw_primitives(primitive, count, primcount < 1 ? 1 : primcount);  // 软件图元计数
     // Root cause AG (CRITICAL): pass firstInstance from g_state (see
     // backend_draw_arrays for rationale). glDrawArraysInstancedBaseInstance
     // sets g_state->currentBaseInstance before falling through to the
@@ -2693,6 +2706,7 @@ void backend_draw_indexed_instanced(int primitive, int count, int index_type,
     mithril::vk::Backend* b = mithril::vk::backend();
     if (!b->commandBuffer || !index_buffer) return;
     if (!mithril::vk::draw_recording_allowed("backend_draw_indexed_instanced")) return;
+    mithril::account_draw_primitives(primitive, count, primcount < 1 ? 1 : primcount);  // 软件图元计数
     // FIX (root cause AE, CRITICAL): GL_UNSIGNED_BYTE index support — see
     // backend_draw_indexed for the full rationale.
     VkIndexType t;

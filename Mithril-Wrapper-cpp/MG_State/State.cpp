@@ -457,6 +457,35 @@ Query* state_get_query(GLuint id) {
     return it == g_state->queries.end() ? nullptr : &it->second;
 }
 
+// ---- GL 查询对象：软件图元计数（GL_PRIMITIVES_GENERATED /
+// GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN）----
+// Metal 无管线统计查询（MoltenVK pipelineStatisticsQuery=VK_FALSE），但 draw
+// 参数在录制期已知，图元数可精确推导（与 GPU 图元装配规则一致）。由
+// backend_draw_* 家族汇入；glEndQuery 时收割进查询对象。indirect draw 的
+// count 在 GPU buffer 里 CPU 不可见，无法计入（文档化限制）。
+void account_draw_primitives(int gl_mode, int64_t count, int64_t instances) {
+    if (!g_state || count <= 0 || instances <= 0) return;
+    const bool wantPrim = g_state->activeQuery[(int)QueryTarget::PrimitivesGenerated] != 0;
+    const bool wantTfb  = g_state->activeQuery[(int)QueryTarget::TfbPrimsWritten] != 0;
+    if (!wantPrim && !wantTfb) return;
+
+    int64_t prims = 0;
+    switch (gl_mode) {
+        case 0x0000: prims = count; break;                        // GL_POINTS
+        case 0x0001: prims = count / 2; break;                    // GL_LINES
+        case 0x0002: prims = (count > 2) ? count : 0; break;      // GL_LINE_LOOP：n 顶点 n 段
+        case 0x0003: prims = (count > 1) ? count - 1 : 0; break;  // GL_LINE_STRIP
+        case 0x0004: prims = count / 3; break;                    // GL_TRIANGLES
+        case 0x0005: prims = (count > 2) ? count - 2 : 0; break;  // GL_TRIANGLE_STRIP
+        case 0x0006: prims = (count > 2) ? count - 2 : 0; break;  // GL_TRIANGLE_FAN
+        case 0x0007: prims = count / 4 * 2; break;                // GL_QUADS→双三角（compat）
+        default:      prims = count / 3; break;                   // 保守
+    }
+    prims *= instances;
+    if (wantPrim) g_state->swPrimAccum += (uint64_t)prims;
+    if (wantTfb)  g_state->swTfbWrittenAccum += (uint64_t)prims;
+}
+
 // ---- Program pipeline helpers (GL 4.1 ARB_separate_shader_objects) ----
 ProgramPipeline* state_get_program_pipeline(GLuint id) {
     if (!g_state || id == 0) return nullptr;

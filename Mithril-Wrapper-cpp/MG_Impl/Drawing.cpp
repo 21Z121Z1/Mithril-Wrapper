@@ -25,19 +25,19 @@
 #define GL_SYNC_FENCE                0x9116
 #endif
 #ifndef GL_SYNC_CONDITION
-#define GL_SYNC_CONDITION            0x9118
+#define GL_SYNC_CONDITION            0x9113
 #endif
 #ifndef GL_SYNC_FLAGS
 #define GL_SYNC_FLAGS                0x9115
 #endif
 #ifndef GL_SYNC_STATUS
-#define GL_SYNC_STATUS               0x9119
+#define GL_SYNC_STATUS               0x9114
 #endif
 #ifndef GL_SIGNALED
-#define GL_SIGNALED                  0x911E
+#define GL_SIGNALED                  0x9119
 #endif
 #ifndef GL_UNSIGNALED
-#define GL_UNSIGNALED                0x911F
+#define GL_UNSIGNALED                0x9118
 #endif
 #ifndef GL_OBJECT_TYPE
 #define GL_OBJECT_TYPE               0x9112
@@ -115,8 +115,29 @@ static bool prepare_draw(GLenum mode) {
     // render into textures sampled by GL shaders (GL Y-up), so they use the
     // non-flipped variant. Deep reference: MobileGL GetShaderTransformFlags.
     bool is_default_fbo = (g_state->currentDrawFBO == 0);
-    const std::vector<uint32_t>& vs_spirv = is_default_fbo
-        ? prog->vertexSpirvYFlipped : prog->vertexSpirv;
+
+    // FIX (红屏安全网, d2a8e49 回退恢复): FBO 0 优先用 Y-flip 变体；若 flip 变体
+    // 为空（glslang 仅在 flip 包装后拒绝该 shader），回退到非 flip 变体。
+    // 跳过 draw 只会留下 glClearColor（MC 加载屏 = 纯红无 Mojang 字标），
+    // 用非 flip 变体虽上下颠倒但内容可见，绝不让 draw 静默消失。
+    // Program.cpp 链接后也有同型兜底（vertexSpirvYFlipped 空 → 拷贝 vertexSpirv），
+    // 这里是第二道防线，捕获兜底未覆盖的路径（如翻转编译半途失败）。
+    const std::vector<uint32_t>& vs_spirv = [&]() -> const std::vector<uint32_t>& {
+        if (!is_default_fbo) return prog->vertexSpirv;
+        if (!prog->vertexSpirvYFlipped.empty()) return prog->vertexSpirvYFlipped;
+        if (!prog->vertexSpirv.empty()) {
+            static GLuint last_fb_warned = 0;
+            if (last_fb_warned != prog->id) {
+                last_fb_warned = prog->id;
+                MITHRIL_LOG_WARN("gl", "prepare_draw: program %u has empty "
+                                  "vertexSpirvYFlipped for FBO 0 — falling back "
+                                  "to non-flipped SPIR-V (Y orientation wrong, "
+                                  "but draw will not be skipped)", prog->id);
+            }
+            return prog->vertexSpirv;
+        }
+        return prog->vertexSpirvYFlipped; // both empty — caught below
+    }();
 
     // Defensive: skip draws whose shader translation produced no SPIR-V
     // (e.g. glslang failed on an unrecognised construct). Issuing the draw
@@ -1207,23 +1228,42 @@ void glTextureBarrier(void) {
     backend_memory_barrier(GL_FRAMEBUFFER_BARRIER_BIT);
 }
 
-/* ---- Sync objects (P1-16 FIX) ---- */
-// Real state tracking via g_state->syncObjects. Handles are allocated from
-// g_state->nextSyncHandle (monotonic, avoids the sentinel 0x1). CPU-side
-// fences are considered immediately signaled, matching the previous stub
-// behaviour but with proper existence/identity checks.
+/* ---- Sync objects — REAL GPU fence semantics (P1-16 FIX, rewritten) ---- */
+// Backend (Device.cpp) exposes a monotonic submit-serial watermark:
+//   backend_current_submit_serial()  — vkQueueSubmit count issued so far
+//   backend_last_completed_serial()  — strictly-completed watermark (polls the
+//                                      per-slot VkFence via vkGetFenceStatus)
+//   backend_wait_serial(s, timeout)  — blocks on the owning slot fences
+// A fence records serial = current+1 ("the next submit includes everything
+// recorded before me"). Signaling rule:
+//   serial <= completed      → done
+//   serial >  submitSerial   → fence covers zero commands (empty stream) → done
+// GL_SYNC_FLUSH_COMMANDS_BIT on glClientWaitSync flushes the GL stream
+// (backend_end_render_pass + backend_commit) before waiting, per spec.
+
+static bool sync_serial_signaled(uint64_t serial) {
+    if (serial <= backend_last_completed_serial()) return true;
+    // fence 之后没有任何待提交命令（提交序号未推进）→ 空流，立即视为完成。
+    return serial > backend_current_submit_serial();
+}
+
 GLsync glFenceSync(GLenum condition, GLbitfield flags) {
     MITHRIL_ENSURE_INIT();
     if (condition != GL_SYNC_GPU_COMMANDS_COMPLETE) {
         mithril::state_set_error(GL_INVALID_ENUM);
         return nullptr;
     }
+    if (flags != 0) {
+        mithril::state_set_error(GL_INVALID_VALUE);
+        return nullptr;
+    }
     mithril::Sync sync;
     sync.handle = g_state->nextSyncHandle;
     sync.condition = condition;
     sync.flags = flags;
-    sync.signaled = true;  // CPU-side fence is immediately signaled
+    sync.signaled = false;
     sync.markedForDeletion = false;
+    sync.serial = backend_current_submit_serial() + 1;
     g_state->syncObjects[sync.handle] = sync;
     g_state->nextSyncHandle = reinterpret_cast<void*>(
         reinterpret_cast<uintptr_t>(g_state->nextSyncHandle) + 1);
@@ -1235,22 +1275,55 @@ void glDeleteSync(GLsync sync) {
     if (!sync) return;
     void* handle = reinterpret_cast<void*>(sync);
     g_state->syncObjects.erase(handle);
+    // fence 骑在帧槽 VkFence 上（提交序号机制），无独立 VkFence 需要销毁。
 }
 
 GLenum glClientWaitSync(GLsync sync, GLbitfield flags, GLuint64 timeout) {
     MITHRIL_ENSURE_INIT();
-    (void)flags; (void)timeout;
     if (!sync) return GL_WAIT_FAILED;
+    if (flags & ~GL_SYNC_FLUSH_COMMANDS_BIT) {
+        mithril::state_set_error(GL_INVALID_VALUE);
+        return GL_WAIT_FAILED;
+    }
     void* handle = reinterpret_cast<void*>(sync);
     auto it = g_state->syncObjects.find(handle);
     if (it == g_state->syncObjects.end()) return GL_WAIT_FAILED;
-    return it->second.signaled ? GL_ALREADY_SIGNALED : GL_TIMEOUT_EXPIRED;
+    mithril::Sync& s = it->second;
+
+    // 规范：FLUSH 位要求先冲刷 GL 命令流（未提交命令必须先上 GPU 才可能完成）。
+    if (flags & GL_SYNC_FLUSH_COMMANDS_BIT) {
+        backend_end_render_pass();
+        backend_commit();
+    }
+    if (sync_serial_signaled(s.serial)) {
+        s.signaled = true;
+        return GL_ALREADY_SIGNALED;
+    }
+    bool done = backend_wait_serial(s.serial, timeout);
+    if (done) {
+        s.signaled = true;
+        return GL_CONDITION_SATISFIED;
+    }
+    return GL_TIMEOUT_EXPIRED;
 }
 
 void glWaitSync(GLsync sync, GLbitfield flags, GLuint64 timeout) {
     MITHRIL_ENSURE_INIT();
-    (void)sync; (void)flags; (void)timeout;
-    // No-op: CPU-side fences are immediately signaled.
+    (void)timeout;  // 规范要求为 GL_TIMEOUT_IGNORED
+    if (!sync) return;
+    if (flags != 0) {
+        mithril::state_set_error(GL_INVALID_VALUE);
+        return;
+    }
+    void* handle = reinterpret_cast<void*>(sync);
+    auto it = g_state->syncObjects.find(handle);
+    if (it == g_state->syncObjects.end()) return;
+    mithril::Sync& s = it->second;
+    // Vulkan 无服务端任意 fence 等待；为保证后续命令严格晚于 fence 的排序
+    // 语义，冲刷后阻塞到完成（ANGLE/Metal 路径同此策略）。
+    backend_end_render_pass();
+    backend_commit();
+    if (backend_wait_serial(s.serial, UINT64_MAX)) s.signaled = true;
 }
 
 GLboolean glIsSync(GLsync sync) {
@@ -1269,13 +1342,16 @@ void glGetSynciv(GLsync sync, GLenum pname, GLsizei bufSize, GLsizei* length, GL
     void* handle = reinterpret_cast<void*>(sync);
     auto it = g_state->syncObjects.find(handle);
     if (it == g_state->syncObjects.end()) return;
-    const mithril::Sync& s = it->second;
+    mithril::Sync& s = it->second;
     GLint v = 0;
     switch (pname) {
         case GL_OBJECT_TYPE:    v = GL_SYNC_FENCE; break;
         case GL_SYNC_CONDITION: v = (GLint)s.condition; break;
         case GL_SYNC_FLAGS:     v = (GLint)s.flags; break;
-        case GL_SYNC_STATUS:    v = s.signaled ? GL_SIGNALED : GL_UNSIGNALED; break;
+        case GL_SYNC_STATUS:
+            v = sync_serial_signaled(s.serial) ? GL_SIGNALED : GL_UNSIGNALED;
+            s.signaled = (v == GL_SIGNALED);
+            break;
         default: return;
     }
     values[0] = v;

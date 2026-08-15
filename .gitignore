@@ -1,6 +1,7 @@
 build-linux/
 build_linux/
 build/
+build-headless/
 *.o
 *.so
 *.a

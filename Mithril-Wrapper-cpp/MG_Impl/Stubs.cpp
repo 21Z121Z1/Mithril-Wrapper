@@ -75,10 +75,14 @@
 #ifndef GL_TEXTURE_COMPARE_FUNC
 #define GL_TEXTURE_COMPARE_FUNC      0x884D
 #endif
+#ifndef GL_QUERY_RESULT_NO_WAIT
+#define GL_QUERY_RESULT_NO_WAIT      0x8E16
+#endif
 
 #include "includes.h"
 
 #include <cstring>
+#include <ctime>
 
 extern "C" {
 
@@ -143,9 +147,8 @@ void glColor4f(GLfloat, GLfloat, GLfloat, GLfloat) {}
 void glColor4ub(GLubyte, GLubyte, GLubyte, GLubyte) {}
 void glTexCoord2f(GLfloat, GLfloat) {}
 void glTexCoord4f(GLfloat, GLfloat, GLfloat, GLfloat) {}
-void glRasterPos2i(GLint, GLint) {}
-void glRasterPos3f(GLfloat, GLfloat, GLfloat) {}
-void glWindowPos2i(GLint, GLint) {}
+// glRasterPos*/glWindowPos* 家族的完整实现见 GL46_Compat.cpp
+// （符号去重：c503b82 修复被 d2a8e49 误回退，此处不再定义）。
 
 /* ---- Lighting / material / fog ---- */
 void glShadeModel(GLenum) {}
@@ -205,9 +208,7 @@ void glEvalPoint1(GLint) {}
 void glEvalPoint2(GLint, GLint) {}
 
 /* ---- Rect ---- */
-void glRectd(GLdouble, GLdouble, GLdouble, GLdouble) {}
-void glRectf(GLfloat, GLfloat, GLfloat, GLfloat) {}
-void glRecti(GLint, GLint, GLint, GLint) {}
+// glRect* 家族的完整实现见 GL46_Compat.cpp（同上，去重）。
 
 /* ---- Attrib stack ---- */
 void glPushAttrib(GLbitfield) {}
@@ -411,9 +412,17 @@ void glSamplerParameterfv(GLuint sampler, GLenum pname, const GLfloat* params) {
 }
 
 /* =========================================================================
- * Query objects (P1-1 / P2-1)
- * Occlusion / primitives-generated / timer queries.  State is tracked; the
- * backend result retrieval is deferred (returns 0 / GL_FALSE until wired).
+ * Query objects — 真实 VkQueryPool 后端（MG_Backend/DirectVulkan/Queries.cpp）
+ *
+ *   GL_SAMPLES_PASSED / GL_ANY_SAMPLES_PASSED -> VK_QUERY_TYPE_OCCLUSION
+ *   GL_TIMESTAMP (glQueryCounter)             -> vkCmdWriteTimestamp
+ *   GL_TIME_ELAPSED                           -> 2-slot 时间戳池（t1-t0）
+ *   GL_PRIMITIVES_GENERATED / GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN
+ *                                             -> 软件计数（Metal 无管线统计
+ *                                                查询；draw 参数已知，精确）
+ *
+ * 老款 GPU（A12 及更早）timestampValidBits==0：时间戳类回退到单调 CPU 时钟
+ * （真实流逝时间，仅基准不同，限流日志一次性说明）。
  * ========================================================================= */
 static mithril::QueryTarget query_target_from_gl(GLenum target) {
     switch (target) {
@@ -421,8 +430,28 @@ static mithril::QueryTarget query_target_from_gl(GLenum target) {
         case GL_ANY_SAMPLES_PASSED:         return mithril::QueryTarget::AnySamplesPassed;
         case GL_PRIMITIVES_GENERATED:       return mithril::QueryTarget::PrimitivesGenerated;
         case GL_TIME_ELAPSED:               return mithril::QueryTarget::TimeElapsed;
+        case GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN:
+                                            return mithril::QueryTarget::TfbPrimsWritten;
         default:                            return mithril::QueryTarget::Count;
     }
+}
+
+// target -> 后端 pool kind；-1 = 软件计数路径
+static int query_pool_kind_for(mithril::QueryTarget t) {
+    switch (t) {
+        case mithril::QueryTarget::SamplesPassed:
+        case mithril::QueryTarget::AnySamplesPassed:
+            return MITHRIL_QUERY_OCCLUSION;
+        case mithril::QueryTarget::Timestamp:   return MITHRIL_QUERY_TIMESTAMP;
+        case mithril::QueryTarget::TimeElapsed: return MITHRIL_QUERY_TIME_ELAPSED;
+        default: return -1;
+    }
+}
+
+static uint64_t monotonic_ns() {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 }
 
 void glGenQueries(GLsizei n, GLuint* ids) {
@@ -441,6 +470,13 @@ void glDeleteQueries(GLsizei n, const GLuint* ids) {
     for (GLsizei i = 0; i < n; ++i) {
         GLuint name = ids[i];
         if (name == 0) continue;
+        mithril::Query* q = mithril::state_get_query(name);
+        if (q && q->active) {
+            // GL 语义：删除活跃查询 = 隐式 glEndQuery。
+            if (q->target != mithril::QueryTarget::Count)
+                g_state->activeQuery[(int)q->target] = 0;
+        }
+        if (q && q->usesPool) backend_query_pool_destroy(name);
         g_state->queries.erase(name);
         g_state->queryNames.release(name);
     }
@@ -456,49 +492,94 @@ GLboolean glIsQuery(GLuint id) {
 void glBeginQuery(GLenum target, GLuint id) {
     MITHRIL_ENSURE_INIT();
     mithril::QueryTarget qt = query_target_from_gl(target);
-    if (qt == mithril::QueryTarget::Count) {
+    if (qt == mithril::QueryTarget::Count || target == GL_TIMESTAMP) {
+        // glBeginQuery 对 GL_TIMESTAMP 非法（时间戳只能 glQueryCounter）。
         mithril::state_set_error(GL_INVALID_ENUM);
         return;
     }
     mithril::Query* q = mithril::state_get_query(id);
     if (!q) { mithril::state_set_error(GL_INVALID_OPERATION); return; }
+    // GL 语义：同一 target 已有活跃查询 / 查询对象已换过 target → 错误。
+    if (g_state->activeQuery[(int)qt] != 0) {
+        mithril::state_set_error(GL_INVALID_OPERATION);
+        return;
+    }
+    if (q->target != mithril::QueryTarget::Count && q->target != qt) {
+        mithril::state_set_error(GL_INVALID_OPERATION);
+        return;
+    }
     q->target = qt;
     q->active = true;
     q->ended = false;
     q->resultCached = false;
+    q->cachedResult = 0;
+    q->swResult = 0;
+    g_state->activeQuery[(int)qt] = id;
+
+    int kind = query_pool_kind_for(qt);
+    if (kind >= 0 && backend_query_pool_create(id, kind)) {
+        q->usesPool = true;
+        q->cpuFallback = false;
+        backend_query_begin(id);
+    } else if (kind == MITHRIL_QUERY_TIMESTAMP || kind == MITHRIL_QUERY_TIME_ELAPSED) {
+        // 老款 GPU 无时间戳计数器：CPU 单调时钟回退（真实流逝时间）。
+        static bool s_warnedOnce = false;
+        if (!s_warnedOnce) {
+            s_warnedOnce = true;
+            MITHRIL_LOG_WARN("gl", "timestamp queries unsupported "
+                              "(timestampValidBits==0) — falling back to "
+                              "monotonic CPU clock (real elapsed time, "
+                              "different epoch)");
+        }
+        q->usesPool = false;
+        q->cpuFallback = true;
+        q->cpuT0 = monotonic_ns();
+    } else if (kind >= 0) {
+        // occlusion 池创建失败（OOM 等）：保持软件路径，样本数记 0。
+        q->usesPool = false;
+        q->cpuFallback = false;
+    } else {
+        // GL_PRIMITIVES_GENERATED / TFB_WRITTEN：软件计数，见 account_draw_primitives。
+        q->usesPool = false;
+        q->cpuFallback = false;
+        if (qt == mithril::QueryTarget::PrimitivesGenerated) g_state->swPrimAccum = 0;
+        if (qt == mithril::QueryTarget::TfbPrimsWritten)     g_state->swTfbWrittenAccum = 0;
+    }
 }
 
 void glEndQuery(GLenum target) {
     MITHRIL_ENSURE_INIT();
     mithril::QueryTarget qt = query_target_from_gl(target);
-    if (qt == mithril::QueryTarget::Count) {
+    if (qt == mithril::QueryTarget::Count || target == GL_TIMESTAMP) {
         mithril::state_set_error(GL_INVALID_ENUM);
         return;
     }
-    // GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN 特殊处理:
-    // 在 transform feedback 结束时记录状态。
-    if (target == GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN) {
-        auto* tf = mithril::state_get_transform_feedback(g_state->currentTransformFeedback);
-        if (tf) {
-            tf->captureEnded = true;
-            tf->primitivesWritten = 0; // 真实计数需要后端 TF 支持
-        }
-        return;
-    }
-    // Find the active query for this target and end it.
-    for (auto& [id, q] : g_state->queries) {
-        if (q.active && q.target == qt) {
-            q.active = false;
-            q.ended = true;
-            // FIX (Iris occlusion culling 黑屏): 真实实现需要 vkCreateQueryPool
-            // + vkCmdBeginQuery/EndQuery + vkGetQueryPoolResults。当前为保守
-            // stub：标记结果可用并返回非零值（"有样本通过"），让 Iris 的
-            // occlusion culling 认为被测几何可见，不会把整个场景 cull 掉。
-            // 返回 0 会导致 Iris 认为"什么都没通过 occlusion 测试"→ 黑屏。
-            // TODO: 接入真实 VkQueryPool 实现精确 occlusion culling。
-            q.resultCached = true;
-            q.cachedResult = 1;
-            break;
+    GLuint id = g_state->activeQuery[(int)qt];
+    if (id == 0) { mithril::state_set_error(GL_INVALID_OPERATION); return; }
+    mithril::Query* q = mithril::state_get_query(id);
+    if (!q) { g_state->activeQuery[(int)qt] = 0; return; }
+
+    q->active = false;
+    q->ended = true;
+    g_state->activeQuery[(int)qt] = 0;
+
+    if (q->usesPool) {
+        backend_query_end(id);
+    } else if (q->cpuFallback) {
+        q->cachedResult = monotonic_ns() - q->cpuT0;
+        q->resultCached = true;
+    } else {
+        // 软件图元计数收割。
+        q->swResult = (qt == mithril::QueryTarget::TfbPrimsWritten)
+                    ? g_state->swTfbWrittenAccum : g_state->swPrimAccum;
+        q->cachedResult = q->swResult;
+        q->resultCached = true;
+        if (target == GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN) {
+            auto* tf = mithril::state_get_transform_feedback(g_state->currentTransformFeedback);
+            if (tf) {
+                tf->captureEnded = true;
+                tf->primitivesWritten = (GLuint)q->swResult;
+            }
         }
     }
 }
@@ -506,35 +587,144 @@ void glEndQuery(GLenum target) {
 void glGetQueryiv(GLenum target, GLenum pname, GLint* params) {
     MITHRIL_ENSURE_INIT();
     if (!params) return;
+    mithril::QueryTarget qt = query_target_from_gl(target);
     switch (pname) {
-        case GL_QUERY_COUNTER_BITS: *params = 64; break;
-        case GL_CURRENT_QUERY:      *params = 0; break;  // no active query tracked per-target
-        default:                     *params = 0; break;
+        case GL_QUERY_COUNTER_BITS:
+            // occlusion=64（真实样本计数）；timestamp 类取决于设备
+            // timestampValidBits（老 GPU 0 = 永远"立即可用"的 CPU 回退）；
+            // 软件计数 64。
+            if (qt == mithril::QueryTarget::SamplesPassed ||
+                qt == mithril::QueryTarget::AnySamplesPassed) {
+                *params = 64;
+            } else if (qt == mithril::QueryTarget::Timestamp ||
+                       qt == mithril::QueryTarget::TimeElapsed) {
+                *params = (GLint)backend_query_timestamp_valid_bits();
+            } else {
+                *params = 64;
+            }
+            break;
+        case GL_CURRENT_QUERY:
+            *params = (qt == mithril::QueryTarget::Count)
+                    ? 0 : (GLint)g_state->activeQuery[(int)qt];
+            break;
+        default:
+            *params = 0;
+            break;
     }
+}
+
+// 公共取回：pname ∈ {GL_QUERY_RESULT, GL_QUERY_RESULT_NO_WAIT(3.3+),
+// GL_QUERY_RESULT_AVAILABLE}。写 64 位结果到 out64。
+static void query_get_result64(GLuint id, GLenum pname, uint64_t* out64) {
+    *out64 = 0;
+    mithril::Query* q = mithril::state_get_query(id);
+    if (!q || !q->ended) return;
+
+    if (pname == GL_QUERY_RESULT_AVAILABLE) {
+        if (q->usesPool) {
+            bool avail = false; uint64_t dummy = 0;
+            backend_query_get_results(id, false, &dummy, &avail);
+            *out64 = avail ? GL_TRUE : GL_FALSE;
+        } else {
+            *out64 = q->resultCached ? GL_TRUE : GL_FALSE;
+        }
+        return;
+    }
+    const bool wait = (pname != GL_QUERY_RESULT_NO_WAIT);
+    if (q->usesPool) {
+        bool avail = false; uint64_t r = 0;
+        backend_query_get_results(id, wait, &r, &avail);
+        if (q->target == mithril::QueryTarget::AnySamplesPassed)
+            r = (r != 0) ? 1 : 0;   // 布尔化
+        *out64 = r;
+        return;
+    }
+    // 软件 / CPU 回退路径：end 时已缓存。
+    *out64 = q->cachedResult;
+    if (q->target == mithril::QueryTarget::AnySamplesPassed)
+        *out64 = (q->cachedResult != 0) ? 1 : 0;
 }
 
 void glGetQueryObjectiv(GLuint id, GLenum pname, GLint* params) {
     MITHRIL_ENSURE_INIT();
     if (!params) return;
-    mithril::Query* q = mithril::state_get_query(id);
-    if (!q || !q->ended) { *params = 0; return; }
-    switch (pname) {
-        case GL_QUERY_RESULT_AVAILABLE: *params = q->resultCached ? GL_TRUE : GL_FALSE; break;
-        case GL_QUERY_RESULT:           *params = (GLint)q->cachedResult; break;
-        default:                         *params = 0; break;
-    }
+    uint64_t r = 0;
+    query_get_result64(id, pname, &r);
+    *params = (GLint)r;
 }
 
 void glGetQueryObjectuiv(GLuint id, GLenum pname, GLuint* params) {
     MITHRIL_ENSURE_INIT();
     if (!params) return;
+    uint64_t r = 0;
+    query_get_result64(id, pname, &r);
+    *params = (GLuint)r;
+}
+
+void glGetQueryObjecti64v(GLuint id, GLenum pname, GLint64* params) {
+    MITHRIL_ENSURE_INIT();
+    if (!params) return;
+    uint64_t r = 0;
+    query_get_result64(id, pname, &r);
+    *params = (GLint64)r;
+}
+
+void glGetQueryObjectui64v(GLuint id, GLenum pname, GLuint64* params) {
+    MITHRIL_ENSURE_INIT();
+    if (!params) return;
+    uint64_t r = 0;
+    query_get_result64(id, pname, &r);
+    *params = (GLuint64)r;
+}
+
+/* glGetQueryBufferObject*（GL 4.4 ARB_query_buffer_object）：
+ * vkCmdCopyQueryPoolResults 把结果拷进当前绑定的 GL buffer —— 但 GL 入口的
+ * buffer 参数是显式 buffer 名，不走 PIXEL_PACK 绑定。offset 单位字节。
+ * pname=GL_QUERY_RESULT_NO_WAIT / GL_QUERY_RESULT_AVAILABLE → 带 availability。
+ */
+static void query_buffer_object_common(GLuint id, GLuint buffer, GLenum pname,
+                                       GLintptr offset) {
+    MITHRIL_ENSURE_INIT();
     mithril::Query* q = mithril::state_get_query(id);
-    if (!q || !q->ended) { *params = 0; return; }
-    switch (pname) {
-        case GL_QUERY_RESULT_AVAILABLE: *params = q->resultCached ? GL_TRUE : GL_FALSE; break;
-        case GL_QUERY_RESULT:           *params = (GLuint)q->cachedResult; break;
-        default:                         *params = 0; break;
+    if (!q) { mithril::state_set_error(GL_INVALID_OPERATION); return; }
+    if (pname != GL_QUERY_RESULT && pname != GL_QUERY_RESULT_NO_WAIT &&
+        pname != GL_QUERY_RESULT_AVAILABLE) {
+        mithril::state_set_error(GL_INVALID_ENUM);
+        return;
     }
+    if (!q->usesPool) {
+        // 软件/CPU 回退路径：无 GPU 查询可拷，走 CPU 写入（staged upload，
+        // 与读回一致的数据布局：u64 结果 [+ u64 availability]）。
+        mithril::Buffer* b = mithril::state_get_buffer(buffer);
+        if (!b) { mithril::state_set_error(GL_INVALID_OPERATION); return; }
+        uint64_t data[2] = {q->cachedResult, 1};
+        bool withAvail = (pname != GL_QUERY_RESULT);
+        size_t bytes = withAvail ? 16 : 8;
+        if ((size_t)offset + bytes > (size_t)b->size) {
+            mithril::state_set_error(GL_INVALID_VALUE);
+            return;
+        }
+        if (q->target == mithril::QueryTarget::AnySamplesPassed)
+            data[0] = (q->cachedResult != 0) ? 1 : 0;
+        std::memcpy((uint8_t*)b->data.data() + offset, data, bytes);
+        backend_buffer_upload(buffer, (VkDeviceSize)offset, data, bytes);
+        return;
+    }
+    backend_query_copy_results(id, buffer, (VkDeviceSize)offset,
+                               pname != GL_QUERY_RESULT);
+}
+
+void glGetQueryBufferObjectiv(GLuint id, GLuint buffer, GLenum pname, GLintptr offset) {
+    query_buffer_object_common(id, buffer, pname, offset);
+}
+void glGetQueryBufferObjectuiv(GLuint id, GLuint buffer, GLenum pname, GLintptr offset) {
+    query_buffer_object_common(id, buffer, pname, offset);
+}
+void glGetQueryBufferObjecti64v(GLuint id, GLuint buffer, GLenum pname, GLintptr offset) {
+    query_buffer_object_common(id, buffer, pname, offset);
+}
+void glGetQueryBufferObjectui64v(GLuint id, GLuint buffer, GLenum pname, GLintptr offset) {
+    query_buffer_object_common(id, buffer, pname, offset);
 }
 
 void glQueryCounter(GLuint id, GLenum target) {
@@ -545,14 +735,29 @@ void glQueryCounter(GLuint id, GLenum target) {
     }
     mithril::Query* q = mithril::state_get_query(id);
     if (!q) { mithril::state_set_error(GL_INVALID_OPERATION); return; }
+    if (q->active) { mithril::state_set_error(GL_INVALID_OPERATION); return; }
     q->target = mithril::QueryTarget::Timestamp;
     q->ended = true;
-    // 真实实现需要 vkCmdWriteTimestamp。当前返回一个非零单调递增的
-    // 假值：在真实的 GPU 时钟基准上累加，避免 Iris 误判为零导致 culling。
-    static uint64_t s_timestampCounter = 1;
-    q->timestampValue = s_timestampCounter++;
-    q->resultCached = true;
-    q->cachedResult = q->timestampValue;
+    q->resultCached = false;
+
+    if (backend_query_pool_create(id, MITHRIL_QUERY_TIMESTAMP)) {
+        q->usesPool = true;
+        q->cpuFallback = false;
+        backend_query_write_timestamp(id);
+    } else {
+        // 老款 GPU：CPU 单调时钟（ns，真实时基）。
+        static bool s_warnedOnce = false;
+        if (!s_warnedOnce) {
+            s_warnedOnce = true;
+            MITHRIL_LOG_WARN("gl", "glQueryCounter unsupported "
+                              "(timestampValidBits==0) — monotonic CPU clock");
+        }
+        q->usesPool = false;
+        q->cpuFallback = true;
+        q->timestampValue = monotonic_ns();
+        q->cachedResult = q->timestampValue;
+        q->resultCached = true;
+    }
 }
 
 /* =========================================================================

@@ -507,7 +507,7 @@ struct Framebuffer {
 // ---- Query ----
 enum class QueryTarget : int {
     SamplesPassed, AnySamplesPassed, PrimitivesGenerated,
-    TimeElapsed, Timestamp, Count
+    TimeElapsed, Timestamp, TfbPrimsWritten, Count
 };
 
 struct Query {
@@ -519,6 +519,16 @@ struct Query {
     uint64_t     cachedResult = 0;
     uint64_t     timestampValue = 0;  // glQueryCounter 返回值
     bool         markedForDeletion = false;
+    // ---- 真实 VkQueryPool 后端（Queries.cpp）----
+    // usesPool: 该 target 由后端 VkQueryPool 承载（occlusion/timestamp/
+    // time-elapsed 且设备支持）。false = 软件计数（primitives generated /
+    // TFB written）或 CPU 时钟回退（老 GPU 无时间戳计数器）。
+    bool         usesPool = false;
+    // 软件计数结果（glEndQuery 时从 g_state 累加器收割）。
+    uint64_t     swResult = 0;
+    // CPU 时钟回退（timestampValidBits == 0）：录制的 begin 时刻（单调 ns）。
+    uint64_t     cpuT0 = 0;
+    bool         cpuFallback = false;
 };
 
 // ---- Sync ----
@@ -528,6 +538,12 @@ struct Sync {
     GLbitfield  flags = 0;
     bool        signaled = false;
     bool        markedForDeletion = false;
+    // ---- 真实 GPU fence 语义（Device.cpp 提交序号机制）----
+    // glFenceSync 时刻"下一次提交"的序号（= backend_current_submit_serial()+1）。
+    // fence 视为在该次提交包含的所有命令之后。signaled 判定：
+    //   serial <= backend_last_completed_serial()   → 已完成（真 GPU 水位线）
+    //   serial >  backend_current_submit_serial()   → fence 之后零命令待提交
+    uint64_t    serial = 0;
 };
 
 // ---- Transform Feedback ----
@@ -631,6 +647,16 @@ struct GLState {
     std::unordered_map<GLuint, Query>            queries;
     std::unordered_map<void*, Sync>              syncObjects;   // key = handle
     std::unordered_map<GLuint, TransformFeedback> transformFeedbacks;
+
+    // ---- GL 查询对象（真实 VkQueryPool 后端）----
+    // 每 target 当前活跃的 query 名（glGetQueryiv(GL_CURRENT_QUERY)）。
+    // GL 语义：同一 target 同时只能有一个活跃查询。
+    GLuint activeQuery[(int)QueryTarget::Count] = {};
+    // 软件图元计数的活跃累加器（GL_PRIMITIVES_GENERATED /
+    // GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN，Metal 无管线统计查询，
+    // 由 backend_draw_* 在录制期精确累计 draw 参数）。
+    uint64_t swPrimAccum = 0;
+    uint64_t swTfbWrittenAccum = 0;
 
     // ---- Buffer bindings (per-target, non-indexed) ----
     // Indexed by BufferTarget enum. ElementArray is NOT here (lives in VAO).
@@ -867,6 +893,9 @@ Sampler*      state_get_sampler(GLuint id);
 Renderbuffer* state_get_renderbuffer(GLuint id);
 TransformFeedback* state_get_transform_feedback(GLuint id);
 Query*        state_get_query(GLuint id);
+// GL_PRIMITIVES_GENERATED / GL_TRANSFORM_FEEDBACK_PRIMITIVES_WRITTEN 的软件
+// 图元计数（见 State.cpp 的实现注释）。由 backend_draw_* 家族汇入。
+void          account_draw_primitives(int gl_mode, int64_t count, int64_t instances);
 
 // ---- Error helpers ----
 void   state_set_error(GLenum err);
