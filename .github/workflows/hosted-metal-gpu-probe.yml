@@ -120,7 +120,7 @@ jobs:
             -DMITHRIL_OUTPUT_DIRECTORY="$PWD/build-hosted-ios/output" \
             -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO \
             -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED=NO
-          cmake --build build-hosted-ios --config Release --target mithril
+          cmake --build build-hosted-ios --config Release --target mithril_direct
 
       - name: Verify iPhoneOS Mach-O platform contract
         shell: bash
@@ -170,7 +170,7 @@ jobs:
             -DMITHRIL_OUTPUT_DIRECTORY="$PWD/build-hosted-ios-sim/output" \
             -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO \
             -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED=NO
-          cmake --build build-hosted-ios-sim --config Release --target mithril
+          cmake --build build-hosted-ios-sim --config Release --target mithril_direct
           artifact="$(find build-hosted-ios-sim/output -type f -name 'libmithril.dylib' -print -quit)"
           test -n "$artifact"
           echo "artifact=$artifact" >> "$GITHUB_OUTPUT"
