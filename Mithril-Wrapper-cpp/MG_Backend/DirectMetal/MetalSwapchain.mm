@@ -36,6 +36,8 @@
 #include "MetalSwapchain.h"
 #include "../../MG_Impl/Log.h"
 
+#include <TargetConditionals.h>
+
 namespace mithril {
 namespace dmt {
 
@@ -140,8 +142,11 @@ void swapchain_realloc_depth(MetalSwapchain* sc, int w, int h) {
     // Discrete: Managed gives the GPU a private fast copy; GPU->CPU sync
     // happens automatically at command-buffer completion, which is all the
     // depth path ever needs (it is written by GPU, read only for debug).
-    desc.storageMode = b->unifiedMemory ? MTLStorageModeShared
-                                        : MTLStorageModeManaged;
+#if TARGET_OS_OSX
+    desc.storageMode = b->unifiedMemory ? MTLStorageModeShared : MTLStorageModeManaged;
+#else
+    desc.storageMode = MTLStorageModeShared;
+#endif
 
     id<MTLTexture> tex = [b->device newTextureWithDescriptor:desc];
     if (tex == nil) {

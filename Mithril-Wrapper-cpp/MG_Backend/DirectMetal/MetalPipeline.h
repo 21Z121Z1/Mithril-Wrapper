@@ -25,6 +25,8 @@
 #include "MetalCommandStream.h"
 #include "BackendTypes.h"   // MGVertexAttrib
 #include "BackendMetalDecls.h"  // generated dmt_* prototypes (build dir)
+#include "../DirectVulkan/Std140.h"   // Std140Slot / pack_std140 (shared logic)
+#include "../DirectVulkan/Reflect.h"  // mithril::vk::DescriptorBinding
 
 #include <string>
 #include <unordered_map>

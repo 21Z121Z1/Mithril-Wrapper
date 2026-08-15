@@ -5,8 +5,10 @@
 #ifdef __APPLE__
 
 #include "MetalDevice.h"
+#include "../BackendTypes.h"
 #include "../../MG_Impl/Log.h"
 
+#include <TargetConditionals.h>
 #include <mach/mach_time.h>
 #include <sys/time.h>
 
@@ -72,7 +74,7 @@ void shutdown_device() {
 // ---- MSL version --------------------------------------------------------
 
 uint32_t msl_version_for_device() {
-    // Metal 3 devices (Apple7+/Mac2) can compile MSL 2.4; everything else in
+    // Metal 3 devices (Apple7+/Mac2) can compile MSL 3.0; everything else in
     // the supported range gets 2.2 which covers every feature the SPIR-V we
     // emit exercises (buffer/texture/sampler bindings, frag depth, arrays).
     if (@available(macOS 11.0, iOS 14.0, *)) {
@@ -90,10 +92,21 @@ static NSUInteger next_block_size(NSUInteger prev) {
     return sz > (4u * 1024 * 1024) ? (4u * 1024 * 1024) : sz;
 }
 
+static MTLResourceOptions host_visible_buffer_options(const Backend* b) {
+#if TARGET_OS_OSX
+    return b->unifiedMemory ? MTLResourceStorageModeShared
+                            : MTLResourceStorageModeManaged;
+#else
+    // Managed storage is unavailable on iOS/tvOS/watchOS. Apple mobile GPUs
+    // are unified-memory devices, so Shared is the correct CPU-visible mode.
+    (void)b;
+    return MTLResourceStorageModeShared;
+#endif
+}
+
 static id<MTLBuffer> arena_new_block(Backend* b, NSUInteger len) {
     return [b->device newBufferWithLength:len
-                                  options:(b->unifiedMemory ? MTLResourceStorageModeShared
-                                                            : MTLResourceStorageModeManaged)];
+                                  options:host_visible_buffer_options(b)];
 }
 
 bool ubo_allocate(int slot, NSUInteger size, UboSliceDmt& out) {
@@ -128,7 +141,11 @@ bool ubo_upload(int slot, const void* data, NSUInteger size, UboSliceDmt& out) {
     if (!ubo_allocate(slot, size, out)) return false;
     if (data && out.buf.contents) {
         std::memcpy((uint8_t*)out.buf.contents + out.offset, data, size);
-        if (!backend()->unifiedMemory) [out.buf didModifyRange:NSMakeRange(out.offset, size)];
+#if TARGET_OS_OSX
+        if (!backend()->unifiedMemory) {
+            [out.buf didModifyRange:NSMakeRange(out.offset, size)];
+        }
+#endif
     }
     return true;
 }

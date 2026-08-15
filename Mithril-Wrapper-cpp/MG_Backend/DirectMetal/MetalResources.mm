@@ -16,10 +16,65 @@
 #include "../../MG_State/State.h"
 #include "../../MG_Impl/Log.h"
 
+#include <TargetConditionals.h>
 #include <unordered_map>
 
 namespace mithril {
 namespace dmt {
+
+namespace {
+
+bool host_uses_managed_storage(const Backend* b) {
+#if TARGET_OS_OSX
+    return b && !b->unifiedMemory;
+#else
+    (void)b;
+    return false;
+#endif
+}
+
+MTLResourceOptions host_buffer_options(const Backend* b) {
+#if TARGET_OS_OSX
+    return host_uses_managed_storage(b) ? MTLResourceStorageModeManaged
+                                        : MTLResourceStorageModeShared;
+#else
+    (void)b;
+    return MTLResourceStorageModeShared;
+#endif
+}
+
+MTLStorageMode host_texture_storage_mode(const Backend* b) {
+#if TARGET_OS_OSX
+    return host_uses_managed_storage(b) ? MTLStorageModeManaged : MTLStorageModeShared;
+#else
+    (void)b;
+    return MTLStorageModeShared;
+#endif
+}
+
+void mark_buffer_modified(MetalBuffer* mb, NSRange range) {
+#if TARGET_OS_OSX
+    if (mb && mb->managed && mb->buf != nil) [mb->buf didModifyRange:range];
+#else
+    (void)mb;
+    (void)range;
+#endif
+}
+
+bool is_depth_format(VkFormat f) {
+    switch (f) {
+        case VK_FORMAT_D16_UNORM:
+        case VK_FORMAT_X8_D24_UNORM_PACK32:
+        case VK_FORMAT_D32_SFLOAT:
+        case VK_FORMAT_D24_UNORM_S8_UINT:
+        case VK_FORMAT_D32_SFLOAT_S8_UINT:
+            return true;
+        default:
+            return false;
+    }
+}
+
+} // namespace
 
 // ---- Tables ---------------------------------------------------------------
 
@@ -88,7 +143,7 @@ static MetalBuffer* create_metal_buffer(GLuint name, const void* data,
         // frontend uploads fresh contents right after a glBufferData call.
         if (data && mb->contents) {
             std::memcpy(mb->contents, data, size);
-            if (mb->managed) [mb->buf didModifyRange:NSMakeRange(0, size)];
+            mark_buffer_modified(mb, NSMakeRange(0, size));
         }
         return mb;
     }
@@ -96,17 +151,16 @@ static MetalBuffer* create_metal_buffer(GLuint name, const void* data,
         mb = new MetalBuffer();
         buffer_tbl()[name] = mb;
     }
-    mb->managed = !b->unifiedMemory;
+    mb->managed = host_uses_managed_storage(b);
     mb->persistent = persistent;
     mb->capacity = cap;
     mb->buf = [b->device newBufferWithLength:cap
-                                      options:(mb->managed ? MTLResourceStorageModeManaged
-                                                           : MTLResourceStorageModeShared)];
+                                      options:host_buffer_options(b)];
     if (mb->buf == nil) { mb->capacity = 0; return nullptr; }
     mb->contents = mb->buf.contents;
     if (data && mb->contents) {
         std::memcpy(mb->contents, data, size);
-        if (mb->managed) [mb->buf didModifyRange:NSMakeRange(0, size)];
+        mark_buffer_modified(mb, NSMakeRange(0, size));
     }
     return mb;
 }
@@ -255,7 +309,7 @@ void dmt_internal_buffer_upload(GLuint name, GLintptr offset, const void* data,
         mb = grown;
     }
     std::memcpy((uint8_t*)mb->contents + offset, data, size);
-    if (mb->managed) [mb->buf didModifyRange:NSMakeRange(offset, size)];
+    mark_buffer_modified(mb, NSMakeRange(offset, size));
 }
 
 // ---- Samplers ---------------------------------------------------------------
@@ -314,7 +368,7 @@ static void ensure_default_texture() {
     MTLTextureDescriptor* d = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
                                                                                   width:1 height:1 mipmapped:NO];
     d.usage = MTLTextureUsageShaderRead;
-    d.storageMode = b->unifiedMemory ? MTLStorageModeShared : MTLStorageModeManaged;
+    d.storageMode = host_texture_storage_mode(b);
     id<MTLTexture> tex = [b->device newTextureWithDescriptor:d];
     if (!tex) return;
     uint32_t black = 0;
@@ -398,7 +452,7 @@ MetalTexture* get_or_create_texture(GLuint name, int width, int height,
     // generation needs ShaderWrite. Cover all three — costs nothing.
     d.usage = MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite |
               MTLTextureUsageRenderTarget;
-    d.storageMode = b->unifiedMemory ? MTLStorageModeShared : MTLStorageModeManaged;
+    d.storageMode = host_texture_storage_mode(b);
 
     id<MTLTexture> tex = [b->device newTextureWithDescriptor:d];
     if (tex == nil) {
@@ -434,7 +488,9 @@ void dmt_internal_texture_upload(GLuint name, int level, int x, int y, int z,
     const uint8_t* base = (const uint8_t*)pixels +
                           (NSUInteger)(skipPixels * bpp) +
                           (NSUInteger)skipRows * rowBytes;
-    NSUInteger imageBytes = (NSUInteger)d * rowBytes * h;
+    // bytesPerImage is the stride between adjacent 2D images, not the
+    // size of the whole depth range.
+    NSUInteger imageBytes = rowBytes * (NSUInteger)h;
     if (skipImages) base += (NSUInteger)skipImages * imageBytes;
 
     MTLRegion region;
@@ -446,15 +502,17 @@ void dmt_internal_texture_upload(GLuint name, int level, int x, int y, int z,
         NSUInteger slice = (NSUInteger)(z & 5);
         [mt->tex replaceRegion:region mipmapLevel:(NSUInteger)level slice:slice
                       withBytes:base bytesPerRow:rowBytes bytesPerImage:imageBytes];
-    } else if (mt->glTarget == GL_TEXTURE_2D_ARRAY || mt->glTarget == GL_TEXTURE_3D) {
-        [mt->tex replaceRegion:region mipmapLevel:(NSUInteger)level
+    } else if (mt->glTarget == GL_TEXTURE_2D_ARRAY) {
+        MTLRegion sliceRegion = MTLRegionMake2D(x, y, w, h);
+        [mt->tex replaceRegion:sliceRegion mipmapLevel:(NSUInteger)level
+                         slice:(NSUInteger)z
+                     withBytes:base bytesPerRow:rowBytes bytesPerImage:0];
+    } else if (mt->glTarget == GL_TEXTURE_3D) {
+        [mt->tex replaceRegion:region mipmapLevel:(NSUInteger)level slice:0
                       withBytes:base bytesPerRow:rowBytes bytesPerImage:imageBytes];
     } else {
         [mt->tex replaceRegion:region mipmapLevel:(NSUInteger)level
                       withBytes:base bytesPerRow:rowBytes];
-    }
-    if (!backend()->unifiedMemory && mt->tex.storageMode == MTLStorageModeManaged) {
-        // replaceRegion already makes CPU-written bytes visible to the GPU.
     }
 }
 
@@ -582,14 +640,11 @@ void dmt_internal_blit_images_raw(MetalTexture* src, MetalTexture* dst,
     run_scaled_blit(src, dst, p, filter == GL_LINEAR);
 }
 
-/* MSAA resolve（glBlitFramebuffer 多采样 → 单采样）。Metal 的 blit 编码器原生
- * 支持 resolveFromTexture:toTexture:（1:1 平均，与 GL resolve 语义一致），且
- * depth/stencil 格式也能解析（Vulkan 核心做不到、需要 VK_KHR_depth_stencil_
- * resolve 扩展）。
+/* MSAA resolve（glBlitFramebuffer 多采样 → 单采样）。Metal 通过
+ * render-pass attachment 的 resolveTexture + MTLStoreActionMultisampleResolve
+ * 执行 resolve；MTLBlitCommandEncoder 没有 resolveFromTexture:toTexture: API。
  *
- * 限制：blit resolve 只有整纹理形式（无子矩形 API）。GL 的子矩形 resolve 在此
- * 退化为整纹理解析 —— 实际用法（MC/Sodium 的 cascade、后处理 downsample）几乎
- * 全是全 FBO resolve，且源/目标尺寸一致，行为等价。 */
+ * 限制：该路径仍只支持整纹理 resolve；子矩形请求按既有行为退化为整纹理。 */
 void dmt_internal_resolve_images(MetalTexture* src, MetalTexture* dst,
                                  int x, int y, int width, int height) {
     if (!src || !dst || src->tex == nil || dst->tex == nil) return;
@@ -614,9 +669,31 @@ void dmt_internal_resolve_images(MetalTexture* src, MetalTexture* dst,
         }
     }
     if (!ensure_command_buffer()) return;
-    id<MTLBlitCommandEncoder> blit = [backend()->cmd blitCommandEncoder];
-    [blit resolveFromTexture:src->tex toTexture:dst->tex];
-    [blit endEncoding];
+    MTLRenderPassDescriptor* rp = [MTLRenderPassDescriptor renderPassDescriptor];
+    if (is_depth_format(src->vkFormat)) {
+        rp.depthAttachment.texture = src->tex;
+        rp.depthAttachment.resolveTexture = dst->tex;
+        rp.depthAttachment.loadAction = MTLLoadActionLoad;
+        rp.depthAttachment.storeAction = MTLStoreActionMultisampleResolve;
+        if (format_has_stencil(src->vkFormat)) {
+            rp.stencilAttachment.texture = src->tex;
+            rp.stencilAttachment.resolveTexture = dst->tex;
+            rp.stencilAttachment.loadAction = MTLLoadActionLoad;
+            rp.stencilAttachment.storeAction = MTLStoreActionMultisampleResolve;
+        }
+    } else {
+        rp.colorAttachments[0].texture = src->tex;
+        rp.colorAttachments[0].resolveTexture = dst->tex;
+        rp.colorAttachments[0].loadAction = MTLLoadActionLoad;
+        rp.colorAttachments[0].storeAction = MTLStoreActionMultisampleResolve;
+    }
+    id<MTLRenderCommandEncoder> resolve =
+        [backend()->cmd renderCommandEncoderWithDescriptor:rp];
+    if (resolve == nil) {
+        MITHRIL_LOG_ERROR("mtl", "MSAA resolve render encoder creation failed");
+        return;
+    }
+    [resolve endEncoding];
     note_non_render_commands();
 }
 
@@ -638,8 +715,7 @@ int dmt_internal_read_pixels(MetalTexture* colorSrc, int x, int y, int w, int h,
     NSUInteger rowBytes = (NSUInteger)w * 4;
     NSUInteger total = rowBytes * (NSUInteger)h;
     id<MTLBuffer> rb = [b->device newBufferWithLength:total
-                                              options:(b->unifiedMemory ? MTLResourceStorageModeShared
-                                                                        : MTLResourceStorageModeManaged)];
+                                              options:host_buffer_options(b)];
     if (rb == nil) return 0;
 
     // Synchronous one-shot command buffer (does not touch the frame buffer).
@@ -653,7 +729,9 @@ int dmt_internal_read_pixels(MetalTexture* colorSrc, int x, int y, int w, int h,
         destinationOffset:0
    destinationBytesPerRow:rowBytes
  destinationBytesPerImage:total];
-    if (!b->unifiedMemory) [blit synchronizeResource:rb];
+#if TARGET_OS_OSX
+    if (host_uses_managed_storage(b)) [blit synchronizeResource:rb];
+#endif
     [blit endEncoding];
     [cb commit];
     [cb waitUntilCompleted];

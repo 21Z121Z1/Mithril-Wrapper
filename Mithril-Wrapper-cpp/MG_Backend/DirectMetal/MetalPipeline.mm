@@ -156,6 +156,7 @@ BuiltinCache& builtin_cache() {
 bool compile_msl_function(MetalProgramResources* pr,
                           const uint32_t* spirv, int words,
                           spv::ExecutionModel stage,
+                          uint32_t fragOutputMask,
                           MetalCompiledFunction& out) {
     Backend* b = backend();
     if (!b->initialized || !spirv || words <= 0) return false;
@@ -172,6 +173,12 @@ bool compile_msl_function(MetalProgramResources* pr,
         mopts.platform = b->unifiedMemory
             ? spirv_cross::CompilerMSL::Options::iOS
             : spirv_cross::CompilerMSL::Options::macOS;
+        // Metal validates fragment color outputs against the PSO's attached
+        // color targets. A depth-only FBO still needs its fragment stage for
+        // discard, gl_FragDepth and storage side effects, so suppress only
+        // unattached color outputs instead of dropping the fragment function.
+        if (stage == spv::ExecutionModelFragment)
+            mopts.enable_frag_output_mask = fragOutputMask;
         compiler.set_msl_options(mopts);
 
         // The frontend's SPIR-V already remaps Z to [0,1] (Shader.cpp's
@@ -179,8 +186,8 @@ bool compile_msl_function(MetalProgramResources* pr,
         // separate module, so SPIRV-Cross must not apply either again — a
         // double flip would put every default-FBO frame upside down.
         spirv_cross::CompilerGLSL::Options copts = compiler.get_common_options();
-        copts.fixup_clipspace = false;
-        copts.flip_vert_y = false;
+        copts.vertex.fixup_clipspace = false;
+        copts.vertex.flip_vert_y = false;
         compiler.set_common_options(copts);
 
         const spirv_cross::ShaderResources res = compiler.get_shader_resources();
@@ -311,10 +318,16 @@ bool compile_msl_function(MetalProgramResources* pr,
                               err ? err.localizedDescription.UTF8String : "unknown");
             return false;
         }
-        out.function = [lib newFunctionWithName:@"main"]; // SPIRV-Cross entry name
+        // MSL reserves the common SPIR-V/GLSL entry name "main". SPIRV-Cross
+        // therefore sanitizes it during compile(); query the post-compile name
+        // instead of assuming the source-level entry point survived unchanged.
+        const std::string& cleansedEntry =
+            compiler.get_cleansed_entry_point_name("main", stage);
+        NSString* entryName = [NSString stringWithUTF8String:cleansedEntry.c_str()];
+        out.function = [lib newFunctionWithName:entryName];
         if (out.function == nil) {
-            MITHRIL_LOG_ERROR("mtl", "newFunctionWithName:@\"main\" returned nil "
-                              "(%s stage)",
+            MITHRIL_LOG_ERROR("mtl", "newFunctionWithName:%s returned nil (%s stage)",
+                              cleansedEntry.c_str(),
                               stage == spv::ExecutionModelVertex ? "vertex" :
                               stage == spv::ExecutionModelFragment ? "fragment" : "compute");
             return false;
@@ -337,13 +350,19 @@ bool compile_msl_function(MetalProgramResources* pr,
  * entry stays cached with valid=false so the failure is attempted once. */
 MetalCompiledFunction* get_or_compile_stage(MetalProgramResources* pr,
                                             const uint32_t* spirv, int words,
-                                            spv::ExecutionModel stage) {
-    const uint64_t h = fnv1a(spirv, static_cast<size_t>(words) * sizeof(uint32_t));
+                                            spv::ExecutionModel stage,
+                                            uint32_t fragOutputMask = 0xffffffffu) {
+    uint64_t h = fnv1a(spirv, static_cast<size_t>(words) * sizeof(uint32_t));
+    // The same SPIR-V can compile to distinct MSL functions depending on
+    // stage/output masking; both dimensions therefore belong in the cache key.
+    h = fnv1a_u64(static_cast<uint64_t>(stage), h);
+    h = fnv1a_u64(static_cast<uint64_t>(fragOutputMask), h);
     auto it = pr->fnCache.find(h);
     if (it != pr->fnCache.end()) return &it->second;
 
     MetalCompiledFunction cf;
-    const bool ok = compile_msl_function(pr, spirv, words, stage, cf);
+    const bool ok = compile_msl_function(pr, spirv, words, stage,
+                                         fragOutputMask, cf);
     auto res = pr->fnCache.emplace(h, std::move(cf));
     return ok ? &res.first->second : nullptr;
 }
@@ -749,8 +768,9 @@ MetalPipeline* get_or_create_pipeline(
     if (!vf || !vf->valid) return nullptr;
     MetalCompiledFunction* ff = nullptr;
     if (fragment_spirv && fragment_word_count > 0) {
+        const uint32_t fragOutputMask = color_count == 0 ? 0u : 0xffffffffu;
         ff = get_or_compile_stage(pr, fragment_spirv, fragment_word_count,
-                                  spv::ExecutionModelFragment);
+                                  spv::ExecutionModelFragment, fragOutputMask);
         if (!ff || !ff->valid) return nullptr;
     }
 
@@ -1552,7 +1572,7 @@ bool ensure_builtin_functions() {
 
     struct Stage {
         const char* src;
-        id<MTLFunction>* out;
+        id<MTLFunction> __strong* out;
         const char* name;
     };
     Stage stages[6] = {

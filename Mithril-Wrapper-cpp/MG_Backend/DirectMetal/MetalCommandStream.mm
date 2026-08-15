@@ -41,10 +41,12 @@
 #include "MetalCommandStream.h"
 #include "MetalSwapchain.h"
 #include "MetalPipeline.h"      // get_clear_pipeline / clear_depth_stencil_state
+#include "MetalQueries.h"       // shared render-pass visibility result buffer
 #include "../../MG_Impl/Log.h"
 #include "../../MG_State/State.h" // g_state (scissor test for clears +
                                   // currentBaseVertex/currentBaseInstance for draws)
 
+#include <TargetConditionals.h>
 #include <cstring>
 #include <unordered_map>
 
@@ -174,10 +176,20 @@ static ScratchSlot g_scratch[MITHRIL_DMT_MAX_FRAMES_IN_FLIGHT];
 
 constexpr NSUInteger kScratchInitialBytes = 256 * 1024;
 
+MTLResourceOptions scratch_buffer_options(const Backend* b) {
+#if TARGET_OS_OSX
+    return (b && !b->unifiedMemory) ? MTLResourceStorageModeManaged
+                                    : MTLResourceStorageModeShared;
+#else
+    (void)b;
+    return MTLResourceStorageModeShared;
+#endif
+}
+
 // Bump-allocate `bytes` (256-aligned) in the current frame slot's scratch
 // buffer, growing it when needed. Returns the buffer + offset; *outPtr is the
 // CPU write pointer (null on failure).
-bool scratch_alloc(NSUInteger bytes, id<MTLBuffer>& outBuf, NSUInteger& outOff,
+bool scratch_alloc(NSUInteger bytes, id<MTLBuffer> __strong& outBuf, NSUInteger& outOff,
                    void*& outPtr) {
     Backend* b = backend();
     if (!b->initialized || !b->device || bytes == 0) return false;
@@ -189,9 +201,7 @@ bool scratch_alloc(NSUInteger bytes, id<MTLBuffer>& outBuf, NSUInteger& outOff,
         if (s.buf != nil) newCap = s.capacity * 2;
         if (newCap < bytes) newCap = bytes;
         id<MTLBuffer> nb = [b->device newBufferWithLength:newCap
-                              options:(b->unifiedMemory
-                                           ? MTLResourceStorageModeShared
-                                           : MTLResourceStorageModeManaged)];
+                              options:scratch_buffer_options(b)];
         if (nb == nil) {
             static uint32_t warned = 0;
             warn_limited(warned, "dmt", "scratch index buffer allocation failed");
@@ -212,9 +222,15 @@ bool scratch_alloc(NSUInteger bytes, id<MTLBuffer>& outBuf, NSUInteger& outOff,
 // Managed-storage scratch must be flushed after every CPU write so a discrete
 // GPU sees the bytes (mirrors ubo_upload's didModifyRange).
 void scratch_flush(id<MTLBuffer> buf, NSUInteger offset, NSUInteger len) {
+#if TARGET_OS_OSX
     if (!backend()->unifiedMemory && buf != nil) {
         [buf didModifyRange:NSMakeRange(offset, len ? len : 1)];
     }
+#else
+    (void)buf;
+    (void)offset;
+    (void)len;
+#endif
 }
 
 /* ---- Shadow-state application helpers ----
@@ -231,8 +247,8 @@ MTLViewport make_viewport(int x, int y, int w, int h, double zn, double zf) {
     // DOWN exactly like Vulkan, and window-space winding is NOT reversed
     // relative to Vulkan (the winding flip lives in set_front_face instead).
     MTLViewport vp;
-    vp.x = (double)x;
-    vp.y = (double)(y + h);
+    vp.originX = (double)x;
+    vp.originY = (double)(y + h);
     vp.width = (double)w;
     vp.height = (double)-h;
     vp.znear = zn;
@@ -745,6 +761,7 @@ void begin_render_pass(MetalTexture** color_views, int color_count,
 
     @autoreleasepool {
         MTLRenderPassDescriptor* desc = [MTLRenderPassDescriptor renderPassDescriptor];
+        desc.visibilityResultBuffer = visibility_result_buffer();
         const MTLLoadAction load = e.loadClear ? MTLLoadActionClear : MTLLoadActionLoad;
         const MTLClearColor clearClr =
             MTLClearColorMake(e.clearColor[0], e.clearColor[1], e.clearColor[2], e.clearColor[3]);
@@ -785,6 +802,10 @@ void begin_render_pass(MetalTexture** color_views, int color_count,
 
         g_renderEncoder = [b->cmd renderCommandEncoderWithDescriptor:desc];
     }
+    // glBeginQuery may precede the draw that creates this encoder. Reapply
+    // the pending visibility mode only after the pass descriptor has the
+    // shared visibility buffer attached.
+    replay_pending_visibility(g_renderEncoder);
     if (g_renderEncoder == nil) {
         static uint32_t warned = 0;
         warn_limited(warned, "dmt", "renderCommandEncoderWithDescriptor returned nil — pass skipped");

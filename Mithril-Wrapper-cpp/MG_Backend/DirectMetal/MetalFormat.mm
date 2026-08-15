@@ -56,12 +56,14 @@ MTLPixelFormat pixel_format_from_vk(VkFormat f) {
         case VK_FORMAT_R32G32B32A32_UINT:   return MTLPixelFormatRGBA32Uint;
         case VK_FORMAT_R32G32B32A32_SINT:   return MTLPixelFormatRGBA32Sint;
         case VK_FORMAT_R32G32B32A32_SFLOAT: return MTLPixelFormatRGBA32Float;
-        case VK_FORMAT_R16G16B16A16_UNORM: /* dup guard */ return MTLPixelFormatRGBA16Unorm;
         case VK_FORMAT_D16_UNORM:           return MTLPixelFormatDepth32Float; // no D16 in Metal
-        case VK_FORMAT_X8_D24_UNORM_PACK32: return MTLPixelFormatDepth24Unorm_Stencil8;
+        // Depth24Unorm_Stencil8 is unavailable on iOS. Preserve depth-only
+        // semantics for X8_D24 using the portable 32-bit depth format, and use
+        // Depth32Float_Stencil8 for the packed depth+stencil format.
+        case VK_FORMAT_X8_D24_UNORM_PACK32: return MTLPixelFormatDepth32Float;
         case VK_FORMAT_D32_SFLOAT:          return MTLPixelFormatDepth32Float;
         case VK_FORMAT_S8_UINT:             return MTLPixelFormatStencil8;
-        case VK_FORMAT_D24_UNORM_S8_UINT:   return MTLPixelFormatDepth24Unorm_Stencil8;
+        case VK_FORMAT_D24_UNORM_S8_UINT:   return MTLPixelFormatDepth32Float_Stencil8;
         case VK_FORMAT_D32_SFLOAT_S8_UINT:  return MTLPixelFormatDepth32Float_Stencil8;
         case VK_FORMAT_BC1_RGBA_UNORM_BLOCK:  return MTLPixelFormatBC1_RGBA;
         case VK_FORMAT_BC1_RGBA_SRGB_BLOCK:   return MTLPixelFormatBC1_RGBA_sRGB;
@@ -102,8 +104,7 @@ MTLPixelFormat pixel_format_from_vk(VkFormat f) {
 
 bool format_has_stencil(VkFormat f) {
     return f == VK_FORMAT_S8_UINT || f == VK_FORMAT_D24_UNORM_S8_UINT ||
-           f == VK_FORMAT_D32_SFLOAT_S8_UINT ||
-           f == VK_FORMAT_X8_D24_UNORM_PACK32; // X8_D24 maps to D24S8 here
+           f == VK_FORMAT_D32_SFLOAT_S8_UINT;
 }
 
 // GL (type, size, normalized/integer) -> MTLVertexFormat. MTLVertexFormatInvalid
@@ -119,20 +120,25 @@ MTLVertexFormat vertex_format_from_gl(GLenum type, int size, int normalized, int
         }
         return MTLVertexFormatInvalid;
     }
+    // Metal has no normalized 32-bit signed/unsigned integer vertex formats.
+    // Do not substitute a non-normalized format: that would silently change
+    // glVertexAttribPointer conversion semantics.
     if (type == GL_INT && !integer) {
+        if (norm) return MTLVertexFormatInvalid;
         switch (size) {
-            case 1: return norm ? MTLVertexFormatIntNormalized : MTLVertexFormatInt;
-            case 2: return norm ? MTLVertexFormatInt2Normalized : MTLVertexFormatInt2;
-            case 3: return norm ? MTLVertexFormatInt3Normalized : MTLVertexFormatInt3;
-            case 4: return norm ? MTLVertexFormatInt4Normalized : MTLVertexFormatInt4;
+            case 1: return MTLVertexFormatInt;
+            case 2: return MTLVertexFormatInt2;
+            case 3: return MTLVertexFormatInt3;
+            case 4: return MTLVertexFormatInt4;
         }
     }
     if (type == GL_UNSIGNED_INT && !integer) {
+        if (norm) return MTLVertexFormatInvalid;
         switch (size) {
-            case 1: return norm ? MTLVertexFormatUIntNormalized : MTLVertexFormatUInt;
-            case 2: return norm ? MTLVertexFormatUInt2Normalized : MTLVertexFormatUInt2;
-            case 3: return norm ? MTLVertexFormatUInt3Normalized : MTLVertexFormatUInt3;
-            case 4: return norm ? MTLVertexFormatUInt4Normalized : MTLVertexFormatUInt4;
+            case 1: return MTLVertexFormatUInt;
+            case 2: return MTLVertexFormatUInt2;
+            case 3: return MTLVertexFormatUInt3;
+            case 4: return MTLVertexFormatUInt4;
         }
     }
     if (type == GL_INT && integer) {
@@ -249,7 +255,6 @@ NSUInteger vertex_format_bytes(MTLVertexFormat f) {
         case MTLVertexFormatHalf2: case MTLVertexFormatUShort2Normalized:
         case MTLVertexFormatShort2Normalized: case MTLVertexFormatUShort2:
         case MTLVertexFormatShort2: case MTLVertexFormatFloat:
-        case MTLVertexFormatUIntNormalized: case MTLVertexFormatIntNormalized:
         case MTLVertexFormatUInt: case MTLVertexFormatInt:
         case MTLVertexFormatUInt1010102Normalized:
         case MTLVertexFormatInt1010102Normalized:
@@ -261,15 +266,12 @@ NSUInteger vertex_format_bytes(MTLVertexFormat f) {
         case MTLVertexFormatUShort4: case MTLVertexFormatShort4:
         case MTLVertexFormatUShort3Normalized: case MTLVertexFormatShort3Normalized:
         case MTLVertexFormatUShort3: case MTLVertexFormatShort3:
-        case MTLVertexFormatUInt2Normalized: case MTLVertexFormatInt2Normalized:
         case MTLVertexFormatUInt2: case MTLVertexFormatInt2:
             return 8;
         case MTLVertexFormatFloat3:
-        case MTLVertexFormatUInt3Normalized: case MTLVertexFormatInt3Normalized:
         case MTLVertexFormatUInt3: case MTLVertexFormatInt3:
             return 12;
         case MTLVertexFormatFloat4:
-        case MTLVertexFormatUInt4Normalized: case MTLVertexFormatInt4Normalized:
         case MTLVertexFormatUInt4: case MTLVertexFormatInt4:
             return 16;
         default:

@@ -1317,6 +1317,11 @@ VkBuffer dvk_get_or_create_buffer(GLuint name, const void* data, size_t size) {
     return e.buffer;
 }
 
+} // extern "C"
+
+namespace mithril {
+namespace vk {
+
 /* ---- GL_TEXTURE_BUFFER（samplerBuffer）VkBufferView 缓存 ------------------
  * GL 侧状态（MG_State Texture::texBuffer* + Buffer::data/contentVersion）是
  * 唯一事实源；这里只持有派生的 VkBufferView。缓存键 = 源 VkBuffer 句柄 +
@@ -1416,6 +1421,11 @@ VkBufferView get_or_create_texel_buffer_view(GLuint texName) {
     tbl[texName] = e;
     return view;
 }
+
+} // namespace vk
+} // namespace mithril
+
+extern "C" {
 
 /*
  * Immutable, possibly persistently-mapped storage (GL_ARB_buffer_storage).

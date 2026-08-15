@@ -133,7 +133,7 @@ uint64_t dmt_vram_bytes(void) {
     mithril::dmt::Backend* b = mithril::dmt::backend();
     if (!b || !b->initialized) return 0;
     uint64_t sz = 0;
-    if (@available(macOS 10.15, iOS 13.0, *)) {
+    if (@available(macOS 10.15, iOS 16.0, *)) {
         // Discrete GPUs: the working-set ceiling (VRAM). Unified memory:
         // reported as a share of physical RAM; fall through to physicalMemory
         // when the device reports nothing usable.

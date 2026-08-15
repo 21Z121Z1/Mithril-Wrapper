@@ -12,6 +12,8 @@
 #include "MetalDevice.h"
 #include "../BackendTypes.h"   // MGUnpackParams
 
+#include <unordered_map>
+
 namespace mithril {
 namespace dmt {
 

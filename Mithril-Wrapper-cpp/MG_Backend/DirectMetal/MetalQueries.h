@@ -32,6 +32,13 @@ bool     query_pool_create(uint64_t query_id, int kind);
  * by in-flight command buffers itself). */
 void     query_pool_destroy(uint64_t query_id);
 
+/* Shared visibility arena. Returns nil until the first occlusion query
+ * actually needs it, so ordinary render passes carry no unused visibility
+ * resource. begin_render_pass calls replay_pending_visibility() immediately
+ * after encoder creation to arm a begin that happened before the pass. */
+id<MTLBuffer> visibility_result_buffer();
+void replay_pending_visibility(id<MTLRenderCommandEncoder> encoder);
+
 /* backend_query_begin / backend_query_end: record the GL begin/end pair.
  * OCCLUSION: encoder visibility-result Counting/Disabled (+ buffer bind).
  * TIME_ELAPSED: begin/end counter samples (slots 0/1 of the pair). */

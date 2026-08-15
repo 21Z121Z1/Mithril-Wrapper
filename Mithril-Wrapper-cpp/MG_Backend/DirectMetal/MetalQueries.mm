@@ -50,18 +50,21 @@
 
 #include <mach/mach_time.h>
 
+#include <TargetConditionals.h>
 #include <cstring>
 #include <unordered_map>
+#include <vector>
 
 namespace mithril {
 namespace dmt {
 namespace {
 
-constexpr uint32_t kCounterSlots = 64;   // samples per pool (8 B each)
+constexpr uint32_t kCounterSlots = 64;   // samples per timestamp pool
+constexpr uint32_t kVisibilitySlots = 16384; // 128 KiB shared result arena
 
 struct QueryPool {
     int kind = -1;                          // MITHRIL_QUERY_*
-    id<MTLBuffer> visibility = nil;         // occlusion: shared 8-byte counter
+    NSUInteger visibilityOffset = NSNotFound; // occlusion byte offset
     id<MTLCounterSampleBuffer> counters = nil; // timestamp/elapsed slots
     uint64_t cpuT0 = 0, cpuT1 = 0;          // CPU fallback (ns)
     bool cpuFallback = false;               // sample on the CPU clock now on
@@ -78,6 +81,44 @@ struct QueryPool {
 std::unordered_map<uint64_t, QueryPool>& pool_table() {
     static std::unordered_map<uint64_t, QueryPool> t;
     return t;
+}
+
+id<MTLBuffer> g_visibilityResults = nil;
+uint32_t g_nextVisibilitySlot = 0;
+std::vector<uint32_t> g_freeVisibilitySlots;
+
+id<MTLBuffer> ensure_visibility_result_buffer() {
+    Backend* b = backend();
+    if (!b || !b->initialized || b->device == nil) return nil;
+    if (g_visibilityResults != nil && g_visibilityResults.device == b->device)
+        return g_visibilityResults;
+    g_visibilityResults = [b->device newBufferWithLength:(NSUInteger)kVisibilitySlots * 8
+                                                  options:MTLResourceStorageModeShared];
+    g_nextVisibilitySlot = 0;
+    g_freeVisibilitySlots.clear();
+    if (g_visibilityResults != nil && g_visibilityResults.contents != nullptr)
+        std::memset(g_visibilityResults.contents, 0, (size_t)kVisibilitySlots * 8);
+    return g_visibilityResults;
+}
+
+bool allocate_visibility_offset(NSUInteger& offset) {
+    if (ensure_visibility_result_buffer() == nil) return false;
+    uint32_t slot;
+    if (!g_freeVisibilitySlots.empty()) {
+        slot = g_freeVisibilitySlots.back();
+        g_freeVisibilitySlots.pop_back();
+    } else {
+        if (g_nextVisibilitySlot >= kVisibilitySlots) return false;
+        slot = g_nextVisibilitySlot++;
+    }
+    offset = (NSUInteger)slot * 8;
+    return true;
+}
+
+void free_visibility_offset(NSUInteger offset) {
+    if (offset == NSNotFound || (offset & 7u) != 0) return;
+    NSUInteger slot = offset / 8;
+    if (slot < kVisibilitySlots) g_freeVisibilitySlots.push_back((uint32_t)slot);
 }
 
 // ---- CPU clock (fallback timebase) ----------------------------------------
@@ -143,12 +184,17 @@ static id<MTLCounterSampleBuffer> new_counter_buffer(NSUInteger samples) {
     return nil;
 }
 
-// The counter set holds exactly one counter (timestamp) -> stride is 8 bytes.
+// Counter samples use a vendor-private representation; resolve to Metal's
+// standard timestamp result before CPU access.
 static uint64_t read_slot(const QueryPool& p, uint32_t slot) {
-    if (p.counters == nil || p.counters.contents == nullptr) return 0;
-    uint64_t v = 0;
-    std::memcpy(&v, (const uint8_t*)p.counters.contents + (size_t)slot * 8, 8);
-    return v;
+    if (p.counters == nil) return 0;
+    if (@available(macOS 10.15, iOS 14.0, *)) {
+        NSData* data = [p.counters resolveCounterRange:NSMakeRange(slot, 1)];
+        if (data == nil || data.length < sizeof(MTLCounterResultTimestamp)) return 0;
+        auto* ts = static_cast<const MTLCounterResultTimestamp*>(data.bytes);
+        return ts[0].timestamp == MTLCounterErrorValue ? 0 : ts[0].timestamp;
+    }
+    return 0;
 }
 
 // Move the circular cursor one slot forward; degrade the pool to the CPU
@@ -183,13 +229,13 @@ static bool sample_counter(QueryPool& p, uint32_t slot) {
     if (@available(macOS 10.15, iOS 14.0, *)) {
         id<MTLRenderCommandEncoder> renc = current_encoder();
         if (renc != nil) {
-            [renc sampleCountersInBuffer:p.counters atOffset:slot
+            [renc sampleCountersInBuffer:p.counters atSampleIndex:slot
                              withBarrier:YES];
             return true;
         }
         id<MTLBlitCommandEncoder> benc = [backend()->cmd blitCommandEncoder];
         if (benc == nil) return false;
-        [benc sampleCountersInBuffer:p.counters atOffset:slot
+        [benc sampleCountersInBuffer:p.counters atSampleIndex:slot
                          withBarrier:YES];
         [benc endEncoding];
         note_non_render_commands();   // hasCommands accounting stays honest
@@ -209,6 +255,24 @@ static void degrade_to_cpu(QueryPool& p) {
 }
 
 } // namespace
+
+id<MTLBuffer> visibility_result_buffer() { return g_visibilityResults; }
+
+void replay_pending_visibility(id<MTLRenderCommandEncoder> encoder) {
+    if (encoder == nil || g_visibilityResults == nil) return;
+    for (auto& kv : pool_table()) {
+        QueryPool& p = kv.second;
+        if (p.kind != MITHRIL_QUERY_OCCLUSION || !p.begun ||
+            p.ended || !p.pendingVisibility || p.visibilityOffset == NSNotFound)
+            continue;
+        [encoder setVisibilityResultMode:MTLVisibilityResultModeCounting
+                                  offset:p.visibilityOffset];
+        p.pendingVisibility = false;
+        // OpenGL permits at most one active query per target in a context;
+        // Metal likewise has one visibility mode/offset per encoder.
+        break;
+    }
+}
 
 // ---- Pool lifecycle --------------------------------------------------------
 
@@ -230,19 +294,18 @@ bool query_pool_create(uint64_t query_id, int kind) {
     QueryPool p;
     p.kind = kind;
     if (kind == MITHRIL_QUERY_OCCLUSION) {
-        // Per-pool buffer => no cross-frame/cross-query aliasing. Shared on
-        // every platform: buffers accept Shared even on discrete GPUs, and
-        // then GPU-writes are directly CPU-coherent with zero maintenance
-        // (Managed would need didModifyRange for the wrong direction only).
-        p.visibility = [b->device newBufferWithLength:8
-                                              options:MTLResourceStorageModeShared];
-        if (p.visibility == nil) {
-            MITHRIL_LOG_WARN("mtl", "occlusion query: visibility buffer "
-                             "alloc failed for query %llu",
+        const bool firstVisibilityUse = (g_visibilityResults == nil);
+        if (!allocate_visibility_offset(p.visibilityOffset)) {
+            MITHRIL_LOG_WARN("mtl", "occlusion query visibility arena exhausted for %llu",
                              (unsigned long long)query_id);
             return false;
         }
-        std::memset(p.visibility.contents, 0, 8);
+        id<MTLBuffer> vb = ensure_visibility_result_buffer();
+        std::memset((uint8_t*)vb.contents + p.visibilityOffset, 0, 8);
+        // A pass created before the first occlusion pool has no visibility
+        // result buffer by design. Split it now; query_begin will mark the
+        // query pending and the next pass replays the visibility mode.
+        if (firstVisibilityUse && render_pass_active()) end_render_pass();
     } else {
         // No timestamp counter set: report the pool as unsupported so the GL
         // layer keeps its CPU-clock fallback (mirrors validBits == 0).
@@ -256,13 +319,12 @@ bool query_pool_create(uint64_t query_id, int kind) {
 }
 
 void query_pool_destroy(uint64_t query_id) {
-    // Why no deferred disposal (unlike Vulkan's disposalQueue): Metal
-    // retains every object an encoded command buffer references until that
-    // buffer completes (MetalResources.mm LIFETIME NOTE), so erasing the
-    // entry and letting ARC drop the id<> refs is safe with queries in
-    // flight. VkQueryPool needed the queue only because vkDestroyQueryPool
-    // is immediate and the driver does not hold references for you.
-    pool_table().erase(query_id);
+    auto& table = pool_table();
+    auto it = table.find(query_id);
+    if (it == table.end()) return;
+    if (it->second.kind == MITHRIL_QUERY_OCCLUSION)
+        free_visibility_offset(it->second.visibilityOffset);
+    table.erase(it);
 }
 
 // ---- Begin / end -----------------------------------------------------------
@@ -275,22 +337,22 @@ void query_begin(uint64_t query_id) {
     QueryPool& p = it->second;
 
     if (p.kind == MITHRIL_QUERY_OCCLUSION) {
-        if (p.visibility == nil || p.visibility.contents == nullptr) return;
+        id<MTLBuffer> visibility = ensure_visibility_result_buffer();
+        if (visibility == nil || visibility.contents == nullptr || p.visibilityOffset == NSNotFound) return;
         // GL semantics: a fresh begin discards the previous result. Vulkan
         // records vkCmdResetQueryPool on the command buffer; Metal has no
         // reset command, so zero the 8 bytes from the CPU. This races only
         // with a STILL-INFLIGHT previous frame using the same pool — the
         // Vulkan path carries the identical caveat.
-        std::memset(p.visibility.contents, 0, 8);
+        std::memset((uint8_t*)visibility.contents + p.visibilityOffset, 0, 8);
         p.begun = true;
         p.ended = false;
         p.pendingVisibility = false;
 
         id<MTLRenderCommandEncoder> enc = current_encoder();
         if (enc != nil) {
-            [enc setVisibilityResultBuffer:p.visibility];
             [enc setVisibilityResultMode:MTLVisibilityResultModeCounting
-                                   offset:0];
+                                   offset:p.visibilityOffset];
         } else {
             // TRADE-OFF (no live pass): the visibility mode is ENCODER state
             // — there is nowhere to record it yet, and MetalCommandStream
@@ -350,13 +412,12 @@ void query_end(uint64_t query_id) {
                 // immediately below. Zero draws happen in between, so the
                 // count stays at the memset zero — but the encoder's
                 // visibility state ends up well-defined instead of stale.
-                [enc setVisibilityResultBuffer:p.visibility];
-                [enc setVisibilityResultMode:MTLVisibilityResultModeCounting
-                                       offset:0];
+                    [enc setVisibilityResultMode:MTLVisibilityResultModeCounting
+                                       offset:p.visibilityOffset];
                 p.pendingVisibility = false;
             }
             [enc setVisibilityResultMode:MTLVisibilityResultModeDisabled
-                                   offset:0];
+                                   offset:p.visibilityOffset];
         } else {
             // No encoder at end either: the pending mode is dropped; the
             // result remains the memset zero and availability is still true.
@@ -442,10 +503,13 @@ bool query_get_results(uint64_t query_id, bool wait,
             // CPU-mapped memory — this plain read IS the "resolve". That is
             // the one systematic win over VkGetQueryPoolResults, at the cost
             // of no GPU-side availability word (see file header).
-            if (out && p.visibility != nil && p.visibility.contents != nullptr) {
-                uint64_t v = 0;
-                std::memcpy(&v, p.visibility.contents, 8);
-                *out = v;
+            if (out) {
+                id<MTLBuffer> visibility = visibility_result_buffer();
+                if (visibility != nil && visibility.contents != nullptr && p.visibilityOffset != NSNotFound) {
+                    uint64_t v = 0;
+                    std::memcpy(&v, (const uint8_t*)visibility.contents + p.visibilityOffset, 8);
+                    *out = v;
+                }
             }
             break;
 
@@ -519,10 +583,11 @@ void query_copy_results(uint64_t query_id, uint32_t gl_buffer_id,
         const uint64_t a = avail ? 1ull : 0ull;
         std::memcpy(dst + 8, &a, 8);
     }
+#if TARGET_OS_OSX
     if (mb->managed) {
-        // CPU write -> GPU visibility on discrete GPUs.
         [mb->buf didModifyRange:NSMakeRange((NSUInteger)offset, need)];
     }
+#endif
 }
 
 // ---- Clock -----------------------------------------------------------------
@@ -553,14 +618,17 @@ uint64_t query_timestamp_now_ns() {
             if (cb != nil) {
                 id<MTLBlitCommandEncoder> enc = [cb blitCommandEncoder];
                 if (enc != nil) {
-                    [enc sampleCountersInBuffer:csb atOffset:0
+                    [enc sampleCountersInBuffer:csb atSampleIndex:0
                                      withBarrier:YES];
                     [enc endEncoding];
                     [cb commit];
                     [cb waitUntilCompleted];
-                    uint64_t v = 0;
-                    std::memcpy(&v, csb.contents, 8);
-                    if (v != 0) return v;   // 0 = never written -> fallback
+                    NSData* data = [csb resolveCounterRange:NSMakeRange(0, 1)];
+                    if (data != nil && data.length >= sizeof(MTLCounterResultTimestamp)) {
+                        auto* ts = static_cast<const MTLCounterResultTimestamp*>(data.bytes);
+                        uint64_t v = ts[0].timestamp;
+                        if (v != 0 && v != MTLCounterErrorValue) return v;
+                    }
                 }
             }
         }
