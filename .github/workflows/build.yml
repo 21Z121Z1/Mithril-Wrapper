@@ -7,6 +7,7 @@ on:
       - 'feature/**'
       - 'refactor/**'
       - 'codex/**'
+      - 'integration/directmetal-unified-20260815'
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -16,7 +17,7 @@ jobs:
     name: DirectMetal macOS semantics + boundary
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: false
 
@@ -58,7 +59,7 @@ jobs:
           codesign --force --sign - build-direct/artifacts/libmithril.dylib
           codesign --verify --verbose=2 build-direct/artifacts/libmithril.dylib
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: mithril-direct-macos
           path: build-direct/artifacts/libmithril.dylib
@@ -68,7 +69,7 @@ jobs:
     name: DirectMetal iPhoneOS arm64
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: false
 
@@ -101,7 +102,7 @@ jobs:
           codesign --force --sign - build-ios/artifacts/libmithril.dylib
           codesign --verify --verbose=2 build-ios/artifacts/libmithril.dylib
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: mithril-direct-ios-arm64
           path: build-ios/artifacts/libmithril.dylib
@@ -111,7 +112,7 @@ jobs:
     name: Vulkan reference regression
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
 
