@@ -17,6 +17,8 @@
 #include <string>
 #include <unordered_map>
 
+extern "C" void mithril_e2e_capture_before_present(int width, int height, void* mithril_handle);
+
 namespace {
 struct ContextState {
     EGLDisplay display = EGL_NO_DISPLAY;
@@ -370,6 +372,18 @@ void glfwSwapBuffers(GLFWwindow* window) {
         if (it == g_contexts.end()) return;
         state = it->second;
     }
+
+    // This is the authoritative L4 capture seam: the frame is fully encoded by
+    // Minecraft but eglSwapBuffers has not yet presented it or acquired the
+    // next drawable. The helper is a no-op unless the Client GameTest has
+    // atomically posted a one-shot capture request.
+    auto getFramebufferSize = real_glfw<void (*)(GLFWwindow*, int*, int*)>("glfwGetFramebufferSize");
+    if (getFramebufferSize) {
+        int width = 0, height = 0;
+        getFramebufferSize(window, &width, &height);
+        mithril_e2e_capture_before_present(width, height, mithril().handle);
+    }
+
     if (mithril().swapBuffers(state.display, state.surface) == EGL_TRUE) {
         auto count = g_swap_count.fetch_add(1) + 1;
         if (count <= 3 || count % 120 == 0) write_state("swap_buffers");
