@@ -43,6 +43,28 @@ def exported_symbols(dylib: pathlib.Path):
     return out
 
 
+def core_symbols_for_version(path: pathlib.Path, target_version: str):
+    target = tuple(int(v) for v in target_version.split(".", 1))
+    required = []
+    malformed = []
+    for lineno, raw in enumerate(path.read_text().splitlines(), 1):
+        if not raw.strip() or raw.lstrip().startswith("#"):
+            continue
+        parts = raw.split("\t")
+        if len(parts) != 2:
+            malformed.append((lineno, raw))
+            continue
+        version_tag, symbol = parts
+        m = re.fullmatch(r"GL_VERSION_(\d+)_(\d+)", version_tag)
+        if not m:
+            malformed.append((lineno, raw))
+            continue
+        version = (int(m.group(1)), int(m.group(2)))
+        if version <= target:
+            required.append(symbol)
+    return sorted(set(required)), malformed
+
+
 def parse_trace(path: pathlib.Path):
     events = []
     if not path.exists():
@@ -75,7 +97,7 @@ def main():
     ap.add_argument("--report")
     args = ap.parse_args()
 
-    manifest_path = pathlib.Path(args.manifest)
+    manifest_path = pathlib.Path(args.manifest).resolve()
     getter_path = pathlib.Path(args.getter)
     manifest = json.loads(manifest_path.read_text())
     getter_text = getter_path.read_text()
@@ -104,6 +126,37 @@ def main():
             f"GL_SHADING_LANGUAGE_VERSION integer query={numeric_glsl} contract={contract_numeric_glsl}"
         )
 
+    semantics = manifest["semantic_evidence"]
+    if core.get("status") != "minecraft-e2e-proven":
+        failures.append("core version status must be minecraft-e2e-proven")
+    if not core.get("state_semantics"):
+        failures.append("core version has no state semantic evidence")
+    if not core.get("oracles"):
+        failures.append("core version has no executable oracle evidence")
+    for semantic in core.get("state_semantics", []):
+        ev = semantics.get(semantic)
+        if not ev or ev.get("status") != "proven":
+            failures.append(f"core {core['version']}: semantic {semantic} is unproven")
+
+    repo_root = manifest_path.parents[2]
+    core_symbols_path = repo_root / core.get("symbols_file", "")
+    core_required = []
+    core_symbol_malformed = []
+    if not core.get("symbols_file"):
+        failures.append("core version has no symbols_file")
+    elif not core_symbols_path.is_file():
+        failures.append(f"core symbols file missing: {core_symbols_path}")
+    else:
+        core_required, core_symbol_malformed = core_symbols_for_version(
+            core_symbols_path, core["version"]
+        )
+        if core_symbol_malformed:
+            failures.append(
+                f"core symbols file has {len(core_symbol_malformed)} malformed line(s)"
+            )
+        if not core_required:
+            failures.append(f"no cumulative core symbols resolved for GL {core['version']}")
+
     contract_ext = manifest["advertised_extensions"]
     if len(advertised) != len(set(advertised)):
         failures.append("kExtensions contains duplicate entries")
@@ -114,7 +167,6 @@ def main():
     if over_contract:
         failures.append("contract says advertised but source omits: " + ", ".join(over_contract))
 
-    semantics = manifest["semantic_evidence"]
     for ext_name, entry in contract_ext.items():
         if entry.get("status") != "proven":
             failures.append(f"{ext_name}: status is not proven")
@@ -130,12 +182,21 @@ def main():
                 failures.append(f"{ext_name}: semantic {semantic} is unproven")
 
     exports = None
+    missing_core_exports = []
     if args.dylib:
         dylib = pathlib.Path(args.dylib)
         if not dylib.is_file():
             failures.append(f"dylib missing: {dylib}")
         else:
             exports = exported_symbols(dylib)
+            missing_core_exports = sorted(set(core_required) - exports)
+            if missing_core_exports:
+                failures.append(
+                    f"GL {core['version']} core export contract missing "
+                    f"{len(missing_core_exports)} symbol(s): "
+                    + ", ".join(missing_core_exports[:24])
+                    + (" ..." if len(missing_core_exports) > 24 else "")
+                )
             for ext_name, entry in contract_ext.items():
                 for symbol in entry.get("symbols", []):
                     if symbol not in exports:
@@ -185,12 +246,17 @@ def main():
         for key, value in sorted(observed.items())
     }
     report = {
-        "schema_version": "1.0",
+        "schema_version": manifest.get("schema_version", "1.0"),
         "profile": manifest.get("profile"),
         "advertised_gl_version": gl_version,
         "advertised_glsl_version": glsl_version,
         "integer_gl_version": f"{major}.{minor}",
         "integer_glsl_version": numeric_glsl,
+        "core_symbol_contract": {
+            "required_count": len(core_required),
+            "missing_count": len(missing_core_exports),
+            "symbols_file": core.get("symbols_file"),
+        },
         "advertised_extensions": advertised,
         "export_check_performed": exports is not None,
         "trace_event_count": len(trace_events),
