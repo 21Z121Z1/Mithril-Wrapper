@@ -443,8 +443,25 @@ void issue_indexed_draw(GLenum primitive, uint32_t count, int index_type,
     const bool fan = (primitive == GL_TRIANGLE_FAN);
     const bool loop = (primitive == GL_LINE_LOOP);
 
-    if (index_type != 2 && !fan && !loop) {
-        // Fast path — draw straight from the app's index buffer.
+    const uint32_t sourceMax = index_type == 1 ? 0xffffffffu
+                               : (index_type == 2 ? 0xffu : 0xffffu);
+    const bool fixedRestart = mithril::g_state && mithril::g_state->primitiveRestartFixedIndex;
+    const bool programmableRestart = mithril::g_state && mithril::g_state->primitiveRestart &&
+                                     !fixedRestart;
+    const uint32_t restartToken = fixedRestart ? sourceMax
+                                  : (programmableRestart
+                                         ? mithril::g_state->primitiveRestartIndex
+                                         : 0u);
+    const bool restartCanMatch = fixedRestart ||
+        (programmableRestart && restartToken <= sourceMax);
+    const bool nativeRestartToken = restartCanMatch && restartToken == sourceMax;
+
+    // Metal only accepts U16/U32 indices and ALWAYS reserves that type's
+    // maximum value as a primitive-restart sentinel. U8 therefore always
+    // needs widening; programmable restart needs remapping unless its token
+    // already equals the native maximum. Fixed U16/U32 can stay zero-copy.
+    const bool needsRestartRemap = restartCanMatch && !nativeRestartToken;
+    if (index_type != 2 && !fan && !loop && !needsRestartRemap) {
         [r drawIndexedPrimitives:primitive_from_gl(primitive)
                        indexCount:(NSUInteger)count
                         indexType:index_type_from_int(index_type)
@@ -456,37 +473,14 @@ void issue_indexed_draw(GLenum primitive, uint32_t count, int index_type,
         return;
     }
 
-    // All expansions need CPU-readable contents. The backend creates every GL
-    // buffer shared/managed, so contents is non-null in practice; a private
-    // buffer here cannot be expanded — drop the draw rather than mis-render.
     if (index_buffer->contents == nullptr) {
         static uint32_t warned = 0;
-        warn_limited(warned, "dmt", "expanded draw needs CPU-readable indices "
+        warn_limited(warned, "dmt", "indexed semantic adaptation needs CPU-readable indices "
                                   "(private storage?) — draw dropped");
         return;
     }
     const uint8_t* src = (const uint8_t*)index_buffer->contents + index_offset;
 
-    if (index_type == 2 && !fan && !loop) {
-        // Widen U8 -> U16 only.
-        const NSUInteger bytes = (NSUInteger)count * 2;
-        id<MTLBuffer> sb; NSUInteger off; void* ptr;
-        if (!scratch_alloc(bytes, sb, off, ptr)) return;
-        uint16_t* dst = (uint16_t*)ptr;
-        for (uint32_t i = 0; i < count; ++i) dst[i] = (uint16_t)src[i];
-        scratch_flush(sb, off, bytes);
-        [r drawIndexedPrimitives:primitive_from_gl(primitive)
-                       indexCount:(NSUInteger)count
-                        indexType:MTLIndexTypeUInt16
-                      indexBuffer:sb
-                indexBufferOffset:off
-                   instanceCount:instanceCount
-                      baseVertex:baseVertex
-                    baseInstance:baseInstance];
-        return;
-    }
-
-    // Gather the source indices as u32 (max of any source width).
     static thread_local std::vector<uint32_t> gather;
     gather.clear();
     gather.reserve(count);
@@ -500,57 +494,115 @@ void issue_indexed_draw(GLenum primitive, uint32_t count, int index_type,
         for (uint32_t i = 0; i < count; ++i) gather.push_back(s[i]);
     }
 
+    // Fan and loop need explicit per-restart segmentation before their Metal
+    // primitive expansion. Restart comparison deliberately precedes
+    // baseVertex, matching OpenGL's indexed assembly semantics.
     if (fan) {
-        if (count < 3) return;
-        // Values came from the app's index buffer: only a U32 source can
-        // exceed 65535, so u16 is safe for U8/U16 sources.
-        const bool use16 = (index_type != 1);
-        const NSUInteger bytes = (NSUInteger)(count - 2) * 3 * (use16 ? 2 : 4);
+        static thread_local std::vector<uint32_t> expanded;
+        expanded.clear();
+        size_t begin = 0;
+        while (begin < gather.size()) {
+            size_t end = begin;
+            while (end < gather.size() &&
+                   !(restartCanMatch && gather[end] == restartToken)) ++end;
+            if (end - begin >= 3) {
+                for (size_t t = begin + 1; t + 1 < end; ++t) {
+                    expanded.push_back(gather[begin]);
+                    expanded.push_back(gather[t]);
+                    expanded.push_back(gather[t + 1]);
+                }
+            }
+            begin = end + (end < gather.size() ? 1 : 0);
+        }
+        if (expanded.empty()) return;
+        // U32 only when required by source width; fixed/program restart tokens
+        // have already been removed by expansion, so no synthetic sentinel is
+        // needed in the triangle-list output.
+        const bool use32 = index_type == 1;
+        const NSUInteger bytes = expanded.size() * (use32 ? 4u : 2u);
         id<MTLBuffer> sb; NSUInteger off; void* ptr;
         if (!scratch_alloc(bytes, sb, off, ptr)) return;
-        for (uint32_t t = 0; t + 2 < count; ++t) {
-            const uint32_t v[3] = {gather[0], gather[t + 1], gather[t + 2]};
-            if (use16) {
-                uint16_t* o = (uint16_t*)ptr + (size_t)t * 3;
-                o[0] = (uint16_t)v[0]; o[1] = (uint16_t)v[1]; o[2] = (uint16_t)v[2];
-            } else {
-                uint32_t* o = (uint32_t*)ptr + (size_t)t * 3;
-                o[0] = v[0]; o[1] = v[1]; o[2] = v[2];
-            }
+        if (use32) {
+            std::memcpy(ptr, expanded.data(), bytes);
+        } else {
+            uint16_t* d = (uint16_t*)ptr;
+            for (size_t i = 0; i < expanded.size(); ++i) d[i] = (uint16_t)expanded[i];
         }
         scratch_flush(sb, off, bytes);
         [r drawIndexedPrimitives:MTLPrimitiveTypeTriangle
-                       indexCount:(NSUInteger)(count - 2) * 3
-                        indexType:(use16 ? MTLIndexTypeUInt16 : MTLIndexTypeUInt32)
-                      indexBuffer:sb
-                indexBufferOffset:off
-                   instanceCount:instanceCount
-                      baseVertex:baseVertex
+                       indexCount:expanded.size()
+                        indexType:(use32 ? MTLIndexTypeUInt32 : MTLIndexTypeUInt16)
+                      indexBuffer:sb indexBufferOffset:off
+                   instanceCount:instanceCount baseVertex:baseVertex
                     baseInstance:baseInstance];
         return;
     }
 
-    // Line loop: strip of the gathered ids plus the closing first id.
-    if (count < 2) return;
-    const bool use16 = (index_type != 1);
-    const NSUInteger nIdx = (NSUInteger)count + 1;
-    const NSUInteger bytes = nIdx * (use16 ? 2 : 4);
+    if (loop) {
+        // A restart creates independent line loops. Issue each segment as its
+        // own line strip with the first index appended; no sentinel is needed.
+        size_t begin = 0;
+        while (begin < gather.size()) {
+            size_t end = begin;
+            while (end < gather.size() &&
+                   !(restartCanMatch && gather[end] == restartToken)) ++end;
+            const size_t n = end - begin;
+            if (n >= 2) {
+                const bool use32 = index_type == 1;
+                const NSUInteger bytes = (n + 1) * (use32 ? 4u : 2u);
+                id<MTLBuffer> sb; NSUInteger off; void* ptr;
+                if (!scratch_alloc(bytes, sb, off, ptr)) return;
+                if (use32) {
+                    uint32_t* d = (uint32_t*)ptr;
+                    for (size_t i = 0; i < n; ++i) d[i] = gather[begin + i];
+                    d[n] = gather[begin];
+                } else {
+                    uint16_t* d = (uint16_t*)ptr;
+                    for (size_t i = 0; i < n; ++i) d[i] = (uint16_t)gather[begin + i];
+                    d[n] = (uint16_t)gather[begin];
+                }
+                scratch_flush(sb, off, bytes);
+                [r drawIndexedPrimitives:MTLPrimitiveTypeLineStrip
+                               indexCount:n + 1
+                                indexType:(use32 ? MTLIndexTypeUInt32 : MTLIndexTypeUInt16)
+                              indexBuffer:sb indexBufferOffset:off
+                           instanceCount:instanceCount baseVertex:baseVertex
+                            baseInstance:baseInstance];
+            }
+            begin = end + (end < gather.size() ? 1 : 0);
+        }
+        return;
+    }
+
+    // Plain primitive adaptation. U8 widens to U16. A programmable U16
+    // restart widens to U32 so ordinary 0xffff remains a vertex index while
+    // the chosen token becomes Metal's 0xffffffff sentinel. U32 stays U32 and
+    // remaps a custom token in-place; 0xffffffff cannot be represented as a
+    // non-restart Metal index, but such a vertex index cannot address a real
+    // Minecraft vertex buffer and is outside the practical terrain domain.
+    const bool use32 = (index_type == 1) || (index_type == 0 && needsRestartRemap);
+    const NSUInteger bytes = (NSUInteger)count * (use32 ? 4u : 2u);
     id<MTLBuffer> sb; NSUInteger off; void* ptr;
     if (!scratch_alloc(bytes, sb, off, ptr)) return;
-    for (uint32_t i = 0; i < count; ++i) {
-        if (use16) ((uint16_t*)ptr)[i] = (uint16_t)gather[i];
-        else       ((uint32_t*)ptr)[i] = gather[i];
+    if (use32) {
+        uint32_t* dst = (uint32_t*)ptr;
+        for (uint32_t i = 0; i < count; ++i) {
+            const uint32_t v = gather[i];
+            dst[i] = (restartCanMatch && v == restartToken) ? 0xffffffffu : v;
+        }
+    } else {
+        uint16_t* dst = (uint16_t*)ptr;
+        for (uint32_t i = 0; i < count; ++i) {
+            const uint32_t v = gather[i];
+            dst[i] = (restartCanMatch && v == restartToken) ? 0xffffu : (uint16_t)v;
+        }
     }
-    if (use16) ((uint16_t*)ptr)[count] = (uint16_t)gather[0];
-    else       ((uint32_t*)ptr)[count] = gather[0];
     scratch_flush(sb, off, bytes);
-    [r drawIndexedPrimitives:MTLPrimitiveTypeLineStrip
-                   indexCount:nIdx
-                    indexType:(use16 ? MTLIndexTypeUInt16 : MTLIndexTypeUInt32)
-                  indexBuffer:sb
-            indexBufferOffset:off
-               instanceCount:instanceCount
-                  baseVertex:baseVertex
+    [r drawIndexedPrimitives:primitive_from_gl(primitive)
+                   indexCount:(NSUInteger)count
+                    indexType:(use32 ? MTLIndexTypeUInt32 : MTLIndexTypeUInt16)
+                  indexBuffer:sb indexBufferOffset:off
+               instanceCount:instanceCount baseVertex:baseVertex
                 baseInstance:baseInstance];
 }
 
@@ -1331,8 +1383,16 @@ void draw_indexed_indirect(GLenum primitive, int index_type,
     const NSUInteger effStride = (NSUInteger)(stride > 0 ? stride : 20);
     const bool expanded = (primitive == GL_TRIANGLE_FAN || primitive == GL_LINE_LOOP);
     const bool widenU8 = (index_type == 2); // Metal has no U8 index type
+    const uint32_t sourceMax = index_type == 1 ? 0xffffffffu
+                               : (index_type == 2 ? 0xffu : 0xffffu);
+    const bool fixedRestart = mithril::g_state && mithril::g_state->primitiveRestartFixedIndex;
+    const bool programmableRestart = mithril::g_state && mithril::g_state->primitiveRestart &&
+                                     !fixedRestart;
+    const bool restartNeedsAdaptation = widenU8 ||
+        (programmableRestart && mithril::g_state->primitiveRestartIndex <= sourceMax &&
+         mithril::g_state->primitiveRestartIndex != sourceMax);
 
-    if (!expanded && !widenU8 && indirect->contents == nullptr &&
+    if (!expanded && !restartNeedsAdaptation && indirect->contents == nullptr &&
         count == 1 && effStride == 20) {
         // Fast path: one record, plain primitive, app index buffer as-is.
         [g_renderEncoder drawIndexedPrimitives:primitive_from_gl(primitive)
@@ -1354,7 +1414,7 @@ void draw_indexed_indirect(GLenum primitive, int index_type,
         std::memcpy(&args, (const uint8_t*)indirect->contents + offset + (NSUInteger)i * effStride,
                     sizeof(args));
         if (args.indexCount == 0 || args.instanceCount == 0) continue;
-        if (expanded || widenU8) {
+        if (expanded || restartNeedsAdaptation) {
             // indexStart is the first-index offset in ELEMENTS (GL/Vulkan
             // firstIndex semantics == Metal's indexStart).
             const NSUInteger byteOff = index_offset +

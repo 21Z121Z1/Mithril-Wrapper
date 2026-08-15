@@ -445,12 +445,15 @@ struct Program {
     std::unordered_map<std::string, Attrib> attribs;
     std::unordered_map<std::string, GLuint> uniformBlocks;
     std::unordered_map<std::string, GLuint> attribBindings;
-    // SPIR-V for each linked stage (consumed by backend_get_or_create_pipeline).
-    // vertexSpirv:         Z remap, NO Y flip — for user-created FBOs.
-    // vertexSpirvYFlipped: Z remap + Y flip — for default framebuffer (FBO 0).
-    // (Red/black screen fix — must be preserved.)
+    // SPIR-V variants consumed by backend_get_or_create_pipeline().
+    // The first pair implements GL_NEGATIVE_ONE_TO_ONE by remapping clip Z;
+    // the second pair implements GL_ZERO_TO_ONE without that remap.  Each pair
+    // has non-flipped / Y-flipped forms so GL_UPPER_LEFT composes with the
+    // framebuffer presentation orientation without changing viewport/scissor.
     std::vector<uint32_t> vertexSpirv;
     std::vector<uint32_t> vertexSpirvYFlipped;
+    std::vector<uint32_t> vertexSpirvZeroToOne;
+    std::vector<uint32_t> vertexSpirvZeroToOneYFlipped;
     std::vector<uint32_t> fragmentSpirv;
     // Compute stage (GL_COMPUTE_SHADER). Empty for graphics-only programs;
     // backend_get_or_create_compute_pipeline() bails out on empty.

@@ -132,21 +132,23 @@ static bool prepare_draw(GLenum mode) {
     // 用非 flip 变体虽上下颠倒但内容可见，绝不让 draw 静默消失。
     // Program.cpp 链接后也有同型兜底（vertexSpirvYFlipped 空 → 拷贝 vertexSpirv），
     // 这里是第二道防线，捕获兜底未覆盖的路径（如翻转编译半途失败）。
+    const bool clip_upper_left = (g_state->clipOrigin == GL_UPPER_LEFT);
+    const bool zero_to_one = (g_state->clipDepthMode == GL_ZERO_TO_ONE);
+    // Existing framebuffer convention: FBO0 needs one Y inversion relative to
+    // user FBOs. ARB_clip_control UPPER_LEFT contributes one additional
+    // inversion, therefore the two compose by XOR.
+    const bool want_y_flip = is_default_fbo ^ clip_upper_left;
     const std::vector<uint32_t>& vs_spirv = [&]() -> const std::vector<uint32_t>& {
-        if (!is_default_fbo) return prog->vertexSpirv;
-        if (!prog->vertexSpirvYFlipped.empty()) return prog->vertexSpirvYFlipped;
-        if (!prog->vertexSpirv.empty()) {
-            static GLuint last_fb_warned = 0;
-            if (last_fb_warned != prog->id) {
-                last_fb_warned = prog->id;
-                MITHRIL_LOG_WARN("gl", "prepare_draw: program %u has empty "
-                                  "vertexSpirvYFlipped for FBO 0 — falling back "
-                                  "to non-flipped SPIR-V (Y orientation wrong, "
-                                  "but draw will not be skipped)", prog->id);
-            }
-            return prog->vertexSpirv;
+        if (zero_to_one) {
+            const auto& preferred = want_y_flip
+                ? prog->vertexSpirvZeroToOneYFlipped
+                : prog->vertexSpirvZeroToOne;
+            if (!preferred.empty()) return preferred;
+            return want_y_flip ? prog->vertexSpirvYFlipped : prog->vertexSpirv;
         }
-        return prog->vertexSpirvYFlipped; // both empty — caught below
+        const auto& preferred = want_y_flip ? prog->vertexSpirvYFlipped : prog->vertexSpirv;
+        if (!preferred.empty()) return preferred;
+        return prog->vertexSpirv;
     }();
 
     // Defensive: skip draws whose shader translation produced no SPIR-V
@@ -396,6 +398,10 @@ static bool prepare_draw(GLenum mode) {
 #if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
         invert_front_face = true;
 #endif
+        // ARB_clip_control: changing to UPPER_LEFT negates the signed polygon
+        // area used for front-face determination. Toggle the existing backend
+        // orientation compensation exactly once.
+        if (g_state->clipOrigin == GL_UPPER_LEFT) invert_front_face = !invert_front_face;
         backend_set_front_face(
             invert_front_face ?
                 (g_state->frontFace == GL_CCW ? 0 /*CW*/ : 1 /*CCW*/) :
@@ -1200,19 +1206,28 @@ void glMultiDrawArraysIndirectCount(GLenum mode, const void* indirect,
                                     GLintptr drawcount, GLint maxdrawcount,
                                     GLsizei stride) {
     MITHRIL_ENSURE_INIT();
-    if (maxdrawcount <= 0) return;
-    GLuint buf_name = g_state->bufferBindings[(int)mithril::BufferTarget::DrawIndirect].name;
-    VkBuffer indirect_buf = backend_get_buffer(buf_name);
-    if (indirect_buf == VK_NULL_HANDLE) return;
-    // GL 规范：drawcount 是 GL_DRAW_INDIRECT_BUFFER 内的字节偏移，存储一个
-    // uint32 的 draw 数量。Vulkan 的 count 参数正是 (buffer, offset)。
-    VkBuffer count_buf = indirect_buf;
-    VkDeviceSize count_off = (VkDeviceSize)drawcount;
+    if (maxdrawcount < 0) { mithril::state_set_error(GL_INVALID_VALUE); return; }
+    if (maxdrawcount == 0) return;
+    if (drawcount < 0 || (drawcount & 3) != 0 || stride < 0 ||
+        (stride != 0 && (stride < 16 || (stride & 3) != 0))) {
+        mithril::state_set_error(GL_INVALID_VALUE); return;
+    }
+    GLuint indirect_name = g_state->bufferBindings[(int)mithril::BufferTarget::DrawIndirect].name;
+    GLuint count_name = g_state->bufferBindings[(int)mithril::BufferTarget::Parameter].name;
+    if (!indirect_name || !count_name) { mithril::state_set_error(GL_INVALID_OPERATION); return; }
+    VkBuffer indirect_buf = backend_get_buffer(indirect_name);
+    VkBuffer count_buf = backend_get_buffer(count_name);
+    mithril::Buffer* count_state = mithril::state_get_buffer(count_name);
+    if (indirect_buf == VK_NULL_HANDLE || count_buf == VK_NULL_HANDLE || !count_state ||
+        (uint64_t)drawcount + sizeof(uint32_t) > (uint64_t)count_state->size) {
+        mithril::state_set_error(GL_INVALID_OPERATION); return;
+    }
     if (!prepare_draw(mode)) return;
-    int s = stride ? stride : 16;  // sizeof(VkDrawIndirectCommand)
+    int s = stride ? stride : 16;
     backend_draw_indirect_count((int)mode, indirect_buf,
                                 (VkDeviceSize)(intptr_t)indirect,
-                                count_buf, count_off, maxdrawcount, s);
+                                count_buf, (VkDeviceSize)drawcount,
+                                maxdrawcount, s);
     end_draw();
 }
 
@@ -1220,23 +1235,33 @@ void glMultiDrawElementsIndirectCount(GLenum mode, GLenum type,
                                       const void* indirect, GLintptr drawcount,
                                       GLint maxdrawcount, GLsizei stride) {
     MITHRIL_ENSURE_INIT();
-    if (maxdrawcount <= 0) return;
-    GLuint buf_name = g_state->bufferBindings[(int)mithril::BufferTarget::DrawIndirect].name;
-    VkBuffer indirect_buf = backend_get_buffer(buf_name);
-    if (indirect_buf == VK_NULL_HANDLE) return;
+    if (maxdrawcount < 0) { mithril::state_set_error(GL_INVALID_VALUE); return; }
+    if (maxdrawcount == 0) return;
+    if (drawcount < 0 || (drawcount & 3) != 0 || stride < 0 ||
+        (stride != 0 && (stride < 20 || (stride & 3) != 0))) {
+        mithril::state_set_error(GL_INVALID_VALUE); return;
+    }
+    GLuint indirect_name = g_state->bufferBindings[(int)mithril::BufferTarget::DrawIndirect].name;
+    GLuint count_name = g_state->bufferBindings[(int)mithril::BufferTarget::Parameter].name;
+    if (!indirect_name || !count_name) { mithril::state_set_error(GL_INVALID_OPERATION); return; }
+    VkBuffer indirect_buf = backend_get_buffer(indirect_name);
+    VkBuffer count_buf = backend_get_buffer(count_name);
+    mithril::Buffer* count_state = mithril::state_get_buffer(count_name);
     mithril::VertexArray* vao = mithril::state_get_vao(g_state->currentVAO);
     GLuint ib_name = vao ? vao->elementArrayBuffer : 0;
     VkBuffer ib = backend_get_buffer(ib_name);
-    if (ib == VK_NULL_HANDLE) return;
-    // 同 Arrays 变体：count 在 GL_DRAW_INDIRECT_BUFFER 的 drawcount 偏移处。
-    VkBuffer count_buf = indirect_buf;
-    VkDeviceSize count_off = (VkDeviceSize)drawcount;
+    if (indirect_buf == VK_NULL_HANDLE || count_buf == VK_NULL_HANDLE ||
+        ib == VK_NULL_HANDLE || !count_state ||
+        (uint64_t)drawcount + sizeof(uint32_t) > (uint64_t)count_state->size) {
+        mithril::state_set_error(GL_INVALID_OPERATION); return;
+    }
     if (!prepare_draw(mode)) return;
-    int s = stride ? stride : 20;  // sizeof(VkDrawIndexedIndirectCommand)
+    int s = stride ? stride : 20;
     backend_draw_indexed_indirect_count((int)mode, index_type_to_int(type),
                                         ib, 0,
                                         indirect_buf, (VkDeviceSize)(intptr_t)indirect,
-                                        count_buf, count_off, maxdrawcount, s);
+                                        count_buf, (VkDeviceSize)drawcount,
+                                        maxdrawcount, s);
     end_draw();
 }
 

@@ -281,7 +281,8 @@ void normalize_gl_legacy_constructs(std::string& source, GLenum gl_stage) {
 //      This matches MobileGL GetShaderTransformFlags (PositionYFlip is only
 //      set when the current draw FBO is the default framebuffer).
 // ---------------------------------------------------------------------------
-void inject_position_fixup(std::string& src, GLenum gl_stage, bool flip_y) {
+void inject_position_fixup(std::string& src, GLenum gl_stage, bool flip_y,
+                           bool remap_z) {
     if (gl_stage != GL_VERTEX_SHADER) return;
     static const std::regex main_re(R"(\bvoid\s+main\s*\()");
     if (!std::regex_search(src, main_re)) return;
@@ -290,7 +291,13 @@ void inject_position_fixup(std::string& src, GLenum gl_stage, bool flip_y) {
     if (flip_y) {
         src += "    gl_Position.y = -gl_Position.y;\n";
     }
-    src += "    gl_Position.z = (gl_Position.z + gl_Position.w) * 0.5;\n}\n";
+    // Metal/Vulkan clip Z is [0,w].  GL_NEGATIVE_ONE_TO_ONE supplies [-w,w]
+    // and therefore needs the affine remap before clipping. GL_ZERO_TO_ONE
+    // already supplies [0,w] and MUST NOT be remapped (ARB_clip_control).
+    if (remap_z) {
+        src += "    gl_Position.z = (gl_Position.z + gl_Position.w) * 0.5;\n";
+    }
+    src += "}\n";
 }
 
 // ---------------------------------------------------------------------------
@@ -660,9 +667,9 @@ uint64_t fnv1a(const std::string& s) {
 
 struct LinkCache {
     std::mutex mu;
-    // key -> (vertexSpirv, vertexSpirvFlipped, fragmentSpirv)
+    // key -> four clip-control VS variants + fragment SPIR-V.
     struct Entry {
-        std::vector<uint32_t> vs, vsFlip, fs;
+        std::vector<uint32_t> vs, vsFlip, vsZero, vsZeroFlip, fs;
     };
     std::unordered_map<uint64_t, Entry> entries;
 };
@@ -685,7 +692,7 @@ bool shader_compile_stage(GLenum gl_stage, const std::string& glsl_source,
     ensure_glsl_version(source);
     normalize_vulkan_incompatible_layouts(source);
     normalize_gl_legacy_constructs(source, gl_stage);
-    inject_position_fixup(source, gl_stage, /*flip_y=*/false);
+    inject_position_fixup(source, gl_stage, /*flip_y=*/false, /*remap_z=*/true);
 
     glslang::TShader sh(lang);
     const StageConfig cfg{&sh, lang, &source};
@@ -710,6 +717,8 @@ bool shader_link_program(const std::string& vs_source, const std::string& fs_sou
         if (it != link_cache().entries.end()) {
             out.vertexSpirv = it->second.vs;
             out.vertexSpirvFlipped = it->second.vsFlip;
+            out.vertexSpirvZeroToOne = it->second.vsZero;
+            out.vertexSpirvZeroToOneFlipped = it->second.vsZeroFlip;
             out.fragmentSpirv = it->second.fs;
             return true;
         }
@@ -725,47 +734,64 @@ bool shader_link_program(const std::string& vs_source, const std::string& fs_sou
     normalize_gl_legacy_constructs(vs, GL_VERTEX_SHADER);
     normalize_gl_legacy_constructs(fs, GL_FRAGMENT_SHADER);
 
-    // Non-flipped variant (user FBOs).
-    std::string vs_plain = vs;
-    inject_position_fixup(vs_plain, GL_VERTEX_SHADER, /*flip_y=*/false);
+    // Compile all four ARB_clip_control vertex variants. Descriptor
+    // resources are unchanged by the position wrapper, so each independent
+    // deterministic remap produces the same descriptor binding assignment.
     std::vector<uint32_t> vsSpv, fsSpv;
-    uint32_t nextBinding = 0;
-    if (!compile_program(vs_plain, fs, attrib_bindings, &nextBinding,
+    std::vector<uint32_t> vsFlipSpv, fsFlipSpv;
+    std::vector<uint32_t> vsZeroSpv, fsZeroSpv;
+    std::vector<uint32_t> vsZeroFlipSpv, fsZeroFlipSpv;
+
+    std::string vs_plain = vs;
+    inject_position_fixup(vs_plain, GL_VERTEX_SHADER,
+                          /*flip_y=*/false, /*remap_z=*/true);
+    if (!compile_program(vs_plain, fs, attrib_bindings, nullptr,
                          vsSpv, fsSpv, out_info_log)) {
         return false;
     }
 
-    // Y-flipped variant (default framebuffer). The descriptor binding
-    // assignment MUST match the non-flipped variant bit-for-bit — the
-    // program's descriptor set is reflected from the non-flipped SPIR-V.
-    // The flip only edits gl_Position math inside main(), so the resource
-    // set (declarations) is identical and an independent walk assigns the
-    // same bindings. verify/shader_link_probe.cpp pins this invariant.
-    //
-    // FIX (红屏安全网第一道): 非 flip 变体编译成功而 flip 变体失败时（glslang
-    // 仅对 rename+wrapper 后的源拒绝，极罕见），不再让整个链接失败（那会
-    // 触发 fallback 灰屏/跳 draw），而是复用非 flip SPIR-V —— FBO 0 内容
-    // 上下颠倒但可见。draw 永不因 flip 变体而消失。
     std::string vs_flip = vs;
-    inject_position_fixup(vs_flip, GL_VERTEX_SHADER, /*flip_y=*/true);
-    std::vector<uint32_t> vsFlipSpv, fsFlipSpv;
+    inject_position_fixup(vs_flip, GL_VERTEX_SHADER,
+                          /*flip_y=*/true, /*remap_z=*/true);
     if (!compile_program(vs_flip, fs, attrib_bindings, nullptr,
                          vsFlipSpv, fsFlipSpv, out_info_log)) {
-        MITHRIL_LOG_WARN("shader", "Y-flipped variant failed to compile "
-                          "(plain variant succeeded) — reusing non-flipped "
-                          "SPIR-V; default-framebuffer content will be "
-                          "upside-down but drawn. Info: %s",
-                          out_info_log.c_str());
+        MITHRIL_LOG_WARN("shader", "Y-flipped NEGATIVE_ONE_TO_ONE variant failed; "
+                          "reusing non-flipped variant. Info: %s", out_info_log.c_str());
         vsFlipSpv = vsSpv;
+    }
+
+    std::string vs_zero = vs;
+    inject_position_fixup(vs_zero, GL_VERTEX_SHADER,
+                          /*flip_y=*/false, /*remap_z=*/false);
+    if (!compile_program(vs_zero, fs, attrib_bindings, nullptr,
+                         vsZeroSpv, fsZeroSpv, out_info_log)) {
+        MITHRIL_LOG_WARN("shader", "ZERO_TO_ONE variant failed; reusing "
+                          "NEGATIVE_ONE_TO_ONE variant. Info: %s", out_info_log.c_str());
+        vsZeroSpv = vsSpv;
+    }
+
+    std::string vs_zero_flip = vs;
+    inject_position_fixup(vs_zero_flip, GL_VERTEX_SHADER,
+                          /*flip_y=*/true, /*remap_z=*/false);
+    if (!compile_program(vs_zero_flip, fs, attrib_bindings, nullptr,
+                         vsZeroFlipSpv, fsZeroFlipSpv, out_info_log)) {
+        MITHRIL_LOG_WARN("shader", "Y-flipped ZERO_TO_ONE variant failed; "
+                          "reusing non-flipped ZERO_TO_ONE variant. Info: %s",
+                          out_info_log.c_str());
+        vsZeroFlipSpv = vsZeroSpv;
     }
 
     out.vertexSpirv = std::move(vsSpv);
     out.vertexSpirvFlipped = std::move(vsFlipSpv);
+    out.vertexSpirvZeroToOne = std::move(vsZeroSpv);
+    out.vertexSpirvZeroToOneFlipped = std::move(vsZeroFlipSpv);
     out.fragmentSpirv = std::move(fsSpv);
 
     LinkCache::Entry entry;
     entry.vs = out.vertexSpirv;
     entry.vsFlip = out.vertexSpirvFlipped;
+    entry.vsZero = out.vertexSpirvZeroToOne;
+    entry.vsZeroFlip = out.vertexSpirvZeroToOneFlipped;
     entry.fs = out.fragmentSpirv;
     std::lock_guard<std::mutex> lk(link_cache().mu);
     link_cache().entries[key] = std::move(entry);

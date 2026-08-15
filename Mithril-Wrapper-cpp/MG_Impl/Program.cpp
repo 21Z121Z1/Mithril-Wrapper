@@ -168,6 +168,8 @@ void glLinkProgram(GLuint program) {
 
     p->vertexSpirv.clear();
     p->vertexSpirvYFlipped.clear();
+    p->vertexSpirvZeroToOne.clear();
+    p->vertexSpirvZeroToOneYFlipped.clear();
     p->fragmentSpirv.clear();
     p->uniforms.clear();
     p->uniformByLocation.clear();
@@ -208,6 +210,8 @@ void glLinkProgram(GLuint program) {
     if (linked) {
         p->vertexSpirv = std::move(linkOut.vertexSpirv);
         p->vertexSpirvYFlipped = std::move(linkOut.vertexSpirvFlipped);
+        p->vertexSpirvZeroToOne = std::move(linkOut.vertexSpirvZeroToOne);
+        p->vertexSpirvZeroToOneYFlipped = std::move(linkOut.vertexSpirvZeroToOneFlipped);
         p->fragmentSpirv = std::move(linkOut.fragmentSpirv);
 
         // FIX (红屏安全网, d2a8e49 回退恢复): 链接成功但 flip 变体为空时（glslang
@@ -218,11 +222,19 @@ void glLinkProgram(GLuint program) {
         // 的 rename+wrapper，失败只可能是 shader 自身与 wrapper 名冲突）。
         if (p->vertexSpirvYFlipped.empty() && !p->vertexSpirv.empty()) {
             p->vertexSpirvYFlipped = p->vertexSpirv;
-            MITHRIL_LOG_WARN("program", "vertexSpirvYFlipped was empty for "
-                              "program %u, falling back to non-flipped variant "
-                              "(%zu words) — Y orientation will be wrong but "
-                              "draws will not be skipped",
-                              program, p->vertexSpirv.size());
+            MITHRIL_LOG_WARN("program", "vertexSpirvYFlipped missing for program %u; "
+                              "using non-flipped fallback", program);
+        }
+        if (p->vertexSpirvZeroToOne.empty() && !p->vertexSpirv.empty()) {
+            p->vertexSpirvZeroToOne = p->vertexSpirv;
+            MITHRIL_LOG_WARN("program", "ZERO_TO_ONE VS missing for program %u; "
+                              "using NEGATIVE_ONE_TO_ONE fallback", program);
+        }
+        if (p->vertexSpirvZeroToOneYFlipped.empty() &&
+            !p->vertexSpirvZeroToOne.empty()) {
+            p->vertexSpirvZeroToOneYFlipped = p->vertexSpirvZeroToOne;
+            MITHRIL_LOG_WARN("program", "Y-flipped ZERO_TO_ONE VS missing for program %u; "
+                              "using non-flipped ZERO_TO_ONE fallback", program);
         }
     } else {
         // Link failed (uncompiled stage, glslang rejection, SPIR-V remap
@@ -239,6 +251,8 @@ void glLinkProgram(GLuint program) {
             mithril::get_fallback_spirv(GL_FRAGMENT_SHADER, false, fs_fb)) {
             p->vertexSpirv = std::move(vs_fb);
             p->vertexSpirvYFlipped = std::move(vs_fb_flip);
+            p->vertexSpirvZeroToOne = p->vertexSpirv;
+            p->vertexSpirvZeroToOneYFlipped = p->vertexSpirvYFlipped;
             p->fragmentSpirv = std::move(fs_fb);
             p->linked = true;
             p->infoLog = "link failed; using fallback shaders: " + info;

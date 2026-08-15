@@ -53,8 +53,12 @@ namespace mithril {
 // (default framebuffer / on-screen drawable) and non-flipped (user FBO)
 // variants, plus the fragment SPIR-V.
 struct ShaderLinkOutput {
-    std::vector<uint32_t> vertexSpirv;        // non-flipped (user-created FBOs)
-    std::vector<uint32_t> vertexSpirvFlipped; // Y-flipped (default framebuffer)
+    // NEGATIVE_ONE_TO_ONE: GL clip-Z [-w,+w] is remapped to Metal/Vulkan [0,w].
+    std::vector<uint32_t> vertexSpirv;
+    std::vector<uint32_t> vertexSpirvFlipped;
+    // ZERO_TO_ONE: clip-Z is already [0,w], so no Z remap is legal.
+    std::vector<uint32_t> vertexSpirvZeroToOne;
+    std::vector<uint32_t> vertexSpirvZeroToOneFlipped;
     std::vector<uint32_t> fragmentSpirv;
 };
 
