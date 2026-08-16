@@ -21,6 +21,7 @@ jobs:
     timeout-minutes: 25
     env:
       REF_ROOT: ${{ github.workspace }}/build/minecraft-native-linux-reference
+      GLFW_REFERENCE_PREFIX: ${{ runner.temp }}/glfw-3.4
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with: { persist-credentials: false }
@@ -31,24 +32,54 @@ jobs:
       - name: Install Xvfb and Mesa native OpenGL
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb libglfw3-dev libgl1-mesa-dri libglx-mesa0 mesa-utils
+          sudo apt-get install -y \
+            xvfb libgl1-mesa-dri libglx-mesa0 mesa-utils \
+            libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev
           glxinfo -B || true
+      - name: Checkout exact GLFW 3.4 reference runtime
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: glfw/glfw
+          ref: '3.4'
+          path: build/glfw-3.4-src
+          persist-credentials: false
+      - name: Build pinned GLFW 3.4 shared library
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S build/glfw-3.4-src -B build/glfw-3.4-build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$GLFW_REFERENCE_PREFIX" \
+            -DBUILD_SHARED_LIBS=ON \
+            -DGLFW_BUILD_EXAMPLES=OFF \
+            -DGLFW_BUILD_TESTS=OFF \
+            -DGLFW_BUILD_DOCS=OFF \
+            -DGLFW_BUILD_X11=ON \
+            -DGLFW_BUILD_WAYLAND=OFF
+          cmake --build build/glfw-3.4-build --parallel
+          cmake --install build/glfw-3.4-build
+          GLFW_REAL="$GLFW_REFERENCE_PREFIX/lib/libglfw.so.3"
+          test -s "$GLFW_REAL"
+          nm -D "$GLFW_REAL" | grep -q ' glfwInitAllocator$'
+          "$GLFW_REFERENCE_PREFIX/bin/glfwinfo" --version 2>/dev/null || true
       - name: Build native pre-swap capture bridge
         id: bridge
         shell: bash
         run: |
           set -euo pipefail
-          GLFW_REAL=$(ldconfig -p | awk '/libglfw.so.3/{print $NF; exit}')
-          test -f "$GLFW_REAL"
+          GLFW_REAL="$GLFW_REFERENCE_PREFIX/lib/libglfw.so.3"
+          test -s "$GLFW_REAL"
           mkdir -p build/linux-reference
           BRIDGE="$PWD/build/linux-reference/libglfw_native_capture.so"
           clang++ -std=c++20 -shared -fPIC -Wall -Wextra -Werror \
             ci/minecraft-e2e/native/glfw_linux_capture_bridge.cpp \
             -x c++ ci/minecraft-e2e/native/prepresent_capture.mm -x none \
+            -I"$GLFW_REFERENCE_PREFIX/include" \
             "$GLFW_REAL" -ldl -lGL -o "$BRIDGE"
           echo "glfw_real=$GLFW_REAL" >> "$GITHUB_OUTPUT"
           echo "bridge=$BRIDGE" >> "$GITHUB_OUTPUT"
           ldd "$BRIDGE"
+          nm -D "$GLFW_REAL" | grep -E ' glfw(InitAllocator|GetPlatform|PlatformSupported)$'
       - name: Native OpenGL vanilla reference
         id: vanilla
         continue-on-error: true
@@ -86,5 +117,6 @@ jobs:
           VANILLA: ${{ steps.vanilla.outcome }}
           SODIUM: ${{ steps.sodium.outcome }}
         run: |
+          echo "vanilla=$VANILLA sodium=$SODIUM"
           test "$VANILLA" = success
           test "$SODIUM" = success
