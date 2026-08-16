@@ -36,7 +36,7 @@ CI is read-only with respect to repository contents. Workflow permissions should
 
 A new top-level workflow is justified only when it provides a durable evidence plane that cannot be expressed clearly as a job in an existing workflow. Prefer one build followed by several test jobs or steps over rebuilding the same artifact in several workflow files.
 
-Heavy platform, stress, packaging, or diagnostic lanes should default to `workflow_dispatch` unless they are required for every pull request.
+Heavy platform, stress, and diagnostic lanes should default to `workflow_dispatch` unless they are required for the normal development gate. Packaging validation may run automatically on a dedicated E2E/distribution integration branch when it is itself a required evidence plane and is protected by narrow path filters; on the mainline it should normally be release-oriented or manually dispatched rather than rebuilding packages for unrelated changes.
 
 ## Branch policy
 
