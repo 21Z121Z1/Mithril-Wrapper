@@ -48,6 +48,10 @@ thread_local GLFWwindow* g_current = nullptr;
 std::atomic<unsigned long long> g_context_count{0};
 std::atomic<unsigned long long> g_swap_count{0};
 std::atomic<unsigned long long> g_proc_count{0};
+std::mutex g_identity_mutex;
+std::string g_identity_vendor;
+std::string g_identity_renderer;
+std::string g_identity_version;
 
 std::string getenv_string(const char* name) {
     const char* value = std::getenv(name);
@@ -141,14 +145,25 @@ void write_state(const char* stage) {
     if (root.empty()) return;
     std::string path = root + "/bridge-state.json";
     std::string tmp = path + ".tmp";
-    const char* vendor = "";
-    const char* renderer = "";
-    const char* version = "";
+    std::string vendor;
+    std::string renderer;
+    std::string version;
     auto& m = mithril();
-    if (g_current && m.getString) {
-        vendor = reinterpret_cast<const char*>(m.getString(GL_VENDOR));
-        renderer = reinterpret_cast<const char*>(m.getString(GL_RENDERER));
-        version = reinterpret_cast<const char*>(m.getString(GL_VERSION));
+    {
+        std::lock_guard<std::mutex> identityLock(g_identity_mutex);
+        if (g_current && m.getString) {
+            const char* v = reinterpret_cast<const char*>(m.getString(GL_VENDOR));
+            const char* r = reinterpret_cast<const char*>(m.getString(GL_RENDERER));
+            const char* ver = reinterpret_cast<const char*>(m.getString(GL_VERSION));
+            if (v && *v) g_identity_vendor = v;
+            if (r && *r) g_identity_renderer = r;
+            if (ver && *ver) g_identity_version = ver;
+        }
+        /* Keep the last authoritative identity after glfwMakeContextCurrent(NULL)
+         * and glfwDestroyWindow().  The post-process oracle runs after JVM exit. */
+        vendor = g_identity_vendor;
+        renderer = g_identity_renderer;
+        version = g_identity_version;
     }
     FILE* f = std::fopen(tmp.c_str(), "w");
     if (!f) return;
@@ -168,7 +183,7 @@ void write_state(const char* stage) {
         json_escape(stage).c_str(), json_escape(loaded_mithril_path()).c_str(),
         g_context_count.load(), g_swap_count.load(), g_proc_count.load(),
         g_current ? "true" : "false",
-        json_escape(vendor).c_str(), json_escape(renderer).c_str(), json_escape(version).c_str());
+        json_escape(vendor.c_str()).c_str(), json_escape(renderer.c_str()).c_str(), json_escape(version.c_str()).c_str());
     std::fclose(f);
     std::rename(tmp.c_str(), path.c_str());
 }

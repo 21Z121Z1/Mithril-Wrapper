@@ -1,0 +1,39 @@
+#!/usr/bin/env python3
+"""Fast source-level regression guard for semantics fixed by the GL 4.6 hardening lane.
+
+This is not a substitute for Khronos CTS.  It prevents known facade/stub
+implementations from silently returning while GPU/CTS lanes provide behavioral
+validation.
+"""
+from pathlib import Path
+import re
+import sys
+
+root = Path(__file__).resolve().parents[1]
+gl = (root / "Mithril-Wrapper-cpp/MG_Impl/GL46_Compat.cpp").read_text()
+bridge = (root / "ci/minecraft-e2e/native/glfw_mithril_bridge.mm").read_text()
+errors = []
+
+def require(cond, message):
+    if not cond:
+        errors.append(message)
+
+require("struct ProgramUniformScope" in gl, "glProgramUniform* must preserve GL_CURRENT_PROGRAM")
+require(gl.count("program_uniform_scope = program_uniform_begin(program)") >= 20,
+        "all glProgramUniform* entry points must use scoped program selection")
+require("target-aware DSA binding with active-unit restore" in gl,
+        "glBindTextureUnit must derive the object's target and restore GL_ACTIVE_TEXTURE")
+require("target-aware GL 4.4 multi-bind semantics" in gl,
+        "glBindTextures must be target-aware")
+require("if (count <= 0 || !buffers) return;" not in gl,
+        "glBindBuffersRange(NULL) must reset indexed bindings")
+require("derive layered/format state from each texture" in gl,
+        "glBindImageTextures must derive image binding metadata")
+require("g_identity_vendor" in bridge and "Keep the last authoritative identity" in bridge,
+        "Minecraft bridge must persist GL identity through context teardown")
+
+if errors:
+    for e in errors:
+        print(f"FAIL: {e}", file=sys.stderr)
+    raise SystemExit(1)
+print("GL46 semantic source audit: PASS")

@@ -1004,11 +1004,60 @@ void glGenerateTextureMipmap(GLuint texture) {
     glBindTexture(GL_TEXTURE_2D, prev);
 }
 
-/* 50. glBindTextureUnit - glActiveTexture + glBindTexture. */
+/* DSA texture binding must use the texture object's immutable target and must
+ * not perturb GL_ACTIVE_TEXTURE.  Binding name zero clears every target for
+ * the selected unit, matching the GL 4.5/4.6 DSA contract. */
+static const GLenum kDsaTextureTargets[] = {
+    GL_TEXTURE_1D, GL_TEXTURE_2D, GL_TEXTURE_3D, GL_TEXTURE_CUBE_MAP,
+    GL_TEXTURE_RECTANGLE, GL_TEXTURE_2D_MULTISAMPLE, GL_TEXTURE_BUFFER,
+    GL_TEXTURE_1D_ARRAY, GL_TEXTURE_2D_ARRAY, GL_TEXTURE_CUBE_MAP_ARRAY,
+    GL_TEXTURE_2D_MULTISAMPLE_ARRAY
+};
+
+static GLenum texture_target_for_object(GLuint texture) {
+    if (!g_state || texture == 0) return 0;
+    auto it = g_state->textures.find(texture);
+    return it == g_state->textures.end() ? 0 : it->second.target;
+}
+
+static bool texture_target_is_layered(GLenum target) {
+    switch (target) {
+        case GL_TEXTURE_3D:
+        case GL_TEXTURE_1D_ARRAY:
+        case GL_TEXTURE_2D_ARRAY:
+        case GL_TEXTURE_CUBE_MAP:
+        case GL_TEXTURE_CUBE_MAP_ARRAY:
+        case GL_TEXTURE_2D_MULTISAMPLE_ARRAY:
+            return true;
+        default:
+            return false;
+    }
+}
+
+static GLenum image_format_for_object(GLuint texture) {
+    if (!g_state || texture == 0) return GL_R8;
+    auto it = g_state->textures.find(texture);
+    if (it == g_state->textures.end()) return GL_RGBA8;
+    GLenum fmt = static_cast<GLenum>(it->second.internalFormat);
+    return fmt ? fmt : GL_RGBA8;
+}
+
+static void unbind_all_texture_targets_on_active_unit() {
+    for (GLenum target : kDsaTextureTargets) glBindTexture(target, 0);
+}
+
+/* 50. glBindTextureUnit - target-aware DSA binding with active-unit restore. */
 void glBindTextureUnit(GLuint unit, GLuint texture) {
     MITHRIL_ENSURE_INIT();
+    GLint previous = g_state ? g_state->activeTextureUnit : 0;
     glActiveTexture(GL_TEXTURE0 + unit);
-    glBindTexture(GL_TEXTURE_2D, texture);
+    if (texture == 0) {
+        unbind_all_texture_targets_on_active_unit();
+    } else {
+        GLenum target = texture_target_for_object(texture);
+        if (target != 0) glBindTexture(target, texture);
+    }
+    glActiveTexture(GL_TEXTURE0 + previous);
 }
 
 /* 51. glNamedFramebufferTexture - Bind FBO, glFramebufferTexture, restore. */
@@ -1578,12 +1627,18 @@ void glBindBuffersBase(GLenum target, GLuint first, GLsizei count,
     }
 }
 
-/* 103. glBindBuffersRange - Loop glBindBufferRange. */
+/* 103. glBindBuffersRange - GL 4.4 multi-bind semantics. */
 void glBindBuffersRange(GLenum target, GLuint first, GLsizei count,
                         const GLuint* buffers, const GLintptr* offsets,
                         const GLsizeiptr* sizes) {
     MITHRIL_ENSURE_INIT();
-    if (count <= 0 || !buffers) return;
+    if (count <= 0) return;
+    if (!buffers) {
+        /* A null buffers array resets every indexed binding in the range;
+         * offsets/sizes are ignored in this case. */
+        for (GLsizei i = 0; i < count; ++i) glBindBufferBase(target, first + i, 0);
+        return;
+    }
     for (GLsizei i = 0; i < count; ++i) {
         glBindBufferRange(target, first + i, buffers[i],
                           offsets ? offsets[i] : 0,
@@ -1591,23 +1646,22 @@ void glBindBuffersRange(GLenum target, GLuint first, GLsizei count,
     }
 }
 
-/* 104. glBindTextures - Loop: glActiveTexture + glBindTexture. */
+/* 104. glBindTextures - target-aware GL 4.4 multi-bind semantics. */
 void glBindTextures(GLuint first, GLsizei count, const GLuint* textures) {
     MITHRIL_ENSURE_INIT();
     if (count <= 0) return;
-    GLint prevUnit = g_state->activeTextureUnit;
-    if (textures) {
-        for (GLsizei i = 0; i < count; ++i) {
-            glActiveTexture(GL_TEXTURE0 + first + i);
-            glBindTexture(GL_TEXTURE_2D, textures[i]);
-        }
-    } else {
-        for (GLsizei i = 0; i < count; ++i) {
-            glActiveTexture(GL_TEXTURE0 + first + i);
-            glBindTexture(GL_TEXTURE_2D, 0);
+    GLint previous = g_state ? g_state->activeTextureUnit : 0;
+    for (GLsizei i = 0; i < count; ++i) {
+        glActiveTexture(GL_TEXTURE0 + first + static_cast<GLuint>(i));
+        GLuint texture = textures ? textures[i] : 0;
+        if (texture == 0) {
+            unbind_all_texture_targets_on_active_unit();
+        } else {
+            GLenum target = texture_target_for_object(texture);
+            if (target != 0) glBindTexture(target, texture);
         }
     }
-    glActiveTexture(GL_TEXTURE0 + prevUnit);
+    glActiveTexture(GL_TEXTURE0 + previous);
 }
 
 /* 105. glBindSamplers - Loop glBindSampler. */
@@ -1625,20 +1679,21 @@ void glBindSamplers(GLuint first, GLsizei count, const GLuint* samplers) {
     }
 }
 
-/* 106. glBindImageTextures - Loop glBindImageTexture. */
+/* 106. glBindImageTextures - derive layered/format state from each texture. */
 void glBindImageTextures(GLuint first, GLsizei count, const GLuint* textures) {
     MITHRIL_ENSURE_INIT();
     if (count <= 0) return;
-    if (textures) {
-        for (GLsizei i = 0; i < count; ++i) {
-            glBindImageTexture(first + i, textures[i], 0, GL_FALSE, 0,
-                               GL_READ_WRITE, GL_RGBA8);
+    for (GLsizei i = 0; i < count; ++i) {
+        GLuint texture = textures ? textures[i] : 0;
+        if (texture == 0) {
+            glBindImageTexture(first + static_cast<GLuint>(i), 0, 0, GL_FALSE, 0,
+                               GL_READ_ONLY, GL_R8);
+            continue;
         }
-    } else {
-        for (GLsizei i = 0; i < count; ++i) {
-            glBindImageTexture(first + i, 0, 0, GL_FALSE, 0,
-                               GL_READ_ONLY, GL_RGBA8);
-        }
+        GLenum target = texture_target_for_object(texture);
+        GLboolean layered = texture_target_is_layered(target) ? GL_TRUE : GL_FALSE;
+        glBindImageTexture(first + static_cast<GLuint>(i), texture, 0, layered, 0,
+                           GL_READ_WRITE, image_format_for_object(texture));
     }
 }
 
@@ -2323,62 +2378,80 @@ void glGetUniformdv(GLuint program, GLint location, GLdouble* params) {
 /* ---- glProgramUniform* (GL 4.1, ARB_separate_shader_objects): set a
  * program's uniforms without binding it. Delegate via save/restore of the
  * current program (store_uniform reads g_state->currentProgram). ---- */
-static void program_uniform_begin(GLuint program) {
-    if (!g_state) return;
-    g_state->currentProgram = program;
+struct ProgramUniformScope {
+    GLuint previous = 0;
+    bool armed = false;
+
+    explicit ProgramUniformScope(GLuint program) noexcept {
+        if (!g_state) return;
+        previous = g_state->currentProgram;
+        g_state->currentProgram = program;
+        armed = true;
+    }
+
+    ProgramUniformScope(const ProgramUniformScope&) = delete;
+    ProgramUniformScope& operator=(const ProgramUniformScope&) = delete;
+
+    ~ProgramUniformScope() noexcept {
+        if (armed && g_state) g_state->currentProgram = previous;
+    }
+};
+
+static ProgramUniformScope program_uniform_begin(GLuint program) {
+    return ProgramUniformScope(program);
 }
 
-void glProgramUniform1i(GLuint program, GLint loc, GLint v0)               { program_uniform_begin(program); glUniform1i(loc, v0); }
-void glProgramUniform1iv(GLuint program, GLint loc, GLsizei count, const GLint* value) { program_uniform_begin(program); glUniform1iv(loc, count, value); }
-void glProgramUniform1f(GLuint program, GLint loc, GLfloat v0)             { program_uniform_begin(program); glUniform1f(loc, v0); }
-void glProgramUniform1fv(GLuint program, GLint loc, GLsizei count, const GLfloat* value) { program_uniform_begin(program); glUniform1fv(loc, count, value); }
-void glProgramUniform1d(GLuint program, GLint loc, GLdouble v0)            { program_uniform_begin(program); glUniform1d(loc, v0); }
-void glProgramUniform1dv(GLuint program, GLint loc, GLsizei count, const GLdouble* value) { program_uniform_begin(program); glUniform1dv(loc, count, value); }
-void glProgramUniform1ui(GLuint program, GLint loc, GLuint v0)             { program_uniform_begin(program); glUniform1ui(loc, v0); }
-void glProgramUniform1uiv(GLuint program, GLint loc, GLsizei count, const GLuint* value) { program_uniform_begin(program); glUniform1uiv(loc, count, value); }
-void glProgramUniform2i(GLuint program, GLint loc, GLint v0, GLint v1)     { program_uniform_begin(program); glUniform2i(loc, v0, v1); }
-void glProgramUniform2iv(GLuint program, GLint loc, GLsizei count, const GLint* value) { program_uniform_begin(program); glUniform2iv(loc, count, value); }
-void glProgramUniform2f(GLuint program, GLint loc, GLfloat v0, GLfloat v1) { program_uniform_begin(program); glUniform2f(loc, v0, v1); }
-void glProgramUniform2fv(GLuint program, GLint loc, GLsizei count, const GLfloat* value) { program_uniform_begin(program); glUniform2fv(loc, count, value); }
-void glProgramUniform2d(GLuint program, GLint loc, GLdouble v0, GLdouble v1) { program_uniform_begin(program); glUniform2d(loc, v0, v1); }
-void glProgramUniform2dv(GLuint program, GLint loc, GLsizei count, const GLdouble* value) { program_uniform_begin(program); glUniform2dv(loc, count, value); }
-void glProgramUniform2ui(GLuint program, GLint loc, GLuint v0, GLuint v1) { program_uniform_begin(program); glUniform2ui(loc, v0, v1); }
-void glProgramUniform2uiv(GLuint program, GLint loc, GLsizei count, const GLuint* value) { program_uniform_begin(program); glUniform2uiv(loc, count, value); }
-void glProgramUniform3i(GLuint program, GLint loc, GLint v0, GLint v1, GLint v2) { program_uniform_begin(program); glUniform3i(loc, v0, v1, v2); }
-void glProgramUniform3iv(GLuint program, GLint loc, GLsizei count, const GLint* value) { program_uniform_begin(program); glUniform3iv(loc, count, value); }
-void glProgramUniform3f(GLuint program, GLint loc, GLfloat v0, GLfloat v1, GLfloat v2) { program_uniform_begin(program); glUniform3f(loc, v0, v1, v2); }
-void glProgramUniform3fv(GLuint program, GLint loc, GLsizei count, const GLfloat* value) { program_uniform_begin(program); glUniform3fv(loc, count, value); }
-void glProgramUniform3d(GLuint program, GLint loc, GLdouble v0, GLdouble v1, GLdouble v2) { program_uniform_begin(program); glUniform3d(loc, v0, v1, v2); }
-void glProgramUniform3dv(GLuint program, GLint loc, GLsizei count, const GLdouble* value) { program_uniform_begin(program); glUniform3dv(loc, count, value); }
-void glProgramUniform3ui(GLuint program, GLint loc, GLuint v0, GLuint v1, GLuint v2) { program_uniform_begin(program); glUniform3ui(loc, v0, v1, v2); }
-void glProgramUniform3uiv(GLuint program, GLint loc, GLsizei count, const GLuint* value) { program_uniform_begin(program); glUniform3uiv(loc, count, value); }
-void glProgramUniform4i(GLuint program, GLint loc, GLint v0, GLint v1, GLint v2, GLint v3) { program_uniform_begin(program); glUniform4i(loc, v0, v1, v2, v3); }
-void glProgramUniform4iv(GLuint program, GLint loc, GLsizei count, const GLint* value) { program_uniform_begin(program); glUniform4iv(loc, count, value); }
-void glProgramUniform4f(GLuint program, GLint loc, GLfloat v0, GLfloat v1, GLfloat v2, GLfloat v3) { program_uniform_begin(program); glUniform4f(loc, v0, v1, v2, v3); }
-void glProgramUniform4fv(GLuint program, GLint loc, GLsizei count, const GLfloat* value) { program_uniform_begin(program); glUniform4fv(loc, count, value); }
-void glProgramUniform4d(GLuint program, GLint loc, GLdouble v0, GLdouble v1, GLdouble v2, GLdouble v3) { program_uniform_begin(program); glUniform4d(loc, v0, v1, v2, v3); }
-void glProgramUniform4dv(GLuint program, GLint loc, GLsizei count, const GLdouble* value) { program_uniform_begin(program); glUniform4dv(loc, count, value); }
-void glProgramUniform4ui(GLuint program, GLint loc, GLuint v0, GLuint v1, GLuint v2, GLuint v3) { program_uniform_begin(program); glUniform4ui(loc, v0, v1, v2, v3); }
-void glProgramUniform4uiv(GLuint program, GLint loc, GLsizei count, const GLuint* value) { program_uniform_begin(program); glUniform4uiv(loc, count, value); }
+void glProgramUniform1i(GLuint program, GLint loc, GLint v0)               { [[maybe_unused]] auto program_uniform_scope = program_uniform_begin(program); glUniform1i(loc, v0); }
+void glProgramUniform1iv(GLuint program, GLint loc, GLsizei count, const GLint* value) { [[maybe_unused]] auto program_uniform_scope = program_uniform_begin(program); glUniform1iv(loc, count, value); }
+void glProgramUniform1f(GLuint program, GLint loc, GLfloat v0)             { [[maybe_unused]] auto program_uniform_scope = program_uniform_begin(program); glUniform1f(loc, v0); }
+void glProgramUniform1fv(GLuint program, GLint loc, GLsizei count, const GLfloat* value) { [[maybe_unused]] auto program_uniform_scope = program_uniform_begin(program); glUniform1fv(loc, count, value); }
+void glProgramUniform1d(GLuint program, GLint loc, GLdouble v0)            { [[maybe_unused]] auto program_uniform_scope = program_uniform_begin(program); glUniform1d(loc, v0); }
+void glProgramUniform1dv(GLuint program, GLint loc, GLsizei count, const GLdouble* value) { [[maybe_unused]] auto program_uniform_scope = program_uniform_begin(program); glUniform1dv(loc, count, value); }
+void glProgramUniform1ui(GLuint program, GLint loc, GLuint v0)             { [[maybe_unused]] auto program_uniform_scope = program_uniform_begin(program); glUniform1ui(loc, v0); }
+void glProgramUniform1uiv(GLuint program, GLint loc, GLsizei count, const GLuint* value) { [[maybe_unused]] auto program_uniform_scope = program_uniform_begin(program); glUniform1uiv(loc, count, value); }
+void glProgramUniform2i(GLuint program, GLint loc, GLint v0, GLint v1)     { [[maybe_unused]] auto program_uniform_scope = program_uniform_begin(program); glUniform2i(loc, v0, v1); }
+void glProgramUniform2iv(GLuint program, GLint loc, GLsizei count, const GLint* value) { [[maybe_unused]] auto program_uniform_scope = program_uniform_begin(program); glUniform2iv(loc, count, value); }
+void glProgramUniform2f(GLuint program, GLint loc, GLfloat v0, GLfloat v1) { [[maybe_unused]] auto program_uniform_scope = program_uniform_begin(program); glUniform2f(loc, v0, v1); }
+void glProgramUniform2fv(GLuint program, GLint loc, GLsizei count, const GLfloat* value) { [[maybe_unused]] auto program_uniform_scope = program_uniform_begin(program); glUniform2fv(loc, count, value); }
+void glProgramUniform2d(GLuint program, GLint loc, GLdouble v0, GLdouble v1) { [[maybe_unused]] auto program_uniform_scope = program_uniform_begin(program); glUniform2d(loc, v0, v1); }
+void glProgramUniform2dv(GLuint program, GLint loc, GLsizei count, const GLdouble* value) { [[maybe_unused]] auto program_uniform_scope = program_uniform_begin(program); glUniform2dv(loc, count, value); }
+void glProgramUniform2ui(GLuint program, GLint loc, GLuint v0, GLuint v1) { [[maybe_unused]] auto program_uniform_scope = program_uniform_begin(program); glUniform2ui(loc, v0, v1); }
+void glProgramUniform2uiv(GLuint program, GLint loc, GLsizei count, const GLuint* value) { [[maybe_unused]] auto program_uniform_scope = program_uniform_begin(program); glUniform2uiv(loc, count, value); }
+void glProgramUniform3i(GLuint program, GLint loc, GLint v0, GLint v1, GLint v2) { [[maybe_unused]] auto program_uniform_scope = program_uniform_begin(program); glUniform3i(loc, v0, v1, v2); }
+void glProgramUniform3iv(GLuint program, GLint loc, GLsizei count, const GLint* value) { [[maybe_unused]] auto program_uniform_scope = program_uniform_begin(program); glUniform3iv(loc, count, value); }
+void glProgramUniform3f(GLuint program, GLint loc, GLfloat v0, GLfloat v1, GLfloat v2) { [[maybe_unused]] auto program_uniform_scope = program_uniform_begin(program); glUniform3f(loc, v0, v1, v2); }
+void glProgramUniform3fv(GLuint program, GLint loc, GLsizei count, const GLfloat* value) { [[maybe_unused]] auto program_uniform_scope = program_uniform_begin(program); glUniform3fv(loc, count, value); }
+void glProgramUniform3d(GLuint program, GLint loc, GLdouble v0, GLdouble v1, GLdouble v2) { [[maybe_unused]] auto program_uniform_scope = program_uniform_begin(program); glUniform3d(loc, v0, v1, v2); }
+void glProgramUniform3dv(GLuint program, GLint loc, GLsizei count, const GLdouble* value) { [[maybe_unused]] auto program_uniform_scope = program_uniform_begin(program); glUniform3dv(loc, count, value); }
+void glProgramUniform3ui(GLuint program, GLint loc, GLuint v0, GLuint v1, GLuint v2) { [[maybe_unused]] auto program_uniform_scope = program_uniform_begin(program); glUniform3ui(loc, v0, v1, v2); }
+void glProgramUniform3uiv(GLuint program, GLint loc, GLsizei count, const GLuint* value) { [[maybe_unused]] auto program_uniform_scope = program_uniform_begin(program); glUniform3uiv(loc, count, value); }
+void glProgramUniform4i(GLuint program, GLint loc, GLint v0, GLint v1, GLint v2, GLint v3) { [[maybe_unused]] auto program_uniform_scope = program_uniform_begin(program); glUniform4i(loc, v0, v1, v2, v3); }
+void glProgramUniform4iv(GLuint program, GLint loc, GLsizei count, const GLint* value) { [[maybe_unused]] auto program_uniform_scope = program_uniform_begin(program); glUniform4iv(loc, count, value); }
+void glProgramUniform4f(GLuint program, GLint loc, GLfloat v0, GLfloat v1, GLfloat v2, GLfloat v3) { [[maybe_unused]] auto program_uniform_scope = program_uniform_begin(program); glUniform4f(loc, v0, v1, v2, v3); }
+void glProgramUniform4fv(GLuint program, GLint loc, GLsizei count, const GLfloat* value) { [[maybe_unused]] auto program_uniform_scope = program_uniform_begin(program); glUniform4fv(loc, count, value); }
+void glProgramUniform4d(GLuint program, GLint loc, GLdouble v0, GLdouble v1, GLdouble v2, GLdouble v3) { [[maybe_unused]] auto program_uniform_scope = program_uniform_begin(program); glUniform4d(loc, v0, v1, v2, v3); }
+void glProgramUniform4dv(GLuint program, GLint loc, GLsizei count, const GLdouble* value) { [[maybe_unused]] auto program_uniform_scope = program_uniform_begin(program); glUniform4dv(loc, count, value); }
+void glProgramUniform4ui(GLuint program, GLint loc, GLuint v0, GLuint v1, GLuint v2, GLuint v3) { [[maybe_unused]] auto program_uniform_scope = program_uniform_begin(program); glUniform4ui(loc, v0, v1, v2, v3); }
+void glProgramUniform4uiv(GLuint program, GLint loc, GLsizei count, const GLuint* value) { [[maybe_unused]] auto program_uniform_scope = program_uniform_begin(program); glUniform4uiv(loc, count, value); }
 
-void glProgramUniformMatrix2fv(GLuint program, GLint loc, GLsizei count, GLboolean transpose, const GLfloat* value) { program_uniform_begin(program); glUniformMatrix2fv(loc, count, transpose, value); }
-void glProgramUniformMatrix3fv(GLuint program, GLint loc, GLsizei count, GLboolean transpose, const GLfloat* value) { program_uniform_begin(program); glUniformMatrix3fv(loc, count, transpose, value); }
-void glProgramUniformMatrix4fv(GLuint program, GLint loc, GLsizei count, GLboolean transpose, const GLfloat* value) { program_uniform_begin(program); glUniformMatrix4fv(loc, count, transpose, value); }
-void glProgramUniformMatrix2x3fv(GLuint program, GLint loc, GLsizei count, GLboolean transpose, const GLfloat* value) { program_uniform_begin(program); glUniformMatrix2x3fv(loc, count, transpose, value); }
-void glProgramUniformMatrix3x2fv(GLuint program, GLint loc, GLsizei count, GLboolean transpose, const GLfloat* value) { program_uniform_begin(program); glUniformMatrix3x2fv(loc, count, transpose, value); }
-void glProgramUniformMatrix2x4fv(GLuint program, GLint loc, GLsizei count, GLboolean transpose, const GLfloat* value) { program_uniform_begin(program); glUniformMatrix2x4fv(loc, count, transpose, value); }
-void glProgramUniformMatrix4x2fv(GLuint program, GLint loc, GLsizei count, GLboolean transpose, const GLfloat* value) { program_uniform_begin(program); glUniformMatrix4x2fv(loc, count, transpose, value); }
-void glProgramUniformMatrix3x4fv(GLuint program, GLint loc, GLsizei count, GLboolean transpose, const GLfloat* value) { program_uniform_begin(program); glUniformMatrix3x4fv(loc, count, transpose, value); }
-void glProgramUniformMatrix4x3fv(GLuint program, GLint loc, GLsizei count, GLboolean transpose, const GLfloat* value) { program_uniform_begin(program); glUniformMatrix4x3fv(loc, count, transpose, value); }
-void glProgramUniformMatrix2dv(GLuint program, GLint loc, GLsizei count, GLboolean transpose, const GLdouble* value) { program_uniform_begin(program); glUniformMatrix2dv(loc, count, transpose, value); }
-void glProgramUniformMatrix3dv(GLuint program, GLint loc, GLsizei count, GLboolean transpose, const GLdouble* value) { program_uniform_begin(program); glUniformMatrix3dv(loc, count, transpose, value); }
-void glProgramUniformMatrix4dv(GLuint program, GLint loc, GLsizei count, GLboolean transpose, const GLdouble* value) { program_uniform_begin(program); glUniformMatrix4dv(loc, count, transpose, value); }
-void glProgramUniformMatrix2x3dv(GLuint program, GLint loc, GLsizei count, GLboolean transpose, const GLdouble* value) { program_uniform_begin(program); glUniformMatrix2x3dv(loc, count, transpose, value); }
-void glProgramUniformMatrix3x2dv(GLuint program, GLint loc, GLsizei count, GLboolean transpose, const GLdouble* value) { program_uniform_begin(program); glUniformMatrix3x2dv(loc, count, transpose, value); }
-void glProgramUniformMatrix2x4dv(GLuint program, GLint loc, GLsizei count, GLboolean transpose, const GLdouble* value) { program_uniform_begin(program); glUniformMatrix2x4dv(loc, count, transpose, value); }
-void glProgramUniformMatrix4x2dv(GLuint program, GLint loc, GLsizei count, GLboolean transpose, const GLdouble* value) { program_uniform_begin(program); glUniformMatrix4x2dv(loc, count, transpose, value); }
-void glProgramUniformMatrix3x4dv(GLuint program, GLint loc, GLsizei count, GLboolean transpose, const GLdouble* value) { program_uniform_begin(program); glUniformMatrix3x4dv(loc, count, transpose, value); }
-void glProgramUniformMatrix4x3dv(GLuint program, GLint loc, GLsizei count, GLboolean transpose, const GLdouble* value) { program_uniform_begin(program); glUniformMatrix4x3dv(loc, count, transpose, value); }
+void glProgramUniformMatrix2fv(GLuint program, GLint loc, GLsizei count, GLboolean transpose, const GLfloat* value) { [[maybe_unused]] auto program_uniform_scope = program_uniform_begin(program); glUniformMatrix2fv(loc, count, transpose, value); }
+void glProgramUniformMatrix3fv(GLuint program, GLint loc, GLsizei count, GLboolean transpose, const GLfloat* value) { [[maybe_unused]] auto program_uniform_scope = program_uniform_begin(program); glUniformMatrix3fv(loc, count, transpose, value); }
+void glProgramUniformMatrix4fv(GLuint program, GLint loc, GLsizei count, GLboolean transpose, const GLfloat* value) { [[maybe_unused]] auto program_uniform_scope = program_uniform_begin(program); glUniformMatrix4fv(loc, count, transpose, value); }
+void glProgramUniformMatrix2x3fv(GLuint program, GLint loc, GLsizei count, GLboolean transpose, const GLfloat* value) { [[maybe_unused]] auto program_uniform_scope = program_uniform_begin(program); glUniformMatrix2x3fv(loc, count, transpose, value); }
+void glProgramUniformMatrix3x2fv(GLuint program, GLint loc, GLsizei count, GLboolean transpose, const GLfloat* value) { [[maybe_unused]] auto program_uniform_scope = program_uniform_begin(program); glUniformMatrix3x2fv(loc, count, transpose, value); }
+void glProgramUniformMatrix2x4fv(GLuint program, GLint loc, GLsizei count, GLboolean transpose, const GLfloat* value) { [[maybe_unused]] auto program_uniform_scope = program_uniform_begin(program); glUniformMatrix2x4fv(loc, count, transpose, value); }
+void glProgramUniformMatrix4x2fv(GLuint program, GLint loc, GLsizei count, GLboolean transpose, const GLfloat* value) { [[maybe_unused]] auto program_uniform_scope = program_uniform_begin(program); glUniformMatrix4x2fv(loc, count, transpose, value); }
+void glProgramUniformMatrix3x4fv(GLuint program, GLint loc, GLsizei count, GLboolean transpose, const GLfloat* value) { [[maybe_unused]] auto program_uniform_scope = program_uniform_begin(program); glUniformMatrix3x4fv(loc, count, transpose, value); }
+void glProgramUniformMatrix4x3fv(GLuint program, GLint loc, GLsizei count, GLboolean transpose, const GLfloat* value) { [[maybe_unused]] auto program_uniform_scope = program_uniform_begin(program); glUniformMatrix4x3fv(loc, count, transpose, value); }
+void glProgramUniformMatrix2dv(GLuint program, GLint loc, GLsizei count, GLboolean transpose, const GLdouble* value) { [[maybe_unused]] auto program_uniform_scope = program_uniform_begin(program); glUniformMatrix2dv(loc, count, transpose, value); }
+void glProgramUniformMatrix3dv(GLuint program, GLint loc, GLsizei count, GLboolean transpose, const GLdouble* value) { [[maybe_unused]] auto program_uniform_scope = program_uniform_begin(program); glUniformMatrix3dv(loc, count, transpose, value); }
+void glProgramUniformMatrix4dv(GLuint program, GLint loc, GLsizei count, GLboolean transpose, const GLdouble* value) { [[maybe_unused]] auto program_uniform_scope = program_uniform_begin(program); glUniformMatrix4dv(loc, count, transpose, value); }
+void glProgramUniformMatrix2x3dv(GLuint program, GLint loc, GLsizei count, GLboolean transpose, const GLdouble* value) { [[maybe_unused]] auto program_uniform_scope = program_uniform_begin(program); glUniformMatrix2x3dv(loc, count, transpose, value); }
+void glProgramUniformMatrix3x2dv(GLuint program, GLint loc, GLsizei count, GLboolean transpose, const GLdouble* value) { [[maybe_unused]] auto program_uniform_scope = program_uniform_begin(program); glUniformMatrix3x2dv(loc, count, transpose, value); }
+void glProgramUniformMatrix2x4dv(GLuint program, GLint loc, GLsizei count, GLboolean transpose, const GLdouble* value) { [[maybe_unused]] auto program_uniform_scope = program_uniform_begin(program); glUniformMatrix2x4dv(loc, count, transpose, value); }
+void glProgramUniformMatrix4x2dv(GLuint program, GLint loc, GLsizei count, GLboolean transpose, const GLdouble* value) { [[maybe_unused]] auto program_uniform_scope = program_uniform_begin(program); glUniformMatrix4x2dv(loc, count, transpose, value); }
+void glProgramUniformMatrix3x4dv(GLuint program, GLint loc, GLsizei count, GLboolean transpose, const GLdouble* value) { [[maybe_unused]] auto program_uniform_scope = program_uniform_begin(program); glUniformMatrix3x4dv(loc, count, transpose, value); }
+void glProgramUniformMatrix4x3dv(GLuint program, GLint loc, GLsizei count, GLboolean transpose, const GLdouble* value) { [[maybe_unused]] auto program_uniform_scope = program_uniform_begin(program); glUniformMatrix4x3dv(loc, count, transpose, value); }
 
 /* ---- Program pipeline objects (GL 4.1): minimal name tracking. The
  * separable-program path is not exercised by the target workload; binding is
