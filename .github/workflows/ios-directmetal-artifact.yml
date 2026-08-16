@@ -1,0 +1,174 @@
+name: Mithril iOS arm64 Artifact
+
+on:
+  push:
+    branches:
+      - ci/minecraft-on-mithril-e2e-20260815
+    paths:
+      - 'CMakeLists.txt'
+      - 'Mithril-Wrapper-cpp/**'
+      - '.gitmodules'
+      - '.github/workflows/ios-directmetal-artifact.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mithril-ios-arm64-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  MOLTENVK_TAG: v1.4.2
+
+jobs:
+  build-ios-arm64:
+    name: Build iPhoneOS arm64 libmithril.dylib
+    runs-on: macos-26
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Fetch pinned ios-cmake toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL -o ios.toolchain.cmake \
+            https://raw.githubusercontent.com/leetal/ios-cmake/4.5.0/ios.toolchain.cmake
+          shasum -a 256 ios.toolchain.cmake
+
+      - name: Fetch MoltenVK static iOS SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          TARBALL=MoltenVK-ios.tar
+          curl -fsSL -o "$TARBALL" \
+            "https://github.com/KhronosGroup/MoltenVK/releases/download/${MOLTENVK_TAG}/${TARBALL}"
+          mkdir -p moltenvk-staging
+          tar -xf "$TARBALL" -C moltenvk-staging
+
+          FOUND=$(find moltenvk-staging -type d -name MoltenVK.xcframework -path '*static*' | head -1)
+          if [ -z "$FOUND" ]; then
+            FOUND=$(find moltenvk-staging -type d -name MoltenVK.xcframework | head -1)
+          fi
+          test -n "$FOUND"
+          mv "$FOUND" ./MoltenVK.xcframework
+
+          HDRS=$(find moltenvk-staging -type d -name vulkan -path '*/include/vulkan' | head -1)
+          test -n "$HDRS"
+          mv "$(dirname "$HDRS")" ./MoltenVK-Headers
+          rm -rf moltenvk-staging
+
+          test -f MoltenVK.xcframework/ios-arm64/libMoltenVK.a
+          test -f MoltenVK-Headers/vulkan/vulkan.h
+
+      - name: Configure iPhoneOS arm64
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-ios -G Xcode \
+            -DCMAKE_TOOLCHAIN_FILE="$PWD/ios.toolchain.cmake" \
+            -DPLATFORM=OS64 \
+            -DDEPLOYMENT_TARGET=15.0 \
+            -DENABLE_BITCODE=OFF \
+            -DENABLE_ARC=OFF \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_FLAGS='-Wno-error=implicit-function-declaration' \
+            -DCMAKE_CXX_FLAGS='-Wno-error'
+
+      - name: Build libmithril.dylib
+        id: build
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake --build build-ios --config Release --target mithril --parallel
+          DYLIB=$(find build-ios -type f -name libmithril.dylib -print | head -1)
+          test -n "$DYLIB"
+          test -s "$DYLIB"
+          DYLIB="$(cd "$(dirname "$DYLIB")" && pwd)/$(basename "$DYLIB")"
+          echo "path=$DYLIB" >> "$GITHUB_OUTPUT"
+          ls -lh "$DYLIB"
+
+      - name: Verify iPhoneOS Mach-O, ABI and DirectMetal payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          DYLIB='${{ steps.build.outputs.path }}'
+
+          file "$DYLIB" | tee /tmp/file.txt
+          grep -q 'arm64' /tmp/file.txt
+
+          echo '=== LC_BUILD_VERSION ==='
+          xcrun vtool -show-build "$DYLIB" | tee /tmp/build-version.txt
+          grep -Eiq 'platform[[:space:]]+IOS|platform[[:space:]]+2' /tmp/build-version.txt
+
+          echo '=== linked libraries ==='
+          otool -L "$DYLIB" | tee /tmp/otool.txt
+          if grep -E '^\s+/(opt/homebrew|usr/local)/' /tmp/otool.txt; then
+            echo '::error::non-portable Homebrew dependency found in iOS dylib'
+            exit 1
+          fi
+
+          NM_OUT=$(nm -gU "$DYLIB")
+          missing=0
+          for sym in \
+            eglGetDisplay eglInitialize eglChooseConfig eglBindAPI \
+            eglCreateWindowSurface eglCreateContext eglMakeCurrent eglSwapBuffers \
+            glGetString glGetError glCreateShader glCreateProgram glDrawArrays \
+            glDrawElements glReadPixels; do
+            if echo "$NM_OUT" | grep -qE " [Tt] _?${sym}$"; then
+              echo "OK   $sym"
+            else
+              echo "MISS $sym"
+              missing=1
+            fi
+          done
+          test "$missing" -eq 0
+
+          # The Apple build is dual-backend and defaults to DirectMetal.
+          # Require the DirectMetal implementation to be present in this image,
+          # rather than accidentally shipping a Vulkan-only build.
+          if ! strings "$DYLIB" | grep -q 'Metal 3 (DirectMetal)'; then
+            echo '::error::DirectMetal backend identity missing from iOS dylib'
+            exit 1
+          fi
+
+      - name: Ad-hoc sign
+        shell: bash
+        run: |
+          set -euo pipefail
+          DYLIB='${{ steps.build.outputs.path }}'
+          codesign --force --sign - "$DYLIB"
+          codesign --verify --strict --verbose=2 "$DYLIB"
+          codesign -dv --verbose=4 "$DYLIB" 2>&1 | head -40
+
+      - name: Create build metadata and checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp '${{ steps.build.outputs.path }}' dist/libmithril.dylib
+          shasum -a 256 dist/libmithril.dylib | tee dist/SHA256SUMS
+          cat > dist/BUILD_INFO.txt <<EOF
+          repository=${GITHUB_REPOSITORY}
+          commit=${GITHUB_SHA}
+          target=iPhoneOS arm64
+          deployment_target=15.0
+          backend_default=DirectMetal
+          moltenvk=${MOLTENVK_TAG}
+          EOF
+          cat dist/BUILD_INFO.txt
+
+      - name: Upload iOS Mithril artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: Mithril-DirectMetal-iOS-arm64-${{ github.sha }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
