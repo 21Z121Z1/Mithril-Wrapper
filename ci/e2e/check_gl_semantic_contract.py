@@ -77,13 +77,7 @@ def parse_trace(path: pathlib.Path):
             events.append({"line": lineno, "malformed": raw})
             continue
         domain, semantic, api, details = parts
-        events.append({
-            "line": lineno,
-            "domain": domain,
-            "semantic": semantic,
-            "api": api,
-            "details": details,
-        })
+        events.append({"line": lineno, "domain": domain, "semantic": semantic, "api": api, "details": details})
     return events
 
 
@@ -118,26 +112,58 @@ def main():
         failures.append(f"invalid core version contract: {exc}")
         contract_major = contract_minor = contract_numeric_glsl = -1
     if (major, minor) != (contract_major, contract_minor):
-        failures.append(
-            f"GL_MAJOR/MINOR integer query={major}.{minor} contract={core['version']}"
-        )
+        failures.append(f"GL_MAJOR/MINOR integer query={major}.{minor} contract={core['version']}")
     if numeric_glsl != contract_numeric_glsl:
-        failures.append(
-            f"GL_SHADING_LANGUAGE_VERSION integer query={numeric_glsl} contract={contract_numeric_glsl}"
-        )
+        failures.append(f"GL_SHADING_LANGUAGE_VERSION integer query={numeric_glsl} contract={contract_numeric_glsl}")
 
     semantics = manifest["semantic_evidence"]
     api_evidence = manifest.get("api_evidence", {})
+    phases = manifest.get("oracle_phases", {})
+    for required_phase in ("gpu", "production"):
+        if required_phase not in phases or not phases.get(required_phase):
+            failures.append(f"oracle phase {required_phase!r} is missing or empty")
+    registered_oracles = {name for names in phases.values() for name in names}
+    gpu_oracles = set(phases.get("gpu", []))
+
     if core.get("status") != "minecraft-e2e-proven":
         failures.append("core version status must be minecraft-e2e-proven")
     if not core.get("state_semantics"):
         failures.append("core version has no state semantic evidence")
     if not core.get("oracles"):
         failures.append("core version has no executable oracle evidence")
+    for oracle in core.get("oracles", []):
+        if oracle not in registered_oracles:
+            failures.append(f"core {core['version']}: oracle {oracle} is not registered in oracle_phases")
     for semantic in core.get("state_semantics", []):
         ev = semantics.get(semantic)
         if not ev or ev.get("status") != "proven":
             failures.append(f"core {core['version']}: semantic {semantic} is unproven")
+
+    for semantic, ev in semantics.items():
+        if ev.get("status") != "proven":
+            failures.append(f"semantic_evidence {semantic}: status is not proven")
+        if not ev.get("domain"):
+            failures.append(f"semantic_evidence {semantic}: missing domain")
+        oracle = ev.get("oracle")
+        if not oracle:
+            failures.append(f"semantic_evidence {semantic}: missing oracle")
+        elif oracle not in registered_oracles:
+            failures.append(f"semantic_evidence {semantic}: oracle {oracle} is not registered")
+
+    for api, ev in api_evidence.items():
+        if not re.fullmatch(r"gl[A-Za-z0-9_]+", api):
+            failures.append(f"api_evidence has invalid API key {api!r}")
+        if ev.get("status") != "proven":
+            failures.append(f"api_evidence {api}: status is not proven")
+        if not ev.get("domain"):
+            failures.append(f"api_evidence {api}: missing domain")
+        oracle = ev.get("oracle")
+        if not oracle:
+            failures.append(f"api_evidence {api}: missing oracle")
+        elif oracle not in registered_oracles:
+            failures.append(f"api_evidence {api}: oracle {oracle} is not registered in oracle_phases")
+        elif oracle not in gpu_oracles:
+            failures.append(f"api_evidence {api}: oracle {oracle} is not a prerequisite GPU oracle")
 
     repo_root = manifest_path.parents[2]
     core_symbols_path = repo_root / core.get("symbols_file", "")
@@ -148,13 +174,9 @@ def main():
     elif not core_symbols_path.is_file():
         failures.append(f"core symbols file missing: {core_symbols_path}")
     else:
-        core_required, core_symbol_malformed = core_symbols_for_version(
-            core_symbols_path, core["version"]
-        )
+        core_required, core_symbol_malformed = core_symbols_for_version(core_symbols_path, core["version"])
         if core_symbol_malformed:
-            failures.append(
-                f"core symbols file has {len(core_symbol_malformed)} malformed line(s)"
-            )
+            failures.append(f"core symbols file has {len(core_symbol_malformed)} malformed line(s)")
         if not core_required:
             failures.append(f"no cumulative core symbols resolved for GL {core['version']}")
 
@@ -177,6 +199,9 @@ def main():
             failures.append(f"{ext_name}: no state semantic evidence")
         if not entry.get("gpu_oracles"):
             failures.append(f"{ext_name}: no executable oracle evidence")
+        for oracle in entry.get("gpu_oracles", []):
+            if oracle not in registered_oracles:
+                failures.append(f"{ext_name}: oracle {oracle} is not registered in oracle_phases")
         for semantic in entry.get("state_semantics", []):
             ev = semantics.get(semantic)
             if not ev or ev.get("status") != "proven":
@@ -192,12 +217,7 @@ def main():
             exports = exported_symbols(dylib)
             missing_core_exports = sorted(set(core_required) - exports)
             if missing_core_exports:
-                failures.append(
-                    f"GL {core['version']} core export contract missing "
-                    f"{len(missing_core_exports)} symbol(s): "
-                    + ", ".join(missing_core_exports[:24])
-                    + (" ..." if len(missing_core_exports) > 24 else "")
-                )
+                failures.append(f"GL {core['version']} core export contract missing {len(missing_core_exports)} symbol(s): " + ", ".join(missing_core_exports[:24]) + (" ..." if len(missing_core_exports) > 24 else ""))
             for ext_name, entry in contract_ext.items():
                 for symbol in entry.get("symbols", []):
                     if symbol not in exports:
@@ -220,15 +240,11 @@ def main():
             if event["domain"] == "api_call" and key.startswith("api."):
                 evidence = api_evidence.get(event["api"])
                 if not evidence or evidence.get("status") != "proven":
-                    failures.append(
-                        f"observed but unproven API: {event['api']} line {event['line']}"
-                    )
+                    failures.append(f"observed but unproven API: {event['api']} line {event['line']}")
             else:
                 evidence = semantics.get(key)
                 if not evidence or evidence.get("status") != "proven":
-                    failures.append(
-                        f"observed but unproven semantic: {key} via {event['api']} line {event['line']}"
-                    )
+                    failures.append(f"observed but unproven semantic: {key} via {event['api']} line {event['line']}")
         if malformed:
             failures.append(f"semantic trace contains {len(malformed)} malformed line(s)")
     if args.require_trace and not trace_events:
@@ -236,9 +252,7 @@ def main():
 
     enforced = set(manifest.get("trace_coverage", {}).get("enforced_domains", []))
     if args.require_trace and enforced:
-        seen_domains = {
-            event.get("domain") for event in trace_events if "malformed" not in event
-        }
+        seen_domains = {event.get("domain") for event in trace_events if "malformed" not in event}
         missing_domains = sorted(enforced - seen_domains)
         if missing_domains:
             failures.append("required trace domain not observed: " + ", ".join(missing_domains))
@@ -248,16 +262,8 @@ def main():
             "count": value["count"],
             "apis": sorted(value["apis"]),
             "domains": sorted(value["domains"]),
-            "oracle": (
-                api_evidence.get(next(iter(value["apis"]), ""), {}).get("oracle")
-                if "api_call" in value["domains"]
-                else semantics.get(key, {}).get("oracle")
-            ),
-            "status": (
-                api_evidence.get(next(iter(value["apis"]), ""), {}).get("status", "unproven")
-                if "api_call" in value["domains"]
-                else semantics.get(key, {}).get("status", "unproven")
-            ),
+            "oracle": (api_evidence.get(next(iter(value["apis"]), ""), {}).get("oracle") if "api_call" in value["domains"] else semantics.get(key, {}).get("oracle")),
+            "status": (api_evidence.get(next(iter(value["apis"]), ""), {}).get("status", "unproven") if "api_call" in value["domains"] else semantics.get(key, {}).get("status", "unproven")),
         }
         for key, value in sorted(observed.items())
     }
@@ -268,12 +274,10 @@ def main():
         "advertised_glsl_version": glsl_version,
         "integer_gl_version": f"{major}.{minor}",
         "integer_glsl_version": numeric_glsl,
-        "core_symbol_contract": {
-            "required_count": len(core_required),
-            "missing_count": len(missing_core_exports),
-            "symbols_file": core.get("symbols_file"),
-        },
+        "core_symbol_contract": {"required_count": len(core_required), "missing_count": len(missing_core_exports), "symbols_file": core.get("symbols_file")},
         "advertised_extensions": advertised,
+        "registered_gpu_oracles": sorted(gpu_oracles),
+        "api_evidence_count": len(api_evidence),
         "export_check_performed": exports is not None,
         "trace_event_count": len(trace_events),
         "observed_semantics": report_observed,
