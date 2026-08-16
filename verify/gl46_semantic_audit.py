@@ -48,3 +48,8 @@ for _pname in ("GL_TEXTURE_BINDING_1D", "GL_TEXTURE_BINDING_2D", "GL_TEXTURE_BIN
                "GL_TEXTURE_BINDING_1D_ARRAY", "GL_TEXTURE_BINDING_2D_ARRAY",
                "GL_TEXTURE_BINDING_CUBE_MAP_ARRAY", "GL_TEXTURE_BINDING_2D_MULTISAMPLE_ARRAY"):
     require(("case " + _pname + ":") in _getter, "missing texture binding getter: " + _pname)
+
+require("gl46_active_uniforms" in gl and "u.blockIndex" in gl and "u.matrixStride" in gl,
+        "uniform reflection APIs must expose Program/SPIR-V metadata")
+require("Set all indices to GL_INVALID_INDEX" not in gl,
+        "glGetUniformIndices must not be a facade default")

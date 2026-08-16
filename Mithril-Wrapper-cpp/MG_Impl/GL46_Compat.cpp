@@ -16,6 +16,7 @@
 //    initialized, and include a comment explaining why they are no-ops.
 #include "includes.h"
 #include <cstring>
+#include <algorithm>
 #include <unordered_set>
 
 // GL enums absent from the project's minimal glcorearb.h.
@@ -217,64 +218,137 @@ GLenum glGetGraphicsResetStatus(void) {
     return GL_NO_ERROR;
 }
 
-/* 2. glGetActiveUniformsiv - UBO reflection. Return defaults for unknown
- * uniforms. For GL_UNIFORM_BLOCK_INDEX return -1 (not in a block). */
+/* 2-5. Uniform and uniform-block reflection.
+ * Program.cpp already owns authoritative SPIR-V reflection metadata.  Build a
+ * deterministic, cold-path view here instead of returning facade defaults. */
+static std::vector<const mithril::Uniform*> gl46_active_uniforms(GLuint program) {
+    std::vector<const mithril::Uniform*> out;
+    mithril::Program* p = mithril::state_get_program(program);
+    if (!p || !p->linked) return out;
+    out.reserve(p->uniforms.size());
+    for (const auto& kv : p->uniforms) out.push_back(&kv.second);
+    std::sort(out.begin(), out.end(), [](const mithril::Uniform* a,
+                                         const mithril::Uniform* b) {
+        return a->name < b->name;
+    });
+    return out;
+}
+
+static bool gl46_uniform_name_matches(const mithril::Uniform& u, const char* name) {
+    if (!name) return false;
+    if (u.name == name) return true;
+    std::string n(name);
+    if (n.size() > 3 && n.compare(n.size() - 3, 3, "[0]") == 0 &&
+        u.name == n.substr(0, n.size() - 3)) return true;
+    if (u.size > 1 && u.name.size() > 3 &&
+        u.name.compare(u.name.size() - 3, 3, "[0]") == 0 &&
+        u.name.substr(0, u.name.size() - 3) == n) return true;
+    return false;
+}
+
 void glGetActiveUniformsiv(GLuint program, GLsizei uniformCount,
                            const GLuint* uniformIndices, GLenum pname,
                            GLint* params) {
     MITHRIL_ENSURE_INIT();
-    if (!params || !uniformIndices || uniformCount <= 0) return;
+    if (uniformCount < 0) { mithril::state_set_error(GL_INVALID_VALUE); return; }
+    if (uniformCount == 0) return;
+    if (!uniformIndices || !params) { mithril::state_set_error(GL_INVALID_VALUE); return; }
+    mithril::Program* p = mithril::state_get_program(program);
+    if (!p || !p->linked) { mithril::state_set_error(GL_INVALID_VALUE); return; }
+    const auto uniforms = gl46_active_uniforms(program);
     for (GLsizei i = 0; i < uniformCount; ++i) {
+        if (uniformIndices[i] >= uniforms.size()) {
+            params[i] = 0;
+            mithril::state_set_error(GL_INVALID_VALUE);
+            continue;
+        }
+        const mithril::Uniform& u = *uniforms[uniformIndices[i]];
         switch (pname) {
-            case GL_UNIFORM_BLOCK_INDEX:
-                params[i] = -1;
-                break;
-            case GL_UNIFORM_TYPE:
-            case GL_UNIFORM_SIZE:
-            case GL_UNIFORM_NAME_LENGTH:
-            case GL_UNIFORM_OFFSET:
-            case GL_UNIFORM_ARRAY_STRIDE:
-            case GL_UNIFORM_MATRIX_STRIDE:
-                params[i] = 0;
-                break;
-            case GL_UNIFORM_IS_ROW_MAJOR:
-                params[i] = GL_FALSE;
-                break;
+            case GL_UNIFORM_TYPE:          params[i] = (GLint)u.type; break;
+            case GL_UNIFORM_SIZE:          params[i] = u.size; break;
+            case GL_UNIFORM_NAME_LENGTH:   params[i] = (GLint)u.name.size() + 1; break;
+            case GL_UNIFORM_BLOCK_INDEX:   params[i] = u.blockIndex; break;
+            case GL_UNIFORM_OFFSET:        params[i] = u.offset; break;
+            case GL_UNIFORM_ARRAY_STRIDE:  params[i] = u.arrayStride; break;
+            case GL_UNIFORM_MATRIX_STRIDE: params[i] = u.matrixStride; break;
+            case GL_UNIFORM_IS_ROW_MAJOR:  params[i] = u.rowMajor ? GL_TRUE : GL_FALSE; break;
             default:
                 params[i] = 0;
+                mithril::state_set_error(GL_INVALID_ENUM);
                 break;
         }
     }
 }
 
-/* 3. glGetUniformIndices - Set all indices to GL_INVALID_INDEX (no UBO
- * reflection in the wrapper; shaders use standalone uniforms). */
 void glGetUniformIndices(GLuint program, GLsizei uniformCount,
                          const GLchar* const* uniformNames,
                          GLuint* uniformIndices) {
     MITHRIL_ENSURE_INIT();
-    if (!uniformIndices || !uniformNames || uniformCount <= 0) return;
+    if (uniformCount < 0) { mithril::state_set_error(GL_INVALID_VALUE); return; }
+    if (uniformCount == 0) return;
+    if (!uniformNames || !uniformIndices) { mithril::state_set_error(GL_INVALID_VALUE); return; }
+    mithril::Program* p = mithril::state_get_program(program);
+    if (!p || !p->linked) { mithril::state_set_error(GL_INVALID_VALUE); return; }
+    const auto uniforms = gl46_active_uniforms(program);
     for (GLsizei i = 0; i < uniformCount; ++i) {
         uniformIndices[i] = GL_INVALID_INDEX;
+        for (GLuint j = 0; j < (GLuint)uniforms.size(); ++j) {
+            if (gl46_uniform_name_matches(*uniforms[j], uniformNames[i])) {
+                uniformIndices[i] = j;
+                break;
+            }
+        }
     }
 }
 
-/* 4. glGetActiveUniformName - Return empty string. */
 void glGetActiveUniformName(GLuint program, GLuint uniformIndex,
                             GLsizei bufSize, GLsizei* length,
                             GLchar* uniformName) {
     MITHRIL_ENSURE_INIT();
-    if (length) *length = 0;
-    if (uniformName && bufSize > 0) uniformName[0] = '\0';
+    if (bufSize < 0) { mithril::state_set_error(GL_INVALID_VALUE); return; }
+    mithril::Program* p = mithril::state_get_program(program);
+    if (!p || !p->linked) { mithril::state_set_error(GL_INVALID_VALUE); return; }
+    const auto uniforms = gl46_active_uniforms(program);
+    if (uniformIndex >= uniforms.size()) {
+        mithril::state_set_error(GL_INVALID_VALUE);
+        if (length) *length = 0;
+        if (uniformName && bufSize > 0) uniformName[0] = ' ';
+        return;
+    }
+    const std::string& name = uniforms[uniformIndex]->name;
+    GLsizei copied = 0;
+    if (uniformName && bufSize > 0) {
+        copied = (GLsizei)std::min<size_t>(name.size(), (size_t)bufSize - 1);
+        memcpy(uniformName, name.data(), (size_t)copied);
+        uniformName[copied] = ' ';
+    }
+    if (length) *length = copied;
 }
 
-/* 5. glGetActiveUniformBlockName - Return empty string. */
 void glGetActiveUniformBlockName(GLuint program, GLuint uniformBlockIndex,
                                  GLsizei bufSize, GLsizei* length,
                                  GLchar* uniformName) {
     MITHRIL_ENSURE_INIT();
-    if (length) *length = 0;
-    if (uniformName && bufSize > 0) uniformName[0] = '\0';
+    if (bufSize < 0) { mithril::state_set_error(GL_INVALID_VALUE); return; }
+    mithril::Program* p = mithril::state_get_program(program);
+    if (!p || !p->linked) { mithril::state_set_error(GL_INVALID_VALUE); return; }
+    const std::string* found = nullptr;
+    for (const auto& kv : p->uniformBlocks) {
+        if (kv.second == uniformBlockIndex) { found = &kv.first; break; }
+    }
+    if (!found) {
+        mithril::state_set_error(GL_INVALID_VALUE);
+        if (length) *length = 0;
+        if (uniformName && bufSize > 0) uniformName[0] = ' ';
+        return;
+    }
+    GLsizei copied = 0;
+    if (uniformName && bufSize > 0) {
+        copied = (GLsizei)std::min<size_t>(found->size(), (size_t)bufSize - 1);
+        memcpy(uniformName, found->data(), (size_t)copied);
+        uniformName[copied] = ' ';
+    }
+    if (length) *length = copied;
 }
 
 /* 6. glClearTexImage - Clear a texture level via Vulkan vkCmdClearColorImage.
