@@ -33,9 +33,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            xvfb libgl1-mesa-dri libglx-mesa0 mesa-utils ninja-build \
+            xvfb libgl1-mesa-dri libglx-mesa0 libgl-dev mesa-utils ninja-build \
             libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev
-          glxinfo -B || true
       - name: Checkout exact GLFW 3.4 reference runtime
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
@@ -60,6 +59,7 @@ jobs:
           cmake --install build/glfw-3.4-build
           GLFW_REAL="$GLFW_REFERENCE_PREFIX/lib/libglfw.so.3"
           test -s "$GLFW_REAL"
+          test -f /usr/include/GL/gl.h
           nm -D "$GLFW_REAL" | grep -q ' glfwInitAllocator$'
       - name: Build native pre-swap capture bridge
         id: bridge
@@ -75,12 +75,14 @@ jobs:
             -x c++ ci/minecraft-e2e/native/prepresent_capture.mm -x none \
             -I"$GLFW_REFERENCE_PREFIX/include" \
             "$GLFW_REAL" -ldl -lGL -o "$BRIDGE"
+          test -s "$BRIDGE"
           echo "glfw_real=$GLFW_REAL" >> "$GITHUB_OUTPUT"
           echo "bridge=$BRIDGE" >> "$GITHUB_OUTPUT"
           ldd "$BRIDGE"
           nm -D "$GLFW_REAL" | grep -E ' glfw(InitAllocator|GetPlatform|PlatformSupported)$'
       - name: Native OpenGL vanilla reference
         id: vanilla
+        if: steps.bridge.outcome == 'success'
         continue-on-error: true
         shell: bash
         run: |
@@ -92,7 +94,7 @@ jobs:
             -PglfwDelegate="${{ steps.bridge.outputs.glfw_real }}" runDifferentialClientGameTest
       - name: Native OpenGL Sodium 0.9.1 reference
         id: sodium
-        if: always()
+        if: always() && steps.bridge.outcome == 'success'
         continue-on-error: true
         shell: bash
         run: |
@@ -110,12 +112,14 @@ jobs:
           retention-days: 7
           if-no-files-found: warn
           path: build/minecraft-native-linux-reference/**
-      - name: Enforce both native reference lanes
+      - name: Enforce bridge and both native reference lanes
         if: always()
         env:
+          BRIDGE: ${{ steps.bridge.outcome }}
           VANILLA: ${{ steps.vanilla.outcome }}
           SODIUM: ${{ steps.sodium.outcome }}
         run: |
-          echo "vanilla=$VANILLA sodium=$SODIUM"
+          echo "bridge=$BRIDGE vanilla=$VANILLA sodium=$SODIUM"
+          test "$BRIDGE" = success
           test "$VANILLA" = success
           test "$SODIUM" = success
