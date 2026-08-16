@@ -7,27 +7,23 @@
 # appends Mithril's isolation policy afterwards on *every* toolchain pass.
 
 # Toolchain files are also evaluated in CMake try_compile() child projects.
-# Explicitly forward the custom paths so compiler ABI probes see the same base
-# toolchain and isolation inputs instead of failing before real configuration.
+# CMAKE_TRY_COMPILE_PLATFORM_VARIABLES is the canonical propagation path, while
+# environment fallback makes the compiler-ABI probe robust on CMake/ios-cmake
+# combinations that instantiate the child before those custom cache variables
+# have been copied.
 list(APPEND CMAKE_TRY_COMPILE_PLATFORM_VARIABLES
     MITHRIL_IOS_BASE_TOOLCHAIN
     MITHRIL_AMETHYST_EXPORT_LIST
     MITHRIL_AMETHYST_FORCE_NOT_WEAK_LIST)
 
-if(NOT DEFINED MITHRIL_IOS_BASE_TOOLCHAIN OR
-   "${MITHRIL_IOS_BASE_TOOLCHAIN}" STREQUAL "")
-    message(FATAL_ERROR "MITHRIL_IOS_BASE_TOOLCHAIN is required")
-endif()
-if(NOT EXISTS "${MITHRIL_IOS_BASE_TOOLCHAIN}")
-    message(FATAL_ERROR
-        "Base iOS toolchain does not exist: ${MITHRIL_IOS_BASE_TOOLCHAIN}")
-endif()
-
-include("${MITHRIL_IOS_BASE_TOOLCHAIN}")
-
 foreach(_var IN ITEMS
+        MITHRIL_IOS_BASE_TOOLCHAIN
         MITHRIL_AMETHYST_EXPORT_LIST
         MITHRIL_AMETHYST_FORCE_NOT_WEAK_LIST)
+    if((NOT DEFINED ${_var} OR "${${_var}}" STREQUAL "") AND
+       DEFINED ENV{${_var}} AND NOT "$ENV{${_var}}" STREQUAL "")
+        set(${_var} "$ENV{${_var}}")
+    endif()
     if(NOT DEFINED ${_var} OR "${${_var}}" STREQUAL "")
         message(FATAL_ERROR "${_var} must be supplied for Amethyst isolation")
     endif()
@@ -35,6 +31,8 @@ foreach(_var IN ITEMS
         message(FATAL_ERROR "${_var} does not exist: ${${_var}}")
     endif()
 endforeach()
+
+include("${MITHRIL_IOS_BASE_TOOLCHAIN}")
 
 # Avoid duplicate appends when CMake evaluates the wrapper more than once in a
 # scope that retained the previous value.
