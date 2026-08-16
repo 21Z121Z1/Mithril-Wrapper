@@ -8,6 +8,7 @@ on:
       - 'Mithril-Wrapper-cpp/**'
       - 'tests/gl46_state_semantics_smoke.c'
       - 'tests/gl46_error_semantics_smoke.c'
+      - 'tests/gl46_reflection_semantics_smoke.c'
       - 'verify/gl46_core_symbols.txt'
       - 'verify/gl46_semantic_audit.py'
       - '.github/workflows/gl46-state-semantics.yml'
@@ -71,12 +72,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          clang -std=c11 -O2 -Wall -Wextra -Werror \
-            -IMithril-Wrapper-cpp/include tests/gl46_state_semantics_smoke.c \
-            -o build-gl46-state/gl46_state_semantics_smoke
-          clang -std=c11 -O2 -Wall -Wextra -Werror \
-            -IMithril-Wrapper-cpp/include tests/gl46_error_semantics_smoke.c \
-            -o build-gl46-state/gl46_error_semantics_smoke
+          for test in gl46_state_semantics_smoke gl46_error_semantics_smoke gl46_reflection_semantics_smoke; do
+            clang -std=c11 -O2 -Wall -Wextra -Werror \
+              -IMithril-Wrapper-cpp/include "tests/${test}.c" \
+              -o "build-gl46-state/${test}"
+          done
       - name: Run state semantics on real hosted Metal GPU
         shell: bash
         run: |
@@ -91,6 +91,13 @@ jobs:
           export DYLD_LIBRARY_PATH="$(brew --prefix)/lib:${DYLD_LIBRARY_PATH:-}"
           build-gl46-state/gl46_error_semantics_smoke "$MITHRIL" | tee build-gl46-state/gl46-error-semantics.log
           grep -q 'GL46 ERROR SEMANTICS ALL PASSED' build-gl46-state/gl46-error-semantics.log
+      - name: Run program reflection semantics on real hosted Metal GPU
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DYLD_LIBRARY_PATH="$(brew --prefix)/lib:${DYLD_LIBRARY_PATH:-}"
+          build-gl46-state/gl46_reflection_semantics_smoke "$MITHRIL" | tee build-gl46-state/gl46-reflection-semantics.log
+          grep -q 'GL46 REFLECTION SEMANTICS ALL PASSED' build-gl46-state/gl46-reflection-semantics.log
       - name: Upload semantic evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -101,4 +108,5 @@ jobs:
           path: |
             build-gl46-state/gl46-state-semantics.log
             build-gl46-state/gl46-error-semantics.log
+            build-gl46-state/gl46-reflection-semantics.log
             build-gl46-state/exported.txt
