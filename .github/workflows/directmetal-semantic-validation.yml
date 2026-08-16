@@ -1,0 +1,158 @@
+name: DirectMetal semantic validation
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'ci/minecraft-on-mithril-e2e-*'
+    paths:
+      - 'CMakeLists.txt'
+      - 'Mithril-Wrapper-cpp/**'
+      - 'tests/directmetal_*'
+      - 'tests/gl46_*'
+      - 'verify/gl46_*'
+      - '.github/workflows/directmetal-semantic-validation.yml'
+  pull_request:
+    branches:
+      - ci/minecraft-on-mithril-e2e-20260815
+    paths:
+      - 'CMakeLists.txt'
+      - 'Mithril-Wrapper-cpp/**'
+      - 'tests/directmetal_*'
+      - 'tests/gl46_*'
+      - 'verify/gl46_*'
+      - '.github/workflows/directmetal-semantic-validation.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: directmetal-semantic-validation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  semantics:
+    name: GL 4.6 + terrain + texture semantics on real Metal
+    runs-on: macos-26
+    timeout-minutes: 25
+    env:
+      MITHRIL_BACKEND: metal
+      MTL_DEBUG_LAYER: '1'
+      MTL_SHADER_VALIDATION: '0'
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Install native dependencies
+        run: brew install vulkan-loader molten-vk ninja
+
+      - name: Build production Mithril once
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-semantics -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_FLAGS='-Wno-error' \
+            -DCMAKE_CXX_FLAGS='-Wno-error'
+          cmake --build build-semantics --target mithril --parallel
+          MITHRIL=$(find build-semantics -type f -name libmithril.dylib -print -quit)
+          test -s "$MITHRIL"
+          echo "MITHRIL=$MITHRIL" >> "$GITHUB_ENV"
+          file "$MITHRIL"
+
+      - name: Enforce OpenGL 4.6 Core ABI
+        shell: bash
+        run: |
+          set -euo pipefail
+          nm -gU "$MITHRIL" | awk '{print $3}' | sed 's/^_//' | sort -u > build-semantics/exported.txt
+          python3 - <<'PY'
+          from pathlib import Path
+          expected = []
+          for line in Path('verify/gl46_core_symbols.txt').read_text().splitlines():
+              if not line.strip() or line.lstrip().startswith('#'):
+                  continue
+              expected.append(line.split()[-1])
+          exported = set(Path('build-semantics/exported.txt').read_text().splitlines())
+          missing = [symbol for symbol in expected if symbol not in exported]
+          print(f'GL46 ABI expected={len(expected)} exported_core={len(expected)-len(missing)} missing={len(missing)}')
+          if len(expected) != 657:
+              raise SystemExit(f'canonical list changed unexpectedly: {len(expected)} != 657')
+          if missing:
+              print('\n'.join('MISSING ' + symbol for symbol in missing))
+              raise SystemExit(1)
+          PY
+
+      - name: Run GL 4.6 source-level semantic guard
+        run: python3 verify/gl46_semantic_audit.py
+
+      - name: Compile behavioral oracles
+        shell: bash
+        run: |
+          set -euo pipefail
+          for test in \
+            gl46_state_semantics_smoke \
+            gl46_error_semantics_smoke \
+            gl46_reflection_semantics_smoke \
+            gl46_sampler_semantics_smoke \
+            directmetal_terrain_semantics_smoke \
+            directmetal_sodium_terrain_contract_smoke \
+            directmetal_draw_parameters_smoke \
+            directmetal_restart_disabled_strip_smoke \
+            directmetal_u32_max_index_smoke \
+            directmetal_texture_fbo_roundtrip_smoke; do
+            clang -std=gnu11 -O0 -g -Wall -Wextra -Werror \
+              -IMithril-Wrapper-cpp/include "tests/${test}.c" \
+              -o "build-semantics/${test}" -ldl
+          done
+          clang -std=gnu11 -O0 -g -Wall -Wextra -Werror \
+            -DGL_VERTEX_ATTRIB_ARRAY_BUFFER_BINDING=0x889F \
+            -IMithril-Wrapper-cpp/include \
+            tests/directmetal_vertex_binding_smoke.c \
+            -o build-semantics/directmetal_vertex_binding_smoke -ldl
+
+      - name: Run GL 4.6 behavioral semantics
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DYLD_LIBRARY_PATH="$(brew --prefix)/lib:${DYLD_LIBRARY_PATH:-}"
+          build-semantics/gl46_state_semantics_smoke "$MITHRIL" | tee build-semantics/gl46-state.log
+          grep -q 'GL46 STATE SEMANTICS ALL PASSED' build-semantics/gl46-state.log
+          build-semantics/gl46_error_semantics_smoke "$MITHRIL" | tee build-semantics/gl46-error.log
+          grep -q 'GL46 ERROR SEMANTICS ALL PASSED' build-semantics/gl46-error.log
+          build-semantics/gl46_reflection_semantics_smoke "$MITHRIL" | tee build-semantics/gl46-reflection.log
+          grep -q 'GL46 REFLECTION SEMANTICS ALL PASSED' build-semantics/gl46-reflection.log
+          build-semantics/gl46_sampler_semantics_smoke "$MITHRIL" | tee build-semantics/gl46-sampler.log
+          grep -q 'GL46 SAMPLER SEMANTICS ALL PASSED' build-semantics/gl46-sampler.log
+
+      - name: Run terrain and indexed-draw semantics
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DYLD_LIBRARY_PATH="$(brew --prefix)/lib:${DYLD_LIBRARY_PATH:-}"
+          build-semantics/directmetal_terrain_semantics_smoke "$MITHRIL" | tee build-semantics/terrain.log
+          build-semantics/directmetal_vertex_binding_smoke "$MITHRIL" | tee build-semantics/vertex-binding.log
+          build-semantics/directmetal_sodium_terrain_contract_smoke "$MITHRIL" | tee build-semantics/sodium-terrain.log
+          build-semantics/directmetal_draw_parameters_smoke "$MITHRIL" | tee build-semantics/draw-parameters.log
+          build-semantics/directmetal_restart_disabled_strip_smoke "$MITHRIL" | tee build-semantics/restart-disabled-strip.log
+          build-semantics/directmetal_u32_max_index_smoke "$MITHRIL" | tee build-semantics/u32-max-index.log
+
+      - name: Run texture FBO and readPixels roundtrip semantics
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DYLD_LIBRARY_PATH="$(brew --prefix)/lib:${DYLD_LIBRARY_PATH:-}"
+          build-semantics/directmetal_texture_fbo_roundtrip_smoke "$MITHRIL" | tee build-semantics/texture-fbo-roundtrip.log
+
+      - name: Upload semantic evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: directmetal-semantic-validation-${{ github.sha }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            build-semantics/*.log
+            build-semantics/exported.txt
