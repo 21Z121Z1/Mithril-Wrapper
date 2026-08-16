@@ -1,0 +1,58 @@
+name: DirectMetal buffer UBO semantics
+
+on:
+  push:
+    branches:
+      - 'fix/gl-semantic-closure-integration-20260816'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: directmetal-buffer-ubo-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  buffer-ubo:
+    runs-on: macos-26
+    timeout-minutes: 20
+    env:
+      MITHRIL_BACKEND: metal
+      MTL_DEBUG_LAYER: '1'
+      MTL_SHADER_VALIDATION: '0'
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - run: brew install vulkan-loader molten-vk ninja
+      - name: Build Mithril
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-buffer-ubo -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-buffer-ubo --target mithril --parallel
+          find build-buffer-ubo -type f -name libmithril.dylib -print -quit > /tmp/mithril-path
+          test -s /tmp/mithril-path
+      - name: Compile buffer UBO oracle
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang -std=gnu11 -O0 -g -Wall -Wextra -Werror -IMithril-Wrapper-cpp/include \
+            tests/directmetal_buffer_ubo_semantics_smoke.c -o build-buffer-ubo/buffer-ubo -ldl
+      - name: Run buffer UBO semantics on real Metal GPU
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DYLD_LIBRARY_PATH="$(brew --prefix)/lib"
+          build-buffer-ubo/buffer-ubo "$(cat /tmp/mithril-path)" | tee build-buffer-ubo/buffer-ubo.log
+          grep -F 'BUFFER UBO SEMANTICS SMOKE ALL PASSED' build-buffer-ubo/buffer-ubo.log
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: directmetal-buffer-ubo-${{ github.sha }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: build-buffer-ubo/buffer-ubo.log
