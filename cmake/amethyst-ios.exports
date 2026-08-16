@@ -1,0 +1,11 @@
+# Public ABI exposed by libmithril when embedded in Amethyst.
+#
+# Keep the drop-in OpenGL/EGL surface exported while making every implementation
+# detail (glslang, SPIRV-Cross, DirectMetal/DirectVulkan backend internals, C++
+# RTTI/vtables) private to this Mach-O image.  This is deliberately a linker
+# export allow-list rather than source-level visibility annotations: glslang's
+# AST contains header-defined weak C++ virtual functions, including the global
+# TIntermNode external-interface class, which otherwise remain coalescable by
+# dyld even when their symbol visibility is hidden.
+_gl*
+_egl*
