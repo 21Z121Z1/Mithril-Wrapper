@@ -454,7 +454,17 @@ void glGetIntegerv(GLenum pname, GLint* params) {
         case GL_PACK_SKIP_IMAGES:             *params = g_state->pixelStore.packSkipImages; break;
         case GL_PACK_SWAP_BYTES:              *params = g_state->pixelStore.packSwapBytes ? GL_TRUE : GL_FALSE; break;
         case GL_PACK_LSB_FIRST:               *params = g_state->pixelStore.packLSBFirst ? GL_TRUE : GL_FALSE; break;
+        case GL_TEXTURE_BINDING_1D:           *params = (GLint)g_state->textureBindings[g_state->activeTextureUnit][(int)mithril::TextureTarget::_1D].name; break;
         case GL_TEXTURE_BINDING_2D:           *params = (GLint)g_state->textureBindings[g_state->activeTextureUnit][(int)mithril::TextureTarget::_2D].name; break;
+        case GL_TEXTURE_BINDING_3D:           *params = (GLint)g_state->textureBindings[g_state->activeTextureUnit][(int)mithril::TextureTarget::_3D].name; break;
+        case GL_TEXTURE_BINDING_CUBE_MAP:     *params = (GLint)g_state->textureBindings[g_state->activeTextureUnit][(int)mithril::TextureTarget::CubeMap].name; break;
+        case GL_TEXTURE_BINDING_RECTANGLE:    *params = (GLint)g_state->textureBindings[g_state->activeTextureUnit][(int)mithril::TextureTarget::Rectangle].name; break;
+        case GL_TEXTURE_BINDING_2D_MULTISAMPLE:*params = (GLint)g_state->textureBindings[g_state->activeTextureUnit][(int)mithril::TextureTarget::_2DMultisample].name; break;
+        case GL_TEXTURE_BINDING_BUFFER:       *params = (GLint)g_state->textureBindings[g_state->activeTextureUnit][(int)mithril::TextureTarget::Buffer].name; break;
+        case GL_TEXTURE_BINDING_1D_ARRAY:     *params = (GLint)g_state->textureBindings[g_state->activeTextureUnit][(int)mithril::TextureTarget::_1DArray].name; break;
+        case GL_TEXTURE_BINDING_2D_ARRAY:     *params = (GLint)g_state->textureBindings[g_state->activeTextureUnit][(int)mithril::TextureTarget::_2DArray].name; break;
+        case GL_TEXTURE_BINDING_CUBE_MAP_ARRAY:*params = (GLint)g_state->textureBindings[g_state->activeTextureUnit][(int)mithril::TextureTarget::CubeMapArray].name; break;
+        case GL_TEXTURE_BINDING_2D_MULTISAMPLE_ARRAY:*params = (GLint)g_state->textureBindings[g_state->activeTextureUnit][(int)mithril::TextureTarget::_2DMultisampleArray].name; break;
         case GL_BLEND_SRC_RGB:                *params = (GLint)g_state->blends[0].srcRGB; break;
         case GL_BLEND_DST_RGB:                *params = (GLint)g_state->blends[0].dstRGB; break;
         case GL_BLEND_SRC_ALPHA:              *params = (GLint)g_state->blends[0].srcA; break;

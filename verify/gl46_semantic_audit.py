@@ -40,3 +40,11 @@ print("GL46 semantic source audit: PASS")
 
 require("return mithril::state_take_error();" in (root / "Mithril-Wrapper-cpp/MG_Impl/Getter.cpp").read_text(),
         "glGetError must expose the context error queue instead of swallowing it")
+
+_getter = (root / "Mithril-Wrapper-cpp/MG_Impl/Getter.cpp").read_text()
+for _pname in ("GL_TEXTURE_BINDING_1D", "GL_TEXTURE_BINDING_2D", "GL_TEXTURE_BINDING_3D",
+               "GL_TEXTURE_BINDING_CUBE_MAP", "GL_TEXTURE_BINDING_RECTANGLE",
+               "GL_TEXTURE_BINDING_2D_MULTISAMPLE", "GL_TEXTURE_BINDING_BUFFER",
+               "GL_TEXTURE_BINDING_1D_ARRAY", "GL_TEXTURE_BINDING_2D_ARRAY",
+               "GL_TEXTURE_BINDING_CUBE_MAP_ARRAY", "GL_TEXTURE_BINDING_2D_MULTISAMPLE_ARRAY"):
+    require(("case " + _pname + ":") in _getter, "missing texture binding getter: " + _pname)
