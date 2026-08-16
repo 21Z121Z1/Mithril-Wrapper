@@ -354,6 +354,25 @@ void bind_draw_id(uint32_t drawID) {
     }
 }
 
+void apply_polygon_mode(id<MTLRenderCommandEncoder> r, GLenum primitive) {
+    if (r == nil || !mithril::g_state) return;
+    switch (primitive) {
+        case GL_TRIANGLES:
+        case GL_TRIANGLE_STRIP:
+        case GL_TRIANGLE_FAN:
+            // Metal exposes triangle fill mode dynamically. Minecraft's
+            // production path uses FRONT_AND_BACK; when both GL face states
+            // agree this is exact and does not require a second PSO.
+            [r setTriangleFillMode:(mithril::g_state->polygonModeFront == GL_LINE &&
+                                    mithril::g_state->polygonModeBack == GL_LINE)
+                                       ? MTLTriangleFillModeLines
+                                       : MTLTriangleFillModeFill];
+            break;
+        default:
+            break;
+    }
+}
+
 /* ---- Primitive expansion (fan / line-loop / U8 indices) ---- */
 
 // Byte size of one source index for the 0=U16 / 1=U32 / 2=U8 encoding.
@@ -389,6 +408,7 @@ void issue_arrays_draw(GLenum primitive, uint32_t first, uint32_t count,
     id<MTLRenderCommandEncoder> r = g_renderEncoder;
     if (count == 0) return;
     bind_draw_id(current_draw_id());
+    apply_polygon_mode(r, primitive);
 
     if (primitive == GL_TRIANGLE_FAN) {
         if (count < 3) return;
@@ -456,6 +476,7 @@ void issue_indexed_draw(GLenum primitive, uint32_t count, int index_type,
     id<MTLRenderCommandEncoder> r = g_renderEncoder;
     if (count == 0 || !index_buffer || index_buffer->buf == nil) return;
     bind_draw_id(current_draw_id());
+    apply_polygon_mode(r, primitive);
     const bool fan = (primitive == GL_TRIANGLE_FAN);
     const bool loop = (primitive == GL_LINE_LOOP);
 

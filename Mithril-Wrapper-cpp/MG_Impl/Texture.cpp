@@ -919,15 +919,80 @@ GLboolean glIsTexture(GLuint texture) {
 void glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height,
                   GLenum format, GLenum type, void* pixels) {
     MITHRIL_ENSURE_INIT();
-    if (!pixels || width <= 0 || height <= 0) return;
-    // Delegate to the backend: it resolves the current colour attachment
-    // (EGL default framebuffer or the user FBO's GL_COLOR_ATTACHMENT0),
-    // transitions it to TRANSFER_SRC_OPTIMAL, copies into a host-visible
-    // staging buffer via vkCmdCopyImageToBuffer, and synchronously maps +
-    // memcpy's into the caller's buffer. Returns 0 if readback isn't
-    // possible (e.g. no FBO bound to the default framebuffer).
-    (void)backend_read_pixels((int)x, (int)y, (int)width, (int)height,
-                              format, type, pixels);
+    if (width < 0 || height < 0) {
+        mithril::state_set_error(GL_INVALID_VALUE);
+        return;
+    }
+    if (width == 0 || height == 0) return;
+
+    const int bpp = backend_host_texel_bytes(format, type);
+    const auto& ps = g_state->pixelStore;
+    if (bpp <= 0 || ps.packAlignment <= 0 || ps.packRowLength < 0 ||
+        ps.packSkipRows < 0 || ps.packSkipPixels < 0 ||
+        ps.packImageHeight < 0 || ps.packSkipImages < 0) {
+        mithril::state_set_error(GL_INVALID_OPERATION);
+        return;
+    }
+
+    const size_t alignment = (size_t)ps.packAlignment;
+    if (!(alignment == 1 || alignment == 2 || alignment == 4 || alignment == 8)) {
+        mithril::state_set_error(GL_INVALID_VALUE);
+        return;
+    }
+    const size_t rowPixels = ps.packRowLength > 0 ? (size_t)ps.packRowLength
+                                                   : (size_t)width;
+    size_t rowBytes = 0, rowStride = 0, compactRow = 0, compactBytes = 0;
+    if (!checked_mul_size(rowPixels, (size_t)bpp, &rowBytes) ||
+        !checked_add_size(rowBytes, alignment - 1, &rowStride)) {
+        mithril::state_set_error(GL_INVALID_OPERATION);
+        return;
+    }
+    rowStride = (rowStride / alignment) * alignment;
+    if (!checked_mul_size((size_t)width, (size_t)bpp, &compactRow) ||
+        !checked_mul_size(compactRow, (size_t)height, &compactBytes)) {
+        mithril::state_set_error(GL_INVALID_OPERATION);
+        return;
+    }
+    size_t skipRows = 0, skipPixels = 0, baseOffset = 0, lastRow = 0, required = 0;
+    if (!checked_mul_size((size_t)ps.packSkipRows, rowStride, &skipRows) ||
+        !checked_mul_size((size_t)ps.packSkipPixels, (size_t)bpp, &skipPixels) ||
+        !checked_add_size(skipRows, skipPixels, &baseOffset) ||
+        !checked_mul_size((size_t)(height - 1), rowStride, &lastRow) ||
+        !checked_add_size(baseOffset, lastRow, &required) ||
+        !checked_add_size(required, compactRow, &required)) {
+        mithril::state_set_error(GL_INVALID_OPERATION);
+        return;
+    }
+
+    std::vector<uint8_t> compact(compactBytes);
+    if (!backend_read_pixels((int)x, (int)y, (int)width, (int)height,
+                             format, type, compact.data())) return;
+
+    const GLuint pboName = g_state->bufferBindings[
+        (int)mithril::BufferTarget::PixelPack].name;
+    if (pboName != 0) {
+        mithril::Buffer* pbo = mithril::state_get_buffer(pboName);
+        const uintptr_t userOffset = reinterpret_cast<uintptr_t>(pixels);
+        size_t end = 0;
+        if (!pbo || !checked_add_size((size_t)userOffset, required, &end) ||
+            end > (size_t)pbo->size) {
+            mithril::state_set_error(GL_INVALID_OPERATION);
+            return;
+        }
+        for (GLsizei row = 0; row < height; ++row) {
+            size_t dstOff = (size_t)userOffset + baseOffset + (size_t)row * rowStride;
+            const uint8_t* src = compact.data() + (size_t)row * compactRow;
+            std::memcpy(pbo->data.data() + dstOff, src, compactRow);
+            backend_buffer_upload(pbo->id, (VkDeviceSize)dstOff, src, compactRow);
+        }
+    } else {
+        if (!pixels) return;
+        uint8_t* dst = static_cast<uint8_t*>(pixels);
+        for (GLsizei row = 0; row < height; ++row) {
+            std::memcpy(dst + baseOffset + (size_t)row * rowStride,
+                        compact.data() + (size_t)row * compactRow, compactRow);
+        }
+    }
 }
 
 void glCopyTexImage2D(GLenum target, GLint level, GLenum internalformat,

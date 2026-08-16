@@ -263,9 +263,15 @@ MetalSampler* dmt_internal_get_or_create_sampler(GLuint name, GLint min_filter,
                                                  GLint mag_filter, GLint wrap_s,
                                                  GLint wrap_t, GLint wrap_r,
                                                  const float* border_color) {
-    (void)border_color; // clamp-to-zero stands in for border color
+    uint64_t sig = 1469598103934665603ull;
+    auto mix = [&](uint64_t v) { sig ^= v; sig *= 1099511628211ull; };
+    mix((uint32_t)min_filter); mix((uint32_t)mag_filter);
+    mix((uint32_t)wrap_s); mix((uint32_t)wrap_t); mix((uint32_t)wrap_r);
+    if (border_color) {
+        for (int i=0;i<4;++i) { uint32_t bits=0; std::memcpy(&bits,&border_color[i],sizeof(bits)); mix(bits); }
+    }
     if (MetalSampler* existing = sampler_table_get(name)) {
-        if (existing->smp != nil) return existing;
+        if (existing->smp != nil && existing->stateSignature == sig) return existing;
     }
     Backend* b = backend();
     if (!b->initialized) return nullptr;
@@ -296,6 +302,7 @@ MetalSampler* dmt_internal_get_or_create_sampler(GLuint name, GLint min_filter,
         sampler_tbl()[name] = ms;
     }
     ms->smp = [b->device newSamplerStateWithDescriptor:d];
+    if (ms->smp != nil) ms->stateSignature = sig;
     return ms->smp != nil ? ms : nullptr;
 }
 

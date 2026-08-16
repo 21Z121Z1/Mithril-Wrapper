@@ -586,6 +586,14 @@ void bind_render_buffer(id<MTLRenderCommandEncoder> enc,
     }
 }
 
+int effective_color_write_mask(int attachment, int fallback) {
+    if (!mithril::g_state || attachment < 0 || attachment >= mithril::kMaxColorAttachments)
+        return fallback;
+    const bool* m = mithril::g_state->colorMask[attachment];
+    return (m[0] ? 1 : 0) | (m[1] ? 2 : 0) |
+           (m[2] ? 4 : 0) | (m[3] ? 8 : 0);
+}
+
 // Full graphics-pipeline signature: everything Metal bakes into a PSO plus
 // the module identity. FNV-1a over the whole tuple; collisions are as
 // unlikely as they are on the Vulkan side.
@@ -624,7 +632,8 @@ uint64_t pipeline_signature(GLuint program, uint64_t vsHash, uint64_t fsHash,
     h = fnv1a_u64((uint64_t)blend_dst, h);
     h = fnv1a_u64((uint64_t)blend_src_alpha, h);
     h = fnv1a_u64((uint64_t)blend_dst_alpha, h);
-    h = fnv1a_u64((uint64_t)color_write_mask, h);
+    for (int i = 0; i < color_count; ++i)
+        h = fnv1a_u64((uint64_t)effective_color_write_mask(i, color_write_mask), h);
     /* MSAA：rasterSampleCount 烘焙进 PSO，且 Metal 校验要求 PSO 采样数与
      * render pass 附件的纹理 sampleCount 一致 —— 必须参与缓存键，否则单采样
      * 与多采样 FBO 交替时复用错 PSO → Metal 校验失败 / 命令缓冲提交出错。
@@ -887,7 +896,8 @@ MetalPipeline* get_or_create_pipeline(
             ca.rgbBlendOperation = MTLBlendOperationAdd;   // GL eq not in signature
             ca.alphaBlendOperation = MTLBlendOperationAdd; // (frontend clamps to ADD)
         }
-        ca.writeMask = color_write_mask_from_gl_bits(color_write_mask);
+        ca.writeMask = color_write_mask_from_gl_bits(
+            effective_color_write_mask(i, color_write_mask));
     }
 
     // Depth/stencil formats must mirror the pass (packed formats go to BOTH
@@ -1176,14 +1186,19 @@ void bind_program_descriptors(GLuint program) {
             if (tex_id) {
                 // Sampler params come from the GL texture object so the
                 // pixel-art NEAREST / atlas CLAMP_TO_EDGE cases survive.
-                mithril::Texture* gtex = mithril::state_get_texture(tex_id);
-                GLenum minF  = gtex ? (GLenum)gtex->minFilter : GL_NEAREST_MIPMAP_LINEAR;
-                GLenum magF  = gtex ? (GLenum)gtex->magFilter : GL_LINEAR;
-                GLenum wrapS = gtex ? (GLenum)gtex->wrapS : GL_REPEAT;
-                GLenum wrapT = gtex ? (GLenum)gtex->wrapT : GL_REPEAT;
-                GLenum wrapR = gtex ? (GLenum)gtex->wrapR : GL_REPEAT;
+                const GLuint samplerId = (unit >= 0 && unit < mithril::kMaxTextureUnits)
+                    ? mithril::g_state->samplerBindings[unit] : 0;
+                mithril::Sampler* gs = samplerId ? mithril::state_get_sampler(samplerId) : nullptr;
+                mithril::Texture* gt = mithril::state_get_texture(tex_id);
+                GLenum minF  = gs ? (GLenum)gs->minFilter : (gt ? (GLenum)gt->minFilter : GL_NEAREST_MIPMAP_LINEAR);
+                GLenum magF  = gs ? (GLenum)gs->magFilter : (gt ? (GLenum)gt->magFilter : GL_LINEAR);
+                GLenum wrapS = gs ? (GLenum)gs->wrapS : (gt ? (GLenum)gt->wrapS : GL_REPEAT);
+                GLenum wrapT = gs ? (GLenum)gs->wrapT : (gt ? (GLenum)gt->wrapT : GL_REPEAT);
+                GLenum wrapR = gs ? (GLenum)gs->wrapR : (gt ? (GLenum)gt->wrapR : GL_REPEAT);
+                const float* border = gs ? gs->borderColor : (gt ? gt->borderColor : nullptr);
+                const GLuint cacheName = samplerId ? samplerId : tex_id;
                 if (MetalSampler* ms = dmt_internal_get_or_create_sampler(
-                        tex_id, minF, magF, wrapS, wrapT, wrapR, nullptr)) {
+                        cacheName, minF, magF, wrapS, wrapT, wrapR, border)) {
                     smp = ms->smp;
                 }
             }
@@ -1339,14 +1354,19 @@ void bind_compute_descriptors(GLuint program, mithril::Program* prog,
                 ? mt->tex : (fallbackTex ? fallbackTex->tex : nil);
             id<MTLSamplerState> smp = nil;
             if (tex_id) {
-                mithril::Texture* gtex = mithril::state_get_texture(tex_id);
-                GLenum minF  = gtex ? (GLenum)gtex->minFilter : GL_NEAREST_MIPMAP_LINEAR;
-                GLenum magF  = gtex ? (GLenum)gtex->magFilter : GL_LINEAR;
-                GLenum wrapS = gtex ? (GLenum)gtex->wrapS : GL_REPEAT;
-                GLenum wrapT = gtex ? (GLenum)gtex->wrapT : GL_REPEAT;
-                GLenum wrapR = gtex ? (GLenum)gtex->wrapR : GL_REPEAT;
+                const GLuint samplerId = (unit >= 0 && unit < mithril::kMaxTextureUnits)
+                    ? mithril::g_state->samplerBindings[unit] : 0;
+                mithril::Sampler* gs = samplerId ? mithril::state_get_sampler(samplerId) : nullptr;
+                mithril::Texture* gt = mithril::state_get_texture(tex_id);
+                GLenum minF  = gs ? (GLenum)gs->minFilter : (gt ? (GLenum)gt->minFilter : GL_NEAREST_MIPMAP_LINEAR);
+                GLenum magF  = gs ? (GLenum)gs->magFilter : (gt ? (GLenum)gt->magFilter : GL_LINEAR);
+                GLenum wrapS = gs ? (GLenum)gs->wrapS : (gt ? (GLenum)gt->wrapS : GL_REPEAT);
+                GLenum wrapT = gs ? (GLenum)gs->wrapT : (gt ? (GLenum)gt->wrapT : GL_REPEAT);
+                GLenum wrapR = gs ? (GLenum)gs->wrapR : (gt ? (GLenum)gt->wrapR : GL_REPEAT);
+                const float* border = gs ? gs->borderColor : (gt ? gt->borderColor : nullptr);
+                const GLuint cacheName = samplerId ? samplerId : tex_id;
                 if (MetalSampler* ms = dmt_internal_get_or_create_sampler(
-                        tex_id, minF, magF, wrapS, wrapT, wrapR, nullptr)) {
+                        cacheName, minF, magF, wrapS, wrapT, wrapR, border)) {
                     smp = ms->smp;
                 }
             }

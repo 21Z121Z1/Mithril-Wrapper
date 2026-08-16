@@ -87,6 +87,7 @@ struct MetalTexture {
 
 struct MetalSampler {
     id<MTLSamplerState> smp = nil;
+    uint64_t stateSignature = 0;
 };
 
 struct MetalPipeline {

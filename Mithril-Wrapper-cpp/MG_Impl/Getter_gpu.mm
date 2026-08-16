@@ -97,7 +97,7 @@ extern "C" const char* mithril_get_settings_dump(void) {
     const bool is_metal =
         backend_active_kind() == MITHRIL_BACKEND_KIND_METAL;
 
-    ss << "Mithril-Wrapper 1.0 (OpenGL 4.6 -> " << backend_api_string()
+    ss << "Mithril-Wrapper 1.0 (OpenGL 3.3 -> " << backend_api_string()
        << ")\n";
     ss << "  Backend: " << backend_api_string() << "\n";
 
@@ -127,8 +127,8 @@ extern "C" const char* mithril_get_settings_dump(void) {
         ss << "  Portability: VK_KHR_portability_enumeration + VK_KHR_portability_subset\n";
     }
     ss << "  EGL: 1.5 (backend-backed)\n";
-    ss << "  GL version: 4.6 Core Profile\n";
-    ss << "  GLSL version: 4.60\n";
+    ss << "  GL version: 3.3 Core Profile\n";
+    ss << "  GLSL version: 3.30\n";
 
     dump = ss.str();
     return dump.c_str();
