@@ -1,11 +1,55 @@
-# Public ABI exposed by libmithril when embedded in Amethyst.
+# Explicit EGL ABI exported by libmithril when embedded in Amethyst.
 #
-# Keep the drop-in OpenGL/EGL surface exported while making every implementation
-# detail (glslang, SPIRV-Cross, DirectMetal/DirectVulkan backend internals, C++
-# RTTI/vtables) private to this Mach-O image.  This is deliberately a linker
-# export allow-list rather than source-level visibility annotations: glslang's
-# AST contains header-defined weak C++ virtual functions, including the global
-# TIntermNode external-interface class, which otherwise remain coalescable by
-# dyld even when their symbol visibility is hidden.
-_gl*
-_egl*
+# The iOS isolation workflow prepends the 657 explicit OpenGL Core symbols from
+# verify/gl46_core_symbols.txt to a generated linker export list, then appends
+# these EGL entry points.  Do not use an `_gl*` wildcard here: glslang ships a
+# C interface named `glslang_*`, and ld64 consequently exported that compiler
+# implementation into Amethyst's process-wide dynamic symbol namespace.
+#
+# This list mirrors Mithril-Wrapper-cpp/include/EGL/egl.h's public EGL entry
+# point declarations.  C++ compiler/runtime symbols, glslang/SPIRV-Cross, and
+# backend internals are intentionally absent.
+_eglGetError
+_eglGetDisplay
+_eglGetPlatformDisplay
+_eglInitialize
+_eglTerminate
+_eglQueryString
+_eglBindAPI
+_eglReleaseThread
+_eglGetConfigs
+_eglChooseConfig
+_eglGetConfigAttrib
+_eglCreateWindowSurface
+_eglCreatePbufferSurface
+_eglDestroySurface
+_eglQuerySurface
+_eglCreateContext
+_eglDestroyContext
+_eglMakeCurrent
+_eglGetCurrentContext
+_eglGetCurrentSurface
+_eglGetCurrentDisplay
+_eglQueryContext
+_eglSwapBuffers
+_eglSwapInterval
+_eglWaitClient
+_eglWaitGL
+_eglWaitNative
+_eglCreateSync
+_eglDestroySync
+_eglClientWaitSync
+_eglWaitSync
+_eglGetSyncAttrib
+_eglCreateImage
+_eglDestroyImage
+_eglCreatePlatformWindowSurface
+_eglCreatePlatformPixmapSurface
+_eglCreatePixmapSurface
+_eglCreatePbufferFromClientBuffer
+_eglGetProcAddress
+_eglSurfaceAttrib
+_eglBindTexImage
+_eglReleaseTexImage
+_eglCopyBuffers
+_eglQueryAPI
