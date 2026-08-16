@@ -1,0 +1,400 @@
+name: Minecraft DirectMetal Distribution
+
+on:
+  push:
+    branches:
+      - ci/minecraft-on-mithril-e2e-20260815
+    paths:
+      - 'CMakeLists.txt'
+      - 'Mithril-Wrapper-cpp/**'
+      - 'ci/minecraft-e2e/**'
+      - '.github/ci/minecraft-e2e/**'
+      - '.github/workflows/minecraft-directmetal-distribution.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: minecraft-directmetal-distribution-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DIST_ROOT: build/mithril-directmetal-minecraft-dist
+  E2E_ROOT: build/mithril-directmetal-distribution-e2e
+  GRADLE_OPTS: -Dorg.gradle.caching=true
+
+jobs:
+  package-and-prove:
+    name: Package launcher runtime and prove packaged image
+    runs-on: macos-26
+    timeout-minutes: 35
+
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Setup Java 25
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - name: Setup Gradle 9.4.1
+        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb
+        with:
+          gradle-version: '9.4.1'
+          cache-read-only: true
+
+      - name: Install native runtime dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew install glfw vulkan-loader molten-vk ninja
+
+      - name: Build production Mithril dylib
+        id: mithril
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-distribution-native -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_FLAGS='-Wno-error' \
+            -DCMAKE_CXX_FLAGS='-Wno-error'
+          cmake --build build-distribution-native --target mithril --parallel
+
+          dylib=$(find build-distribution-native -type f -name libmithril.dylib -print | head -1)
+          test -n "$dylib"
+          test -s "$dylib"
+          dylib="$(cd "$(dirname "$dylib")" && pwd)/$(basename "$dylib")"
+          echo "path=$dylib" >> "$GITHUB_OUTPUT"
+
+          file "$dylib"
+          test "$(file "$dylib" | grep -c 'arm64')" -ge 1
+          otool -L "$dylib"
+          shasum -a 256 "$dylib"
+
+      - name: Build portable GLFW to Mithril bridge
+        id: bridge
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build-distribution-native/bridge
+
+          GLFW_PREFIX=$(brew --prefix glfw)
+          GLFW_REAL="$GLFW_PREFIX/lib/libglfw.3.dylib"
+          test -f "$GLFW_REAL" || GLFW_REAL="$GLFW_PREFIX/lib/libglfw.dylib"
+          test -f "$GLFW_REAL"
+
+          # The E2E bridge intentionally supports explicit CI environment
+          # overrides. Distribution builds add this tiny constructor so a real
+          # launcher needs no MITHRIL_E2E_* environment variables: the bridge
+          # discovers its own directory and points the existing bridge logic at
+          # the sibling libmithril.dylib and bundled runtime GLFW.
+          cat > build-distribution-native/bridge/portable_env_shim.mm <<'EOF'
+          #include <dlfcn.h>
+          #include <cstdlib>
+          #include <string>
+          #include <libgen.h>
+          #include <limits.h>
+          #include <unistd.h>
+
+          static std::string self_dir() {
+              Dl_info info{};
+              if (!dladdr((void*)&self_dir, &info) || !info.dli_fname) return {};
+              char resolved[PATH_MAX];
+              const char* src = realpath(info.dli_fname, resolved) ? resolved : info.dli_fname;
+              std::string p(src);
+              auto slash = p.find_last_of('/');
+              return slash == std::string::npos ? std::string() : p.substr(0, slash);
+          }
+
+          __attribute__((constructor)) static void mithril_distribution_paths() {
+              std::string dir = self_dir();
+              if (dir.empty()) return;
+              if (!std::getenv("MITHRIL_E2E_MITHRIL_DYLIB")) {
+                  std::string p = dir + "/libmithril.dylib";
+                  setenv("MITHRIL_E2E_MITHRIL_DYLIB", p.c_str(), 0);
+              }
+              if (!std::getenv("MITHRIL_E2E_GLFW_DELEGATE")) {
+                  std::string p = dir + "/runtime/libglfw.3.dylib";
+                  setenv("MITHRIL_E2E_GLFW_DELEGATE", p.c_str(), 0);
+              }
+          }
+          EOF
+
+          BRIDGE="$PWD/build-distribution-native/bridge/libglfw_mithril.dylib"
+          clang++ -std=c++20 -fobjc-arc -dynamiclib -Wall -Wextra -Werror \
+            ci/minecraft-e2e/native/glfw_mithril_bridge.mm \
+            ci/minecraft-e2e/native/prepresent_capture.mm \
+            build-distribution-native/bridge/portable_env_shim.mm \
+            -I"$GLFW_PREFIX/include" -IMithril-Wrapper-cpp/include \
+            -framework AppKit -framework QuartzCore -framework Foundation \
+            -Wl,-reexport_library,"$GLFW_REAL" \
+            -o "$BRIDGE"
+
+          echo "path=$BRIDGE" >> "$GITHUB_OUTPUT"
+          echo "glfw=$GLFW_REAL" >> "$GITHUB_OUTPUT"
+          file "$BRIDGE"
+          otool -L "$BRIDGE"
+
+      - name: Assemble self-contained launcher bundle
+        id: bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf "$DIST_ROOT"
+          mkdir -p "$DIST_ROOT/runtime" "$DIST_ROOT/launch" "$DIST_ROOT/evidence"
+
+          cp '${{ steps.mithril.outputs.path }}' "$DIST_ROOT/libmithril.dylib"
+          cp '${{ steps.bridge.outputs.path }}' "$DIST_ROOT/libglfw_mithril.dylib"
+          cp '${{ steps.bridge.outputs.glfw }}' "$DIST_ROOT/runtime/libglfw.3.dylib"
+
+          MOLTENVK_REAL=$(otool -L "$DIST_ROOT/libmithril.dylib" | awk '/MoltenVK/{print $1; exit}')
+          test -n "$MOLTENVK_REAL"
+          test -f "$MOLTENVK_REAL"
+          cp "$MOLTENVK_REAL" "$DIST_ROOT/runtime/libMoltenVK.dylib"
+
+          old_mvk=$(otool -L "$DIST_ROOT/libmithril.dylib" | awk '/MoltenVK/{print $1; exit}')
+          old_glfw=$(otool -L "$DIST_ROOT/libglfw_mithril.dylib" | awk '/libglfw/{print $1; exit}')
+          test -n "$old_mvk"
+          test -n "$old_glfw"
+
+          install_name_tool -change "$old_mvk" '@loader_path/runtime/libMoltenVK.dylib' \
+            "$DIST_ROOT/libmithril.dylib"
+          install_name_tool -change "$old_glfw" '@loader_path/runtime/libglfw.3.dylib' \
+            "$DIST_ROOT/libglfw_mithril.dylib"
+          install_name_tool -id '@loader_path/libMoltenVK.dylib' \
+            "$DIST_ROOT/runtime/libMoltenVK.dylib"
+          install_name_tool -id '@loader_path/libglfw.3.dylib' \
+            "$DIST_ROOT/runtime/libglfw.3.dylib"
+
+          # install_name_tool invalidates Mach-O signatures. Re-sign every
+          # redistributed image ad-hoc so dyld sees internally consistent files.
+          codesign --force --sign - "$DIST_ROOT/runtime/libMoltenVK.dylib"
+          codesign --force --sign - "$DIST_ROOT/runtime/libglfw.3.dylib"
+          codesign --force --sign - "$DIST_ROOT/libmithril.dylib"
+          codesign --force --sign - "$DIST_ROOT/libglfw_mithril.dylib"
+
+          cat > "$DIST_ROOT/launch/print-jvm-args.sh" <<'EOF'
+          #!/bin/bash
+          set -euo pipefail
+          ROOT=$(cd "$(dirname "$0")/.." && pwd)
+          printf '%s\n' \
+            "-Dorg.lwjgl.glfw.libname=$ROOT/libglfw_mithril.dylib" \
+            "-Dorg.lwjgl.opengl.libname=$ROOT/libmithril.dylib"
+          EOF
+          chmod +x "$DIST_ROOT/launch/print-jvm-args.sh"
+
+          cat > "$DIST_ROOT/launch/check-bundle.sh" <<'EOF'
+          #!/bin/bash
+          set -euo pipefail
+          ROOT=$(cd "$(dirname "$0")/.." && pwd)
+          cd "$ROOT"
+          shasum -a 256 -c SHA256SUMS
+          for f in libmithril.dylib libglfw_mithril.dylib runtime/libMoltenVK.dylib runtime/libglfw.3.dylib; do
+            file "$f"
+            codesign --verify --strict "$f"
+            if otool -L "$f" | tail -n +2 | awk '{print $1}' | grep -E '^/(opt/homebrew|usr/local)/' >/dev/null; then
+              echo "non-portable Homebrew dependency remains in $f" >&2
+              exit 1
+            fi
+          done
+          echo 'Bundle integrity and portable dependency checks passed.'
+          EOF
+          chmod +x "$DIST_ROOT/launch/check-bundle.sh"
+
+          cat > "$DIST_ROOT/README.md" <<EOF
+          # Mithril DirectMetal Minecraft test runtime
+
+          This is an experimental macOS Apple Silicon test bundle built from:
+
+          - repository: ${GITHUB_REPOSITORY}
+          - commit: ${GITHUB_SHA}
+          - validated workload: Minecraft 26.2 production client, Java 25
+          - backend: Mithril DirectMetal (Metal on Apple is the platform default)
+
+          ## Real launcher setup
+
+          Keep this directory intact at a stable absolute path. Run:
+
+              ./launch/check-bundle.sh
+              ./launch/print-jvm-args.sh
+
+          Copy the two printed `-Dorg.lwjgl...` arguments into the Minecraft
+          installation's JVM arguments. They point LWJGL's GLFW and OpenGL
+          native loaders at this bundle. The distribution bridge locates its
+          sibling Mithril dylib and bundled GLFW runtime automatically; no
+          `MITHRIL_E2E_*` environment variables are required.
+
+          This artifact is validated specifically against Minecraft 26.2. It is
+          a test build, not a claim of complete OpenGL 4.6 conformance.
+          EOF
+
+          python3 - <<'PY'
+          import json, os, pathlib, platform, subprocess
+          root = pathlib.Path(os.environ['DIST_ROOT'])
+          data = {
+              'schema_version': '1.0',
+              'repository': os.environ['GITHUB_REPOSITORY'],
+              'commit': os.environ['GITHUB_SHA'],
+              'run_id': os.environ['GITHUB_RUN_ID'],
+              'run_attempt': os.environ['GITHUB_RUN_ATTEMPT'],
+              'target': 'macOS arm64',
+              'validated_minecraft': '26.2',
+              'validated_java': '25',
+              'backend': 'DirectMetal',
+              'machine': platform.machine(),
+          }
+          (root / 'BUILD_INFO.json').write_text(json.dumps(data, indent=2) + '\n')
+          PY
+
+          # Record dependency closure for field reports.
+          {
+            echo '=== libmithril.dylib ==='
+            otool -L "$DIST_ROOT/libmithril.dylib"
+            echo '=== libglfw_mithril.dylib ==='
+            otool -L "$DIST_ROOT/libglfw_mithril.dylib"
+            echo '=== runtime/libMoltenVK.dylib ==='
+            otool -L "$DIST_ROOT/runtime/libMoltenVK.dylib"
+            echo '=== runtime/libglfw.3.dylib ==='
+            otool -L "$DIST_ROOT/runtime/libglfw.3.dylib"
+          } | tee "$DIST_ROOT/evidence/otool-dependencies.txt"
+
+          # Fail closed if anything still needs the CI machine's Homebrew tree.
+          if grep -E '^\s+/(opt/homebrew|usr/local)/' "$DIST_ROOT/evidence/otool-dependencies.txt"; then
+            echo '::error::distribution still carries an absolute Homebrew dependency'
+            exit 1
+          fi
+
+          (
+            cd "$DIST_ROOT"
+            shasum -a 256 \
+              libmithril.dylib \
+              libglfw_mithril.dylib \
+              runtime/libMoltenVK.dylib \
+              runtime/libglfw.3.dylib \
+              BUILD_INFO.json > SHA256SUMS
+          )
+
+          "$DIST_ROOT/launch/check-bundle.sh"
+          echo "root=$PWD/$DIST_ROOT" >> "$GITHUB_OUTPUT"
+
+      - name: Prove portable bridge self-location without CI environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > build-distribution-native/portable_bridge_env_smoke.c <<'EOF'
+          #include <dlfcn.h>
+          #include <stdio.h>
+          #include <stdlib.h>
+          #include <string.h>
+
+          int main(int argc, char **argv) {
+              if (argc != 2) return 2;
+              unsetenv("MITHRIL_E2E_MITHRIL_DYLIB");
+              unsetenv("MITHRIL_E2E_GLFW_DELEGATE");
+              void *h = dlopen(argv[1], RTLD_NOW | RTLD_LOCAL);
+              if (!h) { fprintf(stderr, "%s\n", dlerror()); return 3; }
+              const char *m = getenv("MITHRIL_E2E_MITHRIL_DYLIB");
+              const char *g = getenv("MITHRIL_E2E_GLFW_DELEGATE");
+              if (!m || !g) return 4;
+              if (!strstr(m, "/libmithril.dylib")) return 5;
+              if (!strstr(g, "/runtime/libglfw.3.dylib")) return 6;
+              printf("portable mithril=%s\nportable glfw=%s\n", m, g);
+              dlclose(h);
+              return 0;
+          }
+          EOF
+          clang -std=c11 -Wall -Wextra -Werror \
+            build-distribution-native/portable_bridge_env_smoke.c \
+            -o build-distribution-native/portable_bridge_env_smoke -ldl
+          env -u MITHRIL_E2E_MITHRIL_DYLIB -u MITHRIL_E2E_GLFW_DELEGATE \
+            build-distribution-native/portable_bridge_env_smoke \
+            "$PWD/$DIST_ROOT/libglfw_mithril.dylib" | tee "$DIST_ROOT/evidence/portable-bridge-smoke.txt"
+
+      - name: Run real Minecraft 26.2 against packaged binaries
+        shell: bash
+        env:
+          MTL_DEBUG_LAYER: '1'
+          MTL_SHADER_VALIDATION: '0'
+        run: |
+          set -euo pipefail
+          rm -rf "$E2E_ROOT"
+          mkdir -p "$E2E_ROOT"
+          python3 ci/minecraft-e2e/evidence.py --root "$E2E_ROOT" init
+
+          gradle -p .github/ci/minecraft-e2e --build-cache --stacktrace \
+            -PmithrilDylib="$PWD/$DIST_ROOT/libmithril.dylib" \
+            -PglfwBridge="$PWD/$DIST_ROOT/libglfw_mithril.dylib" \
+            -PglfwDelegate="$PWD/$DIST_ROOT/runtime/libglfw.3.dylib" \
+            -PevidenceRoot="$PWD/$E2E_ROOT" \
+            runProductionClientGameTest
+
+          python3 - "$E2E_ROOT" "$PWD/$DIST_ROOT/libmithril.dylib" <<'PY'
+          import hashlib, json, pathlib, sys
+          root = pathlib.Path(sys.argv[1])
+          packaged = pathlib.Path(sys.argv[2]).resolve()
+          state = json.loads((root / 'bridge-state.json').read_text())
+          loaded = pathlib.Path(state['mithril_path']).resolve()
+          sha = lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
+          assert sha(packaged) == sha(loaded), 'packaged libmithril was not the loaded image'
+          assert state.get('context_count', 0) >= 1, 'no Mithril context created'
+          assert state.get('swap_count', 0) >= 2, 'no sustained presentation'
+          assert 'Metal 3 (DirectMetal)' in state.get('gl_version', ''), 'DirectMetal GL identity missing'
+          assert 'DirectMetal' in state.get('gl_renderer', ''), 'DirectMetal renderer identity missing'
+          print(json.dumps({
+              'packaged_path': str(packaged),
+              'loaded_path': str(loaded),
+              'sha256': sha(packaged),
+              'context_count': state.get('context_count'),
+              'swap_count': state.get('swap_count'),
+              'gl_renderer': state.get('gl_renderer'),
+              'gl_version': state.get('gl_version'),
+          }, indent=2))
+          PY
+
+          cp "$E2E_ROOT/bridge-state.json" "$DIST_ROOT/evidence/bridge-state.json"
+          cp "$E2E_ROOT/game-state.json" "$DIST_ROOT/evidence/game-state.json"
+          cp "$E2E_ROOT/oracle-results.json" "$DIST_ROOT/evidence/oracle-results.json"
+          cp "$E2E_ROOT/render/minecraft-framebuffer.png" "$DIST_ROOT/evidence/minecraft-framebuffer.png"
+
+          # Prove the exact package content survived validation unchanged.
+          "$DIST_ROOT/launch/check-bundle.sh"
+
+      - name: Create deterministic distribution archive
+        id: archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          ARCHIVE="Mithril-DirectMetal-Minecraft-26.2-macos-arm64-${GITHUB_SHA}.zip"
+          ditto -c -k --sequesterRsrc --keepParent "$DIST_ROOT" "$ARCHIVE"
+          shasum -a 256 "$ARCHIVE" | tee "$ARCHIVE.sha256"
+          echo "archive=$ARCHIVE" >> "$GITHUB_OUTPUT"
+          echo "checksum=$ARCHIVE.sha256" >> "$GITHUB_OUTPUT"
+          ls -lh "$ARCHIVE" "$ARCHIVE.sha256"
+
+      - name: Upload launcher-ready DirectMetal distribution
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: Mithril-DirectMetal-Minecraft-26.2-macos-arm64-${{ github.sha }}
+          path: |
+            ${{ steps.archive.outputs.archive }}
+            ${{ steps.archive.outputs.checksum }}
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
+      - name: Upload packaged-image E2E evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: Mithril-DirectMetal-distribution-evidence-${{ github.sha }}
+          path: |
+            ${{ env.DIST_ROOT }}/evidence/**
+            ${{ env.E2E_ROOT }}/**
+          if-no-files-found: warn
+          retention-days: 14
