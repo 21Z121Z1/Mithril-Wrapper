@@ -1,0 +1,215 @@
+name: Materialize validated MRT semantic fix
+
+on:
+  push:
+    branches:
+      - 'fix/gl-semantic-closure-integration-20260816'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: materialize-mrt-semantic-fix
+  cancel-in-progress: true
+
+jobs:
+  materialize:
+    if: ${{ !contains(github.event.head_commit.message || '', '[mrt-materialized]') }}
+    runs-on: macos-26
+    timeout-minutes: 25
+    env:
+      MITHRIL_BACKEND: metal
+      MTL_DEBUG_LAYER: '1'
+      MTL_SHADER_VALIDATION: '0'
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          submodules: recursive
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Install native dependencies
+        run: brew install vulkan-loader molten-vk ninja
+
+      - name: Apply MRT read-buffer and indexed-clear semantics
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_once(path, old, new, label):
+              p = Path(path)
+              s = p.read_text()
+              if old not in s:
+                  raise SystemExit(f"{label}: anchor missing")
+              p.write_text(s.replace(old, new, 1))
+
+          # GL frontend: glClearBuffer* must not mutate global clear state and
+          # GL_COLOR must select exactly one draw buffer.
+          p = Path('Mithril-Wrapper-cpp/MG_Impl/gl.cpp')
+          s = p.read_text()
+          start = s.index('void glClearBufferfv(')
+          end = s.index('void glClearBufferData(', start)
+          new = r'''void glClearBufferfv(GLenum buffer, GLint drawbuffer, const GLfloat* value) {
+              MITHRIL_ENSURE_INIT();
+              if (!value || !mg_conditional_render_allows()) return;
+              VkImageView colors[8] = {VK_NULL_HANDLE};
+              VkImageView depthView = VK_NULL_HANDLE;
+              int w = 0, h = 0;
+              int n = mithril::collect_draw_fbo_attachments(colors, &depthView, &w, &h);
+              backend_set_load_load();
+              backend_begin_render_pass(colors, n, depthView, w, h, mithril::draw_fbo_sample_count());
+              if (buffer == GL_COLOR) {
+                  backend_clear_buffer_indexed(GL_COLOR, drawbuffer, value, 0.0f, 0);
+              } else if (buffer == GL_DEPTH) {
+                  const float zero[4] = {0, 0, 0, 0};
+                  backend_clear_buffer_indexed(GL_DEPTH, 0, zero, value[0], 0);
+              } else {
+                  mithril::state_set_error(GL_INVALID_ENUM);
+              }
+              backend_end_render_pass();
+          }
+
+          void glClearBufferiv(GLenum buffer, GLint drawbuffer, const GLint* value) {
+              MITHRIL_ENSURE_INIT();
+              if (!value || !mg_conditional_render_allows()) return;
+              VkImageView colors[8] = {VK_NULL_HANDLE};
+              VkImageView depthView = VK_NULL_HANDLE;
+              int w = 0, h = 0;
+              int n = mithril::collect_draw_fbo_attachments(colors, &depthView, &w, &h);
+              backend_set_load_load();
+              backend_begin_render_pass(colors, n, depthView, w, h, mithril::draw_fbo_sample_count());
+              if (buffer == GL_COLOR) {
+                  const float c[4] = {(float)value[0], (float)value[1], (float)value[2], (float)value[3]};
+                  backend_clear_buffer_indexed(GL_COLOR, drawbuffer, c, 0.0f, 0);
+              } else if (buffer == GL_STENCIL) {
+                  const float zero[4] = {0, 0, 0, 0};
+                  backend_clear_buffer_indexed(GL_STENCIL, 0, zero, 0.0f, (GLuint)value[0]);
+              } else {
+                  mithril::state_set_error(GL_INVALID_ENUM);
+              }
+              backend_end_render_pass();
+          }
+
+          void glClearBufferuiv(GLenum buffer, GLint drawbuffer, const GLuint* value) {
+              MITHRIL_ENSURE_INIT();
+              if (!value || !mg_conditional_render_allows()) return;
+              VkImageView colors[8] = {VK_NULL_HANDLE};
+              VkImageView depthView = VK_NULL_HANDLE;
+              int w = 0, h = 0;
+              int n = mithril::collect_draw_fbo_attachments(colors, &depthView, &w, &h);
+              backend_set_load_load();
+              backend_begin_render_pass(colors, n, depthView, w, h, mithril::draw_fbo_sample_count());
+              if (buffer == GL_COLOR) {
+                  const float c[4] = {(float)value[0], (float)value[1], (float)value[2], (float)value[3]};
+                  backend_clear_buffer_indexed(GL_COLOR, drawbuffer, c, 0.0f, 0);
+              } else {
+                  mithril::state_set_error(GL_INVALID_ENUM);
+              }
+              backend_end_render_pass();
+          }
+
+          void glClearBufferfi(GLenum buffer, GLint drawbuffer, GLfloat depth_val, GLint stencil_val) {
+              MITHRIL_ENSURE_INIT();
+              if (!mg_conditional_render_allows()) return;
+              if (buffer != GL_DEPTH_STENCIL || drawbuffer != 0) {
+                  mithril::state_set_error(buffer == GL_DEPTH_STENCIL ? GL_INVALID_VALUE : GL_INVALID_ENUM);
+                  return;
+              }
+              VkImageView colors[8] = {VK_NULL_HANDLE};
+              VkImageView depthView = VK_NULL_HANDLE;
+              int w = 0, h = 0;
+              int n = mithril::collect_draw_fbo_attachments(colors, &depthView, &w, &h);
+              const float zero[4] = {0, 0, 0, 0};
+              backend_set_load_load();
+              backend_begin_render_pass(colors, n, depthView, w, h, mithril::draw_fbo_sample_count());
+              backend_clear_buffer_indexed(GL_DEPTH_STENCIL, 0, zero, depth_val, (GLuint)stencil_val);
+              backend_end_render_pass();
+          }
+
+          '''
+          p.write_text(s[:start] + new + s[end:])
+
+          # DirectMetal readback: obey GL_READ_BUFFER for user FBOs.
+          replace_once(
+              'Mithril-Wrapper-cpp/MG_Backend/DirectMetal/MetalBackend.mm',
+              '''        const GLuint texName = readDepth\n            ? fbo_attachment_texture(fbo->depth)\n            : fbo_attachment_texture(fbo->colors[0]);\n        if (!texName) return 0;\n        src = dmt::texture_table_get(texName);\n''',
+              '''        GLuint texName = 0;\n        if (readDepth) {\n            texName = fbo_attachment_texture(fbo->depth);\n        } else {\n            if (fbo->readBuffer == GL_NONE) return 0;\n            if (fbo->readBuffer < GL_COLOR_ATTACHMENT0 ||\n                fbo->readBuffer > GL_COLOR_ATTACHMENT7) return 0;\n            const GLuint colorIndex = (GLuint)(fbo->readBuffer - GL_COLOR_ATTACHMENT0);\n            texName = fbo_attachment_texture(fbo->colors[colorIndex]);\n        }\n        if (!texName) return 0;\n        src = dmt::texture_table_get(texName);\n''',
+              'DirectMetal readBuffer')
+
+          # DirectVulkan parity: honor the same readBuffer selection in both
+          # image selection and tracked-layout lookup.
+          p = Path('Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/ImageOps.cpp')
+          s = p.read_text()
+          old = '''        mithril::Framebuffer* fbo = mithril::state_get_framebuffer(readFboName);\n        if (!fbo || !fbo->colors[0].texture) return 0;\n        src_tex_id = fbo->colors[0].texture;\n        src_image = dvk_get_texture_image(src_tex_id);\n        mithril::Texture* t = mithril::state_get_texture(src_tex_id);\n        if (t) src_fmt = gl_internal_to_vk((GLenum)t->internalFormat);\n'''
+          new = '''        mithril::Framebuffer* fbo = mithril::state_get_framebuffer(readFboName);\n        if (!fbo || fbo->readBuffer == GL_NONE ||\n            fbo->readBuffer < GL_COLOR_ATTACHMENT0 ||\n            fbo->readBuffer > GL_COLOR_ATTACHMENT7) return 0;\n        const GLuint readIndex = (GLuint)(fbo->readBuffer - GL_COLOR_ATTACHMENT0);\n        if (!fbo->colors[readIndex].texture) return 0;\n        src_tex_id = fbo->colors[readIndex].texture;\n        src_image = dvk_get_texture_image(src_tex_id);\n        mithril::Texture* t = mithril::state_get_texture(src_tex_id);\n        if (t) src_fmt = gl_internal_to_vk((GLenum)t->internalFormat);\n'''
+          if old not in s: raise SystemExit('DirectVulkan read image anchor missing')
+          s = s.replace(old, new, 1)
+          old2 = '''        mithril::Framebuffer* fbo = mithril::state_get_framebuffer(readFboName);\n        if (fbo) {\n            auto& tbl = mithril::vk::texture_table();\n            auto tit = tbl.find(fbo->colors[0].texture);\n            if (tit != tbl.end()) src_layout = tit->second.currentLayout;\n        }\n'''
+          new2 = '''        mithril::Framebuffer* fbo = mithril::state_get_framebuffer(readFboName);\n        if (fbo && fbo->readBuffer >= GL_COLOR_ATTACHMENT0 &&\n            fbo->readBuffer <= GL_COLOR_ATTACHMENT7) {\n            const GLuint readIndex = (GLuint)(fbo->readBuffer - GL_COLOR_ATTACHMENT0);\n            auto& tbl = mithril::vk::texture_table();\n            auto tit = tbl.find(fbo->colors[readIndex].texture);\n            if (tit != tbl.end()) src_layout = tit->second.currentLayout;\n        }\n'''
+          if old2 not in s: raise SystemExit('DirectVulkan read layout anchor missing')
+          p.write_text(s.replace(old2, new2, 1))
+
+          # DirectMetal indexed color clear: temporarily render only to the
+          # requested attachment. sample count comes from the texture itself,
+          # avoiding duplicate EncoderState sample state.
+          p = Path('Mithril-Wrapper-cpp/MG_Backend/DirectMetal/MetalCommandStream.mm')
+          s = p.read_text()
+          needle = '''void clear_buffer_indexed(GLenum buffer, GLint drawbuffer, const float color[4],\n                          float depth, GLuint stencil) {\n    EncoderState& e = enc();\n    if (!e.passActive) return;\n\n'''
+          insert = needle + '''    if (buffer == GL_COLOR) {\n        if (drawbuffer < 0 || drawbuffer >= e.colorCount || drawbuffer >= 8 ||\n            e.colorViews[drawbuffer] == nullptr) return;\n        MetalTexture* selected = e.colorViews[drawbuffer];\n        const int passW = e.passW;\n        const int passH = e.passH;\n        const int samples = selected->samples > 0 ? selected->samples : 1;\n        end_render_pass();\n        MetalTexture* one[1] = {selected};\n        begin_render_pass(one, 1, nullptr, passW, passH, samples);\n        EncoderState& isolated = enc();\n        int rx, ry, rw, rh;\n        resolve_clear_rect(isolated, 0, 0, passW, passH, rx, ry, rw, rh);\n        run_clear_draw(GL_COLOR_BUFFER_BIT, color, depth, stencil, rx, ry, rw, rh);\n        return;\n    }\n\n'''
+          if needle not in s: raise SystemExit('Metal clear_buffer_indexed anchor missing')
+          p.write_text(s.replace(needle, insert, 1))
+
+          # Bring the already-red-before-fix MRT oracle onto this branch.
+          import subprocess
+          test = subprocess.check_output([
+              'git','show','origin/probe/gl-semantic-mrt-20260816:tests/directmetal_mrt_clear_semantics_smoke.c'
+          ], text=True)
+          Path('tests/directmetal_mrt_clear_semantics_smoke.c').write_text(test)
+          PY
+          git diff --check
+
+      - name: Build Mithril
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-mrt -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-mrt --target mithril --parallel
+          find build-mrt -type f -name libmithril.dylib -print -quit > /tmp/mithril-path
+          test -s /tmp/mithril-path
+
+      - name: Compile and run MRT oracle on real Metal GPU
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang -std=gnu11 -O0 -g -Wall -Wextra -Werror -IMithril-Wrapper-cpp/include \
+            tests/directmetal_mrt_clear_semantics_smoke.c -o build-mrt/mrt-clear -ldl
+          export DYLD_LIBRARY_PATH="$(brew --prefix)/lib"
+          build-mrt/mrt-clear "$(cat /tmp/mithril-path)" | tee build-mrt/mrt-clear.log
+          grep -F 'MRT CLEAR SEMANTICS SMOKE ALL PASSED' build-mrt/mrt-clear.log
+
+      - name: Commit validated source fix
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Mithril-Wrapper-cpp/MG_Impl/gl.cpp \
+                  Mithril-Wrapper-cpp/MG_Backend/DirectMetal/MetalBackend.mm \
+                  Mithril-Wrapper-cpp/MG_Backend/DirectMetal/MetalCommandStream.mm \
+                  Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/ImageOps.cpp \
+                  tests/directmetal_mrt_clear_semantics_smoke.c
+          git diff --cached --check
+          git commit -m 'fix(gl): close MRT read and indexed clear semantics [mrt-materialized]'
+          git push origin HEAD:fix/gl-semantic-closure-integration-20260816
+
+      - name: Upload MRT evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: directmetal-mrt-materializer-${{ github.sha }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: build-mrt/mrt-clear.log
