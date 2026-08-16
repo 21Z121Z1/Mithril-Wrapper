@@ -7,6 +7,7 @@ on:
     paths:
       - 'ci/gl46-hardening/apply.py'
       - 'ci/gl46-hardening/apply_errors.py'
+      - 'ci/gl46-hardening/apply_reflection.py'
 
 permissions:
   contents: write
@@ -30,10 +31,12 @@ jobs:
         run: |
           python3 ci/gl46-hardening/apply.py --apply
           python3 ci/gl46-hardening/apply_errors.py --apply
+          python3 ci/gl46-hardening/apply_reflection.py --apply
       - name: Verify patch invariants
         run: |
           python3 ci/gl46-hardening/apply.py --verify
           python3 ci/gl46-hardening/apply_errors.py --verify
+          python3 ci/gl46-hardening/apply_reflection.py --verify
       - name: Mechanical diff checks
         run: |
           git diff --check
@@ -53,5 +56,5 @@ jobs:
                   Mithril-Wrapper-cpp/MG_Impl/Getter.cpp \
                   ci/minecraft-e2e/native/glfw_mithril_bridge.mm \
                   verify/gl46_semantic_audit.py
-          git commit -m 'gl: harden error reporting and 4.6 state semantics'
+          git commit -m 'gl: harden GL 4.6 reflection and state semantics'
           git push origin HEAD:ci/minecraft-on-mithril-e2e-20260815
