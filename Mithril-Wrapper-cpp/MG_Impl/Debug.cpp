@@ -14,6 +14,15 @@
 // are identical because the debug entry points do not depend on the backend.
 #include "includes.h"
 
+// The public GL ABI is consumed directly by LWJGL/JNI and by native loader
+// probes. Fail the production build rather than silently exporting an ABI with
+// host-dependent scalar widths.
+static_assert(sizeof(GLuint) == 4, "OpenGL ABI requires 32-bit GLuint");
+static_assert(sizeof(GLint) == 4, "OpenGL ABI requires 32-bit GLint");
+static_assert(sizeof(GLsizei) == 4, "OpenGL ABI requires 32-bit GLsizei");
+static_assert(sizeof(GLfloat) == 4, "OpenGL ABI requires 32-bit GLfloat");
+static_assert(sizeof(GLdouble) == 8, "OpenGL ABI requires 64-bit GLdouble");
+
 extern "C" {
 
 void glDebugMessageControl(GLenum, GLenum, GLenum, GLsizei, const GLuint*, GLboolean) {
