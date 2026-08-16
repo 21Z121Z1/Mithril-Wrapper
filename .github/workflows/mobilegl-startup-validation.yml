@@ -1,0 +1,164 @@
+name: MobileGL-style startup platform validation
+
+on:
+  push:
+    branches: [fix/mobilegl-style-mc262-startup-preflight]
+  pull_request:
+    branches: [fix/mobilegl-style-mc262-startup-preflight]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mobilegl-startup-validation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ios-arm64:
+    name: iPhoneOS arm64 ABI
+    runs-on: macos-15
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Fetch pinned iOS toolchain and MoltenVK
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL -o ios.toolchain.cmake \
+            https://raw.githubusercontent.com/leetal/ios-cmake/4.5.0/ios.toolchain.cmake
+          curl -fsSL -o MoltenVK-ios.tar \
+            https://github.com/KhronosGroup/MoltenVK/releases/download/v1.4.2/MoltenVK-ios.tar
+          mkdir moltenvk-staging
+          tar -xf MoltenVK-ios.tar -C moltenvk-staging
+          FOUND=$(find moltenvk-staging -type d -name MoltenVK.xcframework -path '*static*' | head -1)
+          test -n "$FOUND"
+          mv "$FOUND" ./MoltenVK.xcframework
+          HDRS=$(find moltenvk-staging -type d -name vulkan -path '*/include/vulkan' | head -1)
+          test -n "$HDRS"
+          mv "$(dirname "$HDRS")" ./MoltenVK-Headers
+
+      - name: Build and verify iPhoneOS dylib
+        id: ios
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -B build-ios \
+            -DCMAKE_TOOLCHAIN_FILE=ios.toolchain.cmake \
+            -DPLATFORM=OS64 \
+            -DDEPLOYMENT_TARGET=15.0 \
+            -DENABLE_BITCODE=OFF \
+            -DENABLE_ARC=OFF \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_C_FLAGS='-Wno-error=implicit-function-declaration' \
+            -DCMAKE_CXX_FLAGS='-Wno-error'
+          cmake --build build-ios --config RelWithDebInfo --target mithril -j$(sysctl -n hw.ncpu)
+          DYLIB=$(realpath "$(find build-ios -name 'libmithril.dylib' -type f | head -1)")
+          test -f "$DYLIB"
+          echo "dylib=$DYLIB" >> "$GITHUB_OUTPUT"
+          file "$DYLIB"
+          xcrun vtool -show-build "$DYLIB" | tee build-ios/vtool.txt
+          xcrun vtool -show-build "$DYLIB" | grep -q 'platform IOS'
+          NM_OUT=$(nm -gU "$DYLIB")
+          for sym in eglGetDisplay eglInitialize eglCreateContext eglMakeCurrent eglSwapBuffers glGetString glGetIntegerv glTexSubImage2D glDrawArrays glDrawElements; do
+            echo "$NM_OUT" | grep -qE " [Tt] _?${sym}$" || { echo "missing $sym"; exit 1; }
+          done
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: mobilegl-startup-ios-arm64-${{ github.sha }}
+          path: ${{ steps.ios.outputs.dylib }}
+          if-no-files-found: error
+          retention-days: 7
+
+  macos-runtime:
+    name: macOS 26 MoltenVK / Metal startup runtime
+    runs-on: macos-26
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Record runner provenance
+        run: |
+          sw_vers
+          uname -a
+          xcodebuild -version
+          printf 'commit=%s\n' "$GITHUB_SHA" | tee runner-provenance.txt
+
+      - name: Install Vulkan loader and MoltenVK
+        run: brew install vulkan-loader molten-vk
+
+      - name: Build production dylib once
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -B build-macos \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_FLAGS='-Wno-error' \
+            -DCMAKE_CXX_FLAGS='-Wno-error'
+          cmake --build build-macos --config Release --target mithril -j$(sysctl -n hw.ncpu)
+          DYLIB=$(realpath "$(find build-macos -name 'libmithril.dylib' -type f | head -1)")
+          test -f "$DYLIB"
+          echo "MITHRIL_DYLIB=$DYLIB" >> "$GITHUB_ENV"
+          file "$DYLIB"
+          shasum -a 256 "$DYLIB" | tee build-macos/mithril-sha256.txt
+          dwarfdump --uuid "$DYLIB" | tee build-macos/mithril-uuid.txt
+
+      - name: Compile existing runtime oracles
+        shell: bash
+        run: |
+          set -euo pipefail
+          for test in gl_smoke render_smoke egl_sync_smoke; do
+            clang -std=c11 -O0 -Wall -Wextra -IMithril-Wrapper-cpp/include \
+              -o "build-macos/${test}" "tests/${test}.c" -ldl
+          done
+          clang++ -std=c++17 -fobjc-arc -O0 -Wall -Wextra \
+            -framework Foundation -framework QuartzCore -framework Metal \
+            -o build-macos/surface_metal_smoke tests/surface_metal_smoke.mm -ldl
+
+      - name: Run GL, real-GPU, sync, and CAMetalLayer regressions
+        shell: bash
+        env:
+          MITHRIL_DEBUG: '1'
+        run: |
+          set -euo pipefail
+          export DYLD_LIBRARY_PATH="$(brew --prefix)/lib"
+          build-macos/gl_smoke "$MITHRIL_DYLIB" | tee build-macos/gl-smoke.log
+          build-macos/render_smoke "$MITHRIL_DYLIB" 2>&1 | tee build-macos/render-smoke.log
+          build-macos/egl_sync_smoke "$MITHRIL_DYLIB" 2>&1 | tee build-macos/egl-sync.log
+          build-macos/surface_metal_smoke "$MITHRIL_DYLIB" 2>&1 | tee build-macos/surface-metal.log
+
+      - name: Verify synchronization and surface contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q 'MVK_CONFIG_MAX_ACTIVE_METAL_COMMAND_BUFFERS_PER_QUEUE' Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Device.cpp
+          ! grep -q 'MVK_CONFIG_SUBMIT_COMMAND_BUFFERS_PER_QUEUE' Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Device.cpp
+          grep -q 'imageAvailablePerFrame' Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Swapchain.h
+          grep -q 'backend_wait_serial' Mithril-Wrapper-cpp/MG_Impl/Drawing.cpp
+          grep -q 'safe_device_wait_idle' Mithril-Wrapper-cpp/MG_Impl/gl.cpp
+          grep -q 'acquireWait' Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Device.cpp
+          grep -q 'backend_wait_serial' Mithril-Wrapper-cpp/egl/egl.cpp
+          grep -q 'surface_destroy' Mithril-Wrapper-cpp/egl/egl.cpp
+          ! grep -q 'object_setClass' Mithril-Wrapper-cpp/egl/SurfaceMetal.mm
+
+      - name: Upload runtime evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: mobilegl-startup-macos26-${{ github.sha }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            runner-provenance.txt
+            build-macos/*.log
+            build-macos/mithril-sha256.txt
+            build-macos/mithril-uuid.txt
+            build-macos/**/libmithril.dylib
