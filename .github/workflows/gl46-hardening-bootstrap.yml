@@ -10,7 +10,8 @@ on:
       - 'ci/gl46-hardening/apply_errors.py'
       - 'ci/gl46-hardening/apply_reflection.py'
       - 'ci/gl46-hardening/apply_sampler.py'
-      - 'ci/gl46-hardening/apply_texture_dsa.py'
+      - 'ci/gl46-hardening/apply_texture_dsa_v2.py'
+      - 'ci/gl46-hardening/apply_readpixels.py'
 
 permissions:
   contents: write
@@ -36,14 +37,16 @@ jobs:
           python3 ci/gl46-hardening/apply_errors.py --apply
           python3 ci/gl46-hardening/apply_reflection.py --apply
           python3 ci/gl46-hardening/apply_sampler.py --apply
-          python3 ci/gl46-hardening/apply_texture_dsa.py --apply
+          python3 ci/gl46-hardening/apply_texture_dsa_v2.py --apply
+          python3 ci/gl46-hardening/apply_readpixels.py --apply
       - name: Verify patch invariants
         run: |
           python3 ci/gl46-hardening/apply.py --verify
           python3 ci/gl46-hardening/apply_errors.py --verify
           python3 ci/gl46-hardening/apply_reflection.py --verify
           python3 ci/gl46-hardening/apply_sampler.py --verify
-          python3 ci/gl46-hardening/apply_texture_dsa.py --verify
+          python3 ci/gl46-hardening/apply_texture_dsa_v2.py --verify
+          python3 ci/gl46-hardening/apply_readpixels.py --verify
       - name: Mechanical diff checks
         run: |
           git diff --check
@@ -61,7 +64,8 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add Mithril-Wrapper-cpp/MG_Impl/GL46_Compat.cpp \
                   Mithril-Wrapper-cpp/MG_Impl/Getter.cpp \
+                  Mithril-Wrapper-cpp/MG_Backend/DirectMetal/MetalBackend.mm \
                   ci/minecraft-e2e/native/glfw_mithril_bridge.mm \
                   verify/gl46_semantic_audit.py
-          git commit -m 'gl: harden sampler texture DSA and reflection semantics'
+          git commit -m 'gl: harden texture DSA sampler reflection and readback semantics'
           git push origin HEAD:ci/minecraft-on-mithril-e2e-20260815
