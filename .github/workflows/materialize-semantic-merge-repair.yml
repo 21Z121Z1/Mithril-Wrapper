@@ -39,12 +39,43 @@ jobs:
             git show 254122e37485f9815cc9a3e36b081af59877d592:"$path" > /tmp/current
             git show 7008034076a36870fe10368c3a88e94c49d7dc58:"$path" > /tmp/base
             git show becdb9caa40842e970916cae8f8db17753af7973:"$path" > /tmp/semantic
-            git merge-file -p /tmp/current /tmp/base /tmp/semantic > "$path" || {
-              echo "three-way conflict in $path"
-              grep -n -C 5 '<<<<<<<\|=======\|>>>>>>>' "$path" || true
-              exit 1
-            }
+            set +e
+            git merge-file -p /tmp/current /tmp/base /tmp/semantic > "$path"
+            rc=$?
+            set -e
+            if (( rc > 1 )); then
+              echo "merge-file hard failure in $path"
+              exit "$rc"
+            fi
+            if grep -q '^<<<<<<< ' "$path"; then
+              python3 - "$path" <<'PY'
+          from pathlib import Path
+          import sys
+          p=Path(sys.argv[1]); lines=p.read_text().splitlines(True); out=[]; i=0
+          while i < len(lines):
+              if not lines[i].startswith('<<<<<<< '):
+                  out.append(lines[i]); i+=1; continue
+              i+=1; left=[]
+              while i < len(lines) and not lines[i].startswith('======='):
+                  left.append(lines[i]); i+=1
+              if i == len(lines): raise SystemExit('unterminated merge conflict')
+              i+=1; right=[]
+              while i < len(lines) and not lines[i].startswith('>>>>>>> '):
+                  right.append(lines[i]); i+=1
+              if i == len(lines): raise SystemExit('unterminated merge conflict')
+              i+=1
+              L=''.join(left); R=''.join(right)
+              if 'currentDrawID' in L and 'account_software_primitive_queries' in R:
+                  out.extend(left); out.extend(right)
+              elif 'account_software_primitive_queries' in L and 'currentDrawID' in R:
+                  out.extend(right); out.extend(left)
+              else:
+                  raise SystemExit(f'unexpected semantic merge conflict in {p}:\nLEFT:\n{L}\nRIGHT:\n{R}')
+          p.write_text(''.join(out))
+          PY
+            fi
           done
+          ! grep -R -n '^<<<<<<<\|^=======\|^>>>>>>>' Mithril-Wrapper-cpp/MG_Impl/Drawing.cpp Mithril-Wrapper-cpp/MG_State/State.h
           grep -q 'currentDrawID' Mithril-Wrapper-cpp/MG_State/State.h
           grep -q 'semantic_trace_eventf' Mithril-Wrapper-cpp/MG_State/State.h
           grep -q 'account_software_primitive_queries' Mithril-Wrapper-cpp/MG_Impl/Drawing.cpp
