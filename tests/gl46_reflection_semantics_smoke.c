@@ -72,6 +72,9 @@ int main(int argc, char** argv) {
     const GLchar* uname="uScalar"; GLuint idx=GL_INVALID_INDEX;
     getUniformIndices(p,1,&uname,&idx);
     CHECK(idx!=GL_INVALID_INDEX,"glGetUniformIndices resolves active uniform");
+    const GLchar* missingName="definitelyMissingUniform"; GLuint missingIdx=0;
+    getUniformIndices(p,1,&missingName,&missingIdx);
+    CHECK(missingIdx==GL_INVALID_INDEX,"glGetUniformIndices returns GL_INVALID_INDEX for an inactive name");
     if (idx!=GL_INVALID_INDEX) {
         GLint type=0,size=0,nameLen=0,block=0;
         getActiveUniformsiv(p,1,&idx,GL_UNIFORM_TYPE,&type);
