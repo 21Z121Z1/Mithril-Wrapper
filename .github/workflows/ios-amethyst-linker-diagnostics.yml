@@ -45,9 +45,6 @@ jobs:
           test -s "$WRAPPER"
           test -s "$BASE_TOOLCHAIN"
 
-          # try_compile() creates child CMake projects before all custom cache
-          # variables are reliably propagated. Environment is inherited by
-          # those children, and the wrapper has an explicit env fallback.
           export MITHRIL_IOS_BASE_TOOLCHAIN="$BASE_TOOLCHAIN"
           export MITHRIL_AMETHYST_EXPORT_LIST="$EXPORTS"
           export MITHRIL_AMETHYST_FORCE_NOT_WEAK_LIST="$NOT_WEAK"
@@ -130,5 +127,21 @@ jobs:
 
           TINTERM=$(grep '_ZN11TIntermNode14getAsUnaryNodeEv' /tmp/nm-m.txt | head -5 | paste -sd';' - || true)
           [[ -n "$TINTERM" ]] && echo "::notice title=TIntermNode getAsUnaryNode state::$TINTERM"
+
+          grep -E '(TInterm|glslang|spirv_cross|__ZTV|__ZTI|__ZTS)' /tmp/nm-m.txt > /tmp/compiler-cxx.txt || true
+          grep -i 'weak' /tmp/compiler-cxx.txt > /tmp/compiler-weak.txt || true
+          WEAK_COUNT=$(wc -l < /tmp/compiler-weak.txt | tr -d ' ')
+          echo "::notice title=Residual compiler weak record count::$WEAK_COUNT"
+          if [[ "$WEAK_COUNT" -gt 0 ]]; then
+            WEAK_SAMPLE=$(head -20 /tmp/compiler-weak.txt | sed 's/%/%25/g;s/\r/%0D/g' | paste -sd';' - | tail -c 7000)
+            echo "::warning title=Residual compiler weak nm records::$WEAK_SAMPLE"
+            EXTERNAL_WEAK=$(grep -iv 'non-external' /tmp/compiler-weak.txt || true)
+            EXTERNAL_WEAK_COUNT=$(printf '%s\n' "$EXTERNAL_WEAK" | sed '/^$/d' | wc -l | tr -d ' ')
+            echo "::notice title=Residual weak records lacking non-external marker::$EXTERNAL_WEAK_COUNT"
+            if [[ "$EXTERNAL_WEAK_COUNT" -gt 0 ]]; then
+              EXT_SAMPLE=$(printf '%s\n' "$EXTERNAL_WEAK" | head -20 | sed 's/%/%25/g;s/\r/%0D/g' | paste -sd';' - | tail -c 7000)
+              echo "::warning title=Potential external weak compiler records::$EXT_SAMPLE"
+            fi
+          fi
 
           true
