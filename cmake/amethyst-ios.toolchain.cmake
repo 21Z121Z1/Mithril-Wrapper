@@ -6,6 +6,14 @@
 # therefore not durable. This wrapper deliberately includes ios-cmake first and
 # appends Mithril's isolation policy afterwards on *every* toolchain pass.
 
+# Toolchain files are also evaluated in CMake try_compile() child projects.
+# Explicitly forward the custom paths so compiler ABI probes see the same base
+# toolchain and isolation inputs instead of failing before real configuration.
+list(APPEND CMAKE_TRY_COMPILE_PLATFORM_VARIABLES
+    MITHRIL_IOS_BASE_TOOLCHAIN
+    MITHRIL_AMETHYST_EXPORT_LIST
+    MITHRIL_AMETHYST_FORCE_NOT_WEAK_LIST)
+
 if(NOT DEFINED MITHRIL_IOS_BASE_TOOLCHAIN OR
    "${MITHRIL_IOS_BASE_TOOLCHAIN}" STREQUAL "")
     message(FATAL_ERROR "MITHRIL_IOS_BASE_TOOLCHAIN is required")
