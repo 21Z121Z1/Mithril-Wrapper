@@ -151,6 +151,7 @@ void glDeleteFramebuffers(GLsizei n, const GLuint* framebuffers) {
 
 void glBindFramebuffer(GLenum target, GLuint framebuffer) {
     MITHRIL_ENSURE_INIT();
+    mithril::semantic_trace_event_oncef("framebuffer_mrt", "framebuffer.mrt_indexed_clear", "glBindFramebuffer", "target=0x%x object=%s", target, framebuffer ? "nonzero" : "zero");
     if (target != GL_DRAW_FRAMEBUFFER && target != GL_READ_FRAMEBUFFER &&
         target != GL_FRAMEBUFFER) {
         mithril::state_set_error(GL_INVALID_ENUM);
@@ -210,6 +211,7 @@ static mithril::Framebuffer* fbo_for_target(GLenum target) {
 void glFramebufferTexture2D(GLenum target, GLenum attachment, GLenum textarget,
                             GLuint texture, GLint level) {
     MITHRIL_ENSURE_INIT();
+    mithril::semantic_trace_event_oncef("framebuffer_mrt", "framebuffer.mrt_indexed_clear", "glFramebufferTexture2D", "target=0x%x attachment=0x%x textarget=0x%x object=%s level=%d", target, attachment, textarget, texture ? "nonzero" : "zero", level);
     mithril::Framebuffer* fbo = fbo_for_target(target);
     if (!fbo) return;
     if (!fbo_validate_attachment(attachment)) return;
@@ -462,6 +464,7 @@ void glBlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1,
                        GLint dstX0, GLint dstY0, GLint dstX1, GLint dstY1,
                        GLbitfield mask, GLenum filter) {
     MITHRIL_ENSURE_INIT();
+    mithril::semantic_trace_event_oncef("framebuffer_mrt", "framebuffer.mrt_indexed_clear", "glBlitFramebuffer", "mask=0x%x filter=0x%x scaled=%s src_origin=%s dst_origin=%s", mask, filter, ((srcX1-srcX0)!=(dstX1-dstX0) || (srcY1-srcY0)!=(dstY1-dstY0)) ? "yes" : "no", (srcX0 || srcY0) ? "nonzero" : "zero", (dstX0 || dstY0) ? "nonzero" : "zero");
 
     // FIX (Iris 阴影贴图必需): depth/stencil blit 支持。Iris 的阴影贴图
     // cascade copy、深度 pre-pass 重建依赖 glBlitFramebuffer(...,

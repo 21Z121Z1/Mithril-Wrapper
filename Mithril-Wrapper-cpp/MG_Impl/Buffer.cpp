@@ -94,6 +94,7 @@ static mithril::Buffer* bound_buffer_for_target(GLenum target) {
 
 void glBindBuffer(GLenum target, GLuint buffer) {
     MITHRIL_ENSURE_INIT();
+    mithril::semantic_trace_event_oncef("buffer_mapping_storage", "buffer.mapping_ubo", "glBindBuffer", "target=0x%x object=%s", target, buffer ? "nonzero" : "zero");
     if (buffer != 0 && !mithril::state_get_buffer(buffer)) {
         g_state->buffers[buffer] = mithril::Buffer{};
         g_state->buffers[buffer].id = buffer;
@@ -117,6 +118,7 @@ void glBindBuffer(GLenum target, GLuint buffer) {
 
 void glBufferData(GLenum target, GLsizeiptr size, const void* data, GLenum usage) {
     MITHRIL_ENSURE_INIT();
+    mithril::semantic_trace_event_oncef("buffer_mapping_storage", "buffer.mapping_ubo", "glBufferData", "target=0x%x usage=0x%x size=%s data=%s", target, usage, size <= 256 ? "tiny" : size <= 65536 ? "small" : size <= 1048576 ? "medium" : "large", data ? "host" : "null");
     if (size < 0) { mithril::state_set_error(GL_INVALID_VALUE); return; }
     mithril::Buffer* b = bound_buffer_for_target(target);
     if (!b) { mithril::state_set_error(GL_INVALID_OPERATION); return; }
@@ -214,6 +216,7 @@ void glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, const void
 void glCopyBufferSubData(GLenum readTarget, GLenum writeTarget,
                          GLintptr readOffset, GLintptr writeOffset, GLsizeiptr size) {
     MITHRIL_ENSURE_INIT();
+    mithril::semantic_trace_event_oncef("buffer_mapping_storage", "buffer.mapping_ubo", "glCopyBufferSubData", "read=0x%x write=0x%x offsets=%s size=%s", readTarget, writeTarget, (readOffset || writeOffset) ? "nonzero" : "zero", size <= 256 ? "tiny" : size <= 65536 ? "small" : size <= 1048576 ? "medium" : "large");
     if (size <= 0) return;
     mithril::Buffer* src = bound_buffer_for_target(readTarget);
     mithril::Buffer* dst = bound_buffer_for_target(writeTarget);
@@ -240,6 +243,7 @@ void* glMapBuffer(GLenum target, GLenum access) {
 
 void* glMapBufferRange(GLenum target, GLintptr offset, GLsizeiptr length, GLbitfield access) {
     MITHRIL_ENSURE_INIT();
+    mithril::semantic_trace_event_oncef("buffer_mapping_storage", "buffer.mapping_ubo", "glMapBufferRange", "target=0x%x offset=%s length=%s access=0x%x", target, offset ? "nonzero" : "zero", length <= 256 ? "tiny" : length <= 65536 ? "small" : length <= 1048576 ? "medium" : "large", access);
     mithril::Buffer* b = bound_buffer_for_target(target);
     if (!b) { mithril::state_set_error(GL_INVALID_OPERATION); return nullptr; }
     if (offset < 0 || length <= 0 || offset + length > b->size) {
@@ -258,6 +262,7 @@ void* glMapBufferRange(GLenum target, GLintptr offset, GLsizeiptr length, GLbitf
 
 GLboolean glUnmapBuffer(GLenum target) {
     MITHRIL_ENSURE_INIT();
+    mithril::semantic_trace_event_oncef("buffer_mapping_storage", "buffer.mapping_ubo", "glUnmapBuffer", "target=0x%x", target);
     mithril::Buffer* b = bound_buffer_for_target(target);
     if (!b || !b->mapped) return GL_FALSE;
     // Upload the (possibly) modified range to the VkBuffer.
@@ -268,6 +273,7 @@ GLboolean glUnmapBuffer(GLenum target) {
 
 void glFlushMappedBufferRange(GLenum target, GLintptr offset, GLsizeiptr length) {
     MITHRIL_ENSURE_INIT();
+    mithril::semantic_trace_event_oncef("buffer_mapping_storage", "buffer.mapping_ubo", "glFlushMappedBufferRange", "target=0x%x offset=%s length=%s", target, offset ? "nonzero" : "zero", length <= 256 ? "tiny" : length <= 65536 ? "small" : length <= 1048576 ? "medium" : "large");
     mithril::Buffer* b = bound_buffer_for_target(target);
     if (!b || !b->mapped) return;
     GLintptr base = b->mapOffset + offset;
@@ -332,6 +338,7 @@ void glBindBufferBase(GLenum target, GLuint index, GLuint buffer) {
 void glBindBufferRange(GLenum target, GLuint index, GLuint buffer,
                        GLintptr offset, GLsizeiptr size) {
     MITHRIL_ENSURE_INIT();
+    mithril::semantic_trace_event_oncef("buffer_mapping_storage", "buffer.mapping_ubo", "glBindBufferRange", "target=0x%x index=%u object=%s offset=%s size=%s", target, index, buffer ? "nonzero" : "zero", offset ? "nonzero" : "zero", size <= 256 ? "tiny" : size <= 65536 ? "small" : size <= 1048576 ? "medium" : "large");
     mithril::IndexedBufferTarget cat = mithril::indexedBufferTargetFromGL(target);
     if (cat == mithril::IndexedBufferTarget::Count) {
         mithril::state_set_error(GL_INVALID_ENUM);

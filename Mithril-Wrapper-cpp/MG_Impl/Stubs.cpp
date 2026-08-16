@@ -328,6 +328,7 @@ void glDeleteSamplers(GLsizei n, const GLuint* samplers) {
 
 void glBindSampler(GLuint unit, GLuint sampler) {
     MITHRIL_ENSURE_INIT();
+    mithril::semantic_trace_event_oncef("textures_samplers", "sampler.object_override", "glBindSampler", "unit=%u object=%s", unit, sampler ? "nonzero" : "zero");
     if (unit >= mithril::kMaxTextureUnits) {
         mithril::state_set_error(GL_INVALID_VALUE);
         return;
@@ -346,6 +347,7 @@ GLboolean glIsSampler(GLuint sampler) {
 
 void glSamplerParameteri(GLuint sampler, GLenum pname, GLint param) {
     MITHRIL_ENSURE_INIT();
+    mithril::semantic_trace_event_oncef("textures_samplers", "sampler.object_override", "glSamplerParameteri", "object=%s pname=0x%x param=%d", sampler ? "nonzero" : "zero", pname, param);
     mithril::Sampler* s = mithril::state_get_sampler(sampler);
     if (!s) return;
     switch (pname) {
@@ -366,6 +368,7 @@ void glSamplerParameteri(GLuint sampler, GLenum pname, GLint param) {
 
 void glSamplerParameterf(GLuint sampler, GLenum pname, GLfloat param) {
     MITHRIL_ENSURE_INIT();
+    mithril::semantic_trace_event_oncef("textures_samplers", "sampler.object_override", "glSamplerParameterf", "object=%s pname=0x%x param_class=%s", sampler ? "nonzero" : "zero", pname, param == 0.0f ? "zero" : param == 1.0f ? "one" : "other");
     mithril::Sampler* s = mithril::state_get_sampler(sampler);
     if (!s) return;
     switch (pname) {

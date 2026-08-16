@@ -55,6 +55,29 @@ void semantic_trace_eventf(const char* domain, const char* semantic,
                  api ? api : "", details);
 }
 
+void semantic_trace_event_oncef(const char* domain, const char* semantic,
+                                const char* api, const char* fmt, ...) {
+    static const bool enabled = [] {
+        const char* path = std::getenv("MITHRIL_GL_SEMANTIC_TRACE");
+        return path && *path;
+    }();
+    if (!enabled) return;
+
+    char details[768];
+    va_list args;
+    va_start(args, fmt);
+    std::vsnprintf(details, sizeof(details), fmt ? fmt : "", args);
+    va_end(args);
+
+    // Preserve each distinct production parameter class once per thread.
+    thread_local std::unordered_set<std::string> seen;
+    std::string key = std::string(domain ? domain : "") + "\t" +
+                      (semantic ? semantic : "") + "\t" +
+                      (api ? api : "") + "\t" + details;
+    if (!seen.insert(key).second) return;
+    semantic_trace_eventf(domain, semantic, api, "%s", details);
+}
+
 void semantic_trace_external_api_call(const char* api, const void* caller) {
     // Keep production overhead effectively zero unless tracing was explicitly
     // requested by CI. getenv is resolved only once per process.

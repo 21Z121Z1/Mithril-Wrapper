@@ -1,5 +1,5 @@
 {
-  "schema_version": "1.4",
+  "schema_version": "1.5",
   "profile": "minecraft-26.2-directmetal",
   "core": {
     "version": "3.3",
@@ -37,128 +37,732 @@
     ]
   },
   "advertised_extensions": {
-    "GL_ARB_vertex_attrib_binding": {"symbols":["glBindVertexBuffer","glVertexAttribFormat","glVertexAttribIFormat","glVertexAttribLFormat","glVertexAttribBinding","glVertexBindingDivisor"],"state_semantics":["vertex.bind_buffer","vertex.attrib.format","vertex.attrib.iformat","vertex.attrib.binding","vertex.binding.divisor","vertex.legacy.pointer","vertex.legacy.divisor"],"gpu_oracles":["directmetal_vertex_binding_smoke"],"status":"proven"},
-    "GL_ARB_clip_control": {"symbols":["glClipControl"],"state_semantics":["clip.control"],"gpu_oracles":["directmetal_terrain_semantics_smoke"],"status":"proven"},
-    "GL_ARB_multi_draw_indirect": {"symbols":["glMultiDrawArraysIndirect","glMultiDrawElementsIndirect"],"state_semantics":["draw.multi_indirect"],"gpu_oracles":["directmetal_terrain_semantics_smoke"],"status":"proven"},
-    "GL_ARB_indirect_parameters": {"symbols":["glMultiDrawArraysIndirectCount","glMultiDrawElementsIndirectCount"],"state_semantics":["draw.indirect_count"],"gpu_oracles":["directmetal_terrain_semantics_smoke"],"status":"proven"},
-    "GL_MITHRIL_wrapper": {"symbols":["glGetString"],"state_semantics":["wrapper.identity"],"gpu_oracles":["minecraft_wrapper_identity"],"status":"proven"}
+    "GL_ARB_vertex_attrib_binding": {
+      "symbols": [
+        "glBindVertexBuffer",
+        "glVertexAttribFormat",
+        "glVertexAttribIFormat",
+        "glVertexAttribLFormat",
+        "glVertexAttribBinding",
+        "glVertexBindingDivisor"
+      ],
+      "state_semantics": [
+        "vertex.bind_buffer",
+        "vertex.attrib.format",
+        "vertex.attrib.iformat",
+        "vertex.attrib.binding",
+        "vertex.binding.divisor",
+        "vertex.legacy.pointer",
+        "vertex.legacy.divisor"
+      ],
+      "gpu_oracles": [
+        "directmetal_vertex_binding_smoke"
+      ],
+      "status": "proven"
+    },
+    "GL_ARB_clip_control": {
+      "symbols": [
+        "glClipControl"
+      ],
+      "state_semantics": [
+        "clip.control"
+      ],
+      "gpu_oracles": [
+        "directmetal_terrain_semantics_smoke"
+      ],
+      "status": "proven"
+    },
+    "GL_ARB_multi_draw_indirect": {
+      "symbols": [
+        "glMultiDrawArraysIndirect",
+        "glMultiDrawElementsIndirect"
+      ],
+      "state_semantics": [
+        "draw.multi_indirect"
+      ],
+      "gpu_oracles": [
+        "directmetal_terrain_semantics_smoke"
+      ],
+      "status": "proven"
+    },
+    "GL_ARB_indirect_parameters": {
+      "symbols": [
+        "glMultiDrawArraysIndirectCount",
+        "glMultiDrawElementsIndirectCount"
+      ],
+      "state_semantics": [
+        "draw.indirect_count"
+      ],
+      "gpu_oracles": [
+        "directmetal_terrain_semantics_smoke"
+      ],
+      "status": "proven"
+    },
+    "GL_MITHRIL_wrapper": {
+      "symbols": [
+        "glGetString"
+      ],
+      "state_semantics": [
+        "wrapper.identity"
+      ],
+      "gpu_oracles": [
+        "minecraft_wrapper_identity"
+      ],
+      "status": "proven"
+    }
   },
   "semantic_evidence": {
-    "core33.resource_roundtrip":{"domain":"textures_samplers","status":"proven","oracle":"directmetal_texture_fbo_roundtrip_smoke"},
-    "texture.layered":{"domain":"textures_samplers","status":"proven","oracle":"directmetal_layered_texture_smoke"},
-    "buffer.mapping_ubo":{"domain":"buffer_mapping_storage","status":"proven","oracle":"directmetal_buffer_ubo_semantics_smoke"},
-    "framebuffer.mrt_indexed_clear":{"domain":"framebuffer_mrt","status":"proven","oracle":"directmetal_mrt_clear_semantics_smoke"},
-    "sampler.object_override":{"domain":"textures_samplers","status":"proven","oracle":"directmetal_sampler_semantics_smoke"},
-    "raster.state":{"domain":"blend_depth_stencil","status":"proven","oracle":"directmetal_raster_semantics_smoke"},
-    "pixel.pack_unpack":{"domain":"pixel_pack_unpack","status":"proven","oracle":"directmetal_pixel_store_semantics_smoke"},
-    "production.api_closure":{"domain":"production_api_closure","status":"proven","oracle":"directmetal_production_api_closure_smoke"},
-    "pixel.client_roundtrip":{"domain":"pixel_pack_unpack","status":"proven","oracle":"directmetal_texture_fbo_roundtrip_smoke"},
-    "sync.query":{"domain":"sync_query","status":"proven","oracle":"query_sync_smoke"},
-    "core33.error_state":{"domain":"state_error","status":"proven","oracle":"directmetal_state_semantics_smoke"},
-    "core33.program_state":{"domain":"program_state","status":"proven","oracle":"directmetal_state_semantics_smoke"},
-    "vertex.bind_buffer":{"domain":"vao_vertex_fetch","status":"proven","oracle":"directmetal_vertex_binding_smoke"},
-    "vertex.attrib.format":{"domain":"vao_vertex_fetch","status":"proven","oracle":"directmetal_vertex_binding_smoke"},
-    "vertex.attrib.iformat":{"domain":"vao_vertex_fetch","status":"proven","oracle":"directmetal_vertex_binding_smoke"},
-    "vertex.attrib.binding":{"domain":"vao_vertex_fetch","status":"proven","oracle":"directmetal_vertex_binding_smoke"},
-    "vertex.binding.divisor":{"domain":"vao_vertex_fetch","status":"proven","oracle":"directmetal_vertex_binding_smoke"},
-    "vertex.legacy.pointer":{"domain":"vao_vertex_fetch","status":"proven","oracle":"directmetal_vertex_binding_smoke"},
-    "vertex.legacy.ipointer":{"domain":"vao_vertex_fetch","status":"proven","oracle":"directmetal_vertex_binding_smoke"},
-    "vertex.legacy.divisor":{"domain":"vao_vertex_fetch","status":"proven","oracle":"directmetal_vertex_binding_smoke"},
-    "draw.configuration":{"domain":"draw","status":"proven","oracle":"directmetal_terrain_semantics_smoke"},
-    "clip.control":{"domain":"draw","status":"proven","oracle":"directmetal_terrain_semantics_smoke"},
-    "draw.multi_indirect":{"domain":"draw","status":"proven","oracle":"directmetal_terrain_semantics_smoke"},
-    "draw.indirect_count":{"domain":"draw","status":"proven","oracle":"directmetal_terrain_semantics_smoke"},
-    "wrapper.identity":{"domain":"runtime_identity","status":"proven","oracle":"minecraft_wrapper_identity"}
+    "core33.resource_roundtrip": {
+      "domain": "textures_samplers",
+      "status": "proven",
+      "oracle": "directmetal_texture_fbo_roundtrip_smoke"
+    },
+    "texture.layered": {
+      "domain": "textures_samplers",
+      "status": "proven",
+      "oracle": "directmetal_layered_texture_smoke"
+    },
+    "buffer.mapping_ubo": {
+      "domain": "buffer_mapping_storage",
+      "status": "proven",
+      "oracle": "directmetal_buffer_ubo_semantics_smoke"
+    },
+    "framebuffer.mrt_indexed_clear": {
+      "domain": "framebuffer_mrt",
+      "status": "proven",
+      "oracle": "directmetal_mrt_clear_semantics_smoke"
+    },
+    "sampler.object_override": {
+      "domain": "textures_samplers",
+      "status": "proven",
+      "oracle": "directmetal_sampler_semantics_smoke"
+    },
+    "raster.state": {
+      "domain": "blend_depth_stencil",
+      "status": "proven",
+      "oracle": "directmetal_raster_semantics_smoke"
+    },
+    "pixel.pack_unpack": {
+      "domain": "pixel_pack_unpack",
+      "status": "proven",
+      "oracle": "directmetal_pixel_store_semantics_smoke"
+    },
+    "production.api_closure": {
+      "domain": "production_api_closure",
+      "status": "proven",
+      "oracle": "directmetal_production_api_closure_smoke"
+    },
+    "pixel.client_roundtrip": {
+      "domain": "pixel_pack_unpack",
+      "status": "proven",
+      "oracle": "directmetal_texture_fbo_roundtrip_smoke"
+    },
+    "sync.query": {
+      "domain": "sync_query",
+      "status": "proven",
+      "oracle": "query_sync_smoke"
+    },
+    "core33.error_state": {
+      "domain": "state_error",
+      "status": "proven",
+      "oracle": "directmetal_state_semantics_smoke"
+    },
+    "core33.program_state": {
+      "domain": "program_state",
+      "status": "proven",
+      "oracle": "directmetal_state_semantics_smoke"
+    },
+    "vertex.bind_buffer": {
+      "domain": "vao_vertex_fetch",
+      "status": "proven",
+      "oracle": "directmetal_vertex_binding_smoke"
+    },
+    "vertex.attrib.format": {
+      "domain": "vao_vertex_fetch",
+      "status": "proven",
+      "oracle": "directmetal_vertex_binding_smoke"
+    },
+    "vertex.attrib.iformat": {
+      "domain": "vao_vertex_fetch",
+      "status": "proven",
+      "oracle": "directmetal_vertex_binding_smoke"
+    },
+    "vertex.attrib.binding": {
+      "domain": "vao_vertex_fetch",
+      "status": "proven",
+      "oracle": "directmetal_vertex_binding_smoke"
+    },
+    "vertex.binding.divisor": {
+      "domain": "vao_vertex_fetch",
+      "status": "proven",
+      "oracle": "directmetal_vertex_binding_smoke"
+    },
+    "vertex.legacy.pointer": {
+      "domain": "vao_vertex_fetch",
+      "status": "proven",
+      "oracle": "directmetal_vertex_binding_smoke"
+    },
+    "vertex.legacy.ipointer": {
+      "domain": "vao_vertex_fetch",
+      "status": "proven",
+      "oracle": "directmetal_vertex_binding_smoke"
+    },
+    "vertex.legacy.divisor": {
+      "domain": "vao_vertex_fetch",
+      "status": "proven",
+      "oracle": "directmetal_vertex_binding_smoke"
+    },
+    "draw.configuration": {
+      "domain": "draw",
+      "status": "proven",
+      "oracle": "directmetal_terrain_semantics_smoke"
+    },
+    "clip.control": {
+      "domain": "draw",
+      "status": "proven",
+      "oracle": "directmetal_terrain_semantics_smoke"
+    },
+    "draw.multi_indirect": {
+      "domain": "draw",
+      "status": "proven",
+      "oracle": "directmetal_terrain_semantics_smoke"
+    },
+    "draw.indirect_count": {
+      "domain": "draw",
+      "status": "proven",
+      "oracle": "directmetal_terrain_semantics_smoke"
+    },
+    "wrapper.identity": {
+      "domain": "runtime_identity",
+      "status": "proven",
+      "oracle": "minecraft_wrapper_identity"
+    }
   },
   "oracle_phases": {
-    "gpu": ["directmetal_terrain_semantics_smoke","directmetal_vertex_binding_smoke","directmetal_state_semantics_smoke","directmetal_texture_fbo_roundtrip_smoke","directmetal_layered_texture_smoke","query_sync_smoke","directmetal_mrt_clear_semantics_smoke","directmetal_buffer_ubo_semantics_smoke","directmetal_sampler_semantics_smoke","directmetal_raster_semantics_smoke","directmetal_pixel_store_semantics_smoke","directmetal_production_api_closure_smoke"],
-    "production": ["minecraft_production_client_gametest","minecraft_wrapper_identity"]
+    "gpu": [
+      "directmetal_terrain_semantics_smoke",
+      "directmetal_vertex_binding_smoke",
+      "directmetal_state_semantics_smoke",
+      "directmetal_texture_fbo_roundtrip_smoke",
+      "directmetal_layered_texture_smoke",
+      "query_sync_smoke",
+      "directmetal_mrt_clear_semantics_smoke",
+      "directmetal_buffer_ubo_semantics_smoke",
+      "directmetal_sampler_semantics_smoke",
+      "directmetal_raster_semantics_smoke",
+      "directmetal_pixel_store_semantics_smoke",
+      "directmetal_production_api_closure_smoke"
+    ],
+    "production": [
+      "minecraft_production_client_gametest",
+      "minecraft_wrapper_identity"
+    ]
   },
-  "trace_coverage": {"enforced_domains":["api_call","vao_vertex_fetch","draw"],"next_domains":["direct_state_access"]},
+  "trace_coverage": {
+    "enforced_domains": [
+      "api_call",
+      "vao_vertex_fetch",
+      "draw",
+      "buffer_mapping_storage",
+      "textures_samplers",
+      "framebuffer_mrt",
+      "blend_depth_stencil",
+      "pixel_pack_unpack"
+    ],
+    "next_domains": [
+      "direct_state_access"
+    ]
+  },
   "production_trace": {
-    "required_apis": ["glGetString","glGetError","glGetIntegerv","glGetStringi","glEnable","glClipControl","glTexImage2D","glGetTexLevelParameteriv","glGenFramebuffers","glGenBuffers","glBindBuffer","glBufferData","glGenSamplers","glSamplerParameteri","glSamplerParameterf","glGenTextures","glBindTexture","glTexParameterf","glPixelStorei","glTexSubImage2D","glBindFramebuffer","glFramebufferTexture2D","glClearColor","glClear","glBufferSubData","glCreateShader","glShaderSource","glCompileShader","glGetShaderiv","glCreateProgram","glBindAttribLocation","glAttachShader","glLinkProgram","glGetProgramiv","glGetProgramInfoLog","glGetUniformBlockIndex","glUniformBlockBinding","glGetUniformLocation","glGenQueries","glClearDepth","glDrawBuffer","glMapBufferRange","glFlushMappedBufferRange","glUnmapBuffer","glCopyBufferSubData","glScissor","glViewport","glDepthMask","glBlendFuncSeparate","glPolygonMode","glUseProgram","glBindBufferRange","glDrawBuffers","glGenVertexArrays","glBindVertexArray","glEnableVertexAttribArray","glVertexAttribFormat","glVertexAttribBinding","glVertexBindingDivisor","glBindVertexBuffer","glDrawElementsInstancedBaseVertex","glBindSampler","glDisable","glBlitFramebuffer","glFenceSync","glClientWaitSync","glDeleteSync","glDeleteTextures","glDeleteProgram","glDeleteShader","glDrawArraysInstanced","glDeleteBuffers","glActiveTexture","glDepthFunc","glVertexAttribIFormat","glColorMaski","glDeleteFramebuffers","glReadPixels","glCheckFramebufferStatus","glDeleteQueries","glDeleteSamplers"]
+    "required_apis": [
+      "glGetString",
+      "glGetError",
+      "glGetIntegerv",
+      "glGetStringi",
+      "glEnable",
+      "glClipControl",
+      "glTexImage2D",
+      "glGetTexLevelParameteriv",
+      "glGenFramebuffers",
+      "glGenBuffers",
+      "glBindBuffer",
+      "glBufferData",
+      "glGenSamplers",
+      "glSamplerParameteri",
+      "glSamplerParameterf",
+      "glGenTextures",
+      "glBindTexture",
+      "glTexParameterf",
+      "glPixelStorei",
+      "glTexSubImage2D",
+      "glBindFramebuffer",
+      "glFramebufferTexture2D",
+      "glClearColor",
+      "glClear",
+      "glBufferSubData",
+      "glCreateShader",
+      "glShaderSource",
+      "glCompileShader",
+      "glGetShaderiv",
+      "glCreateProgram",
+      "glBindAttribLocation",
+      "glAttachShader",
+      "glLinkProgram",
+      "glGetProgramiv",
+      "glGetProgramInfoLog",
+      "glGetUniformBlockIndex",
+      "glUniformBlockBinding",
+      "glGetUniformLocation",
+      "glGenQueries",
+      "glClearDepth",
+      "glDrawBuffer",
+      "glMapBufferRange",
+      "glFlushMappedBufferRange",
+      "glUnmapBuffer",
+      "glCopyBufferSubData",
+      "glScissor",
+      "glViewport",
+      "glDepthMask",
+      "glBlendFuncSeparate",
+      "glPolygonMode",
+      "glUseProgram",
+      "glBindBufferRange",
+      "glDrawBuffers",
+      "glGenVertexArrays",
+      "glBindVertexArray",
+      "glEnableVertexAttribArray",
+      "glVertexAttribFormat",
+      "glVertexAttribBinding",
+      "glVertexBindingDivisor",
+      "glBindVertexBuffer",
+      "glDrawElementsInstancedBaseVertex",
+      "glBindSampler",
+      "glDisable",
+      "glBlitFramebuffer",
+      "glFenceSync",
+      "glClientWaitSync",
+      "glDeleteSync",
+      "glDeleteTextures",
+      "glDeleteProgram",
+      "glDeleteShader",
+      "glDrawArraysInstanced",
+      "glDeleteBuffers",
+      "glActiveTexture",
+      "glDepthFunc",
+      "glVertexAttribIFormat",
+      "glColorMaski",
+      "glDeleteFramebuffers",
+      "glReadPixels",
+      "glCheckFramebufferStatus",
+      "glDeleteQueries",
+      "glDeleteSamplers"
+    ]
   },
   "api_evidence": {
-    "glGetString":{"status":"proven","domain":"state_error","oracle":"directmetal_state_semantics_smoke"},
-    "glGetError":{"status":"proven","domain":"state_error","oracle":"directmetal_state_semantics_smoke"},
-    "glGetIntegerv":{"status":"proven","domain":"buffer_mapping_storage","oracle":"directmetal_buffer_ubo_semantics_smoke"},
-    "glGetStringi":{"status":"proven","domain":"production_api_closure","oracle":"directmetal_production_api_closure_smoke"},
-    "glEnable":{"status":"proven","domain":"blend_depth_stencil","oracle":"directmetal_raster_semantics_smoke"},
-    "glClipControl":{"status":"proven","domain":"draw","oracle":"directmetal_terrain_semantics_smoke"},
-    "glTexImage2D":{"status":"proven","domain":"textures_samplers","oracle":"directmetal_texture_fbo_roundtrip_smoke"},
-    "glGetTexLevelParameteriv":{"status":"proven","domain":"production_api_closure","oracle":"directmetal_production_api_closure_smoke"},
-    "glGenFramebuffers":{"status":"proven","domain":"framebuffer_mrt","oracle":"directmetal_mrt_clear_semantics_smoke"},
-    "glGenBuffers":{"status":"proven","domain":"buffer_mapping_storage","oracle":"directmetal_buffer_ubo_semantics_smoke"},
-    "glBindBuffer":{"status":"proven","domain":"buffer_mapping_storage","oracle":"directmetal_buffer_ubo_semantics_smoke"},
-    "glBufferData":{"status":"proven","domain":"buffer_mapping_storage","oracle":"directmetal_buffer_ubo_semantics_smoke"},
-    "glGenSamplers":{"status":"proven","domain":"sampler_objects","oracle":"directmetal_sampler_semantics_smoke"},
-    "glSamplerParameteri":{"status":"proven","domain":"sampler_objects","oracle":"directmetal_sampler_semantics_smoke"},
-    "glSamplerParameterf":{"status":"proven","domain":"production_api_closure","oracle":"directmetal_production_api_closure_smoke"},
-    "glGenTextures":{"status":"proven","domain":"textures_samplers","oracle":"directmetal_texture_fbo_roundtrip_smoke"},
-    "glBindTexture":{"status":"proven","domain":"textures_samplers","oracle":"directmetal_texture_fbo_roundtrip_smoke"},
-    "glTexParameterf":{"status":"proven","domain":"production_api_closure","oracle":"directmetal_production_api_closure_smoke"},
-    "glPixelStorei":{"status":"proven","domain":"pixel_pack_unpack","oracle":"directmetal_pixel_store_semantics_smoke"},
-    "glTexSubImage2D":{"status":"proven","domain":"production_api_closure","oracle":"directmetal_production_api_closure_smoke"},
-    "glBindFramebuffer":{"status":"proven","domain":"framebuffer_mrt","oracle":"directmetal_mrt_clear_semantics_smoke"},
-    "glFramebufferTexture2D":{"status":"proven","domain":"framebuffer_mrt","oracle":"directmetal_mrt_clear_semantics_smoke"},
-    "glClearColor":{"status":"proven","domain":"blend_depth_stencil","oracle":"directmetal_raster_semantics_smoke"},
-    "glClear":{"status":"proven","domain":"blend_depth_stencil","oracle":"directmetal_raster_semantics_smoke"},
-    "glBufferSubData":{"status":"proven","domain":"buffer_mapping_storage","oracle":"directmetal_buffer_ubo_semantics_smoke"},
-    "glCreateShader":{"status":"proven","domain":"production_api_closure","oracle":"directmetal_production_api_closure_smoke"},
-    "glShaderSource":{"status":"proven","domain":"production_api_closure","oracle":"directmetal_production_api_closure_smoke"},
-    "glCompileShader":{"status":"proven","domain":"production_api_closure","oracle":"directmetal_production_api_closure_smoke"},
-    "glGetShaderiv":{"status":"proven","domain":"production_api_closure","oracle":"directmetal_production_api_closure_smoke"},
-    "glCreateProgram":{"status":"proven","domain":"production_api_closure","oracle":"directmetal_production_api_closure_smoke"},
-    "glBindAttribLocation":{"status":"proven","domain":"production_api_closure","oracle":"directmetal_production_api_closure_smoke"},
-    "glAttachShader":{"status":"proven","domain":"production_api_closure","oracle":"directmetal_production_api_closure_smoke"},
-    "glLinkProgram":{"status":"proven","domain":"production_api_closure","oracle":"directmetal_production_api_closure_smoke"},
-    "glGetProgramiv":{"status":"proven","domain":"production_api_closure","oracle":"directmetal_production_api_closure_smoke"},
-    "glGetProgramInfoLog":{"status":"proven","domain":"production_api_closure","oracle":"directmetal_production_api_closure_smoke"},
-    "glGetUniformBlockIndex":{"status":"proven","domain":"buffer_mapping_storage","oracle":"directmetal_buffer_ubo_semantics_smoke"},
-    "glUniformBlockBinding":{"status":"proven","domain":"buffer_mapping_storage","oracle":"directmetal_buffer_ubo_semantics_smoke"},
-    "glGetUniformLocation":{"status":"proven","domain":"production_api_closure","oracle":"directmetal_production_api_closure_smoke"},
-    "glGenQueries":{"status":"proven","domain":"sync_query","oracle":"query_sync_smoke"},
-    "glClearDepth":{"status":"proven","domain":"blend_depth_stencil","oracle":"directmetal_raster_semantics_smoke"},
-    "glDrawBuffer":{"status":"proven","domain":"production_api_closure","oracle":"directmetal_production_api_closure_smoke"},
-    "glMapBufferRange":{"status":"proven","domain":"buffer_mapping_storage","oracle":"directmetal_buffer_ubo_semantics_smoke"},
-    "glFlushMappedBufferRange":{"status":"proven","domain":"buffer_mapping_storage","oracle":"directmetal_buffer_ubo_semantics_smoke"},
-    "glUnmapBuffer":{"status":"proven","domain":"buffer_mapping_storage","oracle":"directmetal_buffer_ubo_semantics_smoke"},
-    "glCopyBufferSubData":{"status":"proven","domain":"buffer_mapping_storage","oracle":"directmetal_buffer_ubo_semantics_smoke"},
-    "glScissor":{"status":"proven","domain":"draw","oracle":"directmetal_terrain_semantics_smoke"},
-    "glViewport":{"status":"proven","domain":"draw","oracle":"directmetal_terrain_semantics_smoke"},
-    "glDepthMask":{"status":"proven","domain":"blend_depth_stencil","oracle":"directmetal_raster_semantics_smoke"},
-    "glBlendFuncSeparate":{"status":"proven","domain":"blend_depth_stencil","oracle":"directmetal_raster_semantics_smoke"},
-    "glPolygonMode":{"status":"proven","domain":"blend_depth_stencil","oracle":"directmetal_raster_semantics_smoke"},
-    "glUseProgram":{"status":"proven","domain":"production_api_closure","oracle":"directmetal_production_api_closure_smoke"},
-    "glBindBufferRange":{"status":"proven","domain":"buffer_mapping_storage","oracle":"directmetal_buffer_ubo_semantics_smoke"},
-    "glDrawBuffers":{"status":"proven","domain":"framebuffer_mrt","oracle":"directmetal_mrt_clear_semantics_smoke"},
-    "glGenVertexArrays":{"status":"proven","domain":"vao_vertex_fetch","oracle":"directmetal_vertex_binding_smoke"},
-    "glBindVertexArray":{"status":"proven","domain":"vao_vertex_fetch","oracle":"directmetal_vertex_binding_smoke"},
-    "glEnableVertexAttribArray":{"status":"proven","domain":"vao_vertex_fetch","oracle":"directmetal_vertex_binding_smoke"},
-    "glVertexAttribFormat":{"status":"proven","domain":"vao_vertex_fetch","oracle":"directmetal_vertex_binding_smoke"},
-    "glVertexAttribBinding":{"status":"proven","domain":"vao_vertex_fetch","oracle":"directmetal_vertex_binding_smoke"},
-    "glVertexBindingDivisor":{"status":"proven","domain":"vao_vertex_fetch","oracle":"directmetal_vertex_binding_smoke"},
-    "glBindVertexBuffer":{"status":"proven","domain":"vao_vertex_fetch","oracle":"directmetal_vertex_binding_smoke"},
-    "glDrawElementsInstancedBaseVertex":{"status":"proven","domain":"production_api_closure","oracle":"directmetal_production_api_closure_smoke"},
-    "glBindSampler":{"status":"proven","domain":"sampler_objects","oracle":"directmetal_sampler_semantics_smoke"},
-    "glDisable":{"status":"proven","domain":"blend_depth_stencil","oracle":"directmetal_raster_semantics_smoke"},
-    "glBlitFramebuffer":{"status":"proven","domain":"production_api_closure","oracle":"directmetal_production_api_closure_smoke"},
-    "glFenceSync":{"status":"proven","domain":"sync_query","oracle":"query_sync_smoke"},
-    "glClientWaitSync":{"status":"proven","domain":"sync_query","oracle":"query_sync_smoke"},
-    "glDeleteSync":{"status":"proven","domain":"sync_query","oracle":"query_sync_smoke"},
-    "glDeleteTextures":{"status":"proven","domain":"production_api_closure","oracle":"directmetal_production_api_closure_smoke"},
-    "glDeleteProgram":{"status":"proven","domain":"production_api_closure","oracle":"directmetal_production_api_closure_smoke"},
-    "glDeleteShader":{"status":"proven","domain":"production_api_closure","oracle":"directmetal_production_api_closure_smoke"},
-    "glDrawArraysInstanced":{"status":"proven","domain":"production_api_closure","oracle":"directmetal_production_api_closure_smoke"},
-    "glDeleteBuffers":{"status":"proven","domain":"production_api_closure","oracle":"directmetal_production_api_closure_smoke"},
-    "glActiveTexture":{"status":"proven","domain":"sampler_objects","oracle":"directmetal_sampler_semantics_smoke"},
-    "glDepthFunc":{"status":"proven","domain":"blend_depth_stencil","oracle":"directmetal_raster_semantics_smoke"},
-    "glVertexAttribIFormat":{"status":"proven","domain":"vao_vertex_fetch","oracle":"directmetal_vertex_binding_smoke"},
-    "glColorMaski":{"status":"proven","domain":"blend_depth_stencil","oracle":"directmetal_raster_semantics_smoke"},
-    "glDeleteFramebuffers":{"status":"proven","domain":"production_api_closure","oracle":"directmetal_production_api_closure_smoke"},
-    "glReadPixels":{"status":"proven","domain":"pixel_pack_unpack","oracle":"directmetal_pixel_store_semantics_smoke"},
-    "glCheckFramebufferStatus":{"status":"proven","domain":"framebuffer_mrt","oracle":"directmetal_mrt_clear_semantics_smoke"},
-    "glDeleteQueries":{"status":"proven","domain":"sync_query","oracle":"query_sync_smoke"},
-    "glDeleteSamplers":{"status":"proven","domain":"production_api_closure","oracle":"directmetal_production_api_closure_smoke"}
+    "glGetString": {
+      "status": "proven",
+      "domain": "state_error",
+      "oracle": "directmetal_state_semantics_smoke"
+    },
+    "glGetError": {
+      "status": "proven",
+      "domain": "state_error",
+      "oracle": "directmetal_state_semantics_smoke"
+    },
+    "glGetIntegerv": {
+      "status": "proven",
+      "domain": "buffer_mapping_storage",
+      "oracle": "directmetal_buffer_ubo_semantics_smoke"
+    },
+    "glGetStringi": {
+      "status": "proven",
+      "domain": "production_api_closure",
+      "oracle": "directmetal_production_api_closure_smoke"
+    },
+    "glEnable": {
+      "status": "proven",
+      "domain": "blend_depth_stencil",
+      "oracle": "directmetal_raster_semantics_smoke"
+    },
+    "glClipControl": {
+      "status": "proven",
+      "domain": "draw",
+      "oracle": "directmetal_terrain_semantics_smoke"
+    },
+    "glTexImage2D": {
+      "status": "proven",
+      "domain": "textures_samplers",
+      "oracle": "directmetal_texture_fbo_roundtrip_smoke"
+    },
+    "glGetTexLevelParameteriv": {
+      "status": "proven",
+      "domain": "production_api_closure",
+      "oracle": "directmetal_production_api_closure_smoke"
+    },
+    "glGenFramebuffers": {
+      "status": "proven",
+      "domain": "framebuffer_mrt",
+      "oracle": "directmetal_mrt_clear_semantics_smoke"
+    },
+    "glGenBuffers": {
+      "status": "proven",
+      "domain": "buffer_mapping_storage",
+      "oracle": "directmetal_buffer_ubo_semantics_smoke"
+    },
+    "glBindBuffer": {
+      "status": "proven",
+      "domain": "buffer_mapping_storage",
+      "oracle": "directmetal_buffer_ubo_semantics_smoke"
+    },
+    "glBufferData": {
+      "status": "proven",
+      "domain": "buffer_mapping_storage",
+      "oracle": "directmetal_buffer_ubo_semantics_smoke"
+    },
+    "glGenSamplers": {
+      "status": "proven",
+      "domain": "sampler_objects",
+      "oracle": "directmetal_sampler_semantics_smoke"
+    },
+    "glSamplerParameteri": {
+      "status": "proven",
+      "domain": "sampler_objects",
+      "oracle": "directmetal_sampler_semantics_smoke"
+    },
+    "glSamplerParameterf": {
+      "status": "proven",
+      "domain": "production_api_closure",
+      "oracle": "directmetal_production_api_closure_smoke"
+    },
+    "glGenTextures": {
+      "status": "proven",
+      "domain": "textures_samplers",
+      "oracle": "directmetal_texture_fbo_roundtrip_smoke"
+    },
+    "glBindTexture": {
+      "status": "proven",
+      "domain": "textures_samplers",
+      "oracle": "directmetal_texture_fbo_roundtrip_smoke"
+    },
+    "glTexParameterf": {
+      "status": "proven",
+      "domain": "production_api_closure",
+      "oracle": "directmetal_production_api_closure_smoke"
+    },
+    "glPixelStorei": {
+      "status": "proven",
+      "domain": "pixel_pack_unpack",
+      "oracle": "directmetal_pixel_store_semantics_smoke"
+    },
+    "glTexSubImage2D": {
+      "status": "proven",
+      "domain": "production_api_closure",
+      "oracle": "directmetal_production_api_closure_smoke"
+    },
+    "glBindFramebuffer": {
+      "status": "proven",
+      "domain": "framebuffer_mrt",
+      "oracle": "directmetal_mrt_clear_semantics_smoke"
+    },
+    "glFramebufferTexture2D": {
+      "status": "proven",
+      "domain": "framebuffer_mrt",
+      "oracle": "directmetal_mrt_clear_semantics_smoke"
+    },
+    "glClearColor": {
+      "status": "proven",
+      "domain": "blend_depth_stencil",
+      "oracle": "directmetal_raster_semantics_smoke"
+    },
+    "glClear": {
+      "status": "proven",
+      "domain": "blend_depth_stencil",
+      "oracle": "directmetal_raster_semantics_smoke"
+    },
+    "glBufferSubData": {
+      "status": "proven",
+      "domain": "buffer_mapping_storage",
+      "oracle": "directmetal_buffer_ubo_semantics_smoke"
+    },
+    "glCreateShader": {
+      "status": "proven",
+      "domain": "production_api_closure",
+      "oracle": "directmetal_production_api_closure_smoke"
+    },
+    "glShaderSource": {
+      "status": "proven",
+      "domain": "production_api_closure",
+      "oracle": "directmetal_production_api_closure_smoke"
+    },
+    "glCompileShader": {
+      "status": "proven",
+      "domain": "production_api_closure",
+      "oracle": "directmetal_production_api_closure_smoke"
+    },
+    "glGetShaderiv": {
+      "status": "proven",
+      "domain": "production_api_closure",
+      "oracle": "directmetal_production_api_closure_smoke"
+    },
+    "glCreateProgram": {
+      "status": "proven",
+      "domain": "production_api_closure",
+      "oracle": "directmetal_production_api_closure_smoke"
+    },
+    "glBindAttribLocation": {
+      "status": "proven",
+      "domain": "production_api_closure",
+      "oracle": "directmetal_production_api_closure_smoke"
+    },
+    "glAttachShader": {
+      "status": "proven",
+      "domain": "production_api_closure",
+      "oracle": "directmetal_production_api_closure_smoke"
+    },
+    "glLinkProgram": {
+      "status": "proven",
+      "domain": "production_api_closure",
+      "oracle": "directmetal_production_api_closure_smoke"
+    },
+    "glGetProgramiv": {
+      "status": "proven",
+      "domain": "production_api_closure",
+      "oracle": "directmetal_production_api_closure_smoke"
+    },
+    "glGetProgramInfoLog": {
+      "status": "proven",
+      "domain": "production_api_closure",
+      "oracle": "directmetal_production_api_closure_smoke"
+    },
+    "glGetUniformBlockIndex": {
+      "status": "proven",
+      "domain": "buffer_mapping_storage",
+      "oracle": "directmetal_buffer_ubo_semantics_smoke"
+    },
+    "glUniformBlockBinding": {
+      "status": "proven",
+      "domain": "buffer_mapping_storage",
+      "oracle": "directmetal_buffer_ubo_semantics_smoke"
+    },
+    "glGetUniformLocation": {
+      "status": "proven",
+      "domain": "production_api_closure",
+      "oracle": "directmetal_production_api_closure_smoke"
+    },
+    "glGenQueries": {
+      "status": "proven",
+      "domain": "sync_query",
+      "oracle": "query_sync_smoke"
+    },
+    "glClearDepth": {
+      "status": "proven",
+      "domain": "blend_depth_stencil",
+      "oracle": "directmetal_raster_semantics_smoke"
+    },
+    "glDrawBuffer": {
+      "status": "proven",
+      "domain": "production_api_closure",
+      "oracle": "directmetal_production_api_closure_smoke"
+    },
+    "glMapBufferRange": {
+      "status": "proven",
+      "domain": "buffer_mapping_storage",
+      "oracle": "directmetal_buffer_ubo_semantics_smoke"
+    },
+    "glFlushMappedBufferRange": {
+      "status": "proven",
+      "domain": "buffer_mapping_storage",
+      "oracle": "directmetal_buffer_ubo_semantics_smoke"
+    },
+    "glUnmapBuffer": {
+      "status": "proven",
+      "domain": "buffer_mapping_storage",
+      "oracle": "directmetal_buffer_ubo_semantics_smoke"
+    },
+    "glCopyBufferSubData": {
+      "status": "proven",
+      "domain": "buffer_mapping_storage",
+      "oracle": "directmetal_buffer_ubo_semantics_smoke"
+    },
+    "glScissor": {
+      "status": "proven",
+      "domain": "draw",
+      "oracle": "directmetal_terrain_semantics_smoke"
+    },
+    "glViewport": {
+      "status": "proven",
+      "domain": "draw",
+      "oracle": "directmetal_terrain_semantics_smoke"
+    },
+    "glDepthMask": {
+      "status": "proven",
+      "domain": "blend_depth_stencil",
+      "oracle": "directmetal_raster_semantics_smoke"
+    },
+    "glBlendFuncSeparate": {
+      "status": "proven",
+      "domain": "blend_depth_stencil",
+      "oracle": "directmetal_raster_semantics_smoke"
+    },
+    "glPolygonMode": {
+      "status": "proven",
+      "domain": "blend_depth_stencil",
+      "oracle": "directmetal_raster_semantics_smoke"
+    },
+    "glUseProgram": {
+      "status": "proven",
+      "domain": "production_api_closure",
+      "oracle": "directmetal_production_api_closure_smoke"
+    },
+    "glBindBufferRange": {
+      "status": "proven",
+      "domain": "buffer_mapping_storage",
+      "oracle": "directmetal_buffer_ubo_semantics_smoke"
+    },
+    "glDrawBuffers": {
+      "status": "proven",
+      "domain": "framebuffer_mrt",
+      "oracle": "directmetal_mrt_clear_semantics_smoke"
+    },
+    "glGenVertexArrays": {
+      "status": "proven",
+      "domain": "vao_vertex_fetch",
+      "oracle": "directmetal_vertex_binding_smoke"
+    },
+    "glBindVertexArray": {
+      "status": "proven",
+      "domain": "vao_vertex_fetch",
+      "oracle": "directmetal_vertex_binding_smoke"
+    },
+    "glEnableVertexAttribArray": {
+      "status": "proven",
+      "domain": "vao_vertex_fetch",
+      "oracle": "directmetal_vertex_binding_smoke"
+    },
+    "glVertexAttribFormat": {
+      "status": "proven",
+      "domain": "vao_vertex_fetch",
+      "oracle": "directmetal_vertex_binding_smoke"
+    },
+    "glVertexAttribBinding": {
+      "status": "proven",
+      "domain": "vao_vertex_fetch",
+      "oracle": "directmetal_vertex_binding_smoke"
+    },
+    "glVertexBindingDivisor": {
+      "status": "proven",
+      "domain": "vao_vertex_fetch",
+      "oracle": "directmetal_vertex_binding_smoke"
+    },
+    "glBindVertexBuffer": {
+      "status": "proven",
+      "domain": "vao_vertex_fetch",
+      "oracle": "directmetal_vertex_binding_smoke"
+    },
+    "glDrawElementsInstancedBaseVertex": {
+      "status": "proven",
+      "domain": "production_api_closure",
+      "oracle": "directmetal_production_api_closure_smoke"
+    },
+    "glBindSampler": {
+      "status": "proven",
+      "domain": "sampler_objects",
+      "oracle": "directmetal_sampler_semantics_smoke"
+    },
+    "glDisable": {
+      "status": "proven",
+      "domain": "blend_depth_stencil",
+      "oracle": "directmetal_raster_semantics_smoke"
+    },
+    "glBlitFramebuffer": {
+      "status": "proven",
+      "domain": "production_api_closure",
+      "oracle": "directmetal_production_api_closure_smoke"
+    },
+    "glFenceSync": {
+      "status": "proven",
+      "domain": "sync_query",
+      "oracle": "query_sync_smoke"
+    },
+    "glClientWaitSync": {
+      "status": "proven",
+      "domain": "sync_query",
+      "oracle": "query_sync_smoke"
+    },
+    "glDeleteSync": {
+      "status": "proven",
+      "domain": "sync_query",
+      "oracle": "query_sync_smoke"
+    },
+    "glDeleteTextures": {
+      "status": "proven",
+      "domain": "production_api_closure",
+      "oracle": "directmetal_production_api_closure_smoke"
+    },
+    "glDeleteProgram": {
+      "status": "proven",
+      "domain": "production_api_closure",
+      "oracle": "directmetal_production_api_closure_smoke"
+    },
+    "glDeleteShader": {
+      "status": "proven",
+      "domain": "production_api_closure",
+      "oracle": "directmetal_production_api_closure_smoke"
+    },
+    "glDrawArraysInstanced": {
+      "status": "proven",
+      "domain": "production_api_closure",
+      "oracle": "directmetal_production_api_closure_smoke"
+    },
+    "glDeleteBuffers": {
+      "status": "proven",
+      "domain": "production_api_closure",
+      "oracle": "directmetal_production_api_closure_smoke"
+    },
+    "glActiveTexture": {
+      "status": "proven",
+      "domain": "sampler_objects",
+      "oracle": "directmetal_sampler_semantics_smoke"
+    },
+    "glDepthFunc": {
+      "status": "proven",
+      "domain": "blend_depth_stencil",
+      "oracle": "directmetal_raster_semantics_smoke"
+    },
+    "glVertexAttribIFormat": {
+      "status": "proven",
+      "domain": "vao_vertex_fetch",
+      "oracle": "directmetal_vertex_binding_smoke"
+    },
+    "glColorMaski": {
+      "status": "proven",
+      "domain": "blend_depth_stencil",
+      "oracle": "directmetal_raster_semantics_smoke"
+    },
+    "glDeleteFramebuffers": {
+      "status": "proven",
+      "domain": "production_api_closure",
+      "oracle": "directmetal_production_api_closure_smoke"
+    },
+    "glReadPixels": {
+      "status": "proven",
+      "domain": "pixel_pack_unpack",
+      "oracle": "directmetal_pixel_store_semantics_smoke"
+    },
+    "glCheckFramebufferStatus": {
+      "status": "proven",
+      "domain": "framebuffer_mrt",
+      "oracle": "directmetal_mrt_clear_semantics_smoke"
+    },
+    "glDeleteQueries": {
+      "status": "proven",
+      "domain": "sync_query",
+      "oracle": "query_sync_smoke"
+    },
+    "glDeleteSamplers": {
+      "status": "proven",
+      "domain": "production_api_closure",
+      "oracle": "directmetal_production_api_closure_smoke"
+    }
   }
 }

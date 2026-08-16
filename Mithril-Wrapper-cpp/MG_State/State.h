@@ -932,6 +932,8 @@ GLenum state_take_error();
 // MITHRIL_GL_SEMANTIC_TRACE points at an output TSV file.
 void semantic_trace_eventf(const char* domain, const char* semantic,
                            const char* api, const char* fmt, ...);
+void semantic_trace_event_oncef(const char* domain, const char* semantic,
+                                const char* api, const char* fmt, ...);
 
 // ---- Name allocation (unified via NameAllocator) ----
 void state_gen_names(const char* kind, GLsizei n, GLuint* out);

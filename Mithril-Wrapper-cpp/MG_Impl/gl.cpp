@@ -194,6 +194,7 @@ void glClearBufferSubData(GLenum target, GLenum internalformat,
  */
 void glEnable(GLenum cap) {
     MITHRIL_ENSURE_INIT();
+    mithril::semantic_trace_event_oncef("blend_depth_stencil", "raster.state", "glEnable", "cap=0x%x transition=on", cap);
     if (cap == GL_PRIMITIVE_RESTART_FIXED_INDEX) {
         g_state->primitiveRestartFixedIndex = true;
         g_state->bumpRenderVersion();
@@ -209,6 +210,7 @@ void glEnable(GLenum cap) {
 
 void glDisable(GLenum cap) {
     MITHRIL_ENSURE_INIT();
+    mithril::semantic_trace_event_oncef("blend_depth_stencil", "raster.state", "glDisable", "cap=0x%x transition=off", cap);
     if (cap == GL_PRIMITIVE_RESTART_FIXED_INDEX) {
         g_state->primitiveRestartFixedIndex = false;
         g_state->bumpRenderVersion();
@@ -303,6 +305,7 @@ void glBlendFunc(GLenum sf, GLenum df) {
 
 void glBlendFuncSeparate(GLenum sRGB, GLenum dRGB, GLenum sA, GLenum dA) {
     MITHRIL_ENSURE_INIT();
+    mithril::semantic_trace_event_oncef("blend_depth_stencil", "raster.state", "glBlendFuncSeparate", "rgb=0x%x/0x%x alpha=0x%x/0x%x", sRGB, dRGB, sA, dA);
     for (int i = 0; i < mithril::kMaxColorAttachments; ++i) {
         g_state->blends[i].srcRGB = sRGB; g_state->blends[i].dstRGB = dRGB;
         g_state->blends[i].srcA   = sA;   g_state->blends[i].dstA   = dA;
@@ -365,11 +368,13 @@ void glBlendEquationSeparatei(GLuint buf, GLenum mRGB, GLenum mA) {
 /* ---- Depth / stencil / color mask ---- */
 void glDepthFunc(GLenum func) {
     MITHRIL_ENSURE_INIT();
+    mithril::semantic_trace_event_oncef("blend_depth_stencil", "raster.state", "glDepthFunc", "func=0x%x", func);
     g_state->depthFunc = func;
 }
 
 void glDepthMask(GLboolean flag) {
     MITHRIL_ENSURE_INIT();
+    mithril::semantic_trace_event_oncef("blend_depth_stencil", "raster.state", "glDepthMask", "write=%s", flag ? "on" : "off");
     g_state->depthMask = (flag != 0);
 }
 
@@ -387,6 +392,7 @@ void glColorMask(GLboolean r, GLboolean g, GLboolean b, GLboolean a) {
 
 void glColorMaski(GLuint buf, GLboolean r, GLboolean g, GLboolean b, GLboolean a) {
     MITHRIL_ENSURE_INIT();
+    mithril::semantic_trace_event_oncef("blend_depth_stencil", "raster.state", "glColorMaski", "index=%u mask=%u%u%u%u", buf, !!r, !!g, !!b, !!a);
     if (buf >= mithril::kMaxColorAttachments) { mithril::state_set_error(GL_INVALID_VALUE); return; }
     g_state->colorMask[buf][0] = (r != 0);
     g_state->colorMask[buf][1] = (g != 0);
@@ -469,6 +475,7 @@ void glFrontFace(GLenum mode) {
 
 void glPolygonMode(GLenum face, GLenum mode) {
     MITHRIL_ENSURE_INIT();
+    mithril::semantic_trace_event_oncef("blend_depth_stencil", "raster.state", "glPolygonMode", "face=0x%x mode=0x%x", face, mode);
     if (face == GL_FRONT || face == GL_FRONT_AND_BACK) g_state->polygonModeFront = mode;
     if (face == GL_BACK  || face == GL_FRONT_AND_BACK) g_state->polygonModeBack  = mode;
 }
@@ -531,6 +538,7 @@ void glHint(GLenum, GLenum) { MITHRIL_ENSURE_INIT(); /* hints are advisory */ }
  */
 void glPixelStorei(GLenum pname, GLint param) {
     MITHRIL_ENSURE_INIT();
+    mithril::semantic_trace_event_oncef("pixel_pack_unpack", "pixel.pack_unpack", "glPixelStorei", "pname=0x%x param=%d", pname, param);
     switch (pname) {
         case GL_UNPACK_ALIGNMENT:      g_state->pixelStore.unpackAlignment     = param; break;
         case GL_PACK_ALIGNMENT:        g_state->pixelStore.packAlignment       = param; break;
@@ -558,6 +566,7 @@ void glPixelStoref(GLenum pname, GLfloat param) { glPixelStorei(pname, (GLint)pa
  */
 void glActiveTexture(GLenum texture) {
     MITHRIL_ENSURE_INIT();
+    mithril::semantic_trace_event_oncef("textures_samplers", "sampler.object_override", "glActiveTexture", "selector=0x%x", texture);
     if (texture < GL_TEXTURE0 || texture >= GL_TEXTURE0 + mithril::kMaxTextureUnits) {
         mithril::state_set_error(GL_INVALID_ENUM);
         return;

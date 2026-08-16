@@ -68,6 +68,7 @@ void glDeleteTextures(GLsizei n, const GLuint* textures) {
 
 void glBindTexture(GLenum target, GLuint texture) {
     MITHRIL_ENSURE_INIT();
+    mithril::semantic_trace_event_oncef("textures_samplers", "core33.resource_roundtrip", "glBindTexture", "target=0x%x object=%s", target, texture ? "nonzero" : "zero");
     mithril::TextureTarget tt = mithril::textureTargetFromGL(target);
     if (tt == mithril::TextureTarget::Count) {
         mithril::state_set_error(GL_INVALID_ENUM);
@@ -230,6 +231,7 @@ void glTexImage2D(GLenum target, GLint level, GLint internalFormat,
                   GLsizei width, GLsizei height, GLint border,
                   GLenum format, GLenum type, const void* pixels) {
     MITHRIL_ENSURE_INIT();
+    mithril::semantic_trace_event_oncef("textures_samplers", "core33.resource_roundtrip", "glTexImage2D", "target=0x%x level=%d internal=0x%x external=0x%x type=0x%x extent=%s pixels=%s", target, level, internalFormat, format, type, (width * height <= 256) ? "tiny" : (width * height <= 65536) ? "small" : (width * height <= 1048576) ? "medium" : "large", pixels ? "host_or_offset" : "null");
     if (border != 0) { mithril::state_set_error(GL_INVALID_VALUE); return; }
 
     // GL_PROXY_TEXTURE_2D: no real texture is created. Just record the
@@ -397,6 +399,7 @@ void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset,
                      GLsizei width, GLsizei height,
                      GLenum format, GLenum type, const void* pixels) {
     MITHRIL_ENSURE_INIT();
+    mithril::semantic_trace_event_oncef("textures_samplers", "core33.resource_roundtrip", "glTexSubImage2D", "target=0x%x level=%d offsets=%s external=0x%x type=0x%x extent=%s pixels=%s", target, level, (xoffset || yoffset) ? "nonzero" : "zero", format, type, (width * height <= 256) ? "tiny" : (width * height <= 65536) ? "small" : (width * height <= 1048576) ? "medium" : "large", pixels ? "host_or_offset" : "null");
     mithril::Texture* t = bound_texture_for_target(target);
     if (!t) return;
     const void* uploadPixels = resolve_unpack_pixels(pixels, width, height, 1,
@@ -919,6 +922,7 @@ GLboolean glIsTexture(GLuint texture) {
 void glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height,
                   GLenum format, GLenum type, void* pixels) {
     MITHRIL_ENSURE_INIT();
+    mithril::semantic_trace_event_oncef("pixel_pack_unpack", "pixel.pack_unpack", "glReadPixels", "origin=%s extent=%s format=0x%x type=0x%x dst=%s", (x || y) ? "nonzero" : "zero", (width * height <= 256) ? "tiny" : (width * height <= 65536) ? "small" : (width * height <= 1048576) ? "medium" : "large", format, type, pixels ? "host_or_offset" : "null");
     if (width < 0 || height < 0) {
         mithril::state_set_error(GL_INVALID_VALUE);
         return;
