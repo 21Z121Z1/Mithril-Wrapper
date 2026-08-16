@@ -40,6 +40,8 @@ jobs:
         run: |
           set -euo pipefail
           clang -std=gnu11 -O0 -g -Wall -Wextra -Werror -IMithril-Wrapper-cpp/include \
+            -DGL_INVALID_INDEX=0xFFFFFFFFu \
+            -DGL_UNIFORM_BUFFER_OFFSET_ALIGNMENT=0x8A34 \
             tests/directmetal_buffer_ubo_semantics_smoke.c -o build-buffer-ubo/buffer-ubo -ldl
       - name: Run buffer UBO semantics on real Metal GPU
         shell: bash
