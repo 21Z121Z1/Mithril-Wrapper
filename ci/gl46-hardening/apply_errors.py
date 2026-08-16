@@ -24,6 +24,33 @@ NEW = '''GLenum glGetError(void) {
 }
 '''
 
+DEFINE_ANCHOR = '''#ifndef GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT
+#define GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT 0x84FF
+#endif
+'''
+DEFINE_BLOCK = DEFINE_ANCHOR + '''#ifndef GL_TEXTURE_BINDING_1D
+#define GL_TEXTURE_BINDING_1D 0x8068
+#endif
+#ifndef GL_TEXTURE_BINDING_RECTANGLE
+#define GL_TEXTURE_BINDING_RECTANGLE 0x84F6
+#endif
+#ifndef GL_TEXTURE_BINDING_BUFFER
+#define GL_TEXTURE_BINDING_BUFFER 0x8C2C
+#endif
+#ifndef GL_TEXTURE_BINDING_1D_ARRAY
+#define GL_TEXTURE_BINDING_1D_ARRAY 0x8C1C
+#endif
+#ifndef GL_TEXTURE_BINDING_CUBE_MAP_ARRAY
+#define GL_TEXTURE_BINDING_CUBE_MAP_ARRAY 0x900A
+#endif
+#ifndef GL_TEXTURE_BINDING_2D_MULTISAMPLE
+#define GL_TEXTURE_BINDING_2D_MULTISAMPLE 0x9104
+#endif
+#ifndef GL_TEXTURE_BINDING_2D_MULTISAMPLE_ARRAY
+#define GL_TEXTURE_BINDING_2D_MULTISAMPLE_ARRAY 0x9105
+#endif
+'''
+
 BINDING_OLD = '''        case GL_TEXTURE_BINDING_2D:           *params = (GLint)g_state->textureBindings[g_state->activeTextureUnit][(int)mithril::TextureTarget::_2D].name; break;
 '''
 BINDING_NEW = '''        case GL_TEXTURE_BINDING_1D:           *params = (GLint)g_state->textureBindings[g_state->activeTextureUnit][(int)mithril::TextureTarget::_1D].name; break;
@@ -45,11 +72,14 @@ AUDIT_BINDING_CHECK = '''\n_getter = (root / "Mithril-Wrapper-cpp/MG_Impl/Getter
 
 def apply():
     text = GETTER.read_text()
+    if DEFINE_BLOCK not in text:
+        if DEFINE_ANCHOR not in text:
+            raise SystemExit('getter define anchor not found')
+        text = text.replace(DEFINE_ANCHOR, DEFINE_BLOCK, 1)
     if OLD in text:
         text = text.replace(OLD, NEW, 1)
     elif NEW not in text:
         raise SystemExit('glGetError anchor not found')
-
     if BINDING_OLD in text:
         text = text.replace(BINDING_OLD, BINDING_NEW, 1)
     elif 'case GL_TEXTURE_BINDING_2D_ARRAY:' not in text:
@@ -69,6 +99,8 @@ def verify():
     text = GETTER.read_text()
     if NEW not in text:
         raise SystemExit('glGetError is not spec-observable')
+    if DEFINE_BLOCK not in text:
+        raise SystemExit('missing fallback texture binding enum definitions')
     if 'mithril::state_take_error();\n    return GL_NO_ERROR;' in text:
         raise SystemExit('legacy error swallowing remains')
     for pname in ('GL_TEXTURE_BINDING_1D', 'GL_TEXTURE_BINDING_2D', 'GL_TEXTURE_BINDING_3D',
