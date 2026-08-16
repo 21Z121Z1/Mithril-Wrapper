@@ -1,0 +1,51 @@
+name: GL 4.6 semantic hardening executor
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['ci/minecraft-on-mithril-e2e-20260815']
+    paths:
+      - 'ci/gl46-hardening/apply.py'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: gl46-hardening-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  apply-and-verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout exact branch with write credentials
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ci/minecraft-on-mithril-e2e-20260815
+          fetch-depth: 2
+          persist-credentials: true
+      - name: Apply deterministic semantic hardening patch
+        run: python3 ci/gl46-hardening/apply.py --apply
+      - name: Verify patch invariants
+        run: python3 ci/gl46-hardening/apply.py --verify
+      - name: Mechanical diff checks
+        run: |
+          git diff --check
+          git status --short
+          git diff --stat
+      - name: Commit hardened implementation
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git diff --quiet; then
+            echo 'No implementation changes required.'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Mithril-Wrapper-cpp/MG_Impl/GL46_Compat.cpp \
+                  ci/minecraft-e2e/native/glfw_mithril_bridge.mm \
+                  verify/gl46_semantic_audit.py
+          git commit -m 'gl: harden program-uniform and DSA multi-bind semantics'
+          git push origin HEAD:ci/minecraft-on-mithril-e2e-20260815
