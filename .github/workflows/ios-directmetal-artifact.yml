@@ -114,14 +114,14 @@ jobs:
             exit 1
           fi
 
-          NM_OUT=$(nm -gU "$DYLIB")
+          nm -gU "$DYLIB" > /tmp/nm-global.txt
           missing=0
           for sym in \
             eglGetDisplay eglInitialize eglChooseConfig eglBindAPI \
             eglCreateWindowSurface eglCreateContext eglMakeCurrent eglSwapBuffers \
             glGetString glGetError glCreateShader glCreateProgram glDrawArrays \
             glDrawElements glReadPixels; do
-            if echo "$NM_OUT" | grep -qE " [Tt] _?${sym}$"; then
+            if grep -qE " [Tt] _?${sym}$" /tmp/nm-global.txt; then
               echo "OK   $sym"
             else
               echo "MISS $sym"
@@ -131,12 +131,23 @@ jobs:
           test "$missing" -eq 0
 
           # The Apple build is dual-backend and defaults to DirectMetal.
-          # Require the DirectMetal implementation to be present in this image,
-          # rather than accidentally shipping a Vulkan-only build.
-          if ! strings "$DYLIB" | grep -q 'Metal 3 (DirectMetal)'; then
+          # Materialize tool output before grep: with `set -o pipefail`, a
+          # `strings | grep -q` match can make strings exit on SIGPIPE and turn
+          # a real match into a false failure.
+          strings "$DYLIB" > /tmp/mithril-strings.txt
+          if ! grep -Fq 'Metal 3 (DirectMetal)' /tmp/mithril-strings.txt; then
             echo '::error::DirectMetal backend identity missing from iOS dylib'
             exit 1
           fi
+
+          # Also require compiled DirectMetal backend entry points, so this gate
+          # does not rely on a diagnostic string alone.
+          nm "$DYLIB" > /tmp/nm-all.txt
+          if ! grep -Eq '(_dmt_init|_dmt_available|_dmt_create_swapchain)' /tmp/nm-all.txt; then
+            echo '::error::DirectMetal backend symbols missing from iOS dylib'
+            exit 1
+          fi
+          echo 'DirectMetal payload present.'
 
       - name: Ad-hoc sign
         shell: bash
