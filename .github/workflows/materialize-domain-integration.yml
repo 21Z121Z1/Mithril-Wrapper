@@ -1,0 +1,125 @@
+name: Materialize validated semantic domains
+
+on:
+  push:
+    branches: ['fix/gl-semantic-closure-integration-20260816']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: semantic-domain-integration
+  cancel-in-progress: true
+
+jobs:
+  integrate:
+    if: ${{ !contains(github.event.head_commit.message || '', '[domains-integrated]') }}
+    runs-on: macos-26
+    timeout-minutes: 35
+    env:
+      MITHRIL_BACKEND: metal
+      MTL_DEBUG_LAYER: '1'
+      MTL_SHADER_VALIDATION: '0'
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          submodules: recursive
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Integrate only previously GPU-validated product commits
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch origin \
+            d2b6d318b68820bad82fd5ebafadf6c63c103b5f \
+            662d8732900a9825e6817a1081fe4bdc1962d354 \
+            bae3054a727297b64b21d2a204a7c3f4ac928f7d
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git cherry-pick --no-commit d2b6d318b68820bad82fd5ebafadf6c63c103b5f
+          git cherry-pick --no-commit 662d8732900a9825e6817a1081fe4bdc1962d354
+          git cherry-pick --no-commit bae3054a727297b64b21d2a204a7c3f4ac928f7d
+          git show d2b6d318b68820bad82fd5ebafadf6c63c103b5f:tests/directmetal_sampler_semantics_smoke.c > tests/directmetal_sampler_semantics_smoke.c
+          git show 662d8732900a9825e6817a1081fe4bdc1962d354:tests/directmetal_raster_semantics_smoke.c > tests/directmetal_raster_semantics_smoke.c
+          git show bae3054a727297b64b21d2a204a7c3f4ac928f7d:tests/directmetal_pixel_store_semantics_smoke.c > tests/directmetal_pixel_store_semantics_smoke.c
+          git add tests/directmetal_sampler_semantics_smoke.c tests/directmetal_raster_semantics_smoke.c tests/directmetal_pixel_store_semantics_smoke.c
+          git diff --cached --check
+
+      - name: Remove stale diagnostic OpenGL 4.6 claims
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('Mithril-Wrapper-cpp/MG_Impl/Getter_gpu.mm')
+          s=p.read_text()
+          s=s.replace('Mithril-Wrapper 1.0 (OpenGL 4.6 ->', 'Mithril-Wrapper 1.0 (OpenGL 3.3 ->')
+          s=s.replace('GL version: 4.6 Core Profile', 'GL version: 3.3 Core Profile')
+          s=s.replace('GLSL version: 4.60', 'GLSL version: 3.30')
+          p.write_text(s)
+          PY
+          if grep -nE 'OpenGL 4\.6|GL version: 4\.6|GLSL version: 4\.60' Mithril-Wrapper-cpp/MG_Impl/Getter_gpu.mm; then
+            echo 'stale 4.6 diagnostic capability claim remains' >&2
+            exit 1
+          fi
+          git add Mithril-Wrapper-cpp/MG_Impl/Getter_gpu.mm
+          git diff --cached --check
+
+      - name: Install native dependencies
+        run: brew install vulkan-loader molten-vk ninja
+
+      - name: Build combined dual-backend library
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-domains -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-domains --target mithril --parallel
+          find build-domains -type f -name libmithril.dylib -print -quit > /tmp/mithril-path
+          test -s /tmp/mithril-path
+
+      - name: Compile five semantic-domain GPU oracles
+        shell: bash
+        run: |
+          set -euo pipefail
+          CFLAGS='-std=gnu11 -O0 -g -Wall -Wextra -Werror -IMithril-Wrapper-cpp/include'
+          clang $CFLAGS tests/directmetal_mrt_clear_semantics_smoke.c -o build-domains/mrt -ldl
+          clang $CFLAGS -DGL_INVALID_INDEX=0xFFFFFFFFu -DGL_UNIFORM_BUFFER_OFFSET_ALIGNMENT=0x8A34 tests/directmetal_buffer_ubo_semantics_smoke.c -o build-domains/buffer-ubo -ldl
+          clang $CFLAGS tests/directmetal_sampler_semantics_smoke.c -o build-domains/sampler -ldl
+          clang $CFLAGS tests/directmetal_raster_semantics_smoke.c -o build-domains/raster -ldl
+          clang $CFLAGS tests/directmetal_pixel_store_semantics_smoke.c -o build-domains/pixel-store -ldl
+
+      - name: Run all five on the same real Metal GPU build
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DYLD_LIBRARY_PATH="$(brew --prefix)/lib"
+          DYLIB="$(cat /tmp/mithril-path)"
+          build-domains/mrt "$DYLIB" | tee build-domains/mrt.log
+          build-domains/buffer-ubo "$DYLIB" | tee build-domains/buffer-ubo.log
+          build-domains/sampler "$DYLIB" | tee build-domains/sampler.log
+          build-domains/raster "$DYLIB" | tee build-domains/raster.log
+          build-domains/pixel-store "$DYLIB" | tee build-domains/pixel-store.log
+          grep -F 'MRT CLEAR SEMANTICS SMOKE ALL PASSED' build-domains/mrt.log
+          grep -F 'BUFFER UBO SEMANTICS SMOKE ALL PASSED' build-domains/buffer-ubo.log
+          grep -F 'SAMPLER SEMANTICS SMOKE ALL PASSED' build-domains/sampler.log
+          grep -F 'RASTER SEMANTICS SMOKE ALL PASSED' build-domains/raster.log
+          grep -F 'PIXEL STORE SEMANTICS SMOKE ALL PASSED' build-domains/pixel-store.log
+
+      - name: Commit only after combined validation
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add Mithril-Wrapper-cpp tests
+          git diff --cached --check
+          git commit -m 'fix(gl): close production semantic domains [domains-integrated]'
+          git push origin HEAD:fix/gl-semantic-closure-integration-20260816
+
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: semantic-domain-integration-${{ github.sha }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: build-domains/*.log
