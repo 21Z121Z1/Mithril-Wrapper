@@ -9,6 +9,7 @@ on:
       - 'ci/gl46-hardening/apply.py'
       - 'ci/gl46-hardening/apply_errors.py'
       - 'ci/gl46-hardening/apply_reflection.py'
+      - 'ci/gl46-hardening/apply_reflection_visibility.py'
       - 'ci/gl46-hardening/apply_sampler.py'
       - 'ci/gl46-hardening/apply_texture_dsa_v2.py'
       - 'ci/gl46-hardening/apply_readpixels.py'
@@ -36,6 +37,7 @@ jobs:
           python3 ci/gl46-hardening/apply.py --apply
           python3 ci/gl46-hardening/apply_errors.py --apply
           python3 ci/gl46-hardening/apply_reflection.py --apply
+          python3 ci/gl46-hardening/apply_reflection_visibility.py --apply
           python3 ci/gl46-hardening/apply_sampler.py --apply
           python3 ci/gl46-hardening/apply_texture_dsa_v2.py --apply
           python3 ci/gl46-hardening/apply_readpixels.py --apply
@@ -44,6 +46,7 @@ jobs:
           python3 ci/gl46-hardening/apply.py --verify
           python3 ci/gl46-hardening/apply_errors.py --verify
           python3 ci/gl46-hardening/apply_reflection.py --verify
+          python3 ci/gl46-hardening/apply_reflection_visibility.py --verify
           python3 ci/gl46-hardening/apply_sampler.py --verify
           python3 ci/gl46-hardening/apply_texture_dsa_v2.py --verify
           python3 ci/gl46-hardening/apply_readpixels.py --verify
@@ -67,5 +70,5 @@ jobs:
                   Mithril-Wrapper-cpp/MG_Backend/DirectMetal/MetalBackend.mm \
                   ci/minecraft-e2e/native/glfw_mithril_bridge.mm \
                   verify/gl46_semantic_audit.py
-          git commit -m 'gl: harden texture DSA sampler reflection and readback semantics'
+          git commit -m 'gl: harden public GL 4.6 reflection visibility'
           git push origin HEAD:ci/minecraft-on-mithril-e2e-20260815
