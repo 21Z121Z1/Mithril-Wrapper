@@ -1,6 +1,6 @@
 # Development branches
 
-Mithril keeps one canonical branch for each active line of work. Git history is the archive; old implementation snapshots, exact duplicate refs, and completed probe branches should not remain indefinitely as parallel-looking development branches.
+Mithril keeps one canonical branch for each active line of work. Git history is the archive; old implementation snapshots, exact duplicate refs, completed probes, and cleanup branches should not remain indefinitely as parallel-looking development branches.
 
 ## Canonical active lines
 
@@ -17,25 +17,7 @@ Mithril keeps one canonical branch for each active line of work. Git history is 
 | `fix/dual-backend-metal-ios-ci` | Independent-history dual-backend iOS line; do not assume ancestry with current `main`. |
 | `fix/gl-semantic-closure-20260816` | Historical semantic-closure implementation line that still diverges materially from the newer integration branch; retain until its unique commits are explicitly reconciled. |
 
-## Safe retirement candidates
-
-These refs no longer represent distinct active development work and should be deleted once branch-ref deletion is performed:
-
-- `agent/directmetal-fbo-sampling-a17pro` — fully contained by `integration/directmetal-unified-20260815`.
-- `refactor/directmetal-clean-shipping` — fully contained by `integration/directmetal-unified-20260815`.
-- `snapshot/codex-directvulkan-overnight-20260814` — fully contained by `codex/directvulkan-overnight-recovery-20260814`.
-- `integration/glsl-mobilegl-preflight-20260814` and `sync/glsl-conversion-mobilegl-style-20260814` — exact duplicate refs.
-- `ready/glsl-mobilegl-mc262-20260814` and `refactor/glsl-mobilegl-preflight-20260814` — exact duplicate refs, both superseded by `codex/mobilegl-ios-live-20260815`.
-- `probe/gl-pixel-store-semantics-20260816`
-- `probe/gl-raster-semantics-20260816`
-- `probe/gl-sampler-semantics-20260816`
-- `probe/gl-semantic-mrt-20260816`
-
-The four semantic probe branches above have their authoritative oracle files absorbed byte-for-byte into `fix/gl-semantic-closure-integration-20260816`, whose retained semantic-closure workflow has passed. Their temporary probe/materialization workflows are not a reason to keep the refs.
-
-## Cleanup branches
-
-Branches named `chore/*-ci-cleanup-20260816` or `chore/actions-workflow-cleanup-*` exist only to carry the corresponding cleanup pull requests. Delete each cleanup branch after its PR is merged or otherwise resolved.
+All previously audited cleanup, snapshot, duplicate, and absorbed probe refs were retired after their replacements were merged and verified. Historical branch names remain discoverable through merged pull requests and Git history rather than as live refs.
 
 ## Rules for new branches
 
