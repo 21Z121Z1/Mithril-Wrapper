@@ -38,12 +38,17 @@ jobs:
           EXPORTS="$RUNNER_TEMP/amethyst-ios.exports"
           NOT_WEAK="$GITHUB_WORKSPACE/cmake/amethyst-ios.force-not-weak"
           MOLTENVK="$GITHUB_WORKSPACE/Mithril-Wrapper-cpp/3rdparty/MoltenVK/libMoltenVK.dylib"
-          PROJECT_INCLUDE="$GITHUB_WORKSPACE/cmake/amethyst-ios-project-linker-isolation.cmake"
+          WRAPPER="$GITHUB_WORKSPACE/cmake/amethyst-ios.toolchain.cmake"
+          BASE_TOOLCHAIN="$GITHUB_WORKSPACE/ios.toolchain.cmake"
           bash "$GITHUB_WORKSPACE/cmake/generate-amethyst-ios-exports.sh" "$EXPORTS"
           test "$(wc -l < "$EXPORTS" | tr -d ' ')" -eq 701
-          test -s "$PROJECT_INCLUDE"
+          test -s "$WRAPPER"
+          test -s "$BASE_TOOLCHAIN"
           cmake -B build-amethyst-ios \
-            -DCMAKE_TOOLCHAIN_FILE=ios.toolchain.cmake \
+            -DCMAKE_TOOLCHAIN_FILE="$WRAPPER" \
+            -DMITHRIL_IOS_BASE_TOOLCHAIN="$BASE_TOOLCHAIN" \
+            -DMITHRIL_AMETHYST_EXPORT_LIST="$EXPORTS" \
+            -DMITHRIL_AMETHYST_FORCE_NOT_WEAK_LIST="$NOT_WEAK" \
             -DPLATFORM=OS64 \
             -DDEPLOYMENT_TARGET=15.0 \
             -DENABLE_BITCODE=OFF \
@@ -51,10 +56,7 @@ jobs:
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DMOLTENVK_LIBRARY="$MOLTENVK" \
             -DCMAKE_C_FLAGS="-Wno-error=implicit-function-declaration" \
-            -DCMAKE_CXX_FLAGS="-Wno-error" \
-            -DCMAKE_PROJECT_mithril_INCLUDE="$PROJECT_INCLUDE" \
-            -DMITHRIL_AMETHYST_EXPORT_LIST="$EXPORTS" \
-            -DMITHRIL_AMETHYST_FORCE_NOT_WEAK_LIST="$NOT_WEAK"
+            -DCMAKE_CXX_FLAGS="-Wno-error"
 
       - name: Build and capture final linker command
         shell: bash
