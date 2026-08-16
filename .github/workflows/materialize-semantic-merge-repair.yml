@@ -43,8 +43,8 @@ jobs:
             git merge-file -p /tmp/current /tmp/base /tmp/semantic > "$path"
             rc=$?
             set -e
-            if (( rc > 1 )); then
-              echo "merge-file hard failure in $path"
+            if (( rc >= 128 )); then
+              echo "merge-file hard failure in $path: rc=$rc"
               exit "$rc"
             fi
             if grep -q '^<<<<<<< ' "$path"; then
