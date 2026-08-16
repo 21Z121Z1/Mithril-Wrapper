@@ -1,0 +1,9 @@
+# ld64 symbol pattern list used with -force_symbols_not_weak_list.
+#
+# Mach-O C++ symbols have one platform-leading underscore plus the Itanium ABI
+# `_Z...` mangling, hence `__Z*`.  Making C++ definitions non-weak prevents
+# vtable entries from participating in dyld weak coalescing.  The accompanying
+# exported-symbols allow-list then keeps those strong definitions private to
+# libmithril, so neither Amethyst's libshaderc.dylib nor libmithril can satisfy
+# the other image's glslang weak lookups.
+__Z*
