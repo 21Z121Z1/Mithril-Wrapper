@@ -98,7 +98,6 @@ jobs:
           #include <dlfcn.h>
           #include <cstdlib>
           #include <string>
-          #include <libgen.h>
           #include <limits.h>
           #include <unistd.h>
 
@@ -159,13 +158,17 @@ jobs:
           cp "$MOLTENVK_REAL" "$DIST_ROOT/runtime/libMoltenVK.dylib"
 
           old_mvk=$(otool -L "$DIST_ROOT/libmithril.dylib" | awk '/MoltenVK/{print $1; exit}')
-          old_glfw=$(otool -L "$DIST_ROOT/libglfw_mithril.dylib" | awk '/libglfw/{print $1; exit}')
+          old_glfw=$(otool -L "$DIST_ROOT/libglfw_mithril.dylib" | awk '/libglfw\.3\.dylib/{print $1; exit}')
           test -n "$old_mvk"
           test -n "$old_glfw"
 
           install_name_tool -change "$old_mvk" '@loader_path/runtime/libMoltenVK.dylib' \
             "$DIST_ROOT/libmithril.dylib"
           install_name_tool -change "$old_glfw" '@loader_path/runtime/libglfw.3.dylib' \
+            "$DIST_ROOT/libglfw_mithril.dylib"
+          install_name_tool -id '@loader_path/libmithril.dylib' \
+            "$DIST_ROOT/libmithril.dylib"
+          install_name_tool -id '@loader_path/libglfw_mithril.dylib' \
             "$DIST_ROOT/libglfw_mithril.dylib"
           install_name_tool -id '@loader_path/libMoltenVK.dylib' \
             "$DIST_ROOT/runtime/libMoltenVK.dylib"
@@ -224,18 +227,18 @@ jobs:
               ./launch/check-bundle.sh
               ./launch/print-jvm-args.sh
 
-          Copy the two printed `-Dorg.lwjgl...` arguments into the Minecraft
+          Copy the two printed -Dorg.lwjgl... arguments into the Minecraft
           installation's JVM arguments. They point LWJGL's GLFW and OpenGL
           native loaders at this bundle. The distribution bridge locates its
           sibling Mithril dylib and bundled GLFW runtime automatically; no
-          `MITHRIL_E2E_*` environment variables are required.
+          MITHRIL_E2E_* environment variables are required.
 
           This artifact is validated specifically against Minecraft 26.2. It is
           a test build, not a claim of complete OpenGL 4.6 conformance.
           EOF
 
           python3 - <<'PY'
-          import json, os, pathlib, platform, subprocess
+          import json, os, pathlib, platform
           root = pathlib.Path(os.environ['DIST_ROOT'])
           data = {
               'schema_version': '1.0',
