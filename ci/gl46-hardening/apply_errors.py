@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
-"""Restore spec-observable OpenGL error semantics.
-
-Mithril historically swallowed the queued GL error in glGetError() to reduce
-Minecraft log noise.  That makes any conformance claim impossible and also
-hides real renderer bugs.  The state machine already has a bounded FIFO error
-queue, so expose it exactly through glGetError instead of discarding it.
-"""
+"""Restore spec-observable OpenGL error and binding-query semantics."""
 from pathlib import Path
 import argparse
 
@@ -30,20 +24,44 @@ NEW = '''GLenum glGetError(void) {
 }
 '''
 
+BINDING_OLD = '''        case GL_TEXTURE_BINDING_2D:           *params = (GLint)g_state->textureBindings[g_state->activeTextureUnit][(int)mithril::TextureTarget::_2D].name; break;
+'''
+BINDING_NEW = '''        case GL_TEXTURE_BINDING_1D:           *params = (GLint)g_state->textureBindings[g_state->activeTextureUnit][(int)mithril::TextureTarget::_1D].name; break;
+        case GL_TEXTURE_BINDING_2D:           *params = (GLint)g_state->textureBindings[g_state->activeTextureUnit][(int)mithril::TextureTarget::_2D].name; break;
+        case GL_TEXTURE_BINDING_3D:           *params = (GLint)g_state->textureBindings[g_state->activeTextureUnit][(int)mithril::TextureTarget::_3D].name; break;
+        case GL_TEXTURE_BINDING_CUBE_MAP:     *params = (GLint)g_state->textureBindings[g_state->activeTextureUnit][(int)mithril::TextureTarget::CubeMap].name; break;
+        case GL_TEXTURE_BINDING_RECTANGLE:    *params = (GLint)g_state->textureBindings[g_state->activeTextureUnit][(int)mithril::TextureTarget::Rectangle].name; break;
+        case GL_TEXTURE_BINDING_2D_MULTISAMPLE:*params = (GLint)g_state->textureBindings[g_state->activeTextureUnit][(int)mithril::TextureTarget::_2DMultisample].name; break;
+        case GL_TEXTURE_BINDING_BUFFER:       *params = (GLint)g_state->textureBindings[g_state->activeTextureUnit][(int)mithril::TextureTarget::Buffer].name; break;
+        case GL_TEXTURE_BINDING_1D_ARRAY:     *params = (GLint)g_state->textureBindings[g_state->activeTextureUnit][(int)mithril::TextureTarget::_1DArray].name; break;
+        case GL_TEXTURE_BINDING_2D_ARRAY:     *params = (GLint)g_state->textureBindings[g_state->activeTextureUnit][(int)mithril::TextureTarget::_2DArray].name; break;
+        case GL_TEXTURE_BINDING_CUBE_MAP_ARRAY:*params = (GLint)g_state->textureBindings[g_state->activeTextureUnit][(int)mithril::TextureTarget::CubeMapArray].name; break;
+        case GL_TEXTURE_BINDING_2D_MULTISAMPLE_ARRAY:*params = (GLint)g_state->textureBindings[g_state->activeTextureUnit][(int)mithril::TextureTarget::_2DMultisampleArray].name; break;
+'''
+
 AUDIT_CHECK = '''\nrequire("return mithril::state_take_error();" in (root / "Mithril-Wrapper-cpp/MG_Impl/Getter.cpp").read_text(),\n        "glGetError must expose the context error queue instead of swallowing it")\n'''
+AUDIT_BINDING_CHECK = '''\n_getter = (root / "Mithril-Wrapper-cpp/MG_Impl/Getter.cpp").read_text()\nfor _pname in ("GL_TEXTURE_BINDING_1D", "GL_TEXTURE_BINDING_2D", "GL_TEXTURE_BINDING_3D",\n               "GL_TEXTURE_BINDING_CUBE_MAP", "GL_TEXTURE_BINDING_RECTANGLE",\n               "GL_TEXTURE_BINDING_2D_MULTISAMPLE", "GL_TEXTURE_BINDING_BUFFER",\n               "GL_TEXTURE_BINDING_1D_ARRAY", "GL_TEXTURE_BINDING_2D_ARRAY",\n               "GL_TEXTURE_BINDING_CUBE_MAP_ARRAY", "GL_TEXTURE_BINDING_2D_MULTISAMPLE_ARRAY"):\n    require(("case " + _pname + ":") in _getter, "missing texture binding getter: " + _pname)\n'''
 
 
 def apply():
     text = GETTER.read_text()
     if OLD in text:
         text = text.replace(OLD, NEW, 1)
-        GETTER.write_text(text)
     elif NEW not in text:
         raise SystemExit('glGetError anchor not found')
+
+    if BINDING_OLD in text:
+        text = text.replace(BINDING_OLD, BINDING_NEW, 1)
+    elif 'case GL_TEXTURE_BINDING_2D_ARRAY:' not in text:
+        raise SystemExit('texture binding getter anchor not found')
+    GETTER.write_text(text)
+
     audit = AUDIT.read_text()
     if 'glGetError must expose the context error queue' not in audit:
         audit += AUDIT_CHECK
-        AUDIT.write_text(audit)
+    if 'missing texture binding getter:' not in audit:
+        audit += AUDIT_BINDING_CHECK
+    AUDIT.write_text(audit)
     verify()
 
 
@@ -53,8 +71,15 @@ def verify():
         raise SystemExit('glGetError is not spec-observable')
     if 'mithril::state_take_error();\n    return GL_NO_ERROR;' in text:
         raise SystemExit('legacy error swallowing remains')
+    for pname in ('GL_TEXTURE_BINDING_1D', 'GL_TEXTURE_BINDING_2D', 'GL_TEXTURE_BINDING_3D',
+                  'GL_TEXTURE_BINDING_CUBE_MAP', 'GL_TEXTURE_BINDING_RECTANGLE',
+                  'GL_TEXTURE_BINDING_2D_MULTISAMPLE', 'GL_TEXTURE_BINDING_BUFFER',
+                  'GL_TEXTURE_BINDING_1D_ARRAY', 'GL_TEXTURE_BINDING_2D_ARRAY',
+                  'GL_TEXTURE_BINDING_CUBE_MAP_ARRAY', 'GL_TEXTURE_BINDING_2D_MULTISAMPLE_ARRAY'):
+        if f'case {pname}:' not in text:
+            raise SystemExit(f'missing texture binding getter: {pname}')
     compile(AUDIT.read_text(), str(AUDIT), 'exec')
-    print('GL error semantics: PASS')
+    print('GL error/binding getter semantics: PASS')
 
 
 def main():
