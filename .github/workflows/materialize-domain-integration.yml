@@ -28,7 +28,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: true
 
-      - name: Integrate only previously GPU-validated product commits
+      - name: Integrate only previously GPU-validated product patches
         shell: bash
         run: |
           set -euo pipefail
@@ -38,13 +38,39 @@ jobs:
             bae3054a727297b64b21d2a204a7c3f4ac928f7d
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git cherry-pick --no-commit d2b6d318b68820bad82fd5ebafadf6c63c103b5f
-          git cherry-pick --no-commit 662d8732900a9825e6817a1081fe4bdc1962d354
-          git cherry-pick --no-commit bae3054a727297b64b21d2a204a7c3f4ac928f7d
-          git show d2b6d318b68820bad82fd5ebafadf6c63c103b5f:tests/directmetal_sampler_semantics_smoke.c > tests/directmetal_sampler_semantics_smoke.c
-          git show 662d8732900a9825e6817a1081fe4bdc1962d354:tests/directmetal_raster_semantics_smoke.c > tests/directmetal_raster_semantics_smoke.c
-          git show bae3054a727297b64b21d2a204a7c3f4ac928f7d:tests/directmetal_pixel_store_semantics_smoke.c > tests/directmetal_pixel_store_semantics_smoke.c
-          git add tests/directmetal_sampler_semantics_smoke.c tests/directmetal_raster_semantics_smoke.c tests/directmetal_pixel_store_semantics_smoke.c
+
+          # Do not cherry-pick probe history: those commits also contain probe
+          # test additions and temporary files. Extract only the exact product
+          # paths that were independently validated red->green on real Metal.
+          git diff d2b6d318^ d2b6d318 -- \
+            Mithril-Wrapper-cpp/MG_Backend/DirectMetal/MetalDevice.h \
+            Mithril-Wrapper-cpp/MG_Backend/DirectMetal/MetalResources.mm \
+            Mithril-Wrapper-cpp/MG_Backend/DirectMetal/MetalPipeline.mm \
+            > /tmp/sampler.patch
+          git apply --3way /tmp/sampler.patch
+
+          git diff 662d873^ 662d873 -- \
+            Mithril-Wrapper-cpp/MG_Backend/DirectMetal/MetalPipeline.mm \
+            Mithril-Wrapper-cpp/MG_Backend/DirectMetal/MetalCommandStream.mm \
+            > /tmp/raster.patch
+          git apply --3way /tmp/raster.patch
+
+          git diff bae3054^ bae3054 -- \
+            Mithril-Wrapper-cpp/MG_Impl/Texture.cpp \
+            > /tmp/pixel-store.patch
+          git apply --3way /tmp/pixel-store.patch
+
+          git show d2b6d318:tests/directmetal_sampler_semantics_smoke.c > tests/directmetal_sampler_semantics_smoke.c
+          git show 662d873:tests/directmetal_raster_semantics_smoke.c > tests/directmetal_raster_semantics_smoke.c
+          git show bae3054:tests/directmetal_pixel_store_semantics_smoke.c > tests/directmetal_pixel_store_semantics_smoke.c
+          git add Mithril-Wrapper-cpp tests/directmetal_sampler_semantics_smoke.c \
+            tests/directmetal_raster_semantics_smoke.c \
+            tests/directmetal_pixel_store_semantics_smoke.c
+          if git ls-files -u | grep -q .; then
+            echo 'unexpected product-patch conflict:' >&2
+            git status --short
+            exit 1
+          fi
           git diff --cached --check
 
       - name: Remove stale diagnostic OpenGL 4.6 claims
