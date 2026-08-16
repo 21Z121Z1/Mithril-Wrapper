@@ -39,6 +39,27 @@
 #ifndef GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT
 #define GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT 0x84FF
 #endif
+#ifndef GL_TEXTURE_BINDING_1D
+#define GL_TEXTURE_BINDING_1D 0x8068
+#endif
+#ifndef GL_TEXTURE_BINDING_RECTANGLE
+#define GL_TEXTURE_BINDING_RECTANGLE 0x84F6
+#endif
+#ifndef GL_TEXTURE_BINDING_BUFFER
+#define GL_TEXTURE_BINDING_BUFFER 0x8C2C
+#endif
+#ifndef GL_TEXTURE_BINDING_1D_ARRAY
+#define GL_TEXTURE_BINDING_1D_ARRAY 0x8C1C
+#endif
+#ifndef GL_TEXTURE_BINDING_CUBE_MAP_ARRAY
+#define GL_TEXTURE_BINDING_CUBE_MAP_ARRAY 0x900A
+#endif
+#ifndef GL_TEXTURE_BINDING_2D_MULTISAMPLE
+#define GL_TEXTURE_BINDING_2D_MULTISAMPLE 0x9104
+#endif
+#ifndef GL_TEXTURE_BINDING_2D_MULTISAMPLE_ARRAY
+#define GL_TEXTURE_BINDING_2D_MULTISAMPLE_ARRAY 0x9105
+#endif
 
 /* ---- GPU info (Vulkan backend) ----
  * The GL_RENDERER / GL_VENDOR bypass strings are built on first query from
@@ -455,7 +476,17 @@ void glGetIntegerv(GLenum pname, GLint* params) {
         case GL_PACK_SWAP_BYTES:              *params = g_state->pixelStore.packSwapBytes ? GL_TRUE : GL_FALSE; break;
         case GL_PACK_LSB_FIRST:               *params = g_state->pixelStore.packLSBFirst ? GL_TRUE : GL_FALSE; break;
         case GL_TEXTURE_BINDING_1D:           *params = (GLint)g_state->textureBindings[g_state->activeTextureUnit][(int)mithril::TextureTarget::_1D].name; break;
+        case GL_TEXTURE_BINDING_1D:           *params = (GLint)g_state->textureBindings[g_state->activeTextureUnit][(int)mithril::TextureTarget::_1D].name; break;
         case GL_TEXTURE_BINDING_2D:           *params = (GLint)g_state->textureBindings[g_state->activeTextureUnit][(int)mithril::TextureTarget::_2D].name; break;
+        case GL_TEXTURE_BINDING_3D:           *params = (GLint)g_state->textureBindings[g_state->activeTextureUnit][(int)mithril::TextureTarget::_3D].name; break;
+        case GL_TEXTURE_BINDING_CUBE_MAP:     *params = (GLint)g_state->textureBindings[g_state->activeTextureUnit][(int)mithril::TextureTarget::CubeMap].name; break;
+        case GL_TEXTURE_BINDING_RECTANGLE:    *params = (GLint)g_state->textureBindings[g_state->activeTextureUnit][(int)mithril::TextureTarget::Rectangle].name; break;
+        case GL_TEXTURE_BINDING_2D_MULTISAMPLE:*params = (GLint)g_state->textureBindings[g_state->activeTextureUnit][(int)mithril::TextureTarget::_2DMultisample].name; break;
+        case GL_TEXTURE_BINDING_BUFFER:       *params = (GLint)g_state->textureBindings[g_state->activeTextureUnit][(int)mithril::TextureTarget::Buffer].name; break;
+        case GL_TEXTURE_BINDING_1D_ARRAY:     *params = (GLint)g_state->textureBindings[g_state->activeTextureUnit][(int)mithril::TextureTarget::_1DArray].name; break;
+        case GL_TEXTURE_BINDING_2D_ARRAY:     *params = (GLint)g_state->textureBindings[g_state->activeTextureUnit][(int)mithril::TextureTarget::_2DArray].name; break;
+        case GL_TEXTURE_BINDING_CUBE_MAP_ARRAY:*params = (GLint)g_state->textureBindings[g_state->activeTextureUnit][(int)mithril::TextureTarget::CubeMapArray].name; break;
+        case GL_TEXTURE_BINDING_2D_MULTISAMPLE_ARRAY:*params = (GLint)g_state->textureBindings[g_state->activeTextureUnit][(int)mithril::TextureTarget::_2DMultisampleArray].name; break;
         case GL_TEXTURE_BINDING_3D:           *params = (GLint)g_state->textureBindings[g_state->activeTextureUnit][(int)mithril::TextureTarget::_3D].name; break;
         case GL_TEXTURE_BINDING_CUBE_MAP:     *params = (GLint)g_state->textureBindings[g_state->activeTextureUnit][(int)mithril::TextureTarget::CubeMap].name; break;
         case GL_TEXTURE_BINDING_RECTANGLE:    *params = (GLint)g_state->textureBindings[g_state->activeTextureUnit][(int)mithril::TextureTarget::Rectangle].name; break;
