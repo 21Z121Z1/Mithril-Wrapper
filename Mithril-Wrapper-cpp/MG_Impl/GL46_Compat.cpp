@@ -1013,59 +1013,73 @@ void glTextureSubImage3D(GLuint texture, GLint level, GLint xoffset,
     glBindTexture(GL_TEXTURE_3D, prev);
 }
 
-/* 45. glTextureParameterf - Bind to GL_TEXTURE_2D, glTexParameterf, restore. */
+/* 45-48. Texture DSA parameter setters.
+ * Use the target established on the texture object; DSA must not reinterpret
+ * every object as GL_TEXTURE_2D. The legacy setter owns backend invalidation. */
+static GLenum gl46_dsa_texture_target(GLuint texture) {
+    mithril::Texture* t = mithril::state_get_texture(texture);
+    if (!t) {
+        mithril::state_set_error(GL_INVALID_OPERATION);
+        return 0;
+    }
+    return t->target;
+}
+
+static GLuint gl46_dsa_bind_texture(GLuint texture, GLenum* targetOut) {
+    GLenum target = gl46_dsa_texture_target(texture);
+    if (!target) { if (targetOut) *targetOut = 0; return 0; }
+    mithril::TextureTarget slot = mithril::textureTargetFromGL(target);
+    if (slot == mithril::TextureTarget::Count) {
+        mithril::state_set_error(GL_INVALID_ENUM);
+        if (targetOut) *targetOut = 0;
+        return 0;
+    }
+    GLuint unit = g_state->activeTextureUnit;
+    GLuint previous = unit < mithril::kMaxTextureUnits
+        ? g_state->textureBindings[unit][(int)slot].name : 0;
+    glBindTexture(target, texture);
+    if (targetOut) *targetOut = target;
+    return previous;
+}
+
+static void gl46_dsa_restore_texture(GLenum target, GLuint previous) {
+    if (target) glBindTexture(target, previous);
+}
+
 void glTextureParameterf(GLuint texture, GLenum pname, GLfloat param) {
     MITHRIL_ENSURE_INIT();
-    int unit = g_state->activeTextureUnit;
-    GLuint prev = 0;
-    if (unit >= 0 && unit < mithril::kMaxTextureUnits) {
-        prev = g_state->textureBindings[unit][(int)mithril::TextureTarget::_2D].name;
-    }
-    glBindTexture(GL_TEXTURE_2D, texture);
-    glTexParameterf(GL_TEXTURE_2D, pname, param);
-    glBindTexture(GL_TEXTURE_2D, prev);
+    GLenum target = 0; GLuint previous = gl46_dsa_bind_texture(texture, &target);
+    if (!target) return;
+    glTexParameterf(target, pname, param);
+    gl46_dsa_restore_texture(target, previous);
 }
 
-/* 46. glTextureParameteri - Bind to GL_TEXTURE_2D, glTexParameteri, restore. */
 void glTextureParameteri(GLuint texture, GLenum pname, GLint param) {
     MITHRIL_ENSURE_INIT();
-    int unit = g_state->activeTextureUnit;
-    GLuint prev = 0;
-    if (unit >= 0 && unit < mithril::kMaxTextureUnits) {
-        prev = g_state->textureBindings[unit][(int)mithril::TextureTarget::_2D].name;
-    }
-    glBindTexture(GL_TEXTURE_2D, texture);
-    glTexParameteri(GL_TEXTURE_2D, pname, param);
-    glBindTexture(GL_TEXTURE_2D, prev);
+    GLenum target = 0; GLuint previous = gl46_dsa_bind_texture(texture, &target);
+    if (!target) return;
+    glTexParameteri(target, pname, param);
+    gl46_dsa_restore_texture(target, previous);
 }
 
-/* 47. glTextureParameterfv - Bind to GL_TEXTURE_2D, glTexParameterfv, restore. */
 void glTextureParameterfv(GLuint texture, GLenum pname, const GLfloat* params) {
     MITHRIL_ENSURE_INIT();
-    int unit = g_state->activeTextureUnit;
-    GLuint prev = 0;
-    if (unit >= 0 && unit < mithril::kMaxTextureUnits) {
-        prev = g_state->textureBindings[unit][(int)mithril::TextureTarget::_2D].name;
-    }
-    glBindTexture(GL_TEXTURE_2D, texture);
-    glTexParameterfv(GL_TEXTURE_2D, pname, params);
-    glBindTexture(GL_TEXTURE_2D, prev);
+    if (!params) return;
+    GLenum target = 0; GLuint previous = gl46_dsa_bind_texture(texture, &target);
+    if (!target) return;
+    glTexParameterfv(target, pname, params);
+    gl46_dsa_restore_texture(target, previous);
 }
 
-/* 48. glTextureParameteriv - Bind to GL_TEXTURE_2D, glTexParameteriv, restore. */
 void glTextureParameteriv(GLuint texture, GLenum pname, const GLint* params) {
     MITHRIL_ENSURE_INIT();
-    int unit = g_state->activeTextureUnit;
-    GLuint prev = 0;
-    if (unit >= 0 && unit < mithril::kMaxTextureUnits) {
-        prev = g_state->textureBindings[unit][(int)mithril::TextureTarget::_2D].name;
-    }
-    glBindTexture(GL_TEXTURE_2D, texture);
-    glTexParameteriv(GL_TEXTURE_2D, pname, params);
-    glBindTexture(GL_TEXTURE_2D, prev);
+    if (!params) return;
+    GLenum target = 0; GLuint previous = gl46_dsa_bind_texture(texture, &target);
+    if (!target) return;
+    glTexParameteriv(target, pname, params);
+    gl46_dsa_restore_texture(target, previous);
 }
 
-/* 49. glGenerateTextureMipmap - Bind to GL_TEXTURE_2D, glGenerateMipmap, restore. */
 void glGenerateTextureMipmap(GLuint texture) {
     MITHRIL_ENSURE_INIT();
     int unit = g_state->activeTextureUnit;
@@ -2957,28 +2971,38 @@ void glCopyTextureSubImage3D(GLuint texture, GLint level, GLint xoffset, GLint y
 
 void glTextureParameterIiv(GLuint texture, GLenum pname, const GLint* params) {
     MITHRIL_ENSURE_INIT();
-    (void)texture; (void)pname; (void)params;
+    if (!params) return;
+    GLenum target = 0; GLuint previous = gl46_dsa_bind_texture(texture, &target);
+    if (!target) return;
+    glTexParameterIiv(target, pname, params);
+    gl46_dsa_restore_texture(target, previous);
 }
 
 void glTextureParameterIuiv(GLuint texture, GLenum pname, const GLuint* params) {
     MITHRIL_ENSURE_INIT();
-    (void)texture; (void)pname; (void)params;
+    if (!params) return;
+    GLenum target = 0; GLuint previous = gl46_dsa_bind_texture(texture, &target);
+    if (!target) return;
+    glTexParameterIuiv(target, pname, params);
+    gl46_dsa_restore_texture(target, previous);
 }
 
 void glGetTextureParameterIiv(GLuint texture, GLenum pname, GLint* params) {
     MITHRIL_ENSURE_INIT();
-    (void)texture;
-    if (params) sampler_default_params(pname, nullptr, params);
+    if (!params) return;
+    GLenum target = 0; GLuint previous = gl46_dsa_bind_texture(texture, &target);
+    if (!target) return;
+    glGetTexParameterIiv(target, pname, params);
+    gl46_dsa_restore_texture(target, previous);
 }
 
 void glGetTextureParameterIuiv(GLuint texture, GLenum pname, GLuint* params) {
     MITHRIL_ENSURE_INIT();
-    (void)texture;
-    if (params) {
-        GLint v = 0;
-        sampler_default_params(pname, nullptr, &v);
-        *params = (GLuint)v;
-    }
+    if (!params) return;
+    GLenum target = 0; GLuint previous = gl46_dsa_bind_texture(texture, &target);
+    if (!target) return;
+    glGetTexParameterIuiv(target, pname, params);
+    gl46_dsa_restore_texture(target, previous);
 }
 
 void glNamedFramebufferParameteri(GLuint framebuffer, GLenum pname, GLint param) {

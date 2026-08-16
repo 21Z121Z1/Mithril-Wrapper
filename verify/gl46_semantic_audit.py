@@ -62,3 +62,14 @@ require("Sampler object getters (GL 3.3): return the GL defaults" not in gl,
         "sampler queries must not return facade defaults")
 require("glSamplerParameteri(sampler, pname" not in gl,
         "GL46 sampler integer setters must not depend on undeclared cross-TU entry points")
+
+require("gl46_dsa_texture_target" in gl and "textureTargetFromGL" in gl,
+        "texture DSA parameter calls must use the object's tracked target")
+require("sampler_default_params(pname" not in gl,
+        "texture DSA integer getters must not return sampler facade defaults")
+
+_metal_backend=(root/"Mithril-Wrapper-cpp/MG_Backend/DirectMetal/MetalBackend.mm").read_text()
+require("out_pixels, readDefaultFramebuffer ? 1 : 0" not in _metal_backend,
+        "DirectMetal glReadPixels must not vertically reverse the already GL-oriented default framebuffer")
+require("out_pixels, 0);" in _metal_backend,
+        "DirectMetal glReadPixels must preserve GL bottom-left row order")

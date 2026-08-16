@@ -566,11 +566,13 @@ int dmt_read_pixels(int x, int y, int w, int h,
         src = dmt::texture_table_get(texName);
     }
     if (!src || src->tex == nil) return 0;
-    // User FBO textures are already stored in GL bottom-left row order; only
-    // the drawable/default framebuffer uses the presentation-oriented Metal
-    // row order that needs conversion on readback.
+    // Both user FBOs and the DirectMetal default render target are already
+    // stored in GL logical bottom-left row order by their render paths.  A
+    // second CPU Y reversal here would make glReadPixels return top-to-bottom
+    // rows.  Keep the internal flip facility for explicit non-GL callers, but
+    // OpenGL readback must copy rows as stored.
     return dmt::dmt_internal_read_pixels(src, x, y, w, h, format, type,
-                                         out_pixels, readDefaultFramebuffer ? 1 : 0);
+                                         out_pixels, 0);
 }
 
 void dmt_blit_texture(GLuint src_name, GLuint dst_name,
