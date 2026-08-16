@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - 'fix/gl-semantic-closure-*'
+      - 'ci/minecraft-on-mithril-e2e-20260815'
   workflow_dispatch:
 
 permissions:
@@ -60,6 +61,7 @@ jobs:
           clang -std=gnu11 "${common[@]}" tests/directmetal_sampler_semantics_smoke.c -o build-semantic/directmetal_sampler_semantics_smoke -ldl
           clang -std=gnu11 "${common[@]}" tests/directmetal_raster_semantics_smoke.c -o build-semantic/directmetal_raster_semantics_smoke -ldl
           clang -std=gnu11 "${common[@]}" tests/directmetal_pixel_store_semantics_smoke.c -o build-semantic/directmetal_pixel_store_semantics_smoke -ldl
+          clang -std=gnu11 "${common[@]}" tests/directmetal_production_api_closure_smoke.c -o build-semantic/directmetal_production_api_closure_smoke -ldl
 
       - name: Run semantic GPU oracle suite
         shell: bash
@@ -86,6 +88,7 @@ jobs:
           run_oracle directmetal_sampler_semantics_smoke 'SAMPLER SEMANTICS SMOKE ALL PASSED' sampler.log
           run_oracle directmetal_raster_semantics_smoke 'RASTER SEMANTICS SMOKE ALL PASSED' raster.log
           run_oracle directmetal_pixel_store_semantics_smoke 'PIXEL STORE SEMANTICS SMOKE ALL PASSED' pixel-store.log
+          run_oracle directmetal_production_api_closure_smoke 'PRODUCTION API CLOSURE SMOKE ALL PASSED' production-api-closure.log
 
       - name: Enforce advertised capability contract
         shell: bash
