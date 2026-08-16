@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Restore spec-observable OpenGL error and binding-query semantics."""
+"""Restore spec-observable OpenGL error and binding-query semantics.
+
+The migration deliberately normalizes the whole texture-binding query region,
+so re-running this helper is idempotent and can never duplicate switch cases.
+"""
 from pathlib import Path
 import argparse
 
@@ -51,7 +55,9 @@ DEFINE_BLOCK = DEFINE_ANCHOR + '''#ifndef GL_TEXTURE_BINDING_1D
 #endif
 '''
 
-BINDING_OLD = '''        case GL_TEXTURE_BINDING_2D:           *params = (GLint)g_state->textureBindings[g_state->activeTextureUnit][(int)mithril::TextureTarget::_2D].name; break;
+REGION_START = '''        case GL_PACK_LSB_FIRST:               *params = g_state->pixelStore.packLSBFirst ? GL_TRUE : GL_FALSE; break;
+'''
+REGION_END = '''        case GL_BLEND_SRC_RGB:                *params = (GLint)g_state->blends[0].srcRGB; break;
 '''
 BINDING_NEW = '''        case GL_TEXTURE_BINDING_1D:           *params = (GLint)g_state->textureBindings[g_state->activeTextureUnit][(int)mithril::TextureTarget::_1D].name; break;
         case GL_TEXTURE_BINDING_2D:           *params = (GLint)g_state->textureBindings[g_state->activeTextureUnit][(int)mithril::TextureTarget::_2D].name; break;
@@ -66,8 +72,27 @@ BINDING_NEW = '''        case GL_TEXTURE_BINDING_1D:           *params = (GLint)
         case GL_TEXTURE_BINDING_2D_MULTISAMPLE_ARRAY:*params = (GLint)g_state->textureBindings[g_state->activeTextureUnit][(int)mithril::TextureTarget::_2DMultisampleArray].name; break;
 '''
 
+PNAMES = (
+    'GL_TEXTURE_BINDING_1D', 'GL_TEXTURE_BINDING_2D', 'GL_TEXTURE_BINDING_3D',
+    'GL_TEXTURE_BINDING_CUBE_MAP', 'GL_TEXTURE_BINDING_RECTANGLE',
+    'GL_TEXTURE_BINDING_2D_MULTISAMPLE', 'GL_TEXTURE_BINDING_BUFFER',
+    'GL_TEXTURE_BINDING_1D_ARRAY', 'GL_TEXTURE_BINDING_2D_ARRAY',
+    'GL_TEXTURE_BINDING_CUBE_MAP_ARRAY', 'GL_TEXTURE_BINDING_2D_MULTISAMPLE_ARRAY',
+)
+
 AUDIT_CHECK = '''\nrequire("return mithril::state_take_error();" in (root / "Mithril-Wrapper-cpp/MG_Impl/Getter.cpp").read_text(),\n        "glGetError must expose the context error queue instead of swallowing it")\n'''
-AUDIT_BINDING_CHECK = '''\n_getter = (root / "Mithril-Wrapper-cpp/MG_Impl/Getter.cpp").read_text()\nfor _pname in ("GL_TEXTURE_BINDING_1D", "GL_TEXTURE_BINDING_2D", "GL_TEXTURE_BINDING_3D",\n               "GL_TEXTURE_BINDING_CUBE_MAP", "GL_TEXTURE_BINDING_RECTANGLE",\n               "GL_TEXTURE_BINDING_2D_MULTISAMPLE", "GL_TEXTURE_BINDING_BUFFER",\n               "GL_TEXTURE_BINDING_1D_ARRAY", "GL_TEXTURE_BINDING_2D_ARRAY",\n               "GL_TEXTURE_BINDING_CUBE_MAP_ARRAY", "GL_TEXTURE_BINDING_2D_MULTISAMPLE_ARRAY"):\n    require(("case " + _pname + ":") in _getter, "missing texture binding getter: " + _pname)\n'''
+AUDIT_BINDING_CHECK = '''\n_getter = (root / "Mithril-Wrapper-cpp/MG_Impl/Getter.cpp").read_text()\nfor _pname in ("GL_TEXTURE_BINDING_1D", "GL_TEXTURE_BINDING_2D", "GL_TEXTURE_BINDING_3D",\n               "GL_TEXTURE_BINDING_CUBE_MAP", "GL_TEXTURE_BINDING_RECTANGLE",\n               "GL_TEXTURE_BINDING_2D_MULTISAMPLE", "GL_TEXTURE_BINDING_BUFFER",\n               "GL_TEXTURE_BINDING_1D_ARRAY", "GL_TEXTURE_BINDING_2D_ARRAY",\n               "GL_TEXTURE_BINDING_CUBE_MAP_ARRAY", "GL_TEXTURE_BINDING_2D_MULTISAMPLE_ARRAY"):\n    require(_getter.count("case " + _pname + ":") == 1,\n            "texture binding getter must appear exactly once: " + _pname)\n'''
+
+
+def normalize_binding_region(text: str) -> str:
+    start = text.find(REGION_START)
+    if start < 0:
+        raise SystemExit('texture binding region start anchor not found')
+    start += len(REGION_START)
+    end = text.find(REGION_END, start)
+    if end < 0:
+        raise SystemExit('texture binding region end anchor not found')
+    return text[:start] + BINDING_NEW + text[end:]
 
 
 def apply():
@@ -80,16 +105,19 @@ def apply():
         text = text.replace(OLD, NEW, 1)
     elif NEW not in text:
         raise SystemExit('glGetError anchor not found')
-    if BINDING_OLD in text:
-        text = text.replace(BINDING_OLD, BINDING_NEW, 1)
-    elif 'case GL_TEXTURE_BINDING_2D_ARRAY:' not in text:
-        raise SystemExit('texture binding getter anchor not found')
+    text = normalize_binding_region(text)
     GETTER.write_text(text)
 
     audit = AUDIT.read_text()
     if 'glGetError must expose the context error queue' not in audit:
         audit += AUDIT_CHECK
-    if 'missing texture binding getter:' not in audit:
+    # Upgrade an older presence-only guard to an exact-count guard.
+    old_guard_marker = 'missing texture binding getter:'
+    if old_guard_marker in audit:
+        prefix = audit[:audit.rfind('\n_getter =', 0, audit.find(old_guard_marker))]
+        if prefix != audit:
+            audit = prefix.rstrip() + '\n'
+    if 'texture binding getter must appear exactly once:' not in audit:
         audit += AUDIT_BINDING_CHECK
     AUDIT.write_text(audit)
     verify()
@@ -103,15 +131,14 @@ def verify():
         raise SystemExit('missing fallback texture binding enum definitions')
     if 'mithril::state_take_error();\n    return GL_NO_ERROR;' in text:
         raise SystemExit('legacy error swallowing remains')
-    for pname in ('GL_TEXTURE_BINDING_1D', 'GL_TEXTURE_BINDING_2D', 'GL_TEXTURE_BINDING_3D',
-                  'GL_TEXTURE_BINDING_CUBE_MAP', 'GL_TEXTURE_BINDING_RECTANGLE',
-                  'GL_TEXTURE_BINDING_2D_MULTISAMPLE', 'GL_TEXTURE_BINDING_BUFFER',
-                  'GL_TEXTURE_BINDING_1D_ARRAY', 'GL_TEXTURE_BINDING_2D_ARRAY',
-                  'GL_TEXTURE_BINDING_CUBE_MAP_ARRAY', 'GL_TEXTURE_BINDING_2D_MULTISAMPLE_ARRAY'):
-        if f'case {pname}:' not in text:
-            raise SystemExit(f'missing texture binding getter: {pname}')
+    for pname in PNAMES:
+        count = text.count(f'case {pname}:')
+        if count != 1:
+            raise SystemExit(f'{pname}: expected one switch case, found {count}')
+    if normalize_binding_region(text) != text:
+        raise SystemExit('binding getter region is not canonical/idempotent')
     compile(AUDIT.read_text(), str(AUDIT), 'exec')
-    print('GL error/binding getter semantics: PASS')
+    print('GL error/binding getter semantics: PASS; migration is idempotent')
 
 
 def main():
