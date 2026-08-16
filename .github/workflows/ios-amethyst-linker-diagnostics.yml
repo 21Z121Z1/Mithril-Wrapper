@@ -38,8 +38,10 @@ jobs:
           EXPORTS="$RUNNER_TEMP/amethyst-ios.exports"
           NOT_WEAK="$GITHUB_WORKSPACE/cmake/amethyst-ios.force-not-weak"
           MOLTENVK="$GITHUB_WORKSPACE/Mithril-Wrapper-cpp/3rdparty/MoltenVK/libMoltenVK.dylib"
+          PROJECT_INCLUDE="$GITHUB_WORKSPACE/cmake/amethyst-ios-project-linker-isolation.cmake"
           bash "$GITHUB_WORKSPACE/cmake/generate-amethyst-ios-exports.sh" "$EXPORTS"
           test "$(wc -l < "$EXPORTS" | tr -d ' ')" -eq 701
+          test -s "$PROJECT_INCLUDE"
           cmake -B build-amethyst-ios \
             -DCMAKE_TOOLCHAIN_FILE=ios.toolchain.cmake \
             -DPLATFORM=OS64 \
@@ -50,7 +52,9 @@ jobs:
             -DMOLTENVK_LIBRARY="$MOLTENVK" \
             -DCMAKE_C_FLAGS="-Wno-error=implicit-function-declaration" \
             -DCMAKE_CXX_FLAGS="-Wno-error" \
-            -DCMAKE_SHARED_LINKER_FLAGS="-Wl,-exported_symbols_list,$EXPORTS -Wl,-force_symbols_not_weak_list,$NOT_WEAK"
+            -DCMAKE_PROJECT_mithril_INCLUDE="$PROJECT_INCLUDE" \
+            -DMITHRIL_AMETHYST_EXPORT_LIST="$EXPORTS" \
+            -DMITHRIL_AMETHYST_FORCE_NOT_WEAK_LIST="$NOT_WEAK"
 
       - name: Build and capture final linker command
         shell: bash
@@ -117,6 +121,4 @@ jobs:
           TINTERM=$(grep '_ZN11TIntermNode14getAsUnaryNodeEv' /tmp/nm-m.txt | head -5 | paste -sd';' - || true)
           [[ -n "$TINTERM" ]] && echo "::notice title=TIntermNode getAsUnaryNode state::$TINTERM"
 
-          # Diagnostic workflow intentionally reports evidence without turning
-          # the already-known nm -gU mismatch into another opaque failure.
           true
