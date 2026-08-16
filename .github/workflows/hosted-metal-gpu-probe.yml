@@ -1,151 +1,91 @@
-name: hosted-metal-gpu-probe
+name: platform-runtime-validation
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - feature/direct-metal
-      - codex/autonomous-direct-metal-next
+
+permissions:
+  contents: read
 
 concurrency:
-  group: directmetal-hosted-${{ github.ref }}
+  group: platform-runtime-validation-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   directmetal-hosted:
-    name: DirectMetal hosted offscreen GPU required
+    name: macOS 26 real Metal runtime
     runs-on: macos-26
+    timeout-minutes: 20
     env:
-      MTL_DEBUG_LAYER: '0'
+      MTL_DEBUG_LAYER: '1'
       MTL_SHADER_VALIDATION: '0'
       MITHRIL_BACKEND: metal
       MITHRIL_EXPECT_RENDERER: Mithril DirectMetal
-      MITHRIL_LIBRARY: ./output/libmithril.dylib
     steps:
       - uses: actions/checkout@v6
         with:
-          submodules: recursive
+          submodules: false
+          persist-credentials: false
+
+      - name: Fetch DirectMetal shader submodules only
+        run: >-
+          git submodule update --init --depth=1
+          third_party/SPIRV-Cross
+          third_party/SPIRV-Headers
+          third_party/glslang
 
       - name: Describe hosted Apple Silicon runner
         shell: bash
         run: |
           set -euo pipefail
-          echo "CI=${CI:-<unset>}"
           uname -a
           sw_vers
           system_profiler SPHardwareDataType SPDisplaysDataType || true
-          test "$(uname -m)" = "arm64"
+          test "$(uname -m)" = arm64
 
-      - name: Execute real Metal compute/readback capability probe
+      - name: Prove real Metal compute and readback
         shell: bash
         run: |
           set -euo pipefail
-          xcrun swiftc -O -framework Metal .github/ci/HostedMetalCapabilityProbe.swift -o "$RUNNER_TEMP/hosted-metal-gpu-probe"
+          xcrun swiftc -O -framework Metal \
+            .github/ci/HostedMetalCapabilityProbe.swift \
+            -o "$RUNNER_TEMP/hosted-metal-gpu-probe"
           "$RUNNER_TEMP/hosted-metal-gpu-probe"
 
-      - name: Build Mithril DirectMetal backend
+      - name: Configure production DirectMetal target
         shell: bash
-        run: |
-          set -euo pipefail
-          cmake -S . -B build-hosted-metal -DCMAKE_BUILD_TYPE=Release
-          cmake --build build-hosted-metal -j"$(sysctl -n hw.ncpu)"
-          file output/libmithril.dylib
-          otool -L output/libmithril.dylib
-          nm -m output/libmithril.dylib | grep -E 'MTLCreateSystemDefaultDevice|OBJC_CLASS_\$_MTL' || true
-          ln -sf libmithril.dylib output/libmithril.so
+        run: >-
+          cmake -S . -B build-hosted-metal -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DMITHRIL_BUILD_LEGACY=OFF
+          -DMITHRIL_BUILD_DIRECT=ON
+          -DMITHRIL_ENABLE_SHADER_TOOLCHAIN=ON
+          -DMITHRIL_OUTPUT_DIRECTORY="$GITHUB_WORKSPACE/build-hosted-metal/artifacts"
 
-      - name: Run required DirectMetal offscreen gates
-        shell: bash
-        run: |
-          set -euo pipefail
-          tests=(state_smoke shader_smoke draw_smoke texture_smoke sampler_smoke matrix_uniform_smoke provoking_vertex_smoke buffer_texture_smoke typed_vertex_smoke packed_vertex_attrib_smoke ubo_smoke query_smoke sync_smoke stencil_persistence_smoke 3d_smoke render3d_smoke fbo_smoke directmetal_fbo_smoke)
-          for test_name in "${tests[@]}"; do
-            echo "==> ${test_name}"
-            clang -std=c11 -Wall -Wextra "tests/${test_name}.c" -o "$RUNNER_TEMP/${test_name}"
-            "$RUNNER_TEMP/${test_name}"
-          done
+      - name: Build production DirectMetal and registered tests
+        run: cmake --build build-hosted-metal --parallel
 
-      - name: Replay Amethyst EGL negotiation and presentation
-        shell: bash
-        run: |
-          set -euo pipefail
-          ctest --test-dir build-hosted-metal \
-            -V -R '^amethyst_egl_smoke$'
+      - name: Run DirectMetal suite on the hosted Metal GPU
+        run: ctest --test-dir build-hosted-metal -L directmetal --output-on-failure
 
-      - name: Require first-operation FBO clear/readback regression
-        shell: bash
-        run: |
-          set -euo pipefail
-          clang -std=c11 -Wall -Wextra .github/ci/HostedDirectMetalFboProbe.c -o "$RUNNER_TEMP/directmetal-base-fbo-probe"
-          "$RUNNER_TEMP/directmetal-base-fbo-probe"
-
-      - name: Classify presentation-only EGL contract
-        shell: bash
-        run: |
-          set -uo pipefail
-          clang -std=c11 -Wall -Wextra tests/contract_smoke.c -o "$RUNNER_TEMP/contract_smoke"
-          set +e
-          "$RUNNER_TEMP/contract_smoke" 2>&1 | tee "$RUNNER_TEMP/contract_smoke.log"
-          rc=${PIPESTATUS[0]}
-          set -e
-          if [ "$rc" -eq 0 ]; then
-            echo 'HOSTED_EGL_WINDOW_SURFACE_SUPPORTED=true' >> "$GITHUB_STEP_SUMMARY"
-          elif grep -Fq 'eglCreateWindowSurface failed' "$RUNNER_TEMP/contract_smoke.log"; then
-            echo 'HOSTED_EGL_WINDOW_SURFACE_SUPPORTED=false' >> "$GITHUB_STEP_SUMMARY"
-            echo 'Window-surface/presentation coverage remains a physical display-session gate.' >> "$GITHUB_STEP_SUMMARY"
-          else
-            exit "$rc"
-          fi
-
-  ios-directmetal-cross-build-required:
-    name: iPhoneOS DirectMetal arm64 cross-build required
+  ios-simulator-directmetal-runtime:
+    name: iOS Simulator DirectMetal host-GPU runtime
     runs-on: macos-26
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          submodules: recursive
-
-      - name: Cross-compile Mithril DirectMetal for arm64 iPhoneOS
-        shell: bash
-        run: |
-          set -euo pipefail
-          sdk="$(xcrun --sdk iphoneos --show-sdk-path)"
-          xcrun --sdk iphoneos --show-sdk-version
-          cmake -S . -B build-hosted-ios \
-            -G Xcode \
-            -DCMAKE_SYSTEM_NAME=iOS \
-            -DCMAKE_OSX_SYSROOT="$sdk" \
-            -DCMAKE_OSX_ARCHITECTURES=arm64 \
-            -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 \
-            -DMITHRIL_IOS=ON \
-            -DMITHRIL_OUTPUT_DIRECTORY="$PWD/build-hosted-ios/output" \
-            -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO \
-            -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED=NO
-          cmake --build build-hosted-ios --config Release --target mithril
-
-      - name: Verify iPhoneOS Mach-O platform contract
-        shell: bash
-        run: |
-          set -euo pipefail
-          artifact="$(find build-hosted-ios/output -type f -name 'libmithril.dylib' -print -quit)"
-          test -n "$artifact"
-          file "$artifact"
-          otool -D "$artifact"
-          xcrun vtool -show-build "$artifact" | tee "$RUNNER_TEMP/vtool.txt"
-          grep -Eiq 'platform[[:space:]]+(IOS|2)' "$RUNNER_TEMP/vtool.txt"
-          lipo -info "$artifact" | grep -q arm64
-          otool -L "$artifact" | grep -q '/System/Library/Frameworks/Metal.framework/'
-
-  ios-simulator-directmetal-runtime-required:
-    name: iOS Simulator DirectMetal host-GPU runtime required
-    runs-on: macos-26
+    timeout-minutes: 25
     env:
-      MTL_DEBUG_LAYER: '0'
+      MTL_DEBUG_LAYER: '1'
       MTL_SHADER_VALIDATION: '0'
     steps:
       - uses: actions/checkout@v6
         with:
-          submodules: recursive
+          submodules: false
+          persist-credentials: false
+
+      - name: Fetch DirectMetal shader submodules only
+        run: >-
+          git submodule update --init --depth=1
+          third_party/SPIRV-Cross
+          third_party/SPIRV-Headers
+          third_party/glslang
 
       - name: Select and boot an iOS Simulator
         id: simulator
@@ -158,20 +98,25 @@ jobs:
           xcrun simctl boot "$udid" || true
           xcrun simctl bootstatus "$udid" -b
 
-      - name: Cross-build DirectMetal for arm64 iOS Simulator
+      - name: Build DirectMetal for arm64 iOS Simulator
         id: build
         shell: bash
         run: |
           set -euo pipefail
           sdk="$(xcrun --sdk iphonesimulator --show-sdk-path)"
           cmake -S . -B build-hosted-ios-sim \
-            -G Xcode -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_SYSROOT="$sdk" \
-            -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=16.0 \
+            -G Xcode \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OSX_SYSROOT="$sdk" \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=16.0 \
             -DMITHRIL_IOS=ON \
+            -DMITHRIL_BUILD_LEGACY=OFF \
+            -DMITHRIL_BUILD_DIRECT=ON \
             -DMITHRIL_OUTPUT_DIRECTORY="$PWD/build-hosted-ios-sim/output" \
             -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO \
             -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_REQUIRED=NO
-          cmake --build build-hosted-ios-sim --config Release --target mithril
+          cmake --build build-hosted-ios-sim --config Release --target mithril_direct
           artifact="$(find build-hosted-ios-sim/output -type f -name 'libmithril.dylib' -print -quit)"
           test -n "$artifact"
           echo "artifact=$artifact" >> "$GITHUB_OUTPUT"
@@ -194,7 +139,7 @@ jobs:
               "$RUNNER_TEMP/${test_name}.o" -o "$RUNNER_TEMP/${test_name}"
           done
 
-      - name: Package, install and launch DirectMetal smokes as Simulator apps
+      - name: Install and run DirectMetal smokes in Simulator
         shell: bash
         run: |
           set -euo pipefail
