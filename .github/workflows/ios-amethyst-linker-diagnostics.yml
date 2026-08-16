@@ -44,6 +44,14 @@ jobs:
           test "$(wc -l < "$EXPORTS" | tr -d ' ')" -eq 701
           test -s "$WRAPPER"
           test -s "$BASE_TOOLCHAIN"
+
+          # try_compile() creates child CMake projects before all custom cache
+          # variables are reliably propagated. Environment is inherited by
+          # those children, and the wrapper has an explicit env fallback.
+          export MITHRIL_IOS_BASE_TOOLCHAIN="$BASE_TOOLCHAIN"
+          export MITHRIL_AMETHYST_EXPORT_LIST="$EXPORTS"
+          export MITHRIL_AMETHYST_FORCE_NOT_WEAK_LIST="$NOT_WEAK"
+
           cmake -B build-amethyst-ios \
             -DCMAKE_TOOLCHAIN_FILE="$WRAPPER" \
             -DMITHRIL_IOS_BASE_TOOLCHAIN="$BASE_TOOLCHAIN" \
