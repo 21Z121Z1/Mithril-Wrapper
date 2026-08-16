@@ -154,10 +154,20 @@ jobs:
           # The final dynamic export set must be exactly the generated GL/EGL
           # ABI. This catches both compiler leakage and accidental host-ABI loss.
           if ! diff -u "$EXPECTED" /tmp/mithril-export-names.txt; then
-            echo '=== missing expected exports ==='
+            MISSING_COUNT=$(comm -23 "$EXPECTED" /tmp/mithril-export-names.txt | wc -l | tr -d ' ')
+            UNEXPECTED_COUNT=$(comm -13 "$EXPECTED" /tmp/mithril-export-names.txt | wc -l | tr -d ' ')
+            MISSING=$(comm -23 "$EXPECTED" /tmp/mithril-export-names.txt | head -50 | paste -sd, - || true)
+            UNEXPECTED=$(comm -13 "$EXPECTED" /tmp/mithril-export-names.txt | head -50 | paste -sd, - || true)
+            echo "=== missing expected exports ($MISSING_COUNT) ==="
             comm -23 "$EXPECTED" /tmp/mithril-export-names.txt || true
-            echo '=== unexpected dynamic exports ==='
+            echo "=== unexpected dynamic exports ($UNEXPECTED_COUNT) ==="
             comm -13 "$EXPECTED" /tmp/mithril-export-names.txt || true
+            if [[ -n "$MISSING" ]]; then
+              echo "::error title=Missing expected Mach-O exports ($MISSING_COUNT)::$MISSING"
+            fi
+            if [[ -n "$UNEXPECTED" ]]; then
+              echo "::error title=Unexpected Mach-O exports ($UNEXPECTED_COUNT)::$UNEXPECTED"
+            fi
             echo '::error::dynamic exports differ from the exact Amethyst GL/EGL ABI allow-list'
             exit 1
           fi
