@@ -215,10 +215,10 @@ extern "C" {
 
 GLenum glGetError(void) {
     MITHRIL_ENSURE_INIT();
-    // Mirror MobileGlues: always return GL_NO_ERROR to prevent Minecraft from
-    // spamming the log with GL errors that are harmless in the translation layer.
-    mithril::state_take_error();
-    return GL_NO_ERROR;
+    /* OpenGL exposes the oldest pending error and removes exactly that error
+     * from the context queue.  The state machine already maintains the queue;
+     * never discard it merely to silence a workload's diagnostics. */
+    return mithril::state_take_error();
 }
 
 void glGetBooleanv(GLenum pname, GLboolean* params) {

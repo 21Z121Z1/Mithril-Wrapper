@@ -37,3 +37,6 @@ if errors:
         print(f"FAIL: {e}", file=sys.stderr)
     raise SystemExit(1)
 print("GL46 semantic source audit: PASS")
+
+require("return mithril::state_take_error();" in (root / "Mithril-Wrapper-cpp/MG_Impl/Getter.cpp").read_text(),
+        "glGetError must expose the context error queue instead of swallowing it")
