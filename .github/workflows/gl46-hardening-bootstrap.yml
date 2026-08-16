@@ -41,11 +41,20 @@ jobs:
           python3 ci/gl46-hardening/apply_sampler.py --apply
           python3 ci/gl46-hardening/apply_texture_dsa_v2.py --apply
           python3 ci/gl46-hardening/apply_readpixels.py --apply
-      - name: Verify patch invariants
+      - name: Verify composite hardening fixed point
         run: |
+          set -euo pipefail
           python3 ci/gl46-hardening/apply.py --verify
           python3 ci/gl46-hardening/apply_errors.py --verify
-          python3 ci/gl46-hardening/apply_reflection.py --verify
+          # Reflection visibility intentionally refines the base reflection
+          # canonical form. Re-apply the pair and require the combined final
+          # tree to remain stable instead of asking the base migration to erase
+          # the public-visibility refinement during standalone verification.
+          before=$(sha256sum Mithril-Wrapper-cpp/MG_Impl/GL46_Compat.cpp | cut -d' ' -f1)
+          python3 ci/gl46-hardening/apply_reflection.py --apply
+          python3 ci/gl46-hardening/apply_reflection_visibility.py --apply
+          after=$(sha256sum Mithril-Wrapper-cpp/MG_Impl/GL46_Compat.cpp | cut -d' ' -f1)
+          test "$before" = "$after"
           python3 ci/gl46-hardening/apply_reflection_visibility.py --verify
           python3 ci/gl46-hardening/apply_sampler.py --verify
           python3 ci/gl46-hardening/apply_texture_dsa_v2.py --verify
