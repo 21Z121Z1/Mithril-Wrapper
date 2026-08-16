@@ -81,7 +81,7 @@ jobs:
           build-semantic/directmetal_texture_fbo_roundtrip_smoke "$DYLIB" | tee build-semantic/texture-fbo-roundtrip.log
           grep -F 'GL texture upload -> attached FBO -> glReadPixels is byte-exact' build-semantic/texture-fbo-roundtrip.log
           echo directmetal_texture_fbo_roundtrip_smoke >> build-semantic/oracles-passed.txt
-          run_oracle directmetal_layered_texture_smoke 'LAYERED TEXTURE SMOKE ALL PASSED' layered-texture.log
+          run_oracle directmetal_layered_texture_smoke 'DIRECTMETAL LAYERED TEXTURE SMOKE: ALL PASSED' layered-texture.log
           run_oracle query_sync_smoke 'QUERY SYNC SMOKE ALL PASSED' query-sync.log
           run_oracle directmetal_mrt_clear_semantics_smoke 'MRT CLEAR SEMANTICS SMOKE ALL PASSED' mrt-clear.log
           run_oracle directmetal_buffer_ubo_semantics_smoke 'BUFFER UBO SEMANTICS SMOKE ALL PASSED' buffer-ubo.log
