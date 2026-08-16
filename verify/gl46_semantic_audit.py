@@ -54,6 +54,7 @@ require("gl46_active_uniforms" in gl and "u.blockIndex" in gl and "u.matrixStrid
         "uniform reflection APIs must expose Program/SPIR-V metadata")
 require("Set all indices to GL_INVALID_INDEX" not in gl,
         "glGetUniformIndices must not be a facade default")
+require("\x00" not in gl, "GL46 compatibility source must not contain embedded NUL bytes")
 
 require("gl46_get_sampler_scalar" in gl and "gl46_set_sampler_scalar" in gl,
         "sampler getters/setters must expose tracked sampler state")

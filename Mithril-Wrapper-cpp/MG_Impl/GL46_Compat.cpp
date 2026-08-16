@@ -312,7 +312,7 @@ void glGetActiveUniformName(GLuint program, GLuint uniformIndex,
     if (uniformIndex >= uniforms.size()) {
         mithril::state_set_error(GL_INVALID_VALUE);
         if (length) *length = 0;
-        if (uniformName && bufSize > 0) uniformName[0] = ' ';
+        if (uniformName && bufSize > 0) uniformName[0] = '\0';
         return;
     }
     const std::string& name = uniforms[uniformIndex]->name;
@@ -320,7 +320,7 @@ void glGetActiveUniformName(GLuint program, GLuint uniformIndex,
     if (uniformName && bufSize > 0) {
         copied = (GLsizei)std::min<size_t>(name.size(), (size_t)bufSize - 1);
         memcpy(uniformName, name.data(), (size_t)copied);
-        uniformName[copied] = ' ';
+        uniformName[copied] = '\0';
     }
     if (length) *length = copied;
 }
@@ -339,14 +339,14 @@ void glGetActiveUniformBlockName(GLuint program, GLuint uniformBlockIndex,
     if (!found) {
         mithril::state_set_error(GL_INVALID_VALUE);
         if (length) *length = 0;
-        if (uniformName && bufSize > 0) uniformName[0] = ' ';
+        if (uniformName && bufSize > 0) uniformName[0] = '\0';
         return;
     }
     GLsizei copied = 0;
     if (uniformName && bufSize > 0) {
         copied = (GLsizei)std::min<size_t>(found->size(), (size_t)bufSize - 1);
         memcpy(uniformName, found->data(), (size_t)copied);
-        uniformName[copied] = ' ';
+        uniformName[copied] = '\0';
     }
     if (length) *length = copied;
 }
