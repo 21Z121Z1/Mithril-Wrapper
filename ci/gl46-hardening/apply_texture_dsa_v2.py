@@ -143,13 +143,34 @@ def consume_space(text: str, pos: int) -> int:
         pos += 1
     return pos
 
-def normalize(text: str) -> str:
+def parameter_region_start(text: str) -> int:
+    """Return the beginning of the existing DSA parameter block.
+
+    On a normalized source the helper precedes glTextureParameterf by more than
+    the old bounded comment search window, so anchor at the helper itself. For
+    legacy source, fall back to the first setter and its nearby numbered comment.
+    """
+    helper = text.find('static GLenum gl46_dsa_texture_target(')
+    if helper >= 0:
+        comment = text.rfind('/*', max(0, helper - 600), helper)
+        if comment >= 0 and 'Texture DSA parameter setters' in text[comment:helper]:
+            return comment
+        return helper
     first = text.find('void glTextureParameterf(')
-    if first < 0: raise SystemExit('glTextureParameterf not found')
-    comment = text.rfind('/*', max(0, first - 700), first)
-    start = comment if comment >= 0 and '45' in text[comment:first] else first
-    next_fn = text.find('void glGenerateTextureMipmap(', first)
-    if next_fn < 0: raise SystemExit('glGenerateTextureMipmap boundary not found')
+    if first < 0:
+        raise SystemExit('glTextureParameterf not found')
+    comment = text.rfind('/*', max(0, first - 1200), first)
+    if comment >= 0:
+        prefix = text[comment:first]
+        if 'glTextureParameterf' in prefix or '45.' in prefix or 'Texture DSA' in prefix:
+            return comment
+    return first
+
+def normalize(text: str) -> str:
+    start = parameter_region_start(text)
+    next_fn = text.find('void glGenerateTextureMipmap(', start)
+    if next_fn < 0:
+        raise SystemExit('glGenerateTextureMipmap boundary not found')
     text = text[:start] + PARAM_REPLACEMENT.rstrip() + '\n\n' + text[next_fn:]
 
     starts = []
@@ -157,7 +178,8 @@ def normalize(text: str) -> str:
     for name in ('glTextureParameterIiv', 'glTextureParameterIuiv',
                  'glGetTextureParameterIiv', 'glGetTextureParameterIuiv'):
         pos = text.find('void ' + name + '(', cursor)
-        if pos < 0: raise SystemExit(name + ' not found')
+        if pos < 0:
+            raise SystemExit(name + ' not found')
         starts.append(pos)
         cursor = pos + 1
     int_start = starts[0]
@@ -176,13 +198,16 @@ def verify() -> None:
     text = GL46.read_text()
     for needle in ('gl46_dsa_texture_target', 'textureTargetFromGL',
                    'glTexParameterIiv(target', 'glGetTexParameterIuiv(target'):
-        if needle not in text: raise SystemExit('missing invariant: ' + needle)
+        if needle not in text:
+            raise SystemExit('missing invariant: ' + needle)
+    if text.count('static GLenum gl46_dsa_texture_target(') != 1:
+        raise SystemExit('texture DSA helper must appear exactly once')
     if 'sampler_default_params(pname' in text:
         raise SystemExit('legacy texture DSA facade remains')
     if normalize(text) != text:
         raise SystemExit('texture DSA normalization is not idempotent')
     compile(AUDIT.read_text(), str(AUDIT), 'exec')
-    print('GL texture DSA semantics: PASS; function-boundary normalization idempotent')
+    print('GL texture DSA semantics: PASS; canonical helper-boundary normalization idempotent')
 
 def main() -> None:
     p=argparse.ArgumentParser(); g=p.add_mutually_exclusive_group(required=True)
