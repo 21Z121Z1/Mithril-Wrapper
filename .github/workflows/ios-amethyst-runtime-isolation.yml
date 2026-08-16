@@ -1,0 +1,234 @@
+name: Build Amethyst-isolated Mithril for iOS
+
+on:
+  push:
+    branches:
+      - 'fix/ios-amethyst-runtime-isolation'
+  workflow_dispatch:
+
+jobs:
+  build-amethyst-ios:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          submodules: recursive
+
+      - name: Fetch pinned ios-cmake toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL -o ios.toolchain.cmake \
+            https://github.com/leetal/ios-cmake/raw/master/ios.toolchain.cmake
+          test -s ios.toolchain.cmake
+
+      - name: Stage Vulkan headers only
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Compile against current Vulkan headers, but DO NOT stage/link a
+          # static MoltenVK archive.  The actual dependency is the exact dylib
+          # already vendored by this repository and by Amethyst.
+          MOLTENVK_TAG=v1.4.2
+          curl -fsSL -o MoltenVK-ios.tar \
+            "https://github.com/KhronosGroup/MoltenVK/releases/download/${MOLTENVK_TAG}/MoltenVK-ios.tar"
+          mkdir -p moltenvk-staging
+          tar -xf MoltenVK-ios.tar -C moltenvk-staging
+          HDRS=$(find moltenvk-staging -type d -name vulkan -path '*/include/vulkan' | head -1)
+          test -n "$HDRS"
+          mv "$(dirname "$HDRS")" ./MoltenVK-Headers
+          test -s MoltenVK-Headers/vulkan/vulkan.h
+
+      - name: Verify launcher-owned MoltenVK identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          MOLTENVK="$GITHUB_WORKSPACE/Mithril-Wrapper-cpp/3rdparty/MoltenVK/libMoltenVK.dylib"
+          test -s "$MOLTENVK"
+          file "$MOLTENVK"
+          # This blob SHA is also the blob used at
+          # EternityQwQ/Amethyst-iOS:Natives/resources/Frameworks/libMoltenVK.dylib.
+          EXPECTED_BLOB_SHA=30477a5badd5114a2016e5fb27a27dc637c28b5d
+          ACTUAL_BLOB_SHA=$(git hash-object "$MOLTENVK")
+          echo "MoltenVK blob: $ACTUAL_BLOB_SHA"
+          test "$ACTUAL_BLOB_SHA" = "$EXPECTED_BLOB_SHA"
+
+      - name: Configure iPhoneOS arm64 with runtime isolation
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXPORTS="$GITHUB_WORKSPACE/cmake/amethyst-ios.exports"
+          NOT_WEAK="$GITHUB_WORKSPACE/cmake/amethyst-ios.force-not-weak"
+          MOLTENVK="$GITHUB_WORKSPACE/Mithril-Wrapper-cpp/3rdparty/MoltenVK/libMoltenVK.dylib"
+          test -s "$EXPORTS"
+          test -s "$NOT_WEAK"
+          test -s "$MOLTENVK"
+
+          cmake -B build-amethyst-ios \
+            -DCMAKE_TOOLCHAIN_FILE=ios.toolchain.cmake \
+            -DPLATFORM=OS64 \
+            -DDEPLOYMENT_TARGET=15.0 \
+            -DENABLE_BITCODE=OFF \
+            -DENABLE_ARC=OFF \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DMOLTENVK_LIBRARY="$MOLTENVK" \
+            -DCMAKE_C_FLAGS="-Wno-error=implicit-function-declaration" \
+            -DCMAKE_CXX_FLAGS="-Wno-error" \
+            -DCMAKE_SHARED_LINKER_FLAGS="-Wl,-exported_symbols_list,$EXPORTS -Wl,-force_symbols_not_weak_list,$NOT_WEAK"
+
+      - name: Build libmithril.dylib
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake --build build-amethyst-ios --config RelWithDebInfo --target mithril -j"$(sysctl -n hw.ncpu)"
+
+      - name: Locate artifact
+        id: locate
+        shell: bash
+        run: |
+          set -euo pipefail
+          DYLIB=$(find build-amethyst-ios -name libmithril.dylib -type f | head -1)
+          test -n "$DYLIB"
+          echo "path=$DYLIB" >> "$GITHUB_OUTPUT"
+          file "$DYLIB"
+          ls -lh "$DYLIB"
+
+      - name: Verify single MoltenVK ownership
+        shell: bash
+        run: |
+          set -euo pipefail
+          DYLIB='${{ steps.locate.outputs.path }}'
+          otool -L "$DYLIB" | tee /tmp/mithril-dylibs.txt
+
+          grep -Fq '@rpath/libMoltenVK.dylib' /tmp/mithril-dylibs.txt || {
+            echo '::error::libmithril does not dynamically depend on Amethyst libMoltenVK.dylib'
+            exit 1
+          }
+
+          # A dynamic-client libmithril must not contain MoltenVK Objective-C
+          # implementation classes.  This is the class that produced the
+          # duplicate-class runtime warning in the crashing build.
+          nm -a "$DYLIB" > /tmp/mithril-nm-all.txt
+          if grep -Fq 'MVKBlockObserver' /tmp/mithril-nm-all.txt; then
+            echo '::error::MoltenVK implementation is still embedded in libmithril'
+            grep -F 'MVKBlockObserver' /tmp/mithril-nm-all.txt | head -20
+            exit 1
+          fi
+
+          # There must be exactly one MoltenVK load command and no framework
+          # form left after the existing post-build install_name_tool patch.
+          test "$(grep -c 'MoltenVK' /tmp/mithril-dylibs.txt)" -eq 1
+          ! grep -Fq 'MoltenVK.framework/MoltenVK' /tmp/mithril-dylibs.txt
+
+      - name: Verify glslang C++ image isolation
+        shell: bash
+        run: |
+          set -euo pipefail
+          DYLIB='${{ steps.locate.outputs.path }}'
+
+          nm -gU "$DYLIB" > /tmp/mithril-exports.txt
+          echo '=== exported symbol sample ==='
+          head -80 /tmp/mithril-exports.txt
+
+          # The host ABI is OpenGL/EGL only.  No C++ implementation symbol may
+          # be exported, otherwise libshaderc's weak glslang lookups can bind to
+          # this image (or vice versa).
+          if grep -E '(__Z|TIntermNode|glslang|spirv_cross)' /tmp/mithril-exports.txt; then
+            echo '::error::C++/glslang implementation leaked into the dynamic export surface'
+            exit 1
+          fi
+
+          # Catch an over-broad _gl* allow-list accidentally exposing the
+          # optional glslang C interface.
+          if grep -E ' _glslang_' /tmp/mithril-exports.txt; then
+            echo '::error::glslang C interface leaked through OpenGL export wildcard'
+            exit 1
+          fi
+
+          # Required host ABI remains visible after export restriction.
+          for sym in \
+            eglGetDisplay eglInitialize eglCreateWindowSurface eglCreateContext eglMakeCurrent eglSwapBuffers \
+            glGetString glGetError glCreateShader glCompileShader glCreateProgram glLinkProgram \
+            glDrawArrays glDrawElements glReadPixels; do
+            grep -qE " [Tt] _${sym}$" /tmp/mithril-exports.txt || {
+              echo "::error::required host symbol hidden: $sym"
+              exit 1
+            }
+          done
+
+          # TIntermNode is intentionally still compiled into this image because
+          # Mithril uses the full glslang program linker/mapIO path.  It must be
+          # a non-weak private definition, not a weak/coalescable one.
+          nm -m "$DYLIB" > /tmp/mithril-nm-m.txt
+          TINTERM=$(grep '_ZN11TIntermNode14getAsUnaryNodeEv' /tmp/mithril-nm-m.txt || true)
+          echo "TIntermNode getAsUnaryNode: $TINTERM"
+          test -n "$TINTERM"
+          if printf '%s\n' "$TINTERM" | grep -qi 'weak'; then
+            echo '::error::TIntermNode::getAsUnaryNode remains weak/coalescable'
+            exit 1
+          fi
+
+          # No unresolved glslang/TInterm reference may escape to another image.
+          nm -u "$DYLIB" > /tmp/mithril-undef.txt
+          if grep -E '(TInterm|glslang)' /tmp/mithril-undef.txt; then
+            echo '::error::unresolved glslang reference would be satisfied by another image'
+            exit 1
+          fi
+
+          # dyld weak-bind metadata is the most direct regression check for the
+          # original failure mode.  Tool spelling varies across Xcode versions.
+          if xcrun --find dyld_info >/dev/null 2>&1; then
+            xcrun dyld_info -weak_bind "$DYLIB" > /tmp/mithril-weak-bind.txt || true
+            if grep -E '(TInterm|glslang)' /tmp/mithril-weak-bind.txt; then
+              echo '::error::glslang/TInterm still appears in dyld weak-bind metadata'
+              exit 1
+            fi
+          fi
+
+      - name: Verify DirectMetal payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          DYLIB='${{ steps.locate.outputs.path }}'
+          nm "$DYLIB" > /tmp/mithril-all-symbols.txt
+          for sym in _dmt_init _dmt_available _dmt_create_swapchain; do
+            grep -Fq "$sym" /tmp/mithril-all-symbols.txt || {
+              echo "::error::DirectMetal symbol absent: $sym"
+              exit 1
+            }
+          done
+          strings "$DYLIB" > /tmp/mithril-strings.txt
+          grep -Fq 'Metal 3 (DirectMetal)' /tmp/mithril-strings.txt
+
+      - name: Ad-hoc sign and package
+        shell: bash
+        run: |
+          set -euo pipefail
+          DYLIB='${{ steps.locate.outputs.path }}'
+          codesign -f -s - "$DYLIB"
+          codesign --verify --verbose=2 "$DYLIB"
+
+          mkdir -p package
+          cp "$DYLIB" package/libmithril.dylib
+          cat > package/BUILD_INFO.txt <<EOF
+          commit=$GITHUB_SHA
+          target=iPhoneOS arm64
+          integration=Amethyst
+          backend_default=DirectMetal
+          moltenvk_ownership=dynamic-launcher-owned
+          moltenvk_blob=30477a5badd5114a2016e5fb27a27dc637c28b5d
+          glslang_isolation=private-nonweak-cxx
+          EOF
+          shasum -a 256 package/libmithril.dylib > package/SHA256SUMS.txt
+          cat package/BUILD_INFO.txt
+          cat package/SHA256SUMS.txt
+
+      - name: Upload Amethyst test dylib
+        uses: actions/upload-artifact@v4
+        with:
+          name: mithril-ios-amethyst-runtime-isolated
+          path: package/
+          if-no-files-found: error
+          retention-days: 14
