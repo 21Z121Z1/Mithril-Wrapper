@@ -6,111 +6,47 @@
     "glsl_version": "3.30",
     "symbols_file": "verify/gl46_core_symbols.txt",
     "status": "minecraft-e2e-proven",
-    "state_semantics": [
-      "core33.resource_roundtrip",
-      "core33.error_state",
-      "core33.program_state",
-      "texture.layered",
-      "buffer.mapping_ubo",
-      "framebuffer.mrt_indexed_clear",
-      "sampler.object_override",
-      "raster.state",
-      "pixel.pack_unpack",
-      "sync.query",
-      "draw.configuration"
-    ],
-    "oracles": [
-      "directmetal_texture_fbo_roundtrip_smoke",
-      "directmetal_layered_texture_smoke",
-      "directmetal_buffer_ubo_semantics_smoke",
-      "directmetal_mrt_clear_semantics_smoke",
-      "directmetal_sampler_semantics_smoke",
-      "directmetal_raster_semantics_smoke",
-      "directmetal_pixel_store_semantics_smoke",
-      "query_sync_smoke",
-      "directmetal_state_semantics_smoke",
-      "directmetal_terrain_semantics_smoke",
-      "directmetal_vertex_binding_smoke",
-      "minecraft_production_client_gametest"
-    ]
+    "state_semantics": ["core33.resource_roundtrip","core33.error_state","core33.program_state","texture.layered","buffer.mapping_ubo","framebuffer.mrt_indexed_clear","sampler.object_override","raster.state","pixel.pack_unpack","production.api_closure","sync.query","draw.configuration"],
+    "oracles": ["directmetal_texture_fbo_roundtrip_smoke","directmetal_layered_texture_smoke","directmetal_buffer_ubo_semantics_smoke","directmetal_mrt_clear_semantics_smoke","directmetal_sampler_semantics_smoke","directmetal_raster_semantics_smoke","directmetal_pixel_store_semantics_smoke","directmetal_production_api_closure_smoke","query_sync_smoke","directmetal_state_semantics_smoke","directmetal_terrain_semantics_smoke","directmetal_vertex_binding_smoke","minecraft_production_client_gametest"]
   },
   "advertised_extensions": {
-    "GL_ARB_vertex_attrib_binding": {
-      "symbols": ["glBindVertexBuffer", "glVertexAttribFormat", "glVertexAttribIFormat", "glVertexAttribLFormat", "glVertexAttribBinding", "glVertexBindingDivisor"],
-      "state_semantics": ["vertex.bind_buffer", "vertex.attrib.format", "vertex.attrib.iformat", "vertex.attrib.binding", "vertex.binding.divisor", "vertex.legacy.pointer", "vertex.legacy.divisor"],
-      "gpu_oracles": ["directmetal_vertex_binding_smoke"],
-      "status": "proven"
-    },
-    "GL_ARB_clip_control": {
-      "symbols": ["glClipControl"],
-      "state_semantics": ["clip.control"],
-      "gpu_oracles": ["directmetal_terrain_semantics_smoke"],
-      "status": "proven"
-    },
-    "GL_ARB_multi_draw_indirect": {
-      "symbols": ["glMultiDrawArraysIndirect", "glMultiDrawElementsIndirect"],
-      "state_semantics": ["draw.multi_indirect"],
-      "gpu_oracles": ["directmetal_terrain_semantics_smoke"],
-      "status": "proven"
-    },
-    "GL_ARB_indirect_parameters": {
-      "symbols": ["glMultiDrawArraysIndirectCount", "glMultiDrawElementsIndirectCount"],
-      "state_semantics": ["draw.indirect_count"],
-      "gpu_oracles": ["directmetal_terrain_semantics_smoke"],
-      "status": "proven"
-    },
-    "GL_MITHRIL_wrapper": {
-      "symbols": ["glGetString"],
-      "state_semantics": ["wrapper.identity"],
-      "gpu_oracles": ["minecraft_wrapper_identity"],
-      "status": "proven"
-    }
+    "GL_ARB_vertex_attrib_binding": {"symbols":["glBindVertexBuffer","glVertexAttribFormat","glVertexAttribIFormat","glVertexAttribLFormat","glVertexAttribBinding","glVertexBindingDivisor"],"state_semantics":["vertex.bind_buffer","vertex.attrib.format","vertex.attrib.iformat","vertex.attrib.binding","vertex.binding.divisor","vertex.legacy.pointer","vertex.legacy.divisor"],"gpu_oracles":["directmetal_vertex_binding_smoke"],"status":"proven"},
+    "GL_ARB_clip_control": {"symbols":["glClipControl"],"state_semantics":["clip.control"],"gpu_oracles":["directmetal_terrain_semantics_smoke"],"status":"proven"},
+    "GL_ARB_multi_draw_indirect": {"symbols":["glMultiDrawArraysIndirect","glMultiDrawElementsIndirect"],"state_semantics":["draw.multi_indirect"],"gpu_oracles":["directmetal_terrain_semantics_smoke"],"status":"proven"},
+    "GL_ARB_indirect_parameters": {"symbols":["glMultiDrawArraysIndirectCount","glMultiDrawElementsIndirectCount"],"state_semantics":["draw.indirect_count"],"gpu_oracles":["directmetal_terrain_semantics_smoke"],"status":"proven"},
+    "GL_MITHRIL_wrapper": {"symbols":["glGetString"],"state_semantics":["wrapper.identity"],"gpu_oracles":["minecraft_wrapper_identity"],"status":"proven"}
   },
   "semantic_evidence": {
-    "core33.resource_roundtrip": {"domain":"textures_samplers","status":"proven","oracle":"directmetal_texture_fbo_roundtrip_smoke"},
-    "texture.layered": {"domain":"textures_samplers","status":"proven","oracle":"directmetal_layered_texture_smoke"},
-    "buffer.mapping_ubo": {"domain":"buffer_mapping_storage","status":"proven","oracle":"directmetal_buffer_ubo_semantics_smoke"},
-    "framebuffer.mrt_indexed_clear": {"domain":"framebuffer_mrt","status":"proven","oracle":"directmetal_mrt_clear_semantics_smoke"},
-    "sampler.object_override": {"domain":"textures_samplers","status":"proven","oracle":"directmetal_sampler_semantics_smoke"},
-    "raster.state": {"domain":"blend_depth_stencil","status":"proven","oracle":"directmetal_raster_semantics_smoke"},
-    "pixel.pack_unpack": {"domain":"pixel_pack_unpack","status":"proven","oracle":"directmetal_pixel_store_semantics_smoke"},
-    "pixel.client_roundtrip": {"domain":"pixel_pack_unpack","status":"proven","oracle":"directmetal_texture_fbo_roundtrip_smoke"},
-    "sync.query": {"domain":"sync_query","status":"proven","oracle":"query_sync_smoke"},
-    "core33.error_state": {"domain":"state_error","status":"proven","oracle":"directmetal_state_semantics_smoke"},
-    "core33.program_state": {"domain":"program_state","status":"proven","oracle":"directmetal_state_semantics_smoke"},
-    "vertex.bind_buffer": {"domain":"vao_vertex_fetch","status":"proven","oracle":"directmetal_vertex_binding_smoke"},
-    "vertex.attrib.format": {"domain":"vao_vertex_fetch","status":"proven","oracle":"directmetal_vertex_binding_smoke"},
-    "vertex.attrib.iformat": {"domain":"vao_vertex_fetch","status":"proven","oracle":"directmetal_vertex_binding_smoke"},
-    "vertex.attrib.binding": {"domain":"vao_vertex_fetch","status":"proven","oracle":"directmetal_vertex_binding_smoke"},
-    "vertex.binding.divisor": {"domain":"vao_vertex_fetch","status":"proven","oracle":"directmetal_vertex_binding_smoke"},
-    "vertex.legacy.pointer": {"domain":"vao_vertex_fetch","status":"proven","oracle":"directmetal_vertex_binding_smoke"},
-    "vertex.legacy.ipointer": {"domain":"vao_vertex_fetch","status":"proven","oracle":"directmetal_vertex_binding_smoke"},
-    "vertex.legacy.divisor": {"domain":"vao_vertex_fetch","status":"proven","oracle":"directmetal_vertex_binding_smoke"},
-    "draw.configuration": {"domain":"draw","status":"proven","oracle":"directmetal_terrain_semantics_smoke"},
-    "clip.control": {"domain":"draw","status":"proven","oracle":"directmetal_terrain_semantics_smoke"},
-    "draw.multi_indirect": {"domain":"draw","status":"proven","oracle":"directmetal_terrain_semantics_smoke"},
-    "draw.indirect_count": {"domain":"draw","status":"proven","oracle":"directmetal_terrain_semantics_smoke"},
-    "wrapper.identity": {"domain":"runtime_identity","status":"proven","oracle":"minecraft_wrapper_identity"}
+    "core33.resource_roundtrip":{"domain":"textures_samplers","status":"proven","oracle":"directmetal_texture_fbo_roundtrip_smoke"},
+    "texture.layered":{"domain":"textures_samplers","status":"proven","oracle":"directmetal_layered_texture_smoke"},
+    "buffer.mapping_ubo":{"domain":"buffer_mapping_storage","status":"proven","oracle":"directmetal_buffer_ubo_semantics_smoke"},
+    "framebuffer.mrt_indexed_clear":{"domain":"framebuffer_mrt","status":"proven","oracle":"directmetal_mrt_clear_semantics_smoke"},
+    "sampler.object_override":{"domain":"textures_samplers","status":"proven","oracle":"directmetal_sampler_semantics_smoke"},
+    "raster.state":{"domain":"blend_depth_stencil","status":"proven","oracle":"directmetal_raster_semantics_smoke"},
+    "pixel.pack_unpack":{"domain":"pixel_pack_unpack","status":"proven","oracle":"directmetal_pixel_store_semantics_smoke"},
+    "production.api_closure":{"domain":"production_api_closure","status":"proven","oracle":"directmetal_production_api_closure_smoke"},
+    "pixel.client_roundtrip":{"domain":"pixel_pack_unpack","status":"proven","oracle":"directmetal_texture_fbo_roundtrip_smoke"},
+    "sync.query":{"domain":"sync_query","status":"proven","oracle":"query_sync_smoke"},
+    "core33.error_state":{"domain":"state_error","status":"proven","oracle":"directmetal_state_semantics_smoke"},
+    "core33.program_state":{"domain":"program_state","status":"proven","oracle":"directmetal_state_semantics_smoke"},
+    "vertex.bind_buffer":{"domain":"vao_vertex_fetch","status":"proven","oracle":"directmetal_vertex_binding_smoke"},
+    "vertex.attrib.format":{"domain":"vao_vertex_fetch","status":"proven","oracle":"directmetal_vertex_binding_smoke"},
+    "vertex.attrib.iformat":{"domain":"vao_vertex_fetch","status":"proven","oracle":"directmetal_vertex_binding_smoke"},
+    "vertex.attrib.binding":{"domain":"vao_vertex_fetch","status":"proven","oracle":"directmetal_vertex_binding_smoke"},
+    "vertex.binding.divisor":{"domain":"vao_vertex_fetch","status":"proven","oracle":"directmetal_vertex_binding_smoke"},
+    "vertex.legacy.pointer":{"domain":"vao_vertex_fetch","status":"proven","oracle":"directmetal_vertex_binding_smoke"},
+    "vertex.legacy.ipointer":{"domain":"vao_vertex_fetch","status":"proven","oracle":"directmetal_vertex_binding_smoke"},
+    "vertex.legacy.divisor":{"domain":"vao_vertex_fetch","status":"proven","oracle":"directmetal_vertex_binding_smoke"},
+    "draw.configuration":{"domain":"draw","status":"proven","oracle":"directmetal_terrain_semantics_smoke"},
+    "clip.control":{"domain":"draw","status":"proven","oracle":"directmetal_terrain_semantics_smoke"},
+    "draw.multi_indirect":{"domain":"draw","status":"proven","oracle":"directmetal_terrain_semantics_smoke"},
+    "draw.indirect_count":{"domain":"draw","status":"proven","oracle":"directmetal_terrain_semantics_smoke"},
+    "wrapper.identity":{"domain":"runtime_identity","status":"proven","oracle":"minecraft_wrapper_identity"}
   },
   "oracle_phases": {
-    "gpu": [
-      "directmetal_terrain_semantics_smoke",
-      "directmetal_vertex_binding_smoke",
-      "directmetal_state_semantics_smoke",
-      "directmetal_texture_fbo_roundtrip_smoke",
-      "directmetal_layered_texture_smoke",
-      "query_sync_smoke",
-      "directmetal_mrt_clear_semantics_smoke",
-      "directmetal_buffer_ubo_semantics_smoke",
-      "directmetal_sampler_semantics_smoke",
-      "directmetal_raster_semantics_smoke",
-      "directmetal_pixel_store_semantics_smoke"
-    ],
-    "production": ["minecraft_production_client_gametest", "minecraft_wrapper_identity"]
+    "gpu": ["directmetal_terrain_semantics_smoke","directmetal_vertex_binding_smoke","directmetal_state_semantics_smoke","directmetal_texture_fbo_roundtrip_smoke","directmetal_layered_texture_smoke","query_sync_smoke","directmetal_mrt_clear_semantics_smoke","directmetal_buffer_ubo_semantics_smoke","directmetal_sampler_semantics_smoke","directmetal_raster_semantics_smoke","directmetal_pixel_store_semantics_smoke","directmetal_production_api_closure_smoke"],
+    "production": ["minecraft_production_client_gametest","minecraft_wrapper_identity"]
   },
-  "trace_coverage": {
-    "enforced_domains": ["api_call", "vao_vertex_fetch", "draw"],
-    "next_domains": ["production_api_closure", "direct_state_access"]
-  },
+  "trace_coverage": {"enforced_domains":["api_call","vao_vertex_fetch","draw"],"next_domains":["direct_state_access"]},
   "api_evidence": {}
 }
