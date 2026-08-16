@@ -29,7 +29,7 @@ jobs:
         run: |
           set -euo pipefail
           # Compile against current Vulkan headers, but DO NOT stage/link a
-          # static MoltenVK archive.  The actual dependency is the exact dylib
+          # static MoltenVK archive. The actual dependency is the exact dylib
           # already vendored by this repository and by Amethyst.
           MOLTENVK_TAG=v1.4.2
           curl -fsSL -o MoltenVK-ios.tar \
@@ -59,12 +59,25 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          EXPORTS="$GITHUB_WORKSPACE/cmake/amethyst-ios.exports"
+          EXPORTS="$RUNNER_TEMP/amethyst-ios.exports"
           NOT_WEAK="$GITHUB_WORKSPACE/cmake/amethyst-ios.force-not-weak"
           MOLTENVK="$GITHUB_WORKSPACE/Mithril-Wrapper-cpp/3rdparty/MoltenVK/libMoltenVK.dylib"
+
+          # Generate a literal 701-symbol allow-list from Mithril's verified
+          # public ABI. This intentionally replaces the old `_gl*` wildcard,
+          # which also matched glslang's `glslang_*` C interface.
+          bash "$GITHUB_WORKSPACE/cmake/generate-amethyst-ios-exports.sh" "$EXPORTS"
           test -s "$EXPORTS"
           test -s "$NOT_WEAK"
           test -s "$MOLTENVK"
+          if grep -Eq 'glslang|TInterm|spirv_cross|^__Z' "$EXPORTS"; then
+            echo '::error::generated public ABI contains compiler implementation symbols'
+            exit 1
+          fi
+          echo '=== generated ABI sample ==='
+          head -20 "$EXPORTS"
+          echo '...'
+          tail -20 "$EXPORTS"
 
           cmake -B build-amethyst-ios \
             -DCMAKE_TOOLCHAIN_FILE=ios.toolchain.cmake \
@@ -82,7 +95,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cmake --build build-amethyst-ios --config RelWithDebInfo --target mithril -j"$(sysctl -n hw.ncpu)"
+          cmake --build build-amethyst-ios --config RelWithDebInfo --target mithril --verbose -j"$(sysctl -n hw.ncpu)"
 
       - name: Locate artifact
         id: locate
@@ -94,6 +107,7 @@ jobs:
           echo "path=$DYLIB" >> "$GITHUB_OUTPUT"
           file "$DYLIB"
           ls -lh "$DYLIB"
+          xcrun vtool -show-build "$DYLIB" || true
 
       - name: Verify single MoltenVK ownership
         shell: bash
@@ -108,7 +122,7 @@ jobs:
           }
 
           # A dynamic-client libmithril must not contain MoltenVK Objective-C
-          # implementation classes.  This is the class that produced the
+          # implementation classes. This is the class that produced the
           # duplicate-class runtime warning in the crashing build.
           nm -a "$DYLIB" > /tmp/mithril-nm-all.txt
           if grep -Fq 'MVKBlockObserver' /tmp/mithril-nm-all.txt; then
@@ -127,23 +141,26 @@ jobs:
         run: |
           set -euo pipefail
           DYLIB='${{ steps.locate.outputs.path }}'
+          EXPECTED="$RUNNER_TEMP/amethyst-ios.exports"
+          test -s "$EXPECTED"
 
           nm -gU "$DYLIB" > /tmp/mithril-exports.txt
+          awk '{print $NF}' /tmp/mithril-exports.txt | LC_ALL=C sort -u > /tmp/mithril-export-names.txt
           echo '=== exported symbol sample ==='
           head -80 /tmp/mithril-exports.txt
 
-          # The host ABI is OpenGL/EGL only.  No C++ implementation symbol may
-          # be exported, otherwise libshaderc's weak glslang lookups can bind to
-          # this image (or vice versa).
-          if grep -E '(__Z|TIntermNode|glslang|spirv_cross)' /tmp/mithril-exports.txt; then
-            echo '::error::C++/glslang implementation leaked into the dynamic export surface'
+          # The final dynamic export set must be exactly the generated GL/EGL
+          # ABI. This catches both compiler leakage and accidental host-ABI loss.
+          if ! diff -u "$EXPECTED" /tmp/mithril-export-names.txt; then
+            echo '::error::dynamic exports differ from the exact Amethyst GL/EGL ABI allow-list'
             exit 1
           fi
 
-          # Catch an over-broad _gl* allow-list accidentally exposing the
-          # optional glslang C interface.
-          if grep -E ' _glslang_' /tmp/mithril-exports.txt; then
-            echo '::error::glslang C interface leaked through OpenGL export wildcard'
+          # No C++ or shader-compiler implementation symbol may be exported,
+          # otherwise libshaderc's weak glslang lookups can bind to this image
+          # (or vice versa).
+          if grep -E '(__Z|TIntermNode|glslang|spirv_cross)' /tmp/mithril-exports.txt; then
+            echo '::error::C++/glslang implementation leaked into the dynamic export surface'
             exit 1
           fi
 
@@ -159,7 +176,7 @@ jobs:
           done
 
           # TIntermNode is intentionally still compiled into this image because
-          # Mithril uses the full glslang program linker/mapIO path.  It must be
+          # Mithril uses the full glslang program linker/mapIO path. It must be
           # a non-weak private definition, not a weak/coalescable one.
           nm -m "$DYLIB" > /tmp/mithril-nm-m.txt
           TINTERM=$(grep '_ZN11TIntermNode14getAsUnaryNodeEv' /tmp/mithril-nm-m.txt || true)
@@ -170,19 +187,40 @@ jobs:
             exit 1
           fi
 
-          # No unresolved glslang/TInterm reference may escape to another image.
+          # No unresolved glslang/TInterm/SPIRV-Cross reference may escape to
+          # another image.
           nm -u "$DYLIB" > /tmp/mithril-undef.txt
-          if grep -E '(TInterm|glslang)' /tmp/mithril-undef.txt; then
-            echo '::error::unresolved glslang reference would be satisfied by another image'
+          if grep -E '(TInterm|glslang|spirv_cross)' /tmp/mithril-undef.txt; then
+            echo '::error::unresolved shader-compiler reference would be satisfied by another image'
             exit 1
           fi
 
-          # dyld weak-bind metadata is the most direct regression check for the
-          # original failure mode.  Tool spelling varies across Xcode versions.
+          # dyld bind metadata is the direct regression check for the original
+          # cross-image TIntermNode dispatch failure. Tool availability/spelling
+          # varies across Xcode images, so only skip a view when the tool itself
+          # is unavailable.
           if xcrun --find dyld_info >/dev/null 2>&1; then
             xcrun dyld_info -weak_bind "$DYLIB" > /tmp/mithril-weak-bind.txt || true
-            if grep -E '(TInterm|glslang)' /tmp/mithril-weak-bind.txt; then
-              echo '::error::glslang/TInterm still appears in dyld weak-bind metadata'
+            if grep -E '(TInterm|glslang|spirv_cross)' /tmp/mithril-weak-bind.txt; then
+              echo '::error::shader-compiler symbol appears in dyld weak-bind metadata'
+              exit 1
+            fi
+            xcrun dyld_info -bind "$DYLIB" > /tmp/mithril-bind.txt || true
+            if grep -E '(TInterm|glslang|spirv_cross)' /tmp/mithril-bind.txt; then
+              echo '::error::shader-compiler symbol appears in external dyld bind metadata'
+              exit 1
+            fi
+          fi
+
+          if xcrun --find llvm-objdump >/dev/null 2>&1; then
+            xcrun llvm-objdump --macho --exports-trie "$DYLIB" > /tmp/mithril-exports-trie.txt || true
+            if grep -E '(TInterm|glslang|spirv_cross|__Z)' /tmp/mithril-exports-trie.txt; then
+              echo '::error::shader-compiler/C++ symbol appears in Mach-O exports trie'
+              exit 1
+            fi
+            xcrun llvm-objdump --macho --chained-fixups "$DYLIB" > /tmp/mithril-chained-fixups.txt 2>/dev/null || true
+            if grep -E '(TInterm|glslang|spirv_cross)' /tmp/mithril-chained-fixups.txt; then
+              echo '::error::shader-compiler symbol appears in chained fixups'
               exit 1
             fi
           fi
@@ -209,17 +247,24 @@ jobs:
           DYLIB='${{ steps.locate.outputs.path }}'
           codesign -f -s - "$DYLIB"
           codesign --verify --verbose=2 "$DYLIB"
+          codesign -dvvv "$DYLIB" 2>&1 | tee /tmp/mithril-codesign.txt
 
           mkdir -p package
           cp "$DYLIB" package/libmithril.dylib
           cat > package/BUILD_INFO.txt <<EOF
+          repository=$GITHUB_REPOSITORY
+          branch=${GITHUB_REF_NAME}
           commit=$GITHUB_SHA
+          workflow_run=$GITHUB_RUN_ID
           target=iPhoneOS arm64
+          deployment_target=15.0
           integration=Amethyst
           backend_default=DirectMetal
+          moltenvk_version=v1.4.2
+          moltenvk_linkage=dynamic-@rpath/libMoltenVK.dylib
           moltenvk_ownership=dynamic-launcher-owned
           moltenvk_blob=30477a5badd5114a2016e5fb27a27dc637c28b5d
-          glslang_isolation=private-nonweak-cxx
+          glslang_isolation=exact-public-abi+private-nonweak-cxx
           EOF
           shasum -a 256 package/libmithril.dylib > package/SHA256SUMS.txt
           cat package/BUILD_INFO.txt
@@ -228,7 +273,7 @@ jobs:
       - name: Upload Amethyst test dylib
         uses: actions/upload-artifact@v4
         with:
-          name: mithril-ios-amethyst-runtime-isolated
+          name: mithril-ios-amethyst-isolated
           path: package/
           if-no-files-found: error
           retention-days: 14
