@@ -1,0 +1,322 @@
+name: DirectVulkan validation
+
+on:
+  push:
+    branches:
+      - codex/directvulkan-overnight-recovery-20260814
+  pull_request:
+    branches:
+      - codex/directvulkan-overnight-recovery-20260814
+  workflow_dispatch:
+    inputs:
+      deep:
+        description: Run expected-green macOS, iPhoneOS, and lifecycle lanes
+        required: false
+        default: false
+        type: boolean
+      diagnostics:
+        description: Run the strict overnight semantic diagnostic (known red until documented backend gaps are fixed)
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: directvulkan-validation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-smoke:
+    name: Linux lavapipe stable regression
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Install Vulkan software stack
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build clang libvulkan-dev vulkan-tools mesa-vulkan-drivers
+          vulkaninfo --summary || true
+
+      - name: Build DirectVulkan
+        run: |
+          cmake -S . -B build-linux -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -DCMAKE_C_FLAGS='-Wno-error' \
+            -DCMAKE_CXX_FLAGS='-Wno-error'
+          cmake --build build-linux --target mithril -j2
+
+      - name: Build stable regression drivers
+        run: |
+          clang -std=c11 -O0 -g -Wall -Wextra -IMithril-Wrapper-cpp/include \
+            -o tests/gl_smoke_ci tests/gl_smoke.c -ldl
+          clang -D_GNU_SOURCE -std=c11 -O0 -g -Wall -Wextra -IMithril-Wrapper-cpp/include \
+            -o tests/render_smoke_ci tests/render_smoke.c -ldl
+          clang -std=c11 -O0 -g -Wall -Wextra -IMithril-Wrapper-cpp/include \
+            -o tests/egl_sync_smoke_ci tests/egl_sync_smoke.c -ldl
+
+      - name: Resolve Vulkan runtime closure
+        shell: bash
+        run: |
+          set -euo pipefail
+          LIB=$(realpath "$(find build-linux -name 'libmithril.so' -type f | head -1)")
+          test -f "$LIB"
+          echo "MITHRIL_LIB=$LIB" >> "$GITHUB_ENV"
+          ldd -r "$LIB" 2>&1 | tee /tmp/mithril-ldd-r.txt
+          ! grep -E 'undefined symbol|not found' /tmp/mithril-ldd-r.txt
+          ICD=$(find /usr/share/vulkan/icd.d -maxdepth 1 -type f -name 'lvp_icd*.json' | head -1)
+          test -f "$ICD"
+          echo "VK_ICD_FILENAMES=$ICD" >> "$GITHUB_ENV"
+
+      - name: Run stable GL to Vulkan regression suite
+        env:
+          MITHRIL_DEBUG: '1'
+        run: |
+          set -euo pipefail
+          ./tests/gl_smoke_ci "$MITHRIL_LIB"
+          ./tests/render_smoke_ci "$MITHRIL_LIB"
+          ./tests/egl_sync_smoke_ci "$MITHRIL_LIB"
+
+  sanitizers:
+    name: Linux ASan + UBSan stable harnesses
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Install Vulkan software stack
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build clang libvulkan-dev mesa-vulkan-drivers
+
+      - name: Build sanitized DirectVulkan and stable drivers
+        shell: bash
+        run: |
+          set -euo pipefail
+          SAN='-fsanitize=address,undefined -shared-libsan -fno-omit-frame-pointer -fno-sanitize-recover=all'
+          cmake -S . -B build-sanitize -G Ninja \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -DCMAKE_C_FLAGS="$SAN -Wno-error" \
+            -DCMAKE_CXX_FLAGS="$SAN -Wno-error" \
+            -DCMAKE_SHARED_LINKER_FLAGS="$SAN"
+          cmake --build build-sanitize --target mithril -j2
+          clang -std=c11 -O0 -g $SAN -IMithril-Wrapper-cpp/include \
+            -o tests/gl_smoke_asan tests/gl_smoke.c -ldl
+          clang -std=c11 -O0 -g $SAN -IMithril-Wrapper-cpp/include \
+            -o tests/egl_sync_smoke_asan tests/egl_sync_smoke.c -ldl
+
+      - name: Resolve sanitizer runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          LIB=$(realpath "$(find build-sanitize -name 'libmithril.so' -type f | head -1)")
+          test -f "$LIB"
+          echo "MITHRIL_LIB=$LIB" >> "$GITHUB_ENV"
+          ICD=$(find /usr/share/vulkan/icd.d -maxdepth 1 -type f -name 'lvp_icd*.json' | head -1)
+          test -f "$ICD"
+          echo "VK_ICD_FILENAMES=$ICD" >> "$GITHUB_ENV"
+          ASAN_SO=$(clang -print-file-name=libclang_rt.asan-x86_64.so)
+          test -f "$ASAN_SO"
+          SAN_DIR=$(dirname "$ASAN_SO")
+          echo "LD_LIBRARY_PATH=$SAN_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+          echo "LD_PRELOAD=$ASAN_SO" >> "$GITHUB_ENV"
+
+      - name: Run sanitizer regressions
+        env:
+          MITHRIL_DEBUG: '0'
+          ASAN_OPTIONS: detect_leaks=0:halt_on_error=1:allocator_may_return_null=0
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+        run: |
+          set -euo pipefail
+          ./tests/gl_smoke_asan "$MITHRIL_LIB"
+          ./tests/egl_sync_smoke_asan "$MITHRIL_LIB"
+
+  macos-gpu:
+    name: macOS 26 MoltenVK / Metal runtime
+    if: github.event_name == 'workflow_dispatch' && inputs.deep
+    runs-on: macos-26-arm64
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - name: Install Vulkan loader and MoltenVK
+        run: brew install vulkan-loader molten-vk
+      - name: Build Mithril and stable host drivers
+        run: |
+          cmake -B build-native \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_C_FLAGS='-Wno-error' \
+            -DCMAKE_CXX_FLAGS='-Wno-error'
+          cmake --build build-native --config RelWithDebInfo --target mithril -j$(sysctl -n hw.ncpu)
+          DYLIB=$(realpath "$(find build-native -name 'libmithril.dylib' -type f | head -1)")
+          test -f "$DYLIB"
+          echo "MITHRIL_DYLIB=$DYLIB" >> "$GITHUB_ENV"
+          clang -std=c11 -O0 -Wall -Wextra -IMithril-Wrapper-cpp/include -o tests/gl_smoke_ci tests/gl_smoke.c -ldl
+          clang -std=c11 -O0 -Wall -Wextra -IMithril-Wrapper-cpp/include -o tests/render_smoke_ci tests/render_smoke.c -ldl
+          clang -std=c11 -O0 -Wall -Wextra -IMithril-Wrapper-cpp/include -o tests/egl_sync_smoke_ci tests/egl_sync_smoke.c -ldl
+          clang++ -std=c++17 -fobjc-arc -O0 -Wall -Wextra \
+            -framework Foundation -framework QuartzCore -framework Metal \
+            -o tests/surface_metal_smoke_ci tests/surface_metal_smoke.mm -ldl
+      - name: Run real-GPU stable regressions
+        env:
+          MITHRIL_DEBUG: '1'
+        run: |
+          set -euo pipefail
+          export DYLD_LIBRARY_PATH="$(brew --prefix)/lib"
+          ./tests/gl_smoke_ci "$MITHRIL_DYLIB"
+          ./tests/render_smoke_ci "$MITHRIL_DYLIB"
+          ./tests/egl_sync_smoke_ci "$MITHRIL_DYLIB"
+          ./tests/surface_metal_smoke_ci "$MITHRIL_DYLIB"
+
+  ios-cross-build:
+    name: iPhoneOS arm64 ABI
+    if: github.event_name == 'workflow_dispatch' && inputs.deep
+    runs-on: macos-26-arm64
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - name: Fetch pinned iOS toolchain and MoltenVK
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL -o ios.toolchain.cmake \
+            https://raw.githubusercontent.com/leetal/ios-cmake/4.5.0/ios.toolchain.cmake
+          curl -fsSL -o MoltenVK-ios.tar \
+            https://github.com/KhronosGroup/MoltenVK/releases/download/v1.4.2/MoltenVK-ios.tar
+          mkdir moltenvk-staging
+          tar -xf MoltenVK-ios.tar -C moltenvk-staging
+          FOUND=$(find moltenvk-staging -type d -name MoltenVK.xcframework -path '*static*' | head -1)
+          test -n "$FOUND"
+          mv "$FOUND" ./MoltenVK.xcframework
+          HDRS=$(find moltenvk-staging -type d -name vulkan -path '*/include/vulkan' | head -1)
+          test -n "$HDRS"
+          mv "$(dirname "$HDRS")" ./MoltenVK-Headers
+      - name: Build and verify iPhoneOS dylib
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -B build-ios \
+            -DCMAKE_TOOLCHAIN_FILE=ios.toolchain.cmake \
+            -DPLATFORM=OS64 \
+            -DDEPLOYMENT_TARGET=15.0 \
+            -DENABLE_BITCODE=OFF \
+            -DENABLE_ARC=OFF \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_C_FLAGS='-Wno-error=implicit-function-declaration' \
+            -DCMAKE_CXX_FLAGS='-Wno-error'
+          cmake --build build-ios --config RelWithDebInfo --target mithril -j$(sysctl -n hw.ncpu)
+          DYLIB=$(realpath "$(find build-ios -name 'libmithril.dylib' -type f | head -1)")
+          test -f "$DYLIB"
+          file "$DYLIB"
+          NM_OUT=$(nm -gU "$DYLIB")
+          for sym in eglGetDisplay eglInitialize eglCreateContext eglMakeCurrent eglSwapBuffers glGetString glGetIntegerv glTexSubImage2D glDrawArrays glDrawElements; do
+            echo "$NM_OUT" | grep -qE " [Tt] _?${sym}$" || { echo "missing $sym"; exit 1; }
+          done
+          otool -L "$DYLIB"
+
+  lifecycle-stress:
+    name: Linux repeated stable lifecycle stress
+    if: github.event_name == 'workflow_dispatch' && inputs.deep
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - name: Install Vulkan software stack
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build clang libvulkan-dev mesa-vulkan-drivers
+      - name: Build DirectVulkan and render smoke
+        run: |
+          cmake -S . -B build-stress -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -DCMAKE_C_FLAGS='-Wno-error' \
+            -DCMAKE_CXX_FLAGS='-Wno-error'
+          cmake --build build-stress --target mithril -j2
+          clang -D_GNU_SOURCE -std=c11 -O0 -g -IMithril-Wrapper-cpp/include \
+            -o tests/render_smoke_stress tests/render_smoke.c -ldl
+      - name: Resolve runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          LIB=$(realpath "$(find build-stress -name 'libmithril.so' -type f | head -1)")
+          test -f "$LIB"
+          echo "MITHRIL_LIB=$LIB" >> "$GITHUB_ENV"
+          ICD=$(find /usr/share/vulkan/icd.d -maxdepth 1 -type f -name 'lvp_icd*.json' | head -1)
+          test -f "$ICD"
+          echo "VK_ICD_FILENAMES=$ICD" >> "$GITHUB_ENV"
+      - name: Repeat complete process lifecycle ten times
+        env:
+          MITHRIL_DEBUG: '0'
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 10); do
+            echo "=== iteration $i/10 ==="
+            ./tests/render_smoke_stress "$MITHRIL_LIB"
+          done
+
+  overnight-semantic-diagnostic:
+    name: Known-open DirectVulkan semantic diagnostic
+    if: github.event_name == 'workflow_dispatch' && inputs.diagnostics
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - name: Install Vulkan software stack
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build clang libvulkan-dev mesa-vulkan-drivers
+      - name: Build DirectVulkan and strict overnight oracle
+        run: |
+          cmake -S . -B build-diagnostic -G Ninja \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_C_COMPILER=clang \
+            -DCMAKE_CXX_COMPILER=clang++ \
+            -DCMAKE_C_FLAGS='-Wno-error' \
+            -DCMAKE_CXX_FLAGS='-Wno-error'
+          cmake --build build-diagnostic --target mithril -j2
+          clang -D_GNU_SOURCE -std=c11 -O0 -g -Wall -Wextra -IMithril-Wrapper-cpp/include \
+            -o tests/overnight_regression_diagnostic tests/overnight_regression_smoke.c -ldl
+      - name: Resolve runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          LIB=$(realpath "$(find build-diagnostic -name 'libmithril.so' -type f | head -1)")
+          test -f "$LIB"
+          echo "MITHRIL_LIB=$LIB" >> "$GITHUB_ENV"
+          ICD=$(find /usr/share/vulkan/icd.d -maxdepth 1 -type f -name 'lvp_icd*.json' | head -1)
+          test -f "$ICD"
+          echo "VK_ICD_FILENAMES=$ICD" >> "$GITHUB_ENV"
+      - name: Run strict semantic diagnostic
+        env:
+          MITHRIL_DEBUG: '1'
+        run: |
+          set -euo pipefail
+          ./tests/overnight_regression_diagnostic "$MITHRIL_LIB"
