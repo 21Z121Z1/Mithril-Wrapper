@@ -165,6 +165,17 @@ def main():
         elif oracle not in gpu_oracles:
             failures.append(f"api_evidence {api}: oracle {oracle} is not a prerequisite GPU oracle")
 
+    required_production_apis = manifest.get("production_trace", {}).get("required_apis", [])
+    if not required_production_apis:
+        failures.append("production_trace.required_apis is missing or empty")
+    if len(required_production_apis) != len(set(required_production_apis)):
+        failures.append("production_trace.required_apis contains duplicates")
+    for api in required_production_apis:
+        if not re.fullmatch(r"gl[A-Za-z0-9_]+", api):
+            failures.append(f"production_trace has invalid API {api!r}")
+        if api not in api_evidence:
+            failures.append(f"required production API lacks api_evidence: {api}")
+
     repo_root = manifest_path.parents[2]
     core_symbols_path = repo_root / core.get("symbols_file", "")
     core_required = []
@@ -226,6 +237,7 @@ def main():
     trace_events = []
     observed = {}
     malformed = []
+    observed_api_calls = set()
     if args.trace:
         trace_events = parse_trace(pathlib.Path(args.trace))
         for event in trace_events:
@@ -238,6 +250,7 @@ def main():
             observed[key]["apis"].add(event["api"])
             observed[key]["domains"].add(event["domain"])
             if event["domain"] == "api_call" and key.startswith("api."):
+                observed_api_calls.add(event["api"])
                 evidence = api_evidence.get(event["api"])
                 if not evidence or evidence.get("status") != "proven":
                     failures.append(f"observed but unproven API: {event['api']} line {event['line']}")
@@ -256,6 +269,12 @@ def main():
         missing_domains = sorted(enforced - seen_domains)
         if missing_domains:
             failures.append("required trace domain not observed: " + ", ".join(missing_domains))
+
+    missing_required_apis = []
+    if args.require_trace:
+        missing_required_apis = sorted(set(required_production_apis) - observed_api_calls)
+        if missing_required_apis:
+            failures.append("required production API not observed in semantic trace: " + ", ".join(missing_required_apis))
 
     report_observed = {
         key: {
@@ -278,6 +297,11 @@ def main():
         "advertised_extensions": advertised,
         "registered_gpu_oracles": sorted(gpu_oracles),
         "api_evidence_count": len(api_evidence),
+        "production_trace_contract": {
+            "required_api_count": len(required_production_apis),
+            "observed_api_count": len(observed_api_calls),
+            "missing_required_apis": missing_required_apis,
+        },
         "export_check_performed": exports is not None,
         "trace_event_count": len(trace_events),
         "observed_semantics": report_observed,
