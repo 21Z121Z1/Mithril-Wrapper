@@ -1,0 +1,93 @@
+name: GL 4.6 ABI and state semantics
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['ci/minecraft-on-mithril-e2e-*']
+    paths:
+      - 'Mithril-Wrapper-cpp/**'
+      - 'tests/gl46_state_semantics_smoke.c'
+      - 'verify/gl46_core_symbols.txt'
+      - 'verify/gl46_semantic_audit.py'
+      - '.github/workflows/gl46-state-semantics.yml'
+
+permissions: { contents: read }
+
+concurrency:
+  group: gl46-state-semantics-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  abi-and-state-semantics:
+    runs-on: macos-26
+    timeout-minutes: 15
+    env:
+      MITHRIL_BACKEND: metal
+      MTL_DEBUG_LAYER: 1
+      MTL_SHADER_VALIDATION: 0
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - name: Install native dependencies
+        run: brew install vulkan-loader molten-vk ninja
+      - name: Build production Mithril
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-gl46-state -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_FLAGS='-Wno-error' -DCMAKE_CXX_FLAGS='-Wno-error'
+          cmake --build build-gl46-state --target mithril --parallel
+          MITHRIL=$(find build-gl46-state -type f -name libmithril.dylib -print -quit)
+          test -s "$MITHRIL"
+          echo "MITHRIL=$MITHRIL" >> "$GITHUB_ENV"
+      - name: Enforce all 657 OpenGL 4.6 Core ABI entry points
+        shell: bash
+        run: |
+          set -euo pipefail
+          nm -gU "$MITHRIL" | awk '{print $3}' | sed 's/^_//' | sort -u > build-gl46-state/exported.txt
+          python3 - <<'PY'
+          from pathlib import Path
+          expected=[]
+          for line in Path('verify/gl46_core_symbols.txt').read_text().splitlines():
+              if not line.strip() or line.lstrip().startswith('#'):
+                  continue
+              parts=line.split()
+              expected.append(parts[-1])
+          exported=set(Path('build-gl46-state/exported.txt').read_text().splitlines())
+          missing=[x for x in expected if x not in exported]
+          print(f'GL46 ABI expected={len(expected)} exported_core={len(expected)-len(missing)} missing={len(missing)}')
+          if len(expected) != 657:
+              raise SystemExit(f'canonical list changed unexpectedly: {len(expected)} != 657')
+          if missing:
+              print('\n'.join('MISSING '+x for x in missing))
+              raise SystemExit(1)
+          PY
+      - name: Run fast semantic source regression guard
+        run: python3 verify/gl46_semantic_audit.py
+      - name: Compile focused GL 4.6 behavioral oracle
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang -std=c11 -O2 -Wall -Wextra -Werror \
+            -IMithril-Wrapper-cpp/include tests/gl46_state_semantics_smoke.c \
+            -o build-gl46-state/gl46_state_semantics_smoke
+      - name: Run state semantics on real hosted Metal GPU
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DYLD_LIBRARY_PATH="$(brew --prefix)/lib:${DYLD_LIBRARY_PATH:-}"
+          build-gl46-state/gl46_state_semantics_smoke "$MITHRIL" | tee build-gl46-state/gl46-state-semantics.log
+          grep -q 'GL46 STATE SEMANTICS ALL PASSED' build-gl46-state/gl46-state-semantics.log
+      - name: Upload semantic evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: gl46-state-semantics-${{ github.sha }}-${{ github.run_attempt }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: |
+            build-gl46-state/gl46-state-semantics.log
+            build-gl46-state/exported.txt
