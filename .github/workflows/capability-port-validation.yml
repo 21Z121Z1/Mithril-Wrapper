@@ -1,0 +1,84 @@
+name: legacy-capability-port-gate
+
+on:
+  push:
+    branches: [integration/legacy-capability-port]
+  pull_request:
+    branches: [integration/legacy-capability-port]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: legacy-capability-port-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  directmetal-semantic-smoke:
+    name: Legacy DirectMetal semantic integration smoke
+    runs-on: macos-26
+    timeout-minutes: 25
+    env:
+      MITHRIL_BACKEND: metal
+      MTL_DEBUG_LAYER: '1'
+      MTL_SHADER_VALIDATION: '0'
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Install native dependencies
+        run: brew install vulkan-loader molten-vk ninja
+
+      - name: Build dual-backend migration source
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-capability-port -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_FLAGS='-Wno-error' \
+            -DCMAKE_CXX_FLAGS='-Wno-error'
+          cmake --build build-capability-port --target mithril --parallel
+          DYLIB=$(find build-capability-port -type f -name libmithril.dylib -print -quit)
+          test -s "$DYLIB"
+          DYLIB="$(cd "$(dirname "$DYLIB")" && pwd)/$(basename "$DYLIB")"
+          echo "MITHRIL_DYLIB=$DYLIB" >> "$GITHUB_ENV"
+          file "$DYLIB"
+          git diff --check
+
+      - name: Compile representative semantic oracles
+        shell: bash
+        run: |
+          set -euo pipefail
+          common=(-O0 -g -Wall -Wextra -Werror -IMithril-Wrapper-cpp/include)
+          clang -std=gnu11 "${common[@]}" tests/directmetal_state_semantics_smoke.c \
+            -o build-capability-port/state_semantics -ldl
+          clang -std=c11 "${common[@]}" tests/directmetal_texture_fbo_roundtrip_smoke.c \
+            -o build-capability-port/texture_fbo_roundtrip -ldl
+          clang -std=gnu11 "${common[@]}" tests/query_sync_smoke.c \
+            -o build-capability-port/query_sync -ldl
+          clang -std=gnu11 "${common[@]}" \
+            -DGL_TEXTURE_WIDTH=0x1000 -DGL_TEXTURE_HEIGHT=0x1001 -DGL_TEXTURE_INTERNAL_FORMAT=0x1003 \
+            tests/directmetal_production_api_closure_smoke.c \
+            -o build-capability-port/production_api_closure -ldl
+
+      - name: Run representative real-GPU semantic oracles
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DYLD_LIBRARY_PATH="$(brew --prefix)/lib"
+          build-capability-port/state_semantics "$MITHRIL_DYLIB"
+          build-capability-port/texture_fbo_roundtrip "$MITHRIL_DYLIB"
+          build-capability-port/query_sync "$MITHRIL_DYLIB"
+          build-capability-port/production_api_closure "$MITHRIL_DYLIB"
+
+      - name: Record integration boundary
+        run: |
+          {
+            echo '### Legacy capability-port gate'
+            echo '- This validates the historical `Mithril-Wrapper-cpp` migration source only.'
+            echo '- Passing this gate does not make this branch a shipping target.'
+            echo '- Validated semantics must still be ported into the clean `src/*` architecture.'
+          } >> "$GITHUB_STEP_SUMMARY"
