@@ -2,9 +2,9 @@ name: build-mithril
 
 on:
   push:
-    branches: [integration/directmetal-unified-20260815]
+    branches: [integration/directmetal-next]
   pull_request:
-    branches: [integration/directmetal-unified-20260815]
+    branches: [integration/directmetal-next]
   workflow_dispatch:
 
 permissions:
