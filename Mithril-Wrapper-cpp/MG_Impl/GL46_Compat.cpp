@@ -267,7 +267,12 @@ void glGetActiveUniformsiv(GLuint program, GLsizei uniformCount,
             case GL_UNIFORM_TYPE:          params[i] = (GLint)u.type; break;
             case GL_UNIFORM_SIZE:          params[i] = u.size; break;
             case GL_UNIFORM_NAME_LENGTH:   params[i] = (GLint)u.name.size() + 1; break;
-            case GL_UNIFORM_BLOCK_INDEX:   params[i] = u.blockIndex; break;
+            case GL_UNIFORM_BLOCK_INDEX:
+                params[i] = (u.blockIndex >= 0 &&
+                             u.blockBinding >= 0 &&
+                             p->blockIndexForDescriptor.count((GLuint)u.blockBinding) != 0)
+                                ? u.blockIndex : -1;
+                break;
             case GL_UNIFORM_OFFSET:        params[i] = u.offset; break;
             case GL_UNIFORM_ARRAY_STRIDE:  params[i] = u.arrayStride; break;
             case GL_UNIFORM_MATRIX_STRIDE: params[i] = u.matrixStride; break;

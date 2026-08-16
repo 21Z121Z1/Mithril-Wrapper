@@ -56,6 +56,9 @@ require("Set all indices to GL_INVALID_INDEX" not in gl,
         "glGetUniformIndices must not be a facade default")
 require("\x00" not in gl, "GL46 compatibility source must not contain embedded NUL bytes")
 
+require("p->blockIndexForDescriptor.count((GLuint)u.blockBinding)" in gl,
+        "GL uniform reflection must hide backend-synthetic UBOs from GL_UNIFORM_BLOCK_INDEX")
+
 require("gl46_get_sampler_scalar" in gl and "gl46_set_sampler_scalar" in gl,
         "sampler getters/setters must expose tracked sampler state")
 require("Sampler object getters (GL 3.3): return the GL defaults" not in gl,
