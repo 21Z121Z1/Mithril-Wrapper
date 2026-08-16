@@ -806,8 +806,12 @@ int read_pixels(int x, int y, int w, int h, GLenum format, GLenum type, void* ou
         src_layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     } else {
         mithril::Framebuffer* fbo = mithril::state_get_framebuffer(readFboName);
-        if (!fbo || !fbo->colors[0].texture) return 0;
-        src_tex_id = fbo->colors[0].texture;
+        if (!fbo || fbo->readBuffer == GL_NONE ||
+            fbo->readBuffer < GL_COLOR_ATTACHMENT0 ||
+            fbo->readBuffer > GL_COLOR_ATTACHMENT7) return 0;
+        const GLuint readIndex = (GLuint)(fbo->readBuffer - GL_COLOR_ATTACHMENT0);
+        if (!fbo->colors[readIndex].texture) return 0;
+        src_tex_id = fbo->colors[readIndex].texture;
         src_image = dvk_get_texture_image(src_tex_id);
         mithril::Texture* t = mithril::state_get_texture(src_tex_id);
         if (t) src_fmt = gl_internal_to_vk((GLenum)t->internalFormat);
@@ -837,9 +841,11 @@ int read_pixels(int x, int y, int w, int h, GLenum format, GLenum type, void* ou
         src_layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     } else {
         mithril::Framebuffer* fbo = mithril::state_get_framebuffer(readFboName);
-        if (fbo) {
+        if (fbo && fbo->readBuffer >= GL_COLOR_ATTACHMENT0 &&
+            fbo->readBuffer <= GL_COLOR_ATTACHMENT7) {
+            const GLuint readIndex = (GLuint)(fbo->readBuffer - GL_COLOR_ATTACHMENT0);
             auto& tbl = mithril::vk::texture_table();
-            auto tit = tbl.find(fbo->colors[0].texture);
+            auto tit = tbl.find(fbo->colors[readIndex].texture);
             if (tit != tbl.end()) src_layout = tit->second.currentLayout;
         }
     }

@@ -91,139 +91,79 @@ void glClear(GLbitfield mask) {
 
 void glClearBufferfv(GLenum buffer, GLint drawbuffer, const GLfloat* value) {
     MITHRIL_ENSURE_INIT();
-    if (!value) return;
-    if (!mg_conditional_render_allows()) return;   // conditional render 门控
-    (void)drawbuffer;  // backend_clear_attachments clears all color attachments
-
-    VkImageView colors[8] = {VK_NULL_HANDLE};
-    VkImageView depth = VK_NULL_HANDLE;
-    int w = 0, h = 0;
-    int n = mithril::collect_draw_fbo_attachments(colors, &depth, &w, &h);
-
-    GLbitfield mask = 0;
-    if (buffer == GL_COLOR) {
-        GLfloat save[4] = {g_state->clearColor[0], g_state->clearColor[1],
-                           g_state->clearColor[2], g_state->clearColor[3]};
-        backend_set_clear_color(value[0], value[1], value[2], value[3]);
-        g_state->clearColor[0] = value[0]; g_state->clearColor[1] = value[1];
-        g_state->clearColor[2] = value[2]; g_state->clearColor[3] = value[3];
-        mask = GL_COLOR_BUFFER_BIT;
-        backend_set_load_load();
-        backend_begin_render_pass(colors, n, depth, w, h, mithril::draw_fbo_sample_count());
-        backend_clear_attachments(mask, 0, 0, w, h);
-        backend_end_render_pass();
-        g_state->clearColor[0] = save[0]; g_state->clearColor[1] = save[1];
-        g_state->clearColor[2] = save[2]; g_state->clearColor[3] = save[3];
-        backend_set_clear_color(save[0], save[1], save[2], save[3]);
-    } else if (buffer == GL_DEPTH) {
-        GLdouble save = g_state->clearDepth;
-        backend_set_clear_depth((double)value[0]);
-        g_state->clearDepth = (GLclampd)value[0];
-        mask = GL_DEPTH_BUFFER_BIT;
-        backend_set_load_load();
-        backend_begin_render_pass(colors, n, depth, w, h, mithril::draw_fbo_sample_count());
-        backend_clear_attachments(mask, 0, 0, w, h);
-        backend_end_render_pass();
-        g_state->clearDepth = save;
-        backend_set_clear_depth(save);
-    }
-}
-
-void glClearBufferiv(GLenum buffer, GLint drawbuffer, const GLint* value) {
-    MITHRIL_ENSURE_INIT();
-    if (!value) return;
-    if (!mg_conditional_render_allows()) return;   // conditional render 门控
-    (void)drawbuffer;
-
-    VkImageView colors[8] = {VK_NULL_HANDLE};
-    VkImageView depth = VK_NULL_HANDLE;
-    int w = 0, h = 0;
-    int n = mithril::collect_draw_fbo_attachments(colors, &depth, &w, &h);
-
-    GLbitfield mask = 0;
-    if (buffer == GL_COLOR) {
-        GLfloat save[4] = {g_state->clearColor[0], g_state->clearColor[1],
-                           g_state->clearColor[2], g_state->clearColor[3]};
-        backend_set_clear_color((float)value[0], (float)value[1], (float)value[2], (float)value[3]);
-        g_state->clearColor[0] = (float)value[0]; g_state->clearColor[1] = (float)value[1];
-        g_state->clearColor[2] = (float)value[2]; g_state->clearColor[3] = (float)value[3];
-        mask = GL_COLOR_BUFFER_BIT;
-        backend_set_load_load();
-        backend_begin_render_pass(colors, n, depth, w, h, mithril::draw_fbo_sample_count());
-        backend_clear_attachments(mask, 0, 0, w, h);
-        backend_end_render_pass();
-        g_state->clearColor[0] = save[0]; g_state->clearColor[1] = save[1];
-        g_state->clearColor[2] = save[2]; g_state->clearColor[3] = save[3];
-        backend_set_clear_color(save[0], save[1], save[2], save[3]);
-    } else if (buffer == GL_STENCIL) {
-        GLint save = g_state->clearStencil;
-        backend_set_clear_stencil(value[0]);
-        g_state->clearStencil = value[0];
-        mask = GL_STENCIL_BUFFER_BIT;
-        backend_set_load_load();
-        backend_begin_render_pass(colors, n, depth, w, h, mithril::draw_fbo_sample_count());
-        backend_clear_attachments(mask, 0, 0, w, h);
-        backend_end_render_pass();
-        g_state->clearStencil = save;
-        backend_set_clear_stencil(save);
-    }
-}
-
-void glClearBufferuiv(GLenum buffer, GLint drawbuffer, const GLuint* value) {
-    MITHRIL_ENSURE_INIT();
-    if (!value) return;
-    if (!mg_conditional_render_allows()) return;   // conditional render 门控
-    (void)drawbuffer;
-
-    VkImageView colors[8] = {VK_NULL_HANDLE};
-    VkImageView depth = VK_NULL_HANDLE;
-    int w = 0, h = 0;
-    int n = mithril::collect_draw_fbo_attachments(colors, &depth, &w, &h);
-
-    if (buffer == GL_COLOR) {
-        GLfloat save[4] = {g_state->clearColor[0], g_state->clearColor[1],
-                           g_state->clearColor[2], g_state->clearColor[3]};
-        backend_set_clear_color((float)value[0], (float)value[1], (float)value[2], (float)value[3]);
-        g_state->clearColor[0] = (float)value[0]; g_state->clearColor[1] = (float)value[1];
-        g_state->clearColor[2] = (float)value[2]; g_state->clearColor[3] = (float)value[3];
-        backend_set_load_load();
-        backend_begin_render_pass(colors, n, depth, w, h, mithril::draw_fbo_sample_count());
-        backend_clear_attachments(GL_COLOR_BUFFER_BIT, 0, 0, w, h);
-        backend_end_render_pass();
-        g_state->clearColor[0] = save[0]; g_state->clearColor[1] = save[1];
-        g_state->clearColor[2] = save[2]; g_state->clearColor[3] = save[3];
-        backend_set_clear_color(save[0], save[1], save[2], save[3]);
-    }
-}
-
-void glClearBufferfi(GLenum buffer, GLint drawbuffer, GLfloat depth_val, GLint stencil_val) {
-    MITHRIL_ENSURE_INIT();
-    if (!mg_conditional_render_allows()) return;   // conditional render 门控
-    (void)drawbuffer;
-
-    if (buffer != GL_DEPTH_STENCIL) return;
-
+    if (!value || !mg_conditional_render_allows()) return;
     VkImageView colors[8] = {VK_NULL_HANDLE};
     VkImageView depthView = VK_NULL_HANDLE;
     int w = 0, h = 0;
     int n = mithril::collect_draw_fbo_attachments(colors, &depthView, &w, &h);
-
-    GLclampd saveD = g_state->clearDepth;
-    GLint saveS = g_state->clearStencil;
-    backend_set_clear_depth((double)depth_val);
-    backend_set_clear_stencil(stencil_val);
-    g_state->clearDepth = (GLclampd)depth_val;
-    g_state->clearStencil = stencil_val;
-
     backend_set_load_load();
     backend_begin_render_pass(colors, n, depthView, w, h, mithril::draw_fbo_sample_count());
-    backend_clear_attachments(GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT, 0, 0, w, h);
+    if (buffer == GL_COLOR) {
+        backend_clear_buffer_indexed(GL_COLOR, drawbuffer, value, 0.0f, 0);
+    } else if (buffer == GL_DEPTH) {
+        const float zero[4] = {0, 0, 0, 0};
+        backend_clear_buffer_indexed(GL_DEPTH, 0, zero, value[0], 0);
+    } else {
+        mithril::state_set_error(GL_INVALID_ENUM);
+    }
     backend_end_render_pass();
+}
 
-    g_state->clearDepth = saveD;
-    g_state->clearStencil = saveS;
-    backend_set_clear_depth(saveD);
-    backend_set_clear_stencil(saveS);
+void glClearBufferiv(GLenum buffer, GLint drawbuffer, const GLint* value) {
+    MITHRIL_ENSURE_INIT();
+    if (!value || !mg_conditional_render_allows()) return;
+    VkImageView colors[8] = {VK_NULL_HANDLE};
+    VkImageView depthView = VK_NULL_HANDLE;
+    int w = 0, h = 0;
+    int n = mithril::collect_draw_fbo_attachments(colors, &depthView, &w, &h);
+    backend_set_load_load();
+    backend_begin_render_pass(colors, n, depthView, w, h, mithril::draw_fbo_sample_count());
+    if (buffer == GL_COLOR) {
+        const float c[4] = {(float)value[0], (float)value[1], (float)value[2], (float)value[3]};
+        backend_clear_buffer_indexed(GL_COLOR, drawbuffer, c, 0.0f, 0);
+    } else if (buffer == GL_STENCIL) {
+        const float zero[4] = {0, 0, 0, 0};
+        backend_clear_buffer_indexed(GL_STENCIL, 0, zero, 0.0f, (GLuint)value[0]);
+    } else {
+        mithril::state_set_error(GL_INVALID_ENUM);
+    }
+    backend_end_render_pass();
+}
+
+void glClearBufferuiv(GLenum buffer, GLint drawbuffer, const GLuint* value) {
+    MITHRIL_ENSURE_INIT();
+    if (!value || !mg_conditional_render_allows()) return;
+    VkImageView colors[8] = {VK_NULL_HANDLE};
+    VkImageView depthView = VK_NULL_HANDLE;
+    int w = 0, h = 0;
+    int n = mithril::collect_draw_fbo_attachments(colors, &depthView, &w, &h);
+    backend_set_load_load();
+    backend_begin_render_pass(colors, n, depthView, w, h, mithril::draw_fbo_sample_count());
+    if (buffer == GL_COLOR) {
+        const float c[4] = {(float)value[0], (float)value[1], (float)value[2], (float)value[3]};
+        backend_clear_buffer_indexed(GL_COLOR, drawbuffer, c, 0.0f, 0);
+    } else {
+        mithril::state_set_error(GL_INVALID_ENUM);
+    }
+    backend_end_render_pass();
+}
+
+void glClearBufferfi(GLenum buffer, GLint drawbuffer, GLfloat depth_val, GLint stencil_val) {
+    MITHRIL_ENSURE_INIT();
+    if (!mg_conditional_render_allows()) return;
+    if (buffer != GL_DEPTH_STENCIL || drawbuffer != 0) {
+        mithril::state_set_error(buffer == GL_DEPTH_STENCIL ? GL_INVALID_VALUE : GL_INVALID_ENUM);
+        return;
+    }
+    VkImageView colors[8] = {VK_NULL_HANDLE};
+    VkImageView depthView = VK_NULL_HANDLE;
+    int w = 0, h = 0;
+    int n = mithril::collect_draw_fbo_attachments(colors, &depthView, &w, &h);
+    const float zero[4] = {0, 0, 0, 0};
+    backend_set_load_load();
+    backend_begin_render_pass(colors, n, depthView, w, h, mithril::draw_fbo_sample_count());
+    backend_clear_buffer_indexed(GL_DEPTH_STENCIL, 0, zero, depth_val, (GLuint)stencil_val);
+    backend_end_render_pass();
 }
 
 void glClearBufferData(GLenum target, GLenum internalformat,

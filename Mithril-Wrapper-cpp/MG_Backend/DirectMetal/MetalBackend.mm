@@ -559,9 +559,16 @@ int dmt_read_pixels(int x, int y, int w, int h,
     } else {
         Framebuffer* fbo = state_get_framebuffer(g_state->currentReadFBO);
         if (!fbo) return 0;
-        const GLuint texName = readDepth
-            ? fbo_attachment_texture(fbo->depth)
-            : fbo_attachment_texture(fbo->colors[0]);
+        GLuint texName = 0;
+        if (readDepth) {
+            texName = fbo_attachment_texture(fbo->depth);
+        } else {
+            if (fbo->readBuffer == GL_NONE) return 0;
+            if (fbo->readBuffer < GL_COLOR_ATTACHMENT0 ||
+                fbo->readBuffer > GL_COLOR_ATTACHMENT7) return 0;
+            const GLuint colorIndex = (GLuint)(fbo->readBuffer - GL_COLOR_ATTACHMENT0);
+            texName = fbo_attachment_texture(fbo->colors[colorIndex]);
+        }
         if (!texName) return 0;
         src = dmt::texture_table_get(texName);
     }

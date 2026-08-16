@@ -1237,6 +1237,23 @@ void clear_buffer_indexed(GLenum buffer, GLint drawbuffer, const float color[4],
     EncoderState& e = enc();
     if (!e.passActive) return;
 
+    if (buffer == GL_COLOR) {
+        if (drawbuffer < 0 || drawbuffer >= e.colorCount || drawbuffer >= 8 ||
+            e.colorViews[drawbuffer] == nullptr) return;
+        MetalTexture* selected = e.colorViews[drawbuffer];
+        const int passW = e.passW;
+        const int passH = e.passH;
+        const int samples = selected->samples > 0 ? selected->samples : 1;
+        end_render_pass();
+        MetalTexture* one[1] = {selected};
+        begin_render_pass(one, 1, nullptr, passW, passH, samples);
+        EncoderState& isolated = enc();
+        int rx, ry, rw, rh;
+        resolve_clear_rect(isolated, 0, 0, passW, passH, rx, ry, rw, rh);
+        run_clear_draw(GL_COLOR_BUFFER_BIT, color, depth, stencil, rx, ry, rw, rh);
+        return;
+    }
+
     GLbitfield mask = 0;
     switch (buffer) {
         case GL_COLOR:
