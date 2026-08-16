@@ -1,28 +1,48 @@
 # Development branches
 
-Mithril keeps one canonical branch for each active line of work. Git history is the archive; old implementation snapshots, exact duplicate refs, completed probes, and cleanup branches should not remain indefinitely as parallel-looking development branches.
+Mithril uses one shipping baseline, two implementation-focused integration lines, and one temporary legacy migration source. Date-stamped historical branches are reconciliation inputs, not places for new feature work.
 
 ## Canonical active lines
 
-| Branch | Purpose |
-| --- | --- |
-| `main` | Shipping baseline and normal pull-request integration target. |
-| `integration/directmetal-unified-20260815` | Current DirectMetal integration line beyond `main`; owns DirectMetal build/runtime validation until those changes are integrated. |
-| `ci/minecraft-on-mithril-e2e-20260815` | Real Minecraft 26.2 production E2E, render differential, semantic validation, and distribution proof. |
-| `fix/gl-semantic-closure-integration-20260816` | Current GL/DirectMetal semantic-closure integration line. |
-| `codex/directvulkan-overnight-recovery-20260814` | DirectVulkan recovery/diagnostic line; stable gates and known-open semantics are separated in its consolidated CI. |
-| `codex/mobilegl-ios-live-20260815` | Latest descendant of the older GLSL/MobileGL preflight lineage. |
-| `fix/directvulkan-mc262-gui-closure` | DirectVulkan Minecraft-GUI closure line while its branch-specific fixes remain independent. |
-| `fix/mobilegl-style-mc262-startup-preflight` | MobileGL-style Minecraft startup line while its branch-specific fixes remain independent. |
-| `fix/dual-backend-metal-ios-ci` | Independent-history dual-backend iOS line; do not assume ancestry with current `main`. |
-| `fix/gl-semantic-closure-20260816` | Historical semantic-closure implementation line that still diverges materially from the newer integration branch; retain until its unique commits are explicitly reconciled. |
+| Branch | Purpose | Exit condition |
+| --- | --- | --- |
+| `main` | Shipping baseline. DirectMetal is the Apple default backend; Vulkan remains the reference/fallback backend. | Always retained. |
+| `integration/directmetal-next` | The only clean `src/*` DirectMetal product line intended to land on `main`. Owns normal macOS semantics/boundary, iPhoneOS arm64, Linux Vulkan-reference and manual hosted runtime validation. | Merge validated product slices into `main`, then continue from updated `main`. |
+| `integration/directvulkan-reference` | Single convergence line for the Vulkan fallback/reference implementation and its stable regression/sanitizer/GUI evidence. | Port validated behavior/tests into the clean `src/*` Vulkan backend; do not turn this into a second shipping tree. |
+| `integration/legacy-capability-port` | Temporary convergence source for validated `Mithril-Wrapper-cpp` DirectMetal/GL semantics and Minecraft E2E evidence. It exists to reconcile old branches and port capabilities into the clean tree. | Delete after all retained semantics/E2E evidence has been ported or explicitly rejected. |
 
-All previously audited cleanup, snapshot, duplicate, and absorbed probe refs were retired after their replacements were merged and verified. Historical branch names remain discoverable through merged pull requests and Git history rather than as live refs.
+## Frozen migration sources
+
+The branches below may be used as PR heads or comparison refs while their unique commits are reconciled. Do not add new product work to them.
+
+| Branch | Disposition |
+| --- | --- |
+| `integration/directmetal-unified-20260815` | Superseded in purpose by `integration/directmetal-next`; retire after the new canonical gate passes. |
+| `codex/directvulkan-overnight-recovery-20260814` | Baseline used to create `integration/directvulkan-reference`; retire after the new canonical gate passes. |
+| `fix/directvulkan-mc262-gui-closure` | Reconcile its 7 unique commits into `integration/directvulkan-reference` via PR #16, then retire. |
+| `fix/gl-semantic-closure-integration-20260816` | Baseline used to create `integration/legacy-capability-port`; retire once the canonical migration gate is established. |
+| `fix/dual-backend-metal-ios-ci` | Only 3 commits remain unique versus the capability line. Reconcile the still-relevant Metal/iOS fixes via PR #17, then retire. |
+| `fix/gl-semantic-closure-20260816` | Still has 43 unique commits. Reconcile production GL semantics via PR #18 before deletion. |
+| `ci/minecraft-on-mithril-e2e-20260815` | Contains 53 unique commits including production hardening and real Minecraft evidence. Reconcile via PR #19; preserve reusable E2E evidence, not the branch identity. |
+| `fix/mobilegl-style-mc262-startup-preflight` | No unique production code remains versus the DirectVulkan recovery family; retain only until its startup-validation evidence is represented on the canonical DirectVulkan line. |
+| `codex/mobilegl-ios-live-20260815` | No unique production code remains versus the capability-integration family; retire once branch cleanup is executed. |
+
+## Migration order
+
+1. Keep new product development off all frozen migration sources.
+2. Resolve PR #16 into `integration/directvulkan-reference`, preserving GUI-specific production fixes and the Minecraft GUI oracle.
+3. Resolve PR #17 into `integration/legacy-capability-port` by transplanting only still-missing dual-backend Metal/iOS behavior.
+4. Resolve PR #18 semantically: keep the newer contract/oracle-ledger architecture and port only old GL behavior that remains valid and unrepresented.
+5. Resolve PR #19 by preserving production hardening and reusable Minecraft 26.2 Client GameTest/render-differential evidence.
+6. Port the resulting tests and missing behavior from the legacy migration source into `integration/directmetal-next` and the clean Vulkan backend as appropriate.
+7. Land clean-tree product slices into `main` through normal review and CI.
+8. Delete each frozen source as soon as its unique value is represented elsewhere. Do not keep historical names as parallel development choices.
 
 ## Rules for new branches
 
-1. Start from the canonical line that actually owns the work; do not fork from an arbitrary probe or snapshot branch.
-2. Do not copy a complete `.github/workflows` directory merely to obtain CI. Open a pull request to the canonical branch and reuse its gate.
-3. A probe branch may add a test oracle, but not an `apply-*`, `materialize-*`, `stage-*`, source-location, or self-pushing workflow.
-4. When a probe or fix is absorbed, delete the branch. Do not retain several names pointing at the same commit.
-5. Before deleting a divergent branch, compare ancestry and unique commits. A newer date or a greener CI run is not sufficient proof of supersession.
+1. Start from the canonical line that owns the work: `main`, `integration/directmetal-next`, `integration/directvulkan-reference`, or the temporary `integration/legacy-capability-port` only for reconciliation work.
+2. Do not fork new product work from a dated migration source.
+3. Do not copy a complete `.github/workflows` directory merely to obtain CI; extend the owning canonical gate.
+4. A probe may add a test oracle, but not an `apply-*`, `materialize-*`, `stage-*`, source-location, or self-pushing workflow.
+5. When a probe or fix is absorbed, delete its branch. Git history and merged PRs are the archive.
+6. Before deleting a divergent branch, compare ancestry, unique commits, changed files, and CI evidence. A newer date or greener CI alone is insufficient proof.
