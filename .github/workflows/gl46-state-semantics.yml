@@ -7,6 +7,7 @@ on:
     paths:
       - 'Mithril-Wrapper-cpp/**'
       - 'tests/gl46_state_semantics_smoke.c'
+      - 'tests/gl46_error_semantics_smoke.c'
       - 'verify/gl46_core_symbols.txt'
       - 'verify/gl46_semantic_audit.py'
       - '.github/workflows/gl46-state-semantics.yml'
@@ -54,8 +55,7 @@ jobs:
           for line in Path('verify/gl46_core_symbols.txt').read_text().splitlines():
               if not line.strip() or line.lstrip().startswith('#'):
                   continue
-              parts=line.split()
-              expected.append(parts[-1])
+              expected.append(line.split()[-1])
           exported=set(Path('build-gl46-state/exported.txt').read_text().splitlines())
           missing=[x for x in expected if x not in exported]
           print(f'GL46 ABI expected={len(expected)} exported_core={len(expected)-len(missing)} missing={len(missing)}')
@@ -67,13 +67,16 @@ jobs:
           PY
       - name: Run fast semantic source regression guard
         run: python3 verify/gl46_semantic_audit.py
-      - name: Compile focused GL 4.6 behavioral oracle
+      - name: Compile focused GL 4.6 behavioral oracles
         shell: bash
         run: |
           set -euo pipefail
           clang -std=c11 -O2 -Wall -Wextra -Werror \
             -IMithril-Wrapper-cpp/include tests/gl46_state_semantics_smoke.c \
             -o build-gl46-state/gl46_state_semantics_smoke
+          clang -std=c11 -O2 -Wall -Wextra -Werror \
+            -IMithril-Wrapper-cpp/include tests/gl46_error_semantics_smoke.c \
+            -o build-gl46-state/gl46_error_semantics_smoke
       - name: Run state semantics on real hosted Metal GPU
         shell: bash
         run: |
@@ -81,6 +84,13 @@ jobs:
           export DYLD_LIBRARY_PATH="$(brew --prefix)/lib:${DYLD_LIBRARY_PATH:-}"
           build-gl46-state/gl46_state_semantics_smoke "$MITHRIL" | tee build-gl46-state/gl46-state-semantics.log
           grep -q 'GL46 STATE SEMANTICS ALL PASSED' build-gl46-state/gl46-state-semantics.log
+      - name: Run error queue semantics on real hosted Metal GPU
+        shell: bash
+        run: |
+          set -euo pipefail
+          export DYLD_LIBRARY_PATH="$(brew --prefix)/lib:${DYLD_LIBRARY_PATH:-}"
+          build-gl46-state/gl46_error_semantics_smoke "$MITHRIL" | tee build-gl46-state/gl46-error-semantics.log
+          grep -q 'GL46 ERROR SEMANTICS ALL PASSED' build-gl46-state/gl46-error-semantics.log
       - name: Upload semantic evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
@@ -90,4 +100,5 @@ jobs:
           if-no-files-found: warn
           path: |
             build-gl46-state/gl46-state-semantics.log
+            build-gl46-state/gl46-error-semantics.log
             build-gl46-state/exported.txt
