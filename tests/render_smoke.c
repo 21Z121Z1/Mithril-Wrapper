@@ -1,7 +1,7 @@
 /*
  * render_smoke.c — Mithril-Wrapper 真正的离屏渲染冒烟测试。
  *
- * 与 gl_smoke.c（纯状态机断言）不同，本测试驱动完整 GL 4.6 Core 渲染管线：
+ * 与 gl_smoke.c（纯状态机断言）不同，本测试驱动已广告的 GL 3.3 Core 渲染管线：
  *   离屏 FBO（纹理 attachment）→ 纹理上传 → shader 编译/链接 → VAO/VBO →
  *   glDrawArrays → glFinish（backend_commit → vkQueueSubmit）→ glReadPixels
  *   读回像素，验证 GPU 真正执行了绘制（而非仅状态机 no-op）。
@@ -271,10 +271,12 @@ int main(int argc, char** argv) {
     GLint major = 0, minor = 0;
     getIntegerv(GL_MAJOR_VERSION, &major);
     getIntegerv(GL_MINOR_VERSION, &minor);
-    CHECK(major == 4 && minor == 6,
-          "GL version %d.%d (backend-up, glGetIntegerv un-hijacked)", major, minor);
+    CHECK(major == 3 && minor == 3,
+          "GL version %d.%d matches advertised 3.3 contract", major, minor);
     const char* ver = (const char*)getString(GL_VERSION);
-    CHECK(ver && strstr(ver, "4.6"), "glGetString(GL_VERSION): %s", ver ? ver : "(null)");
+    CHECK(ver && strstr(ver, "3.3.0") && strstr(ver, "Mithril-Wrapper"),
+          "glGetString(GL_VERSION) matches contracted 3.3 wrapper identity: %s",
+          ver ? ver : "(null)");
     if (getError() != GL_NO_ERROR) { printf("FAIL: GL error before setup\n"); ++failures; }
 
     /* ---- 离屏 FBO：RGBA8 纹理作为 color attachment ------------------------ */
