@@ -61,7 +61,7 @@ jobs:
           clang -std=gnu11 "${common[@]}" tests/directmetal_sampler_semantics_smoke.c -o build-semantic/directmetal_sampler_semantics_smoke -ldl
           clang -std=gnu11 "${common[@]}" tests/directmetal_raster_semantics_smoke.c -o build-semantic/directmetal_raster_semantics_smoke -ldl
           clang -std=gnu11 "${common[@]}" tests/directmetal_pixel_store_semantics_smoke.c -o build-semantic/directmetal_pixel_store_semantics_smoke -ldl
-          clang -std=gnu11 "${common[@]}" tests/directmetal_production_api_closure_smoke.c -o build-semantic/directmetal_production_api_closure_smoke -ldl
+          clang -std=gnu11 "${common[@]}" -DGL_TEXTURE_WIDTH=0x1000 -DGL_TEXTURE_HEIGHT=0x1001 -DGL_TEXTURE_INTERNAL_FORMAT=0x1003 tests/directmetal_production_api_closure_smoke.c -o build-semantic/directmetal_production_api_closure_smoke -ldl
 
       - name: Run semantic GPU oracle suite
         shell: bash
