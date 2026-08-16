@@ -2006,63 +2006,121 @@ void glGetBufferParameteri64v(GLenum target, GLenum pname, GLint64* params) {
     *params = (GLint64)v;
 }
 
-/* ---- Sampler object getters (GL 3.3): return the GL defaults a fresh
- * sampler has. MC binds samplers rarely; defaults keep capability probes sane. */
-static void sampler_default_params(GLenum pname, GLfloat* f, GLint* i) {
+/* ---- Sampler object getters/setters (GL 3.3).
+ * Sampler state is already tracked in GLState and consumed by backend binding;
+ * expose that authoritative state instead of returning fresh-object defaults. */
+static mithril::Sampler* gl46_sampler(GLuint sampler) {
+    mithril::Sampler* s = mithril::state_get_sampler(sampler);
+    if (!s) mithril::state_set_error(GL_INVALID_OPERATION);
+    return s;
+}
+
+static bool gl46_get_sampler_scalar(const mithril::Sampler& s, GLenum pname,
+                                    GLfloat* f, GLint* i) {
+    auto setf = [&](GLfloat v) { if (f) *f = v; if (i) *i = (GLint)v; };
+    auto seti = [&](GLint v)   { if (i) *i = v; if (f) *f = (GLfloat)v; };
     switch (pname) {
-        case GL_TEXTURE_MIN_FILTER:    if (i) *i = GL_NEAREST_MIPMAP_LINEAR; if (f) *f = (GLfloat)GL_NEAREST_MIPMAP_LINEAR; break;
-        case GL_TEXTURE_MAG_FILTER:    if (i) *i = GL_LINEAR;                if (f) *f = (GLfloat)GL_LINEAR; break;
-        case GL_TEXTURE_WRAP_S:
-        case GL_TEXTURE_WRAP_T:
-        case GL_TEXTURE_WRAP_R:        if (i) *i = GL_REPEAT;                if (f) *f = (GLfloat)GL_REPEAT; break;
-        case GL_TEXTURE_MIN_LOD:       if (i) *i = -1000;                    if (f) *f = -1000.0f; break;
-        case GL_TEXTURE_MAX_LOD:       if (i) *i = 1000;                     if (f) *f = 1000.0f; break;
-        case GL_TEXTURE_LOD_BIAS:      if (i) *i = 0;                        if (f) *f = 0.0f; break;
-        case GL_TEXTURE_COMPARE_MODE:  if (i) *i = GL_NONE;                  if (f) *f = (GLfloat)GL_NONE; break;
-        case GL_TEXTURE_COMPARE_FUNC:  if (i) *i = GL_LEQUAL;                if (f) *f = (GLfloat)GL_LEQUAL; break;
-        default:                       if (i) *i = 0;                        if (f) *f = 0.0f; break;
+        case GL_TEXTURE_MIN_FILTER:   seti(s.minFilter); return true;
+        case GL_TEXTURE_MAG_FILTER:   seti(s.magFilter); return true;
+        case GL_TEXTURE_WRAP_S:       seti(s.wrapS); return true;
+        case GL_TEXTURE_WRAP_T:       seti(s.wrapT); return true;
+        case GL_TEXTURE_WRAP_R:       seti(s.wrapR); return true;
+        case GL_TEXTURE_MIN_LOD:      setf(s.minLod); return true;
+        case GL_TEXTURE_MAX_LOD:      setf(s.maxLod); return true;
+        case GL_TEXTURE_LOD_BIAS:     setf(s.lodBias); return true;
+        case GL_TEXTURE_COMPARE_MODE: seti((GLint)s.compareMode); return true;
+        case GL_TEXTURE_COMPARE_FUNC: seti((GLint)s.compareFunc); return true;
+#ifdef GL_TEXTURE_MAX_ANISOTROPY_EXT
+        case GL_TEXTURE_MAX_ANISOTROPY_EXT: setf(s.maxAnisotropy); return true;
+#endif
+        default: return false;
     }
 }
 
 void glGetSamplerParameteriv(GLuint sampler, GLenum pname, GLint* params) {
     MITHRIL_ENSURE_INIT();
-    (void)sampler;
-    if (params) sampler_default_params(pname, nullptr, params);
+    if (!params) return;
+    mithril::Sampler* s = gl46_sampler(sampler);
+    if (!s) return;
+    if (pname == GL_TEXTURE_BORDER_COLOR) {
+        for (int k = 0; k < 4; ++k) params[k] = (GLint)s->borderColor[k];
+        return;
+    }
+    if (!gl46_get_sampler_scalar(*s, pname, nullptr, params))
+        mithril::state_set_error(GL_INVALID_ENUM);
 }
 
 void glGetSamplerParameterfv(GLuint sampler, GLenum pname, GLfloat* params) {
     MITHRIL_ENSURE_INIT();
-    (void)sampler;
-    if (params) sampler_default_params(pname, params, nullptr);
+    if (!params) return;
+    mithril::Sampler* s = gl46_sampler(sampler);
+    if (!s) return;
+    if (pname == GL_TEXTURE_BORDER_COLOR) {
+        memcpy(params, s->borderColor, sizeof(s->borderColor));
+        return;
+    }
+    if (!gl46_get_sampler_scalar(*s, pname, params, nullptr))
+        mithril::state_set_error(GL_INVALID_ENUM);
 }
 
 void glGetSamplerParameterIiv(GLuint sampler, GLenum pname, GLint* params) {
     MITHRIL_ENSURE_INIT();
-    (void)sampler;
-    if (params) sampler_default_params(pname, nullptr, params);
+    if (!params) return;
+    mithril::Sampler* s = gl46_sampler(sampler);
+    if (!s) return;
+    if (pname == GL_TEXTURE_BORDER_COLOR) {
+        memcpy(params, s->borderColorI, sizeof(s->borderColorI));
+        return;
+    }
+    if (!gl46_get_sampler_scalar(*s, pname, nullptr, params))
+        mithril::state_set_error(GL_INVALID_ENUM);
 }
 
 void glGetSamplerParameterIuiv(GLuint sampler, GLenum pname, GLuint* params) {
     MITHRIL_ENSURE_INIT();
-    (void)sampler;
-    if (params) {
-        GLint v = 0;
-        sampler_default_params(pname, nullptr, &v);
-        *params = (GLuint)v;
+    if (!params) return;
+    mithril::Sampler* s = gl46_sampler(sampler);
+    if (!s) return;
+    if (pname == GL_TEXTURE_BORDER_COLOR) {
+        for (int k = 0; k < 4; ++k) params[k] = (GLuint)s->borderColorUI[k];
+        return;
     }
+    GLint v = 0;
+    if (!gl46_get_sampler_scalar(*s, pname, nullptr, &v)) {
+        mithril::state_set_error(GL_INVALID_ENUM);
+        return;
+    }
+    *params = (GLuint)v;
 }
 
-/* ---- Sampler parameter setters (GL 3.3): MC 绑定 sampler 对象极少；记录
- * 到状态会引入额外表结构，no-op 对目标工作负载安全（默认 sampler 参数已由
- * 纹理参数路径 backend_texture_set_params 覆盖）。 ---- */
 void glSamplerParameterIiv(GLuint sampler, GLenum pname, const GLint* params) {
     MITHRIL_ENSURE_INIT();
-    (void)sampler; (void)pname; (void)params;
+    if (!params) return;
+    mithril::Sampler* s = gl46_sampler(sampler);
+    if (!s) return;
+    if (pname == GL_TEXTURE_BORDER_COLOR) {
+        memcpy(s->borderColorI, params, sizeof(s->borderColorI));
+        for (int k = 0; k < 4; ++k) s->borderColor[k] = (GLfloat)params[k];
+        s->version++;
+        return;
+    }
+    glSamplerParameteri(sampler, pname, params[0]);
 }
 
 void glSamplerParameterIuiv(GLuint sampler, GLenum pname, const GLuint* params) {
     MITHRIL_ENSURE_INIT();
-    (void)sampler; (void)pname; (void)params;
+    if (!params) return;
+    mithril::Sampler* s = gl46_sampler(sampler);
+    if (!s) return;
+    if (pname == GL_TEXTURE_BORDER_COLOR) {
+        for (int k = 0; k < 4; ++k) {
+            s->borderColorUI[k] = (GLint)params[k];
+            s->borderColor[k] = (GLfloat)params[k];
+        }
+        s->version++;
+        return;
+    }
+    glSamplerParameteri(sampler, pname, (GLint)params[0]);
 }
 
 void glBindFragDataLocationIndexed(GLuint program, GLuint colorNumber,
