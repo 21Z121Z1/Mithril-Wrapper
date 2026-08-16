@@ -2,7 +2,7 @@
 """Canonicalize GL 4.5 texture-parameter DSA semantics by function boundaries.
 
 This deliberately does not depend on numbered comments: earlier migrations may
-rewrite those comments.  The replacement is idempotent and remains entirely on
+rewrite those comments. The replacement is idempotent and remains entirely on
 cold API paths.
 """
 from __future__ import annotations
@@ -79,7 +79,6 @@ void glTextureParameteriv(GLuint texture, GLenum pname, const GLint* params) {
     glTexParameteriv(target, pname, params);
     gl46_dsa_restore_texture(target, previous);
 }
-
 '''
 
 INT_REPLACEMENT = r'''void glTextureParameterIiv(GLuint texture, GLenum pname, const GLint* params) {
@@ -116,8 +115,7 @@ void glGetTextureParameterIuiv(GLuint texture, GLenum pname, GLuint* params) {
     if (!target) return;
     glGetTexParameterIuiv(target, pname, params);
     gl46_dsa_restore_texture(target, previous);
-}
-'''
+}'''
 
 AUDIT_APPEND = r'''
 require("gl46_dsa_texture_target" in gl and "textureTargetFromGL" in gl,
@@ -140,6 +138,11 @@ def function_end(text: str, start: int) -> int:
         i += 1
     raise SystemExit('unterminated function')
 
+def consume_space(text: str, pos: int) -> int:
+    while pos < len(text) and text[pos].isspace():
+        pos += 1
+    return pos
+
 def normalize(text: str) -> str:
     first = text.find('void glTextureParameterf(')
     if first < 0: raise SystemExit('glTextureParameterf not found')
@@ -147,7 +150,7 @@ def normalize(text: str) -> str:
     start = comment if comment >= 0 and '45' in text[comment:first] else first
     next_fn = text.find('void glGenerateTextureMipmap(', first)
     if next_fn < 0: raise SystemExit('glGenerateTextureMipmap boundary not found')
-    text = text[:start] + PARAM_REPLACEMENT + text[next_fn:]
+    text = text[:start] + PARAM_REPLACEMENT.rstrip() + '\n\n' + text[next_fn:]
 
     starts = []
     cursor = 0
@@ -158,8 +161,8 @@ def normalize(text: str) -> str:
         starts.append(pos)
         cursor = pos + 1
     int_start = starts[0]
-    int_end = function_end(text, starts[-1])
-    text = text[:int_start] + INT_REPLACEMENT + text[int_end:]
+    int_end = consume_space(text, function_end(text, starts[-1]))
+    text = text[:int_start] + INT_REPLACEMENT.rstrip() + '\n\n' + text[int_end:]
     return text
 
 def apply() -> None:
