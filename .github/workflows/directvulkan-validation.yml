@@ -3,10 +3,10 @@ name: DirectVulkan validation
 on:
   push:
     branches:
-      - codex/directvulkan-overnight-recovery-20260814
+      - integration/directvulkan-reference
   pull_request:
     branches:
-      - codex/directvulkan-overnight-recovery-20260814
+      - integration/directvulkan-reference
   workflow_dispatch:
     inputs:
       deep:
