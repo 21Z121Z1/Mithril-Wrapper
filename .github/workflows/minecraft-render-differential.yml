@@ -19,14 +19,144 @@ concurrency:
   group: minecraft-render-differential-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  DIFF_ARTIFACT_RETENTION_DAYS: '7'
+
 jobs:
-  native-vs-mithril:
-    runs-on: macos-26
-    timeout-minutes: 35
+  linux-native-reference:
+    name: Linux Mesa native OpenGL reference
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
     env:
-      DIFF_ROOT: ${{ github.workspace }}/build/minecraft-render-differential
+      REF_ROOT: ${{ github.workspace }}/build/minecraft-cross-differential/reference
+      GLFW_REFERENCE_PREFIX: ${{ github.workspace }}/build/glfw-3.4-install
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+
+      - name: Setup Java 25
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - name: Setup Gradle 9.4.1 cache
+        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb
+        with:
+          gradle-version: '9.4.1'
+          cache-read-only: true
+          cache-cleanup: on-success
+
+      - name: Install Xvfb, Mesa, and GLFW build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            xvfb libgl1-mesa-dri libglx-mesa0 libgl-dev mesa-utils ninja-build \
+            libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev
+
+      - name: Checkout exact GLFW 3.4 reference runtime
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: glfw/glfw
+          ref: '3.4'
+          path: build/glfw-3.4-src
+          persist-credentials: false
+
+      - name: Build pinned GLFW 3.4 shared library
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S build/glfw-3.4-src -B build/glfw-3.4-build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$GLFW_REFERENCE_PREFIX" \
+            -DBUILD_SHARED_LIBS=ON \
+            -DGLFW_BUILD_EXAMPLES=OFF \
+            -DGLFW_BUILD_TESTS=OFF \
+            -DGLFW_BUILD_DOCS=OFF \
+            -DGLFW_BUILD_X11=ON \
+            -DGLFW_BUILD_WAYLAND=OFF
+          cmake --build build/glfw-3.4-build --parallel
+          cmake --install build/glfw-3.4-build
+          GLFW_REAL="$GLFW_REFERENCE_PREFIX/lib/libglfw.so.3"
+          test -s "$GLFW_REAL"
+          nm -D "$GLFW_REAL" | grep -q ' glfwInitAllocator$'
+
+      - name: Build self-contained native pre-swap capture bridge
+        id: bridge
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build/linux-reference
+          cp -L "$GLFW_REFERENCE_PREFIX/lib/libglfw.so.3" build/linux-reference/libglfw.so.3
+          LOCAL_GLFW="$PWD/build/linux-reference/libglfw.so.3"
+          BRIDGE="$PWD/build/linux-reference/libglfw_native_capture.so"
+          clang++ -std=c++20 -shared -fPIC -Wall -Wextra -Werror \
+            ci/minecraft-e2e/native/glfw_linux_capture_bridge.cpp \
+            -x c++ ci/minecraft-e2e/native/prepresent_capture.mm -x none \
+            -I"$GLFW_REFERENCE_PREFIX/include" \
+            "$LOCAL_GLFW" -Wl,-rpath,'$ORIGIN' -ldl -lGL -o "$BRIDGE"
+          test -s "$BRIDGE"
+          readelf -d "$BRIDGE" | tee build/linux-reference/bridge-dynamic.txt
+          grep -Eq '(RPATH|RUNPATH).*\$ORIGIN' build/linux-reference/bridge-dynamic.txt
+          ldd "$BRIDGE" | tee build/linux-reference/bridge-ldd.txt
+          ! grep -q 'not found' build/linux-reference/bridge-ldd.txt
+          echo "glfw_real=$LOCAL_GLFW" >> "$GITHUB_OUTPUT"
+          echo "bridge=$BRIDGE" >> "$GITHUB_OUTPUT"
+
+      - name: Capture native OpenGL vanilla reference
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$REF_ROOT/native-vanilla"
+          rm -rf "$ROOT"; mkdir -p "$ROOT/render"
+          python3 ci/minecraft-e2e/run-lane.py --timeout 360 --log "$ROOT/runner.log" -- \
+            gradle --no-daemon -p .github/ci/minecraft-e2e --build-cache --stacktrace \
+            -Pe2eBackend=native -Pe2eSodium=false -Pe2eUseXVFB=true -PevidenceRoot="$ROOT" \
+            -PnativeGlfwBridge="${{ steps.bridge.outputs.bridge }}" \
+            -PglfwDelegate="${{ steps.bridge.outputs.glfw_real }}" \
+            runDifferentialClientGameTest
+          test -s "$ROOT/differential-state.json"
+          test -s "$ROOT/render/prepresent-frame-0001.rgba"
+          test -s "$ROOT/render/prepresent-frame-0008.rgba"
+
+      - name: Capture native OpenGL Sodium 0.9.1 reference
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$REF_ROOT/native-sodium"
+          rm -rf "$ROOT"; mkdir -p "$ROOT/render"
+          python3 ci/minecraft-e2e/run-lane.py --timeout 360 --log "$ROOT/runner.log" -- \
+            gradle --no-daemon -p .github/ci/minecraft-e2e --build-cache --stacktrace \
+            -Pe2eBackend=native -Pe2eSodium=true -Pe2eUseXVFB=true -PevidenceRoot="$ROOT" \
+            -PnativeGlfwBridge="${{ steps.bridge.outputs.bridge }}" \
+            -PglfwDelegate="${{ steps.bridge.outputs.glfw_real }}" \
+            runDifferentialClientGameTest
+          test -s "$ROOT/differential-state.json"
+          test -s "$ROOT/render/prepresent-frame-0001.rgba"
+          test -s "$ROOT/render/prepresent-frame-0008.rgba"
+
+      - name: Upload required native framebuffer reference
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: minecraft-native-reference-${{ github.sha }}-${{ github.run_attempt }}
+          retention-days: ${{ fromJSON(env.DIFF_ARTIFACT_RETENTION_DAYS) }}
+          if-no-files-found: error
+          compression-level: 6
+          path: build/minecraft-cross-differential/reference/**
+
+  macos-directmetal-candidate:
+    name: macOS Mithril DirectMetal candidate
+    runs-on: macos-26
+    timeout-minutes: 30
+    env:
+      CANDIDATE_ROOT: ${{ github.workspace }}/build/minecraft-cross-differential/candidate
       MTL_DEBUG_LAYER: '1'
       MTL_SHADER_VALIDATION: '0'
+      MITHRIL_BACKEND: metal
     steps:
       - name: Checkout exact source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
@@ -48,202 +178,141 @@ jobs:
           cache-cleanup: on-success
 
       - name: Install native dependencies
-        shell: bash
         run: brew install glfw vulkan-loader molten-vk ninja
 
-      - name: Build Mithril and both pre-swap bridges
-        id: native
+      - name: Build production Mithril and pre-present bridge
+        id: build
         shell: bash
         run: |
           set -euo pipefail
-          cmake -S . -B build-differential-native -G Ninja -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_C_FLAGS="-Wno-error" -DCMAKE_CXX_FLAGS="-Wno-error"
-          cmake --build build-differential-native --target mithril --parallel
-          MITHRIL=$(find build-differential-native -type f -name libmithril.dylib -print -quit)
+          cmake -S . -B build-cross-differential -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_FLAGS='-Wno-error' -DCMAKE_CXX_FLAGS='-Wno-error'
+          cmake --build build-cross-differential --target mithril --parallel
+          MITHRIL=$(find build-cross-differential -type f -name libmithril.dylib -print -quit)
           test -s "$MITHRIL"
           MITHRIL="$(cd "$(dirname "$MITHRIL")" && pwd)/$(basename "$MITHRIL")"
           GLFW_PREFIX=$(brew --prefix glfw)
           GLFW_REAL="$GLFW_PREFIX/lib/libglfw.3.dylib"
           test -f "$GLFW_REAL" || GLFW_REAL="$GLFW_PREFIX/lib/libglfw.dylib"
-          mkdir -p build-differential-native/bridges
-          MITHRIL_BRIDGE="$PWD/build-differential-native/bridges/libglfw_mithril.dylib"
-          NATIVE_BRIDGE="$PWD/build-differential-native/bridges/libglfw_native_capture.dylib"
+          BRIDGE="$PWD/build-cross-differential/libglfw_mithril.dylib"
           clang++ -std=c++20 -fobjc-arc -dynamiclib -Wall -Wextra -Werror \
             ci/minecraft-e2e/native/glfw_mithril_bridge.mm \
             ci/minecraft-e2e/native/prepresent_capture.mm \
             -I"$GLFW_PREFIX/include" -IMithril-Wrapper-cpp/include \
             -framework AppKit -framework QuartzCore -framework Foundation \
-            -Wl,-reexport_library,"$GLFW_REAL" -o "$MITHRIL_BRIDGE"
-          clang++ -std=c++20 -fobjc-arc -dynamiclib -Wall -Wextra -Werror \
-            ci/minecraft-e2e/native/glfw_native_capture_bridge.mm \
-            ci/minecraft-e2e/native/prepresent_capture.mm \
-            -I"$GLFW_PREFIX/include" -IMithril-Wrapper-cpp/include \
-            -framework Foundation -Wl,-reexport_library,"$GLFW_REAL" -o "$NATIVE_BRIDGE"
-          {
-            echo "mithril=$MITHRIL"
-            echo "glfw_real=$GLFW_REAL"
-            echo "mithril_bridge=$MITHRIL_BRIDGE"
-            echo "native_bridge=$NATIVE_BRIDGE"
-          } >> "$GITHUB_OUTPUT"
-          shasum -a 256 "$MITHRIL" "$MITHRIL_BRIDGE" "$NATIVE_BRIDGE"
+            -Wl,-reexport_library,"$GLFW_REAL" -o "$BRIDGE"
+          test -s "$BRIDGE"
+          echo "mithril=$MITHRIL" >> "$GITHUB_OUTPUT"
+          echo "glfw_real=$GLFW_REAL" >> "$GITHUB_OUTPUT"
+          echo "bridge=$BRIDGE" >> "$GITHUB_OUTPUT"
+          shasum -a 256 "$MITHRIL" "$BRIDGE"
 
-      - name: Probe hosted NSGL reference capability
-        id: nsgl
+      - name: Capture Mithril DirectMetal vanilla candidate
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p "$DIFF_ROOT"
-          clang++ -std=c++20 -Wno-deprecated-declarations \
-            ci/minecraft-e2e/native/nsgl_capability_probe.cpp \
-            -framework OpenGL -o build-differential-native/nsgl_capability_probe
-          build-differential-native/nsgl_capability_probe "$DIFF_ROOT/nsgl-capability.json" \
-            | tee "$DIFF_ROOT/nsgl-capability.log"
-          value=$(grep '^NSGL_MINECRAFT_LIKE_41=' "$DIFF_ROOT/nsgl-capability.log" | tail -1 | cut -d= -f2)
-          test "$value" = true -o "$value" = false
-          echo "minecraft41=$value" >> "$GITHUB_OUTPUT"
-
-      - name: Native OpenGL vanilla baseline
-        id: native_vanilla
-        if: steps.nsgl.outputs.minecraft41 == 'true'
-        continue-on-error: true
-        shell: bash
-        run: |
-          set -euo pipefail
-          ROOT="$DIFF_ROOT/native-vanilla"; rm -rf "$ROOT"; mkdir -p "$ROOT/render"
-          python3 ci/minecraft-e2e/run-lane.py --timeout 360 --log "$ROOT/runner.log" -- \
-            gradle --no-daemon -p .github/ci/minecraft-e2e --build-cache --stacktrace \
-            -Pe2eBackend=native -Pe2eSodium=false -PevidenceRoot="$ROOT" \
-            -PnativeGlfwBridge="${{ steps.native.outputs.native_bridge }}" \
-            -PglfwDelegate="${{ steps.native.outputs.glfw_real }}" \
-            runDifferentialClientGameTest
-
-      - name: Mithril DirectMetal vanilla candidate
-        id: mithril_vanilla
-        if: always()
-        continue-on-error: true
-        shell: bash
-        run: |
-          set -euo pipefail
-          ROOT="$DIFF_ROOT/mithril-vanilla"; rm -rf "$ROOT"; mkdir -p "$ROOT/render"
+          ROOT="$CANDIDATE_ROOT/mithril-vanilla"
+          rm -rf "$ROOT"; mkdir -p "$ROOT/render"
           python3 ci/minecraft-e2e/run-lane.py --timeout 360 --log "$ROOT/runner.log" -- \
             gradle --no-daemon -p .github/ci/minecraft-e2e --build-cache --stacktrace \
             -Pe2eBackend=mithril -Pe2eSodium=false -PevidenceRoot="$ROOT" \
-            -PmithrilDylib="${{ steps.native.outputs.mithril }}" \
-            -PglfwBridge="${{ steps.native.outputs.mithril_bridge }}" \
-            -PglfwDelegate="${{ steps.native.outputs.glfw_real }}" \
+            -PmithrilDylib="${{ steps.build.outputs.mithril }}" \
+            -PglfwBridge="${{ steps.build.outputs.bridge }}" \
+            -PglfwDelegate="${{ steps.build.outputs.glfw_real }}" \
             runDifferentialClientGameTest
+          test -s "$ROOT/differential-state.json"
+          test -s "$ROOT/render/prepresent-frame-0001.rgba"
+          test -s "$ROOT/render/prepresent-frame-0008.rgba"
 
-      - name: Native OpenGL Sodium 0.9.1 baseline
-        id: native_sodium
-        if: always() && steps.native_vanilla.outcome == 'success'
-        continue-on-error: true
+      - name: Capture Mithril DirectMetal Sodium 0.9.1 candidate
         shell: bash
         run: |
           set -euo pipefail
-          ROOT="$DIFF_ROOT/native-sodium"; rm -rf "$ROOT"; mkdir -p "$ROOT/render"
-          python3 ci/minecraft-e2e/run-lane.py --timeout 360 --log "$ROOT/runner.log" -- \
-            gradle --no-daemon -p .github/ci/minecraft-e2e --build-cache --stacktrace \
-            -Pe2eBackend=native -Pe2eSodium=true -PevidenceRoot="$ROOT" \
-            -PnativeGlfwBridge="${{ steps.native.outputs.native_bridge }}" \
-            -PglfwDelegate="${{ steps.native.outputs.glfw_real }}" \
-            runDifferentialClientGameTest
-
-      - name: Mithril DirectMetal Sodium 0.9.1 candidate
-        id: mithril_sodium
-        if: always()
-        continue-on-error: true
-        shell: bash
-        run: |
-          set -euo pipefail
-          ROOT="$DIFF_ROOT/mithril-sodium"; rm -rf "$ROOT"; mkdir -p "$ROOT/render"
+          ROOT="$CANDIDATE_ROOT/mithril-sodium"
+          rm -rf "$ROOT"; mkdir -p "$ROOT/render"
           python3 ci/minecraft-e2e/run-lane.py --timeout 360 --log "$ROOT/runner.log" -- \
             gradle --no-daemon -p .github/ci/minecraft-e2e --build-cache --stacktrace \
             -Pe2eBackend=mithril -Pe2eSodium=true -PevidenceRoot="$ROOT" \
-            -PmithrilDylib="${{ steps.native.outputs.mithril }}" \
-            -PglfwBridge="${{ steps.native.outputs.mithril_bridge }}" \
-            -PglfwDelegate="${{ steps.native.outputs.glfw_real }}" \
+            -PmithrilDylib="${{ steps.build.outputs.mithril }}" \
+            -PglfwBridge="${{ steps.build.outputs.bridge }}" \
+            -PglfwDelegate="${{ steps.build.outputs.glfw_real }}" \
             runDifferentialClientGameTest
+          test -s "$ROOT/differential-state.json"
+          test -s "$ROOT/render/prepresent-frame-0001.rgba"
+          test -s "$ROOT/render/prepresent-frame-0008.rgba"
 
-      - name: Compare vanilla native vs DirectMetal structure
-        id: compare_vanilla
-        if: always() && steps.native_vanilla.outcome == 'success' && steps.mithril_vanilla.outcome == 'success'
-        continue-on-error: true
+      - name: Upload required DirectMetal framebuffer candidate
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: minecraft-directmetal-candidate-${{ github.sha }}-${{ github.run_attempt }}
+          retention-days: ${{ fromJSON(env.DIFF_ARTIFACT_RETENTION_DAYS) }}
+          if-no-files-found: error
+          compression-level: 6
+          path: build/minecraft-cross-differential/candidate/**
+
+  compare-framebuffers:
+    name: Enforce vanilla and Sodium framebuffer differential
+    needs: [linux-native-reference, macos-directmetal-candidate]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout comparator from exact source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+
+      - name: Download native reference frames
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: minecraft-native-reference-${{ github.sha }}-${{ github.run_attempt }}
+          path: build/cross-download/native
+
+      - name: Download DirectMetal candidate frames
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: minecraft-directmetal-candidate-${{ github.sha }}-${{ github.run_attempt }}
+          path: build/cross-download/mithril
+
+      - name: Verify complete evidence before comparison
         shell: bash
         run: |
+          set -euo pipefail
+          for root in \
+            build/cross-download/native/native-vanilla \
+            build/cross-download/native/native-sodium \
+            build/cross-download/mithril/mithril-vanilla \
+            build/cross-download/mithril/mithril-sodium; do
+            test -s "$root/differential-state.json"
+            test -s "$root/render/prepresent-frame-0001.rgba"
+            test -s "$root/render/prepresent-frame-0008.rgba"
+          done
+
+      - name: Compare vanilla native OpenGL vs DirectMetal
+        shell: bash
+        run: |
+          set -euo pipefail
           python3 ci/minecraft-e2e/compare-differential.py \
-            --native "$DIFF_ROOT/native-vanilla" --mithril "$DIFF_ROOT/mithril-vanilla" \
-            --label vanilla --assert-pass
+            --native build/cross-download/native/native-vanilla \
+            --mithril build/cross-download/mithril/mithril-vanilla \
+            --label vanilla --assert-pass \
+            | tee build/cross-download/comparison-vanilla.log
 
-      - name: Compare Sodium native vs DirectMetal structure
-        id: compare_sodium
-        if: always() && steps.native_sodium.outcome == 'success' && steps.mithril_sodium.outcome == 'success'
-        continue-on-error: true
+      - name: Compare Sodium 0.9.1 native OpenGL vs DirectMetal
         shell: bash
         run: |
+          set -euo pipefail
           python3 ci/minecraft-e2e/compare-differential.py \
-            --native "$DIFF_ROOT/native-sodium" --mithril "$DIFF_ROOT/mithril-sodium" \
-            --label sodium --assert-pass
+            --native build/cross-download/native/native-sodium \
+            --mithril build/cross-download/mithril/mithril-sodium \
+            --label sodium --assert-pass \
+            | tee build/cross-download/comparison-sodium.log
 
-      - name: Record differential disposition
-        if: always()
-        shell: bash
-        env:
-          NSGL41: ${{ steps.nsgl.outputs.minecraft41 }}
-          NATIVE_VANILLA: ${{ steps.native_vanilla.outcome }}
-          MITHRIL_VANILLA: ${{ steps.mithril_vanilla.outcome }}
-          NATIVE_SODIUM: ${{ steps.native_sodium.outcome }}
-          MITHRIL_SODIUM: ${{ steps.mithril_sodium.outcome }}
-          COMPARE_VANILLA: ${{ steps.compare_vanilla.outcome }}
-          COMPARE_SODIUM: ${{ steps.compare_sodium.outcome }}
-        run: |
-          python3 - <<'PY'
-          import json, os
-          from pathlib import Path
-          root = Path(os.environ['DIFF_ROOT'])
-          data = {
-              'schema_version': '1.0',
-              'hosted_nsgl_minecraft_like_41': os.getenv('NSGL41',''),
-              'native_vanilla': os.getenv('NATIVE_VANILLA',''),
-              'mithril_vanilla': os.getenv('MITHRIL_VANILLA',''),
-              'native_sodium': os.getenv('NATIVE_SODIUM',''),
-              'mithril_sodium': os.getenv('MITHRIL_SODIUM',''),
-              'compare_vanilla': os.getenv('COMPARE_VANILLA',''),
-              'compare_sodium': os.getenv('COMPARE_SODIUM',''),
-          }
-          (root / 'differential-disposition.json').write_text(json.dumps(data, indent=2, sort_keys=True)+'\n')
-          print(json.dumps(data, indent=2, sort_keys=True))
-          PY
-
-      - name: Upload four-lane differential evidence
+      - name: Upload enforced cross-platform differential evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: minecraft-render-differential-${{ github.sha }}-${{ github.run_attempt }}
-          retention-days: 7
-          if-no-files-found: warn
+          name: minecraft-cross-platform-differential-${{ github.sha }}-${{ github.run_attempt }}
+          retention-days: ${{ fromJSON(env.DIFF_ARTIFACT_RETENTION_DAYS) }}
+          if-no-files-found: error
           compression-level: 6
-          path: build/minecraft-render-differential/**
-
-      - name: Enforce candidate and available-reference gates
-        if: always()
-        shell: bash
-        env:
-          NSGL41: ${{ steps.nsgl.outputs.minecraft41 }}
-          NATIVE_VANILLA: ${{ steps.native_vanilla.outcome }}
-          MITHRIL_VANILLA: ${{ steps.mithril_vanilla.outcome }}
-          NATIVE_SODIUM: ${{ steps.native_sodium.outcome }}
-          MITHRIL_SODIUM: ${{ steps.mithril_sodium.outcome }}
-          COMPARE_VANILLA: ${{ steps.compare_vanilla.outcome }}
-          COMPARE_SODIUM: ${{ steps.compare_sodium.outcome }}
-        run: |
-          set -euo pipefail
-          test "$MITHRIL_VANILLA" = success || { echo 'Mithril vanilla differential lane failed'; exit 1; }
-          test "$MITHRIL_SODIUM" = success || { echo 'Mithril Sodium 0.9.1 differential lane failed'; exit 1; }
-          if [[ "$NATIVE_VANILLA" == success ]]; then
-            test "$COMPARE_VANILLA" = success || { echo 'Native-vs-Mithril vanilla structural comparison failed'; exit 1; }
-          else
-            echo "REFERENCE_UNAVAILABLE native vanilla; hosted_nsgl_minecraft_like_41=$NSGL41"
-          fi
-          if [[ "$NATIVE_SODIUM" == success ]]; then
-            test "$COMPARE_SODIUM" = success || { echo 'Native-vs-Mithril Sodium structural comparison failed'; exit 1; }
-          fi
+          path: build/cross-download/**
