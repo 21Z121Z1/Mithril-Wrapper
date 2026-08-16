@@ -118,8 +118,8 @@ inject_after_init(G, r"void glDepthMask\(GLboolean flag\)",
     'mithril::semantic_trace_event_oncef("blend_depth_stencil", "raster.state", "glDepthMask", "write=%s", flag ? "on" : "off");')
 inject_after_init(G, r"void glBlendFuncSeparate\(GLenum sRGB, GLenum dRGB, GLenum sA, GLenum dA\)",
     'mithril::semantic_trace_event_oncef("blend_depth_stencil", "raster.state", "glBlendFuncSeparate", "rgb=0x%x/0x%x alpha=0x%x/0x%x", sRGB, dRGB, sA, dA);')
-inject_after_init(G, r"void glColorMaski\(GLuint index, GLboolean r, GLboolean g, GLboolean b, GLboolean a\)",
-    'mithril::semantic_trace_event_oncef("blend_depth_stencil", "raster.state", "glColorMaski", "index=%u mask=%u%u%u%u", index, !!r, !!g, !!b, !!a);')
+inject_after_init(G, r"void glColorMaski\(GLuint buf, GLboolean r, GLboolean g, GLboolean b, GLboolean a\)",
+    'mithril::semantic_trace_event_oncef("blend_depth_stencil", "raster.state", "glColorMaski", "index=%u mask=%u%u%u%u", buf, !!r, !!g, !!b, !!a);')
 inject_after_init(G, r"void glPolygonMode\(GLenum face, GLenum mode\)",
     'mithril::semantic_trace_event_oncef("blend_depth_stencil", "raster.state", "glPolygonMode", "face=0x%x mode=0x%x", face, mode);')
 inject_after_init(G, r"void glPixelStorei\(GLenum pname, GLint param\)",
