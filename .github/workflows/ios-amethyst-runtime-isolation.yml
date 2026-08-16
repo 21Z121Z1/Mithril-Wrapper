@@ -145,13 +145,19 @@ jobs:
           test -s "$EXPECTED"
 
           nm -gU "$DYLIB" > /tmp/mithril-exports.txt
-          awk '{print $NF}' /tmp/mithril-exports.txt | LC_ALL=C sort -u > /tmp/mithril-export-names.txt
+          # Parse only real nm symbol records. Blindly printing $NF also captures
+          # nm's optional filename/header record and can create a false export.
+          awk 'NF >= 3 && $NF ~ /^_/ {print $NF}' /tmp/mithril-exports.txt | LC_ALL=C sort -u > /tmp/mithril-export-names.txt
           echo '=== exported symbol sample ==='
           head -80 /tmp/mithril-exports.txt
 
           # The final dynamic export set must be exactly the generated GL/EGL
           # ABI. This catches both compiler leakage and accidental host-ABI loss.
           if ! diff -u "$EXPECTED" /tmp/mithril-export-names.txt; then
+            echo '=== missing expected exports ==='
+            comm -23 "$EXPECTED" /tmp/mithril-export-names.txt || true
+            echo '=== unexpected dynamic exports ==='
+            comm -13 "$EXPECTED" /tmp/mithril-export-names.txt || true
             echo '::error::dynamic exports differ from the exact Amethyst GL/EGL ABI allow-list'
             exit 1
           fi
