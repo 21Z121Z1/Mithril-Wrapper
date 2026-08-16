@@ -16,6 +16,9 @@
 #ifndef GL_UNIFORM_BLOCK_INDEX
 #define GL_UNIFORM_BLOCK_INDEX 0x8A3A
 #endif
+#ifndef GL_INVALID_INDEX
+#define GL_INVALID_INDEX 0xFFFFFFFFu
+#endif
 
 typedef const GLubyte* (*getString_t)(GLenum);
 typedef GLuint (*createShader_t)(GLenum);
