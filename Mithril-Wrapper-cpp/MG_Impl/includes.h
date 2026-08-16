@@ -17,6 +17,14 @@
 // to it as `g_state` without a `mithril::` qualifier.
 using mithril::g_state;
 
+namespace mithril {
+// Records the first call to each GL entry point that originated outside the
+// Mithril dylib. Calls made by one Mithril GL entry point delegating to another
+// are filtered using the caller image, so the production trace reflects the
+// application/LWJGL surface rather than wrapper implementation details.
+void semantic_trace_external_api_call(const char* api, const void* caller);
+}
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -54,6 +62,12 @@ bool mg_conditional_render_allows(void);
 // idempotent (static `done` + backend_init() idempotence), so this is safe.
 // On the EGL/iOS path g_eglInitialized is true, this branch is skipped, and
 // eglInitialize() owns backend bring-up exactly as before.
+#if defined(__clang__) || defined(__GNUC__)
+#define MITHRIL_CALLER_ADDRESS() __builtin_return_address(0)
+#else
+#define MITHRIL_CALLER_ADDRESS() nullptr
+#endif
+
 #define MITHRIL_ENSURE_INIT() \
     do { \
         if (!::mithril::g_state) { \
@@ -61,6 +75,7 @@ bool mg_conditional_render_allows(void);
         } else if (!::mithril::g_eglInitialized && !backend_available()) { \
             ::proc_init(); \
         } \
+        ::mithril::semantic_trace_external_api_call(__func__, MITHRIL_CALLER_ADDRESS()); \
     } while (0)
 
 #endif // MITHRIL_INCLUDES_H

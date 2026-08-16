@@ -66,148 +66,30 @@ static const char* kVendor   = "EternityQwQ, yitenchen123";
 #else
 static const char* kRenderer = "Mithril-Wrapper (Vulkan 1.2 / MoltenVK backend)";
 #endif
-// Target desktop OpenGL 4.6 Core Profile. Both backends (DirectVulkan via
-// MoltenVK, DirectMetal direct) implement the full Core Profile 4.6
-// entry-point set (compute shaders, SSBO, image load/store,
-// ARB_buffer_storage persistent maps, DSA, ARB_vertex_attrib_binding,
-// indirect multi-draw, sample shading, …) that modern Minecraft + Sodium +
-// Iris actually exercise. Metal's hard limits (no geometry/tessellation
-// stages, no fp64) are reported honestly below.
-// The §b (cyan) Minecraft formatting code highlights Mithril in the F3 screen.
-//
-// F3 PARITY REQUIREMENT: the version string differs between backends ONLY in
-// the trailing API tag — "Vulkan 1.2 (MoltenVK)" vs "Metal 3 (DirectMetal)"
-// — so the two backends' F3 output stays line-for-line comparable.
-static const char* kShadingLangVer = "4.60 Mithril-Wrapper (glslang -> SPIR-V)";
+// GL semantic closure 2026-08-16: advertise only the semantic surface for which this branch has
+// executable Minecraft/DirectMetal evidence.  Reporting GL 4.6 made every
+// core 4.x command an implicit promise even when parts of that state machine
+// were still compatibility stubs.  Keep the core contract at 3.3 and expose
+// newer behavior only through individually proven extensions below.
+static const char* kShadingLangVer = "3.30 Mithril-Wrapper (glslang -> SPIR-V)";
 static const char* gl_version_string(void) {
     static std::string cached;
     if (cached.empty()) {
-        cached = std::string("4.6.0 §bMithril-Wrapper§r 1.0 (")
+        cached = std::string("3.3.0 §bMithril-Wrapper§r 1.0 (")
                + backend_api_string() + ")";
     }
     return cached.c_str();
 }
 
-// Full Core Profile 4.6 extension advertisement. LWJGL capability detection
-// resolves EVERY function pointer of an extension via the platform
-// GetProcAddress; if any one is NULL the whole extension is disabled — so the
-// set below MUST be matched by real implementations of every entry point. The
-// wrapper implements all of them (see MG_Impl/* and the DSA / attrib-binding
-// paths). Geometry/tessellation-stage extensions are intentionally omitted
-// (Metal has no such stages via MoltenVK), and fp64 is reported through
-// ARB_gpu_shader_fp64 as present-but-software-gated where harmless.
+// Extension advertisement is a capability contract, not a symbol-presence
+// compatibility list.  Every entry here must have a matching manifest record,
+// exported symbols, state semantics, and an executable oracle.  The contract
+// gate in ci/e2e/check_gl_semantic_contract.py enforces exact equality.
 static const char* kExtensions[] = {
-    /* ---- Core 3.x ---- */
-    "GL_ARB_vertex_buffer_object",
-    "GL_ARB_vertex_array_object",
-    "GL_ARB_framebuffer_object",
-    "GL_ARB_shader_objects",
-    "GL_ARB_vertex_shader",
-    "GL_ARB_fragment_shader",
-    "GL_ARB_uniform_buffer_object",
-    "GL_ARB_draw_elements_base_vertex",
-    "GL_ARB_instanced_arrays",
-    "GL_ARB_texture_multisample",
-    "GL_ARB_texture_buffer_object",
-    "GL_ARB_texture_cube_map_array",
-    "GL_ARB_texture_rg",
-    "GL_ARB_texture_float",
-    "GL_ARB_depth_buffer_float",
-    "GL_ARB_depth_texture",
-    "GL_ARB_depth_clamp",
-    "GL_ARB_seamless_cube_map",
-    "GL_ARB_seamless_cubemap_per_texture",
-    "GL_ARB_sync",
-    "GL_ARB_internalformat_query",
-    "GL_ARB_internalformat_query2",
-    "GL_ARB_invalidate_subdata",
-    "GL_ARB_robustness",
-    "GL_ARB_map_buffer_range",
-    "GL_ARB_vertex_type_2_10_10_10_rev",
-    "GL_ARB_half_float_vertex",
-    "GL_ARB_half_float_pixel",
-    "GL_ARB_texture_compression",
-    "GL_ARB_vertex_array_bgra",
-    "GL_ARB_explicit_attrib_location",
-    "GL_ARB_conservative_depth",
-    "GL_ARB_shading_language_420pack",
-    /* ---- Core 4.x (the set modern MC / Sodium / Iris probe) ---- */
-    "GL_ARB_draw_indirect",
-    "GL_ARB_gpu_shader5",
-    "GL_ARB_gpu_shader_fp64",
-    "GL_ARB_shader_subroutine",
-    "GL_ARB_tessellation_shader",
-    "GL_ARB_transform_feedback2",
-    "GL_ARB_transform_feedback3",
-    "GL_ARB_blend_func_extended",
-    "GL_ARB_sample_shading",
-    "GL_ARB_texture_gather",
-    "GL_ARB_texture_query_lod",
-    "GL_ARB_draw_buffers_blend",
-    "GL_ARB_multi_draw_indirect",
-    "GL_ARB_buffer_storage",
-    "GL_ARB_clear_texture",
-    "GL_ARB_enhanced_layouts",
-    "GL_ARB_shader_image_load_store",
-    "GL_ARB_shader_image_size",
-    "GL_ARB_shader_storage_buffer_object",
-    "GL_ARB_stencil_texturing",
-    "GL_ARB_texture_buffer_range",
-    "GL_ARB_texture_query_levels",
-    "GL_ARB_texture_compression_bptc",
-    "GL_ARB_texture_storage",
-    "GL_ARB_texture_storage_multisample",
     "GL_ARB_vertex_attrib_binding",
-    "GL_ARB_viewport_array",
     "GL_ARB_clip_control",
-    "GL_ARB_conditional_render_inverted",
-    "GL_ARB_cull_distance",
-    "GL_ARB_derivative_control",
-    "GL_ARB_ES2_compatibility",
-    "GL_ARB_ES3_compatibility",
-    "GL_ARB_fragment_layer_viewport",
-    "GL_ARB_framebuffer_no_attachments",
-    "GL_ARB_get_texture_sub_image",
-    "GL_ARB_pipeline_statistics_query",
-    "GL_ARB_query_buffer_object",
-    "GL_ARB_shader_atomic_counters",
-    "GL_ARB_shader_atomic_counter_ops",
-    "GL_ARB_shader_clock",
-    "GL_ARB_shader_draw_parameters",
-    "GL_ARB_shader_group_vote",
-    "GL_ARB_shader_precision",
-    "GL_ARB_shader_texture_image_samples",
-    "GL_ARB_shader_texture_lod",
-    /* GL_ARB_sparse_texture 不上报：Metal/MoltenVK 无 sparse residency
-     * （vkCreateImage 不接受 VK_IMAGE_CREATE_SPARSE_BINDING_BIT），且
-     * glTexPageCommitmentARB 无任何实现 — 上报即假扩展。LWJGL 解析不到
-     * 入口点会整体禁用，但诚实上报让 mod 走非 sparse 路径更稳。*/
-    "GL_ARB_explicit_uniform_location",
-    "GL_ARB_program_interface_query",
-    "GL_ARB_seamless_cubemap_per_texture",
-    "GL_ARB_shader_image_load_formats",
-    "GL_ARB_shading_language_packing",
-    "GL_ARB_texture_mirror_clamp_to_edge",
-    "GL_ARB_texture_multisample",
-    "GL_ARB_vertex_attrib_64bit",
-    "GL_ARB_ES3_1_compatibility",
-    "GL_ARB_compute_shader",
-    "GL_ARB_copy_image",
-    "GL_ARB_debug_output",
-    "GL_ARB_draw_buffers",
-    "GL_ARB_draw_instanced",
-    "GL_ARB_blend_func_extended",
-    "GL_ARB_sampler_objects",
-    "GL_ARB_direct_state_access",
-    "GL_ARB_texture_barrier",
-    "GL_ARB_shader_storage_buffer_object",
+    "GL_ARB_multi_draw_indirect",
     "GL_ARB_indirect_parameters",
-    "GL_ARB_polygon_offset_clamp",
-    "GL_ARB_post_depth_coverage",
-    "GL_ARB_texture_filter_anisotropic",
-    "GL_KHR_debug",
-    "GL_EXT_texture_filter_anisotropic",
-    // Mithril-specific extension (probed by mods to detect Mithril backend)
     "GL_MITHRIL_wrapper",
 };
 
@@ -215,10 +97,9 @@ extern "C" {
 
 GLenum glGetError(void) {
     MITHRIL_ENSURE_INIT();
-    // Mirror MobileGlues: always return GL_NO_ERROR to prevent Minecraft from
-    // spamming the log with GL errors that are harmless in the translation layer.
-    mithril::state_take_error();
-    return GL_NO_ERROR;
+    // GL semantic closure: expose the error state recorded by the translation
+    // layer.  Silently draining it made every conformance assertion false-green.
+    return mithril::state_take_error();
 }
 
 void glGetBooleanv(GLenum pname, GLboolean* params) {
@@ -311,8 +192,8 @@ void glGetIntegerv(GLenum pname, GLint* params) {
         case GL_NUM_EXTENSIONS:
             *params = (GLint)(sizeof(kExtensions)/sizeof(kExtensions[0]));
             break;
-        case GL_MAJOR_VERSION:                *params = 4; break;
-        case GL_MINOR_VERSION:                *params = 6; break;
+        case GL_MAJOR_VERSION:                *params = 3; break;
+        case GL_MINOR_VERSION:                *params = 3; break;
         case GL_CONTEXT_FLAGS:
             *params = GL_CONTEXT_FLAG_FORWARD_COMPATIBLE_BIT;
             break;
@@ -469,7 +350,7 @@ void glGetIntegerv(GLenum pname, GLint* params) {
         case GL_STENCIL_FAIL:                 *params = (GLint)g_state->stencilSfail; break;
         case GL_STENCIL_PASS_DEPTH_FAIL:     *params = (GLint)g_state->stencilDpfail; break;
         case GL_STENCIL_PASS_DEPTH_PASS:     *params = (GLint)g_state->stencilDppass; break;
-        case GL_SHADING_LANGUAGE_VERSION:     *params = 460; break;
+        case GL_SHADING_LANGUAGE_VERSION:     *params = 330; break;
         /* GL 4.5 ARB_clip_control: queryable clip volume state.
          * Required for completeness since we advertise GL_ARB_clip_control and
          * implement glClipControl. MC/Sodium may query these to decide whether

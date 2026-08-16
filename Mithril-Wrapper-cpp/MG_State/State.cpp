@@ -4,6 +4,16 @@
 // for design rationale.
 #include "State.h"
 
+#include <cstdarg>
+#include <cstdio>
+#include <cstdlib>
+#include <mutex>
+#include <string>
+#include <unordered_set>
+#if defined(__APPLE__) || defined(__linux__)
+#include <dlfcn.h>
+#endif
+
 namespace mithril {
 
 // ---- thread_local current context ----
@@ -11,6 +21,67 @@ thread_local GLState* g_state = nullptr;
 
 // ---- EGL initialized flag ----
 bool g_eglInitialized = false;
+
+// Optional semantic trace used by the production Minecraft E2E.  It is fully
+// dormant unless MITHRIL_GL_SEMANTIC_TRACE is set, so normal runtime hot paths
+// pay only a getenv-free function call at explicitly instrumented semantic
+// boundaries.  The file is line buffered so a crash still leaves useful evidence.
+void semantic_trace_eventf(const char* domain, const char* semantic,
+                           const char* api, const char* fmt, ...) {
+    static std::mutex traceMutex;
+    static bool initialized = false;
+    static FILE* traceFile = nullptr;
+
+    std::lock_guard<std::mutex> lock(traceMutex);
+    if (!initialized) {
+        initialized = true;
+        const char* path = std::getenv("MITHRIL_GL_SEMANTIC_TRACE");
+        if (path && *path) {
+            traceFile = std::fopen(path, "a");
+            if (traceFile) std::setvbuf(traceFile, nullptr, _IOLBF, 0);
+        }
+    }
+    if (!traceFile) return;
+
+    char details[1024] = {};
+    if (fmt && *fmt) {
+        va_list args;
+        va_start(args, fmt);
+        std::vsnprintf(details, sizeof(details), fmt, args);
+        va_end(args);
+    }
+    std::fprintf(traceFile, "%s\t%s\t%s\t%s\n",
+                 domain ? domain : "", semantic ? semantic : "",
+                 api ? api : "", details);
+}
+
+void semantic_trace_external_api_call(const char* api, const void* caller) {
+    // Keep production overhead effectively zero unless tracing was explicitly
+    // requested by CI. getenv is resolved only once per process.
+    static const bool enabled = [] {
+        const char* path = std::getenv("MITHRIL_GL_SEMANTIC_TRACE");
+        return path && *path;
+    }();
+    if (!enabled || !api || !*api) return;
+
+#if defined(__APPLE__) || defined(__linux__)
+    // A large part of the compatibility implementation delegates one GL entry
+    // point to another. Those are implementation details, not calls made by
+    // Minecraft/LWJGL. Compare image bases and suppress same-dylib callers.
+    Dl_info callerInfo{};
+    Dl_info selfInfo{};
+    if (caller && dladdr(caller, &callerInfo) != 0 &&
+        dladdr(reinterpret_cast<const void*>(&semantic_trace_external_api_call), &selfInfo) != 0 &&
+        callerInfo.dli_fbase == selfInfo.dli_fbase) {
+        return;
+    }
+#endif
+
+    thread_local std::unordered_set<std::string> seen;
+    if (!seen.emplace(api).second) return;
+    std::string semantic = std::string("api.") + api;
+    semantic_trace_eventf("api_call", semantic.c_str(), api, "external_first_call");
+}
 
 // =========================================================================
 // Enum conversions

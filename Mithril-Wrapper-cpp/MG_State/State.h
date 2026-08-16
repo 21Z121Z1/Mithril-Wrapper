@@ -239,8 +239,8 @@ struct VertexAttrib {
 // ---- Vertex buffer binding point (per VAO) ----
 // GL 4.3 separate-attribute-format model: an attribute names a *binding index*,
 // and the instance-step divisor lives on the binding, not on the attribute
-// (glVertexAttribDivisor is spec'd as shorthand for setting the divisor of the
-// binding the attribute currently points at). Pipeline.cpp reads
+// (glVertexAttribDivisor is spec'd as VertexAttribBinding(index,index) followed
+// by VertexBindingDivisor(index,divisor)). Pipeline.cpp reads
 // bindings[attribs[loc].bindingIndex].divisor to pick
 // VK_VERTEX_INPUT_RATE_INSTANCE — keep that the single source of truth.
 struct VertexBinding {
@@ -845,11 +845,6 @@ struct GLState {
     // 深度对照 MobileGL drawParams.baseVertex / drawParams.baseInstance。
     int32_t  currentBaseVertex = 0;
     uint32_t currentBaseInstance = 0;
-    // ARB_shader_draw_parameters: ordinal of the current sub-draw inside
-    // a Multi* command. Ordinary draws are zero. DirectMetal lowers
-    // SPIR-V DrawIndex to SPIRV-Cross' spvDrawIndex buffer(19), so the
-    // backend reads this value immediately before each native draw.
-    uint32_t currentDrawID = 0;
 
     // GPU fault 诊断：最近一次 glDrawElements 的索引类型（trace_draw 用它
     // 计算索引越界检查的每索引字节数）。glDrawElements 入口处设置。
@@ -927,6 +922,11 @@ void          account_draw_primitives(int gl_mode, int64_t count, int64_t instan
 // ---- Error helpers ----
 void   state_set_error(GLenum err);
 GLenum state_take_error();
+
+// Optional production semantic trace. Enabled only when
+// MITHRIL_GL_SEMANTIC_TRACE points at an output TSV file.
+void semantic_trace_eventf(const char* domain, const char* semantic,
+                           const char* api, const char* fmt, ...);
 
 // ---- Name allocation (unified via NameAllocator) ----
 void state_gen_names(const char* kind, GLsizei n, GLuint* out);
