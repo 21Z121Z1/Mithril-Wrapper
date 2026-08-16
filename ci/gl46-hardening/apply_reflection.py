@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
-"""Wire GL 4.x uniform reflection APIs to Mithril's real Program metadata.
-
-Program.cpp already reflects uniform type/size/location/block/offset/stride
-information from SPIR-V.  The compatibility layer historically discarded that
-information and returned placeholders.  This patch exposes the existing data
-without touching draw-time hot paths.
-"""
+"""Wire GL 4.x uniform reflection APIs to Mithril's real Program metadata."""
 from __future__ import annotations
 
 import argparse
@@ -152,6 +146,7 @@ void glGetActiveUniformBlockName(GLuint program, GLuint uniformBlockIndex,
 '''
 
 PATTERN = re.compile(
+    r'/\* 2-5\. Uniform and uniform-block reflection\..*?(?=/\* 6\. glClearTexImage)|'
     r'/\* 2\. glGetActiveUniformsiv.*?(?=/\* 6\. glClearTexImage)',
     re.S,
 )
@@ -161,20 +156,28 @@ require("gl46_active_uniforms" in gl and "u.blockIndex" in gl and "u.matrixStrid
         "uniform reflection APIs must expose Program/SPIR-V metadata")
 require("Set all indices to GL_INVALID_INDEX" not in gl,
         "glGetUniformIndices must not be a facade default")
+require("\x00" not in gl, "GL46 compatibility source must not contain embedded NUL bytes")
 '''
 
 
-def apply() -> None:
-    text = GL46.read_text()
+def normalize(text: str) -> str:
+    # Earlier re.sub replacement processing converted C++ '\\0' literals into
+    # actual NUL bytes.  Clean them first and use a callable replacement below
+    # so backslashes are copied literally.
+    text = text.replace('\x00', r'\0')
     if '#include <algorithm>' not in text:
         text = text.replace('#include <cstring>\n', '#include <cstring>\n#include <algorithm>\n', 1)
-    if 'static std::vector<const mithril::Uniform*> gl46_active_uniforms' not in text:
-        text, n = PATTERN.subn(REPLACEMENT, text, count=1)
-        if n != 1:
-            raise SystemExit(f'uniform reflection region: expected one match, found {n}')
+    text, n = PATTERN.subn(lambda _: REPLACEMENT, text, count=1)
+    if n != 1:
+        raise SystemExit(f'uniform reflection region: expected one match, found {n}')
+    return text
+
+
+def apply() -> None:
+    text = normalize(GL46.read_text())
     GL46.write_text(text)
     audit = AUDIT.read_text()
-    if 'uniform reflection APIs must expose Program/SPIR-V metadata' not in audit:
+    if 'GL46 compatibility source must not contain embedded NUL bytes' not in audit:
         audit += AUDIT_APPEND
         AUDIT.write_text(audit)
     verify()
@@ -182,23 +185,18 @@ def apply() -> None:
 
 def verify() -> None:
     text = GL46.read_text()
-    required = (
-        '#include <algorithm>',
-        'gl46_active_uniforms',
-        'gl46_uniform_name_matches',
-        'case GL_UNIFORM_TYPE:',
-        'case GL_UNIFORM_BLOCK_INDEX:',
-        'case GL_UNIFORM_OFFSET:',
-        'case GL_UNIFORM_MATRIX_STRIDE:',
-        'p->uniformBlocks',
-    )
-    for needle in required:
+    for needle in ('#include <algorithm>', 'gl46_active_uniforms',
+                   'gl46_uniform_name_matches', 'case GL_UNIFORM_TYPE:',
+                   'case GL_UNIFORM_BLOCK_INDEX:', 'case GL_UNIFORM_OFFSET:',
+                   'case GL_UNIFORM_MATRIX_STRIDE:', 'p->uniformBlocks'):
         if needle not in text:
             raise SystemExit(f'missing reflection invariant: {needle}')
-    if 'Set all indices to GL_INVALID_INDEX' in text:
-        raise SystemExit('legacy uniform reflection facade remains')
+    if '\x00' in text:
+        raise SystemExit('embedded NUL byte remains in GL46_Compat.cpp')
+    if normalize(text) != text:
+        raise SystemExit('reflection region is not canonical/idempotent')
     compile(AUDIT.read_text(), str(AUDIT), 'exec')
-    print('GL program reflection semantics: PASS')
+    print('GL program reflection semantics: PASS; byte-safe and idempotent')
 
 
 def main() -> None:
@@ -208,7 +206,6 @@ def main() -> None:
     g.add_argument('--verify', action='store_true')
     a = p.parse_args()
     apply() if a.apply else verify()
-
 
 if __name__ == '__main__':
     main()
