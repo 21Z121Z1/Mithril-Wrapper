@@ -1,0 +1,46 @@
+name: retire-consolidated-branches-once
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/retire-consolidated-branches-once.yml
+
+permissions:
+  contents: write
+
+jobs:
+  retire:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete superseded and accidental refs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          branches=(
+            'integration/directmetal-unified-20260815'
+            'codex/directvulkan-overnight-recovery-20260814'
+            'fix/gl-semantic-closure-integration-20260816'
+            'codex/mobilegl-ios-live-20260815'
+            'integration/directvulkan-reference-gui'
+            'integration/legacy-capability-dual-backend'
+            'integration/legacy-capability-semantic'
+          )
+          api="$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/git/refs/heads"
+          auth=(-H "Authorization: Bearer $GH_TOKEN" -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28')
+          for branch in "${branches[@]}"; do
+            echo "Retiring $branch"
+            code=$(curl -sS -o "$RUNNER_TEMP/delete.json" -w '%{http_code}' -X DELETE "${auth[@]}" "$api/$branch")
+            case "$code" in
+              204) echo "deleted: $branch" ;;
+              404) echo "already absent: $branch" ;;
+              *) cat "$RUNNER_TEMP/delete.json" || true; echo "DELETE failed: $branch HTTP $code" >&2; exit 1 ;;
+            esac
+          done
+          for branch in "${branches[@]}"; do
+            code=$(curl -sS -o "$RUNNER_TEMP/verify.json" -w '%{http_code}' "${auth[@]}" "$api/$branch")
+            [[ "$code" == 404 ]] || { cat "$RUNNER_TEMP/verify.json" || true; echo "still exists: $branch HTTP $code" >&2; exit 1; }
+          done
+          echo "All ${#branches[@]} superseded refs are absent."
