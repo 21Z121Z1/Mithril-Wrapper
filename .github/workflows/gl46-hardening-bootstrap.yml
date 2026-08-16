@@ -6,6 +6,7 @@ on:
     branches: ['ci/minecraft-on-mithril-e2e-20260815']
     paths:
       - 'ci/gl46-hardening/apply.py'
+      - 'ci/gl46-hardening/apply_errors.py'
 
 permissions:
   contents: write
@@ -25,10 +26,14 @@ jobs:
           ref: ci/minecraft-on-mithril-e2e-20260815
           fetch-depth: 2
           persist-credentials: true
-      - name: Apply deterministic semantic hardening patch
-        run: python3 ci/gl46-hardening/apply.py --apply
+      - name: Apply deterministic semantic hardening patches
+        run: |
+          python3 ci/gl46-hardening/apply.py --apply
+          python3 ci/gl46-hardening/apply_errors.py --apply
       - name: Verify patch invariants
-        run: python3 ci/gl46-hardening/apply.py --verify
+        run: |
+          python3 ci/gl46-hardening/apply.py --verify
+          python3 ci/gl46-hardening/apply_errors.py --verify
       - name: Mechanical diff checks
         run: |
           git diff --check
@@ -45,7 +50,8 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add Mithril-Wrapper-cpp/MG_Impl/GL46_Compat.cpp \
+                  Mithril-Wrapper-cpp/MG_Impl/Getter.cpp \
                   ci/minecraft-e2e/native/glfw_mithril_bridge.mm \
                   verify/gl46_semantic_audit.py
-          git commit -m 'gl: harden program-uniform and DSA multi-bind semantics'
+          git commit -m 'gl: harden error reporting and 4.6 state semantics'
           git push origin HEAD:ci/minecraft-on-mithril-e2e-20260815
