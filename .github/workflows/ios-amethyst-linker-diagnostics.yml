@@ -1,0 +1,122 @@
+name: Diagnose Amethyst iOS linker isolation
+
+on:
+  push:
+    branches:
+      - 'fix/ios-amethyst-runtime-isolation'
+  workflow_dispatch:
+
+jobs:
+  diagnose-linker:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          submodules: recursive
+
+      - name: Stage toolchain and Vulkan headers
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL -o ios.toolchain.cmake \
+            https://github.com/leetal/ios-cmake/raw/master/ios.toolchain.cmake
+          curl -fsSL -o MoltenVK-ios.tar \
+            https://github.com/KhronosGroup/MoltenVK/releases/download/v1.4.2/MoltenVK-ios.tar
+          mkdir -p moltenvk-staging
+          tar -xf MoltenVK-ios.tar -C moltenvk-staging
+          HDRS=$(find moltenvk-staging -type d -name vulkan -path '*/include/vulkan' | head -1)
+          test -n "$HDRS"
+          mv "$(dirname "$HDRS")" ./MoltenVK-Headers
+          test -s MoltenVK-Headers/vulkan/vulkan.h
+
+      - name: Configure exact isolation flags
+        shell: bash
+        run: |
+          set -euo pipefail
+          EXPORTS="$RUNNER_TEMP/amethyst-ios.exports"
+          NOT_WEAK="$GITHUB_WORKSPACE/cmake/amethyst-ios.force-not-weak"
+          MOLTENVK="$GITHUB_WORKSPACE/Mithril-Wrapper-cpp/3rdparty/MoltenVK/libMoltenVK.dylib"
+          bash "$GITHUB_WORKSPACE/cmake/generate-amethyst-ios-exports.sh" "$EXPORTS"
+          test "$(wc -l < "$EXPORTS" | tr -d ' ')" -eq 701
+          cmake -B build-amethyst-ios \
+            -DCMAKE_TOOLCHAIN_FILE=ios.toolchain.cmake \
+            -DPLATFORM=OS64 \
+            -DDEPLOYMENT_TARGET=15.0 \
+            -DENABLE_BITCODE=OFF \
+            -DENABLE_ARC=OFF \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DMOLTENVK_LIBRARY="$MOLTENVK" \
+            -DCMAKE_C_FLAGS="-Wno-error=implicit-function-declaration" \
+            -DCMAKE_CXX_FLAGS="-Wno-error" \
+            -DCMAKE_SHARED_LINKER_FLAGS="-Wl,-exported_symbols_list,$EXPORTS -Wl,-force_symbols_not_weak_list,$NOT_WEAK"
+
+      - name: Build and capture final linker command
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o pipefail
+          cmake --build build-amethyst-ios --config RelWithDebInfo --target mithril --verbose -j"$(sysctl -n hw.ncpu)" 2>&1 | tee /tmp/mithril-build.log
+          DYLIB=$(find build-amethyst-ios -name libmithril.dylib -type f | head -1)
+          test -n "$DYLIB"
+          echo "DYLIB=$DYLIB" >> "$GITHUB_ENV"
+
+          FLAG_LINES=$(grep -E -- '(-exported_symbols_list|-force_symbols_not_weak_list)' /tmp/mithril-build.log | tail -5 || true)
+          if [[ -z "$FLAG_LINES" ]]; then
+            echo '::error title=Final linker isolation flags absent::Verbose build log contains neither -exported_symbols_list nor -force_symbols_not_weak_list'
+          else
+            SAFE=$(printf '%s\n' "$FLAG_LINES" | sed 's/%/%25/g;s/\r/%0D/g;s/\n/%0A/g' | tail -c 7000)
+            echo "::notice title=Final linker isolation flags present::$SAFE"
+          fi
+
+      - name: Inspect symbol table and dyld export planes
+        shell: bash
+        run: |
+          set -euo pipefail
+          DYLIB="$DYLIB"
+          file "$DYLIB"
+          otool -L "$DYLIB"
+
+          nm -m "$DYLIB" > /tmp/nm-m.txt
+          nm -u "$DYLIB" > /tmp/nm-u.txt
+          nm -gU "$DYLIB" > /tmp/nm-gU.txt
+
+          REPS=$(grep -E '(_glGetString$|_eglGetDisplay$|_ShCompile$|_ZN11TIntermNode14getAsUnaryNodeEv$)' /tmp/nm-m.txt | head -20 | paste -sd';' - || true)
+          [[ -n "$REPS" ]] && echo "::notice title=Representative nm -m records::$REPS"
+
+          UNDEF_COMPILER=$(grep -Ec '(TInterm|glslang|spirv_cross)' /tmp/nm-u.txt || true)
+          echo "::notice title=Undefined compiler symbol count::$UNDEF_COMPILER"
+
+          if xcrun --find llvm-objdump >/dev/null 2>&1; then
+            xcrun llvm-objdump --macho --exports-trie "$DYLIB" > /tmp/exports-trie.txt || true
+            HOST_COUNT=$(grep -Ec '(_gl[A-Z][A-Za-z0-9_]*|_egl[A-Z][A-Za-z0-9_]*)' /tmp/exports-trie.txt || true)
+            COMPILER_COUNT=$(grep -Ec '(TInterm|glslang|spirv_cross|__Z)' /tmp/exports-trie.txt || true)
+            HOST_REPS=$(grep -E '(_glGetString|_eglGetDisplay)' /tmp/exports-trie.txt | head -10 | paste -sd';' - || true)
+            COMPILER_REPS=$(grep -E '(TInterm|glslang|spirv_cross|__Z)' /tmp/exports-trie.txt | head -25 | paste -sd';' - || true)
+            echo "::notice title=Mach-O exports trie counts::host_gl_egl=$HOST_COUNT compiler_cxx=$COMPILER_COUNT"
+            [[ -n "$HOST_REPS" ]] && echo "::notice title=Exports trie host samples::$HOST_REPS"
+            [[ -n "$COMPILER_REPS" ]] && echo "::error title=Exports trie compiler leakage::$COMPILER_REPS"
+
+            xcrun llvm-objdump --macho --chained-fixups "$DYLIB" > /tmp/chained.txt 2>/dev/null || true
+            CHAINED_COMPILER=$(grep -Ec '(TInterm|glslang|spirv_cross)' /tmp/chained.txt || true)
+            echo "::notice title=Compiler chained-fixup count::$CHAINED_COMPILER"
+          fi
+
+          if xcrun --find dyld_info >/dev/null 2>&1; then
+            xcrun dyld_info -exports "$DYLIB" > /tmp/dyld-exports.txt 2>/dev/null || true
+            xcrun dyld_info -weak_bind "$DYLIB" > /tmp/weak-bind.txt 2>/dev/null || true
+            xcrun dyld_info -bind "$DYLIB" > /tmp/bind.txt 2>/dev/null || true
+            DYLD_HOST=$(grep -Ec '(_gl[A-Z][A-Za-z0-9_]*|_egl[A-Z][A-Za-z0-9_]*)' /tmp/dyld-exports.txt || true)
+            DYLD_COMPILER=$(grep -Ec '(TInterm|glslang|spirv_cross|__Z)' /tmp/dyld-exports.txt || true)
+            WEAK_COMPILER=$(grep -Ec '(TInterm|glslang|spirv_cross)' /tmp/weak-bind.txt || true)
+            BIND_COMPILER=$(grep -Ec '(TInterm|glslang|spirv_cross)' /tmp/bind.txt || true)
+            echo "::notice title=dyld export/bind counts::exports_host=$DYLD_HOST exports_compiler=$DYLD_COMPILER weak_bind_compiler=$WEAK_COMPILER bind_compiler=$BIND_COMPILER"
+          fi
+
+          TINTERM=$(grep '_ZN11TIntermNode14getAsUnaryNodeEv' /tmp/nm-m.txt | head -5 | paste -sd';' - || true)
+          [[ -n "$TINTERM" ]] && echo "::notice title=TIntermNode getAsUnaryNode state::$TINTERM"
+
+          # Diagnostic workflow intentionally reports evidence without turning
+          # the already-known nm -gU mismatch into another opaque failure.
+          true
