@@ -55,7 +55,9 @@ require("gl46_active_uniforms" in gl and "u.blockIndex" in gl and "u.matrixStrid
 require("Set all indices to GL_INVALID_INDEX" not in gl,
         "glGetUniformIndices must not be a facade default")
 
-require("gl46_get_sampler_scalar" in gl and "s->borderColorI" in gl and "s->borderColorUI" in gl,
+require("gl46_get_sampler_scalar" in gl and "gl46_set_sampler_scalar" in gl,
         "sampler getters/setters must expose tracked sampler state")
 require("Sampler object getters (GL 3.3): return the GL defaults" not in gl,
         "sampler queries must not return facade defaults")
+require("glSamplerParameteri(sampler, pname" not in gl,
+        "GL46 sampler integer setters must not depend on undeclared cross-TU entry points")
