@@ -21,7 +21,7 @@ jobs:
     timeout-minutes: 25
     env:
       REF_ROOT: ${{ github.workspace }}/build/minecraft-native-linux-reference
-      GLFW_REFERENCE_PREFIX: ${{ runner.temp }}/glfw-3.4
+      GLFW_REFERENCE_PREFIX: ${{ github.workspace }}/build/glfw-3.4-install
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with: { persist-credentials: false }
@@ -33,7 +33,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            xvfb libgl1-mesa-dri libglx-mesa0 mesa-utils \
+            xvfb libgl1-mesa-dri libglx-mesa0 mesa-utils ninja-build \
             libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev
           glxinfo -B || true
       - name: Checkout exact GLFW 3.4 reference runtime
@@ -61,7 +61,6 @@ jobs:
           GLFW_REAL="$GLFW_REFERENCE_PREFIX/lib/libglfw.so.3"
           test -s "$GLFW_REAL"
           nm -D "$GLFW_REAL" | grep -q ' glfwInitAllocator$'
-          "$GLFW_REFERENCE_PREFIX/bin/glfwinfo" --version 2>/dev/null || true
       - name: Build native pre-swap capture bridge
         id: bridge
         shell: bash
