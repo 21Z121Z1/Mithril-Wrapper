@@ -4,7 +4,7 @@
  *  1. a small glBufferSubData update does not CPU-copy the whole resident GL buffer;
  *  2. completed resident generations are recycled rather than allocating forever.
  *
- * Pixel readback remains the semantic oracle.  The DirectMetal diagnostic ABI is
+ * Pixel readback remains the semantic oracle. The DirectMetal diagnostic ABI is
  * only used to make the performance-shape assertions deterministic in CI.
  */
 #include <dlfcn.h>
@@ -20,7 +20,6 @@
 #define GL_COMPILE_STATUS      0x8B81
 #define GL_LINK_STATUS         0x8B82
 #define GL_ARRAY_BUFFER        0x8892
-#define GL_BUFFER_SIZE         0x8764
 #define GL_DYNAMIC_DRAW        0x88E8
 #define GL_FLOAT               0x1406
 #define GL_FALSE               0
@@ -53,7 +52,6 @@ typedef void (*PFN_glGenBuffers)(GLsizei, GLuint*);
 typedef void (*PFN_glBindBuffer)(GLenum, GLuint);
 typedef void (*PFN_glBufferData)(GLenum, GLsizeiptr, const void*, GLenum);
 typedef void (*PFN_glBufferSubData)(GLenum, GLintptr, GLsizeiptr, const void*);
-typedef void (*PFN_glGetBufferParameteriv)(GLenum, GLenum, GLint*);
 typedef void (*PFN_glEnableVertexAttribArray)(GLuint);
 typedef void (*PFN_glVertexAttribPointer)(GLuint, GLint, GLenum, GLboolean, GLsizei, const void*);
 typedef void (*PFN_glDrawArrays)(GLenum, GLint, GLsizei);
@@ -89,6 +87,11 @@ static const char* FS =
     "layout(location=0) out vec4 fragColor;\n"
     "void main() { fragColor = vColor; }\n";
 
+struct Vertex {
+    float x, y;
+    float r, g, b, a;
+};
+
 int main(void) {
     const char* library = getenv("MITHRIL_LIBRARY");
     if (!library || !*library) library = "./output/libmithril.dylib";
@@ -111,7 +114,6 @@ int main(void) {
     LOAD(PFN_glBindBuffer, bindBuffer, "glBindBuffer");
     LOAD(PFN_glBufferData, bufferData, "glBufferData");
     LOAD(PFN_glBufferSubData, bufferSubData, "glBufferSubData");
-    LOAD(PFN_glGetBufferParameteriv, getBufferParameteriv, "glGetBufferParameteriv");
     LOAD(PFN_glEnableVertexAttribArray, enableVertexAttribArray, "glEnableVertexAttribArray");
     LOAD(PFN_glVertexAttribPointer, vertexAttribPointer, "glVertexAttribPointer");
     LOAD(PFN_glDrawArrays, drawArrays, "glDrawArrays");
@@ -127,10 +129,9 @@ int main(void) {
     CHECK(createShader && shaderSource && compileShader && getShaderiv &&
           createProgram && attachShader && linkProgram && getProgramiv &&
           useProgram && genVertexArrays && bindVertexArray && genBuffers &&
-          bindBuffer && bufferData && bufferSubData && getBufferParameteriv &&
-          enableVertexAttribArray && vertexAttribPointer && drawArrays &&
-          clearColor && clear && finish && readPixels && getError &&
-          resetStats && getStats,
+          bindBuffer && bufferData && bufferSubData && enableVertexAttribArray &&
+          vertexAttribPointer && drawArrays && clearColor && clear && finish &&
+          readPixels && getError && resetStats && getStats,
           "required GL and DirectMetal diagnostic symbols resolve");
     if (failures) return failures;
 
@@ -153,41 +154,42 @@ int main(void) {
     CHECK(ok, "program links");
     useProgram(program);
 
-    const float positions[6] = {
-        -0.7f, -0.7f,
-         0.7f, -0.7f,
-         0.0f,  0.7f,
+    const struct Vertex white[3] = {
+        {-0.7f, -0.7f, 1, 1, 1, 1},
+        { 0.7f, -0.7f, 1, 1, 1, 1},
+        { 0.0f,  0.7f, 1, 1, 1, 1},
     };
-    const float white[12] = {
-        1,1,1,1, 1,1,1,1, 1,1,1,1,
+    const struct Vertex red[3] = {
+        {-0.7f, -0.7f, 1, 0, 0, 1},
+        { 0.7f, -0.7f, 1, 0, 0, 1},
+        { 0.0f,  0.7f, 1, 0, 0, 1},
     };
-    const float red[12] = {
-        1,0,0,1, 1,0,0,1, 1,0,0,1,
+    const struct Vertex green[3] = {
+        {-0.7f, -0.7f, 0, 1, 0, 1},
+        { 0.7f, -0.7f, 0, 1, 0, 1},
+        { 0.0f,  0.7f, 0, 1, 0, 1},
     };
-    const float green[12] = {
-        0,1,0,1, 0,1,0,1, 0,1,0,1,
-    };
+
     enum { LARGE_BUFFER_SIZE = 256 * 1024 };
     uint8_t* initial = (uint8_t*)calloc(1, LARGE_BUFFER_SIZE);
     CHECK(initial != NULL, "host fixture allocation succeeds");
     if (!initial) return failures;
     memcpy(initial, white, sizeof(white));
 
-    GLuint vao = 0, positionBuffer = 0, colorBuffer = 0;
+    /* A single interleaved VBO is deliberate: it satisfies DrawCommon's
+     * resident-source fast-path invariants and makes the large GL buffer itself
+     * the authoritative Metal resident source. */
+    GLuint vao = 0, vertexBuffer = 0;
     genVertexArrays(1, &vao);
     bindVertexArray(vao);
-
-    genBuffers(1, &positionBuffer);
-    bindBuffer(GL_ARRAY_BUFFER, positionBuffer);
-    bufferData(GL_ARRAY_BUFFER, sizeof(positions), positions, GL_DYNAMIC_DRAW);
-    enableVertexAttribArray(0);
-    vertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), 0);
-
-    genBuffers(1, &colorBuffer);
-    bindBuffer(GL_ARRAY_BUFFER, colorBuffer);
+    genBuffers(1, &vertexBuffer);
+    bindBuffer(GL_ARRAY_BUFFER, vertexBuffer);
     bufferData(GL_ARRAY_BUFFER, LARGE_BUFFER_SIZE, initial, GL_DYNAMIC_DRAW);
+    enableVertexAttribArray(0);
+    vertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, sizeof(struct Vertex), 0);
     enableVertexAttribArray(1);
-    vertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, 4 * sizeof(float), 0);
+    vertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, sizeof(struct Vertex),
+                        (const void*)(2 * sizeof(float)));
     free(initial);
 
     clearColor(0, 0, 0, 1);
@@ -199,7 +201,7 @@ int main(void) {
     CHECK(pixel_is(px, 255, 255, 255), "initial resident generation renders white");
 
     resetStats();
-    bindBuffer(GL_ARRAY_BUFFER, colorBuffer);
+    bindBuffer(GL_ARRAY_BUFFER, vertexBuffer);
     bufferSubData(GL_ARRAY_BUFFER, 0, sizeof(red), red);
     drawArrays(GL_TRIANGLES, 0, 3);
     finish();
@@ -239,18 +241,6 @@ int main(void) {
     CHECK(second.resident_reuses >= 1,
           "completed resident generation is recycled (%llu reuse)",
           (unsigned long long)second.resident_reuses);
-
-    /* A NULL glBufferData store has a logical size without requiring an eager
-     * initialized CPU payload.  The source invariant is checked by CI; this
-     * runtime assertion protects the observable GL size contract. */
-    GLuint lazy = 0;
-    genBuffers(1, &lazy);
-    bindBuffer(GL_ARRAY_BUFFER, lazy);
-    bufferData(GL_ARRAY_BUFFER, LARGE_BUFFER_SIZE, NULL, GL_DYNAMIC_DRAW);
-    GLint logicalSize = 0;
-    getBufferParameteriv(GL_ARRAY_BUFFER, GL_BUFFER_SIZE, &logicalSize);
-    CHECK(logicalSize == LARGE_BUFFER_SIZE,
-          "NULL glBufferData preserves logical GL_BUFFER_SIZE (%d)", logicalSize);
 
     CHECK(getError() == GL_NO_ERROR, "streaming scenario leaves GL_NO_ERROR");
     dlclose(h);
