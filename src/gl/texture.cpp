@@ -255,15 +255,16 @@ bool ResolveUnpackSource(const void* pixels, uint32_t width, uint32_t height,
     }
 
     if (uses_pbo) {
-        const auto buffer = g_buffers.find(g_bound_pixel_unpack_buffer);
+        auto buffer = g_buffers.find(g_bound_pixel_unpack_buffer);
         const uint64_t offset = reinterpret_cast<uintptr_t>(pixels);
         if (buffer == g_buffers.end() || buffer->second.mapped ||
-            offset % type_bytes != 0 || offset > buffer->second.data.size() ||
-            base > buffer->second.data.size() - offset ||
-            span > buffer->second.data.size() - offset - base) {
+            offset % type_bytes != 0 || offset > buffer->second.Size() ||
+            base > buffer->second.Size() - offset ||
+            span > buffer->second.Size() - offset - base) {
             PUSH_ERROR(GL_INVALID_OPERATION);
             return false;
         }
+        buffer->second.EnsureMaterialized();
         output->data = buffer->second.data.empty()
             ? nullptr : buffer->second.data.data() + offset + base;
     } else {
@@ -287,14 +288,15 @@ bool ResolveUnpackBytes(const void* pointer, uint64_t byte_count,
         output->provided = pointer != nullptr;
         return true;
     }
-    const auto buffer = g_buffers.find(g_bound_pixel_unpack_buffer);
+    auto buffer = g_buffers.find(g_bound_pixel_unpack_buffer);
     const uint64_t offset = reinterpret_cast<uintptr_t>(pointer);
     if (buffer == g_buffers.end() || buffer->second.mapped ||
-        offset > buffer->second.data.size() ||
-        byte_count > buffer->second.data.size() - offset) {
+        offset > buffer->second.Size() ||
+        byte_count > buffer->second.Size() - offset) {
         PUSH_ERROR(GL_INVALID_OPERATION);
         return false;
     }
+    buffer->second.EnsureMaterialized();
     output->data = buffer->second.data.empty()
         ? nullptr : buffer->second.data.data() + offset;
     output->provided = true;
@@ -894,9 +896,10 @@ void SyncBufferTexture(TexState& texture, GLuint texture_id) {
         texture.tex_buffer_source_version == buffer->second.content_version)
         return;
 
+    buffer->second.EnsureMaterialized();
     const uint32_t bytes_per_texel = texture.tex_buffer_bytes_per_texel;
     const size_t available_texels = bytes_per_texel
-        ? buffer->second.data.size() / bytes_per_texel : 0;
+        ? buffer->second.Size() / bytes_per_texel : 0;
     texture.width = static_cast<uint32_t>(std::min<size_t>(
         available_texels, static_cast<size_t>(UINT32_MAX)));
     const size_t visible_bytes = static_cast<size_t>(texture.width) *

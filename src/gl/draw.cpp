@@ -254,10 +254,11 @@ bool FetchAttribRow(const AttribData& a, GLint row, GLfloat* out) {
     if (row < 0) return false;
     auto bit = g_buffers.find(a.buffer);
     if (bit == g_buffers.end()) return false;
+    bit->second.EnsureMaterialized();
     GLuint type_sz = AttribTypeSize(a.type);
     GLsizei src_stride = a.stride ? a.stride : (GLsizei)(a.size * type_sz);
     size_t src = (size_t)a.offset + (size_t)row * src_stride;
-    if (src + (size_t)a.size * type_sz > bit->second.data.size()) return false;
+    if (src + (size_t)a.size * type_sz > bit->second.Size()) return false;
     FetchComponents(bit->second.data.data() + src, a.type, a.normalized, out,
                     (GLuint)a.size);
     return true;
@@ -267,13 +268,14 @@ bool PackIntegerAttribRow(const AttribData& a, GLint row, uint8_t* output) {
     if (!a.is_pointer || !a.buffer || row < 0 || a.offset < 0) return false;
     auto buffer = g_buffers.find(a.buffer);
     if (buffer == g_buffers.end()) return false;
+    buffer->second.EnsureMaterialized();
     const uint32_t type_size = AttribTypeSize(a.type);
     const GLsizei stride = a.stride ? a.stride : a.size * type_size;
     const uint64_t source_offset = static_cast<uint64_t>(a.offset) +
                                    static_cast<uint64_t>(row) * stride;
     const uint64_t source_bytes = static_cast<uint64_t>(a.size) * type_size;
-    if (source_offset > buffer->second.data.size() ||
-        source_bytes > buffer->second.data.size() - source_offset)
+    if (source_offset > buffer->second.Size() ||
+        source_bytes > buffer->second.Size() - source_offset)
         return false;
     const uint8_t* bytes = buffer->second.data.data() +
                            static_cast<size_t>(source_offset);
@@ -534,13 +536,14 @@ void DrawCommon(GLenum mode, const std::vector<uint32_t>& idx, GLint first,
         const uint64_t end = start + (uint64_t)v_count *
                              (uint64_t)std::max(resident_stride, 0);
         resident = resident && end >= start &&
-                   end <= (uint64_t)bit->second.data.size();
+                   end <= (uint64_t)bit->second.Size();
 
         if (resident) {
+            bit->second.EnsureMaterialized();
             vstream.attrs = std::move(native_attrs);
             vstream.stride = (uint32_t)resident_stride;
             vstream.source_data = bit->second.data.data();
-            vstream.source_size = bit->second.data.size();
+            vstream.source_size = bit->second.Size();
             vstream.source_lifetime_id = bit->second.lifetime_id;
             vstream.source_content_version = bit->second.content_version;
             vstream.source_previous_content_version =
@@ -673,25 +676,26 @@ void DrawCommon(GLenum mode, const std::vector<uint32_t>& idx, GLint first,
         }
         const IndexedBufferBinding& indexed =
             g_uniform_buffer_bindings[block.binding];
-        const auto buffer = g_buffers.find(indexed.buffer);
+        auto buffer = g_buffers.find(indexed.buffer);
         if (!indexed.buffer || buffer == g_buffers.end()) {
             PUSH_ERROR(GL_INVALID_OPERATION);
             return;
         }
         const uint64_t offset = static_cast<uint64_t>(indexed.offset);
         const uint64_t available = indexed.whole_buffer
-            ? static_cast<uint64_t>(buffer->second.data.size())
+            ? static_cast<uint64_t>(buffer->second.Size())
             : static_cast<uint64_t>(indexed.size);
         if (available < static_cast<uint64_t>(block.data_size) ||
-            offset > buffer->second.data.size() ||
+            offset > buffer->second.Size() ||
             static_cast<uint64_t>(block.data_size) >
-                buffer->second.data.size() - offset) {
+                buffer->second.Size() - offset) {
             ML_LOG_ERROR("uniform block %s needs %d bytes but binding %u "
                          "does not provide a complete range",
                          block.name.c_str(), block.data_size, block.binding);
             PUSH_ERROR(GL_INVALID_OPERATION);
             return;
         }
+        buffer->second.EnsureMaterialized();
         auto append_binding = [&](uint32_t internal_binding,
                                   bool vertex_stage,
                                   bool fragment_stage) {
@@ -700,7 +704,7 @@ void DrawCommon(GLenum mode, const std::vector<uint32_t>& idx, GLint first,
             binding.vertex_stage = vertex_stage;
             binding.fragment_stage = fragment_stage;
             binding.source_data = buffer->second.data.data();
-            binding.source_size = buffer->second.data.size();
+            binding.source_size = buffer->second.Size();
             binding.source_lifetime_id = buffer->second.lifetime_id;
             binding.source_content_version = buffer->second.content_version;
             binding.source_previous_content_version =
@@ -812,6 +816,7 @@ std::vector<uint32_t> LoadIndices(GLenum type, const void* indices,
     if (g_bound_element_buffer == 0) { *err = GL_INVALID_OPERATION; return out; }
     auto bit = g_buffers.find(g_bound_element_buffer);
     if (bit == g_buffers.end()) { *err = GL_INVALID_OPERATION; return out; }
+    bit->second.EnsureMaterialized();
     GLuint idx_sz;
     switch (type) {
         case GL_UNSIGNED_BYTE: idx_sz = 1; break;

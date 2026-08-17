@@ -25,7 +25,8 @@ set(_mithril_vulkan_smokes
     packed_vertex_attrib_smoke
     fbo_smoke
     3d_smoke
-    render3d_smoke)
+    render3d_smoke
+    lazy_buffer_storage_smoke)
 
 set(_mithril_directmetal_smokes
     state_smoke
@@ -52,7 +53,8 @@ set(_mithril_directmetal_smokes
     fbo_smoke
     layered_fbo_smoke
     directmetal_fbo_smoke
-    directmetal_buffer_streaming_smoke)
+    directmetal_buffer_streaming_smoke
+    lazy_buffer_storage_smoke)
 
 if(APPLE AND TARGET mithril_direct)
     set(_mithril_runtime_target mithril_direct)
