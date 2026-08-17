@@ -1,0 +1,216 @@
+name: apply-directmetal-hotpath-phase1
+
+on:
+  push:
+    branches: [perf/directmetal-hotpath-phase1-20260817]
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-verify:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: perf/directmetal-hotpath-phase1-20260817
+          submodules: false
+          fetch-depth: 0
+
+      - name: Fetch DirectMetal shader submodules
+        run: >-
+          git submodule update --init --depth=1
+          third_party/SPIRV-Cross
+          third_party/SPIRV-Headers
+          third_party/glslang
+
+      - name: Apply exact hot-path transformations
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          def replace_exact(path, old, new, count=1):
+              p = Path(path)
+              text = p.read_text()
+              actual = text.count(old)
+              if actual != count:
+                  raise SystemExit(f"{path}: expected {count} copies, found {actual}: {old[:80]!r}")
+              p.write_text(text.replace(old, new, count))
+
+          replace_exact(
+              "src/backend/backend.h",
+              "bool Draw(const DrawParams& params);",
+              "bool Draw(DrawParams params);")
+
+          replace_exact(
+              "src/backend/backend.cpp",
+              "#include <cstring>\n",
+              "#include <cstring>\n#include <utility>\n")
+          replace_exact(
+              "src/backend/backend.cpp",
+              "bool Draw(const DrawParams& params) {\n",
+              "bool Draw(DrawParams params) {\n")
+          replace_exact(
+              "src/backend/backend.cpp",
+              "        case Kind::DirectMetal: return DirectSession().Draw(params);",
+              "        case Kind::DirectMetal: return DirectSession().Draw(std::move(params));")
+
+          replace_exact(
+              "src/metal/MetalDeviceSession.h",
+              "    bool Draw(const backend::DrawParams& params);",
+              "    bool Draw(backend::DrawParams params);")
+
+          replace_exact(
+              "src/metal/MetalDeviceSession.cpp",
+              "#include \"engine.h\"\n",
+              "#include \"engine.h\"\n\n#include <utility>\n")
+          replace_exact(
+              "src/metal/MetalDeviceSession.cpp",
+              "bool MetalDeviceSession::Draw(const backend::DrawParams& params) { return metal::Draw(params); }",
+              "bool MetalDeviceSession::Draw(backend::DrawParams params) { return metal::Draw(std::move(params)); }")
+
+          replace_exact(
+              "src/metal/engine.h",
+              "bool Draw(const backend::DrawParams& params);",
+              "bool Draw(backend::DrawParams params);")
+
+          replace_exact(
+              "src/gl/draw.cpp",
+              "dp.vertex_stream.HasStorage() && !v::Draw(dp))",
+              "dp.vertex_stream.HasStorage() && !v::Draw(std::move(dp)))")
+
+          old_target = '''struct AttachmentSelection {
+              NSUInteger level = 0;
+              NSUInteger slice = 0;
+              NSUInteger depth_plane = 0;
+              bool uses_depth_plane = false;
+          };
+
+          struct ResolvedTarget {
+              std::vector<id<MTLTexture>> colors;
+              std::vector<id<MTLTexture>> resolve_colors;
+              std::vector<AttachmentSelection> color_selections;
+              id<MTLTexture> depth_stencil = nil;
+              AttachmentSelection depth_selection;
+              bool has_stencil = false;
+              NSUInteger width = 0;
+              NSUInteger height = 0;
+              NSUInteger samples = 1;
+          };
+          '''
+          new_target = '''struct AttachmentSelection {
+              NSUInteger level = 0;
+              NSUInteger slice = 0;
+              NSUInteger depth_plane = 0;
+              bool uses_depth_plane = false;
+          };
+
+          // Small fixed-capacity sequence used in the per-draw render-target path.
+          // DirectMetal exposes at most eight GL color attachments, so heap-backed
+          // vectors here only add allocator traffic without adding representable state.
+          template <typename T, size_t Capacity>
+          class InlineList {
+          public:
+              void push_back(const T& value) {
+                  // ResolveTarget validates the frontend attachment count before
+                  // populating these lists; keep this as a defensive invariant.
+                  assert(size_ < Capacity);
+                  values_[size_++] = value;
+              }
+              size_t size() const { return size_; }
+              bool empty() const { return size_ == 0; }
+              T& operator[](size_t index) { return values_[index]; }
+              const T& operator[](size_t index) const { return values_[index]; }
+              auto begin() { return values_.begin(); }
+              auto end() { return values_.begin() + static_cast<ptrdiff_t>(size_); }
+              auto begin() const { return values_.begin(); }
+              auto end() const { return values_.begin() + static_cast<ptrdiff_t>(size_); }
+          private:
+              std::array<T, Capacity> values_{};
+              size_t size_ = 0;
+          };
+
+          constexpr size_t kMaxResolvedColorAttachments = 8;
+
+          struct ResolvedTarget {
+              InlineList<id<MTLTexture>, kMaxResolvedColorAttachments> colors;
+              InlineList<id<MTLTexture>, kMaxResolvedColorAttachments> resolve_colors;
+              InlineList<AttachmentSelection, kMaxResolvedColorAttachments> color_selections;
+              id<MTLTexture> depth_stencil = nil;
+              AttachmentSelection depth_selection;
+              bool has_stencil = false;
+              NSUInteger width = 0;
+              NSUInteger height = 0;
+              NSUInteger samples = 1;
+          };
+          '''
+          replace_exact("src/metal/engine.mm", old_target, new_target)
+          replace_exact(
+              "src/metal/engine.mm",
+              "#include <chrono>\n",
+              "#include <chrono>\n#include <cassert>\n")
+          replace_exact(
+              "src/metal/engine.mm",
+              "    target->width = found->second.spec.width;\n    target->height = found->second.spec.height;\n",
+              "    if (found->second.spec.color.size() > kMaxResolvedColorAttachments)\n        return false;\n    target->width = found->second.spec.width;\n    target->height = found->second.spec.height;\n")
+          replace_exact(
+              "src/metal/engine.mm",
+              "bool Draw(const backend::DrawParams& params) {\n",
+              "bool Draw(backend::DrawParams params) {\n")
+          replace_exact(
+              "src/metal/engine.mm",
+              "    PendingDraw pending;\n    pending.params = params;\n",
+              "    PendingDraw pending;\n")
+          replace_exact(
+              "src/metal/engine.mm",
+              "    if (pending.occlusion) ++pending.occlusion->pending_draws;\n    engine.draws.push_back(std::move(pending));\n",
+              "    // All borrowed source pointers have been retained above. Move the\n    // rich frontend snapshot into deferred storage exactly once instead of\n    // deep-copying its vectors/maps at every draw.\n    pending.params = std::move(params);\n    pending.params.vertex_stream.source_data = nullptr;\n    pending.params.vertex_stream.source_size = 0;\n    pending.params.instance_stream.source_data = nullptr;\n    pending.params.instance_stream.source_size = 0;\n    for (auto& binding : pending.params.uniform_buffers) {\n        binding.source_data = nullptr;\n        binding.source_size = 0;\n    }\n    if (pending.occlusion) ++pending.occlusion->pending_draws;\n    engine.draws.push_back(std::move(pending));\n")
+          # The old code cleared source pointers through pending.params before
+          # pending.params existed. Remove those now-redundant writes.
+          for snippet in (
+              "        pending.params.vertex_stream.source_data = nullptr;\n        pending.params.vertex_stream.source_size = 0;\n",
+              "        pending.params.instance_stream.source_data = nullptr;\n        pending.params.instance_stream.source_size = 0;\n",
+              "        pending.params.uniform_buffers[i].source_data = nullptr;\n        pending.params.uniform_buffers[i].source_size = 0;\n",
+          ):
+              replace_exact("src/metal/engine.mm", snippet, "")
+
+          # Architectural guards: these exact regressions should now be absent.
+          engine = Path("src/metal/engine.mm").read_text()
+          assert "pending.params = params;" not in engine
+          assert "std::vector<id<MTLTexture>> colors;" not in engine
+          draw = Path("src/gl/draw.cpp").read_text()
+          assert "!v::Draw(dp)" not in draw
+          PY
+
+      - name: Verify transformed source invariants
+        run: |
+          git diff --check
+          grep -q 'pending.params = std::move(params);' src/metal/engine.mm
+          grep -q 'InlineList<id<MTLTexture>' src/metal/engine.mm
+          grep -q 'v::Draw(std::move(dp))' src/gl/draw.cpp
+          ! grep -q 'pending.params = params;' src/metal/engine.mm
+
+      - name: Configure DirectMetal Release build
+        run: >-
+          cmake -S . -B build-direct -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DMITHRIL_BUILD_LEGACY=OFF
+          -DMITHRIL_BUILD_DIRECT=ON
+          -DMITHRIL_ENABLE_SHADER_TOOLCHAIN=ON
+
+      - name: Build DirectMetal and regression tests
+        run: cmake --build build-direct --parallel
+
+      - name: Run DirectMetal semantic suite
+        run: ctest --test-dir build-direct -L directmetal --output-on-failure
+
+      - name: Commit verified implementation
+        run: |
+          rm .github/workflows/apply-directmetal-hotpath-phase1.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          git commit -m 'perf: remove DirectMetal per-draw copy and target allocations'
+          git push origin HEAD:perf/directmetal-hotpath-phase1-20260817
