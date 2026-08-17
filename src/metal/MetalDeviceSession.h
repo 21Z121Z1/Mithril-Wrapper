@@ -38,7 +38,7 @@ public:
     uint64_t CreateProgram(const std::vector<uint32_t>& vertex,
                            const std::vector<uint32_t>& fragment);
     void DestroyProgram(uint64_t program);
-    bool Draw(const backend::DrawParams& params);
+    bool Draw(backend::DrawParams params);
     void SubmitFlush(bool waitForCompletion);
     void ReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, void* out);
 

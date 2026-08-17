@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
+#include <utility>
 
 #if defined(MITHRIL_HAS_DIRECT_METAL)
 #include <metal/MetalDeviceSession.h>
@@ -267,13 +268,13 @@ uint64_t CreateProgram(const std::vector<uint32_t>& vs, const std::vector<uint32
 }
 void DestroyProgram(uint64_t program) { DISPATCH_VOID(DestroyProgram, program); }
 
-bool Draw(const DrawParams& params) {
+bool Draw(DrawParams params) {
     switch (SelectedKind()) {
 #if !defined(MITHRIL_DIRECT_ONLY)
         case Kind::Vulkan: vk::Draw(params); return true;
 #endif
 #if defined(MITHRIL_HAS_DIRECT_METAL)
-        case Kind::DirectMetal: return DirectSession().Draw(params);
+        case Kind::DirectMetal: return DirectSession().Draw(std::move(params));
 #endif
         default: return false;
     }

@@ -19,7 +19,7 @@ bool Clear(const backend::ClearParams& params);
 uint64_t CreateProgram(const std::vector<uint32_t>& vs,
                        const std::vector<uint32_t>& fs);
 void DestroyProgram(uint64_t program);
-bool Draw(const backend::DrawParams& params);
+bool Draw(backend::DrawParams params);
 void SubmitFlush(bool wait_for_completion);
 void ReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, void* out);
 uint64_t CreateFence();

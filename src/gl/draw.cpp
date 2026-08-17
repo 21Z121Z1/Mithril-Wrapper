@@ -789,7 +789,7 @@ void DrawCommon(GLenum mode, const std::vector<uint32_t>& idx, GLint first,
         !LowerFlatPrimitives(state.provoking_vertex, &dp))
         return;
     if (ConditionalRenderingAllowsCommands() &&
-        dp.vertex_stream.HasStorage() && !v::Draw(dp))
+        dp.vertex_stream.HasStorage() && !v::Draw(std::move(dp)))
         PUSH_ERROR(GL_INVALID_OPERATION);
 }
 

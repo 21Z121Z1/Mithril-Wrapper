@@ -2,6 +2,8 @@
 
 #include "engine.h"
 
+#include <utility>
+
 namespace mithril::metal {
 
 MetalDeviceSession& MetalDeviceSession::shared() {
@@ -30,7 +32,7 @@ uint64_t MetalDeviceSession::CreateProgram(const std::vector<uint32_t>& vs,
     return metal::CreateProgram(vs, fs);
 }
 void MetalDeviceSession::DestroyProgram(uint64_t program) { metal::DestroyProgram(program); }
-bool MetalDeviceSession::Draw(const backend::DrawParams& params) { return metal::Draw(params); }
+bool MetalDeviceSession::Draw(backend::DrawParams params) { return metal::Draw(std::move(params)); }
 void MetalDeviceSession::SubmitFlush(bool wait) { metal::SubmitFlush(wait); }
 void MetalDeviceSession::ReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, void* out) {
     metal::ReadPixels(x, y, width, height, out);
