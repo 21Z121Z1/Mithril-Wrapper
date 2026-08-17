@@ -58,6 +58,9 @@ jobs:
       - name: Run complete DirectMetal semantic suite
         run: ctest --test-dir build-direct -L directmetal --output-on-failure
 
+      - name: Fetch Vulkan reference headers
+        run: git submodule update --init --depth=1 third_party/Vulkan-Headers
+
       - name: Configure Vulkan reference build
         run: >-
           cmake -S . -B build-vulkan -G Ninja
