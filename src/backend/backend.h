@@ -26,7 +26,7 @@ bool Clear(const ClearParams& params);
 uint64_t CreateProgram(const std::vector<uint32_t>& vs,
                        const std::vector<uint32_t>& fs);
 void DestroyProgram(uint64_t program);
-bool Draw(const DrawParams& params);
+bool Draw(DrawParams params);
 
 // wait_for_completion=false is the glFlush/present path. A backend may keep
 // work in flight. glFinish/readback pass true and establish CPU visibility.

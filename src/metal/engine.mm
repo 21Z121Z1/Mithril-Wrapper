@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cassert>
 #include <cmath>
 #include <condition_variable>
 #include <cstring>
@@ -160,10 +161,37 @@ struct AttachmentSelection {
     bool uses_depth_plane = false;
 };
 
+// Small fixed-capacity sequence used in the per-draw render-target path.
+// DirectMetal exposes at most eight GL color attachments, so heap-backed
+// vectors here only add allocator traffic without adding representable state.
+template <typename T, size_t Capacity>
+class InlineList {
+public:
+    void push_back(const T& value) {
+        // ResolveTarget validates the frontend attachment count before
+        // populating these lists; keep this as a defensive invariant.
+        assert(size_ < Capacity);
+        values_[size_++] = value;
+    }
+    size_t size() const { return size_; }
+    bool empty() const { return size_ == 0; }
+    T& operator[](size_t index) { return values_[index]; }
+    const T& operator[](size_t index) const { return values_[index]; }
+    auto begin() { return values_.begin(); }
+    auto end() { return values_.begin() + static_cast<ptrdiff_t>(size_); }
+    auto begin() const { return values_.begin(); }
+    auto end() const { return values_.begin() + static_cast<ptrdiff_t>(size_); }
+private:
+    std::array<T, Capacity> values_{};
+    size_t size_ = 0;
+};
+
+constexpr size_t kMaxResolvedColorAttachments = 8;
+
 struct ResolvedTarget {
-    std::vector<id<MTLTexture>> colors;
-    std::vector<id<MTLTexture>> resolve_colors;
-    std::vector<AttachmentSelection> color_selections;
+    InlineList<id<MTLTexture>, kMaxResolvedColorAttachments> colors;
+    InlineList<id<MTLTexture>, kMaxResolvedColorAttachments> resolve_colors;
+    InlineList<AttachmentSelection, kMaxResolvedColorAttachments> color_selections;
     id<MTLTexture> depth_stencil = nil;
     AttachmentSelection depth_selection;
     bool has_stencil = false;
@@ -686,6 +714,8 @@ bool ResolveTarget(uint64_t fbo_id, ResolvedTarget* target) {
     auto found = engine.framebuffers.find(fbo_id);
     if (found == engine.framebuffers.end() || !found->second.spec.width ||
         !found->second.spec.height)
+        return false;
+    if (found->second.spec.color.size() > kMaxResolvedColorAttachments)
         return false;
     target->width = found->second.spec.width;
     target->height = found->second.spec.height;
@@ -2354,7 +2384,7 @@ void DestroyBuffer(uint64_t lifetime_id) {
     GetEngine().resident_buffers.erase(lifetime_id);
 }
 
-bool Draw(const backend::DrawParams& params) {
+bool Draw(backend::DrawParams params) {
     auto& engine = GetEngine();
     if (!engine.initialized || !params.program || !params.vertex_stream.HasStorage())
         return false;
@@ -2374,7 +2404,6 @@ bool Draw(const backend::DrawParams& params) {
         return false;
     }
     PendingDraw pending;
-    pending.params = params;
     if (params.occlusion_query) {
         auto query = engine.occlusion_queries.find(params.occlusion_query);
         if (query == engine.occlusion_queries.end() || query->second->ended) {
@@ -2386,14 +2415,10 @@ bool Draw(const backend::DrawParams& params) {
     if (params.vertex_stream.HasResidentSource()) {
         pending.resident_vertex = RetainResidentBuffer(params.vertex_stream);
         if (!pending.resident_vertex) return false;
-        pending.params.vertex_stream.source_data = nullptr;
-        pending.params.vertex_stream.source_size = 0;
     }
     if (params.instance_stream.HasResidentSource()) {
         pending.resident_instance = RetainResidentBuffer(params.instance_stream);
         if (!pending.resident_instance) return false;
-        pending.params.instance_stream.source_data = nullptr;
-        pending.params.instance_stream.source_size = 0;
     }
     for (size_t i = 0; i < params.uniform_buffers.size(); ++i) {
         const auto& binding = params.uniform_buffers[i];
@@ -2414,8 +2439,6 @@ bool Draw(const backend::DrawParams& params) {
             static_cast<NSUInteger>(binding.internal_binding),
             static_cast<NSUInteger>(binding.offset), resident,
             binding.vertex_stage, binding.fragment_stage});
-        pending.params.uniform_buffers[i].source_data = nullptr;
-        pending.params.uniform_buffers[i].source_size = 0;
     }
     for (const auto& bind : params.sampled_textures) {
         if (!bind.vertex_stage && !bind.fragment_stage) {
@@ -2449,6 +2472,18 @@ bool Draw(const backend::DrawParams& params) {
             slot, texture->second.texture, sampler,
             texture->second.backing_buffer,
             bind.vertex_stage, bind.fragment_stage});
+    }
+    // All borrowed source pointers have been retained above. Move the
+    // rich frontend snapshot into deferred storage exactly once instead of
+    // deep-copying its vectors/maps at every draw.
+    pending.params = std::move(params);
+    pending.params.vertex_stream.source_data = nullptr;
+    pending.params.vertex_stream.source_size = 0;
+    pending.params.instance_stream.source_data = nullptr;
+    pending.params.instance_stream.source_size = 0;
+    for (auto& binding : pending.params.uniform_buffers) {
+        binding.source_data = nullptr;
+        binding.source_size = 0;
     }
     if (pending.occlusion) ++pending.occlusion->pending_draws;
     engine.draws.push_back(std::move(pending));
