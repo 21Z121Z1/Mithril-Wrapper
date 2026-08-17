@@ -1,8 +1,10 @@
 /* DirectMetal resident-buffer streaming regression.
  *
- * Proves two properties that the generic GL semantic tests cannot observe:
+ * Proves properties that the generic GL semantic tests cannot observe:
  *  1. a small glBufferSubData update does not CPU-copy the whole resident GL buffer;
- *  2. completed resident generations are recycled rather than allocating forever.
+ *  2. completed resident generations are recycled rather than allocating forever;
+ *  3. multiple frontend writes between native observations fall back to a full
+ *     snapshot instead of preserving from a stale resident generation.
  *
  * Pixel readback remains the semantic oracle. The DirectMetal diagnostic ABI is
  * only used to make the performance-shape assertions deterministic in CI.
@@ -171,14 +173,16 @@ int main(void) {
     };
 
     enum { LARGE_BUFFER_SIZE = 256 * 1024 };
+    const size_t dirtyOffset = sizeof(struct Vertex);
+    const size_t dirtySize = sizeof(white);
     uint8_t* initial = (uint8_t*)calloc(1, LARGE_BUFFER_SIZE);
     CHECK(initial != NULL, "host fixture allocation succeeds");
     if (!initial) return failures;
-    memcpy(initial, white, sizeof(white));
+    memcpy(initial + dirtyOffset, white, dirtySize);
 
-    /* A single interleaved VBO is deliberate: it satisfies DrawCommon's
-     * resident-source fast-path invariants and makes the large GL buffer itself
-     * the authoritative Metal resident source. */
+    /* One large interleaved VBO is deliberate: it satisfies DrawCommon's
+     * resident-source fast-path invariants. Row zero is padding, so the update
+     * has both an untouched prefix and suffix for the preservation blit. */
     GLuint vao = 0, vertexBuffer = 0;
     genVertexArrays(1, &vao);
     bindVertexArray(vao);
@@ -194,7 +198,7 @@ int main(void) {
 
     clearColor(0, 0, 0, 1);
     clear(GL_COLOR_BUFFER_BIT);
-    drawArrays(GL_TRIANGLES, 0, 3);
+    drawArrays(GL_TRIANGLES, 1, 3);
     finish();
     uint8_t px[4] = {0};
     readPixels(256, 256, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
@@ -202,11 +206,12 @@ int main(void) {
 
     resetStats();
     bindBuffer(GL_ARRAY_BUFFER, vertexBuffer);
-    bufferSubData(GL_ARRAY_BUFFER, 0, sizeof(red), red);
-    drawArrays(GL_TRIANGLES, 0, 3);
+    bufferSubData(GL_ARRAY_BUFFER, (GLintptr)dirtyOffset,
+                  (GLsizeiptr)sizeof(red), red);
+    drawArrays(GL_TRIANGLES, 1, 3);
     finish();
     readPixels(256, 256, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
-    CHECK(pixel_is(px, 255, 0, 0), "partial update renders red");
+    CHECK(pixel_is(px, 255, 0, 0), "nonzero-offset partial update renders red");
 
     MithrilDirectMetalBufferStatsV1 first = {0};
     CHECK(getStats(&first, sizeof(first)), "first streaming stats read succeeds");
@@ -217,7 +222,7 @@ int main(void) {
           "CPU uploads exactly modified range (%llu bytes)",
           (unsigned long long)first.partial_cpu_upload_bytes);
     CHECK(first.preserve_blit_bytes == LARGE_BUFFER_SIZE - sizeof(red),
-          "GPU preserves untouched bytes (%llu bytes)",
+          "GPU preserves prefix and suffix (%llu bytes total)",
           (unsigned long long)first.preserve_blit_bytes);
     CHECK(first.resident_allocations == 1 && first.resident_reuses == 0,
           "first replacement allocates one resident generation (%llu alloc, %llu reuse)",
@@ -225,8 +230,9 @@ int main(void) {
           (unsigned long long)first.resident_reuses);
 
     resetStats();
-    bufferSubData(GL_ARRAY_BUFFER, 0, sizeof(green), green);
-    drawArrays(GL_TRIANGLES, 0, 3);
+    bufferSubData(GL_ARRAY_BUFFER, (GLintptr)dirtyOffset,
+                  (GLsizeiptr)sizeof(green), green);
+    drawArrays(GL_TRIANGLES, 1, 3);
     finish();
     readPixels(256, 256, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
     CHECK(pixel_is(px, 0, 255, 0), "recycled generation renders green");
@@ -241,6 +247,30 @@ int main(void) {
     CHECK(second.resident_reuses >= 1,
           "completed resident generation is recycled (%llu reuse)",
           (unsigned long long)second.resident_reuses);
+
+    /* Two writes without an intervening native observation advance the frontend
+     * by two versions. The resident generation is then too old to serve as a
+     * preservation source, so correctness requires a conservative full snapshot. */
+    resetStats();
+    bufferSubData(GL_ARRAY_BUFFER, (GLintptr)dirtyOffset,
+                  (GLsizeiptr)sizeof(red), red);
+    bufferSubData(GL_ARRAY_BUFFER, (GLintptr)dirtyOffset,
+                  (GLsizeiptr)sizeof(green), green);
+    drawArrays(GL_TRIANGLES, 1, 3);
+    finish();
+    readPixels(256, 256, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+    CHECK(pixel_is(px, 0, 255, 0), "stale-version fallback preserves newest bytes");
+
+    MithrilDirectMetalBufferStatsV1 fallback = {0};
+    CHECK(getStats(&fallback, sizeof(fallback)), "fallback stats read succeeds");
+    CHECK(fallback.full_cpu_upload_bytes == LARGE_BUFFER_SIZE,
+          "skipped native version triggers one full snapshot (%llu bytes)",
+          (unsigned long long)fallback.full_cpu_upload_bytes);
+    CHECK(fallback.partial_cpu_upload_bytes == 0 &&
+          fallback.preserve_blit_bytes == 0,
+          "stale resident is never used for preservation (%llu partial, %llu blit)",
+          (unsigned long long)fallback.partial_cpu_upload_bytes,
+          (unsigned long long)fallback.preserve_blit_bytes);
 
     CHECK(getError() == GL_NO_ERROR, "streaming scenario leaves GL_NO_ERROR");
     dlclose(h);
