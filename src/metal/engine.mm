@@ -99,6 +99,14 @@ struct ResidentBuffer {
     size_t size = 0;
 };
 
+struct PendingResidentCopy {
+    id<MTLBuffer> source = nil;
+    id<MTLBuffer> destination = nil;
+    NSUInteger prefix_size = 0;
+    NSUInteger suffix_offset = 0;
+    NSUInteger suffix_size = 0;
+};
+
 struct ResidentTexture {
     id<MTLTexture> texture = nil;
     // Texture-buffer views share this allocation. Retain it explicitly so
@@ -228,6 +236,11 @@ struct CommandCompletion {
     bool success = false;
 };
 
+struct RetiredResidentBuffer {
+    id<MTLBuffer> buffer = nil;
+    std::shared_ptr<CommandCompletion> completion;
+};
+
 struct OcclusionSegment {
     id<MTLBuffer> results = nil;
     NSUInteger offset = 0;
@@ -244,6 +257,13 @@ struct OcclusionQueryState {
 MithrilDirectMetalBindingStatsV1 EmptyBindingStats() {
     MithrilDirectMetalBindingStatsV1 stats{};
     stats.version = MITHRIL_DIRECT_METAL_BINDING_STATS_VERSION;
+    stats.struct_size = static_cast<uint32_t>(sizeof(stats));
+    return stats;
+}
+
+MithrilDirectMetalBufferStatsV1 EmptyBufferStats() {
+    MithrilDirectMetalBufferStatsV1 stats{};
+    stats.version = MITHRIL_DIRECT_METAL_BUFFER_STATS_VERSION;
     stats.struct_size = static_cast<uint32_t>(sizeof(stats));
     return stats;
 }
@@ -276,6 +296,11 @@ struct Engine {
     uint64_t pipeline_clock = 0;
     uint64_t sampler_clock = 0;
     MithrilDirectMetalBindingStatsV1 binding_stats = EmptyBindingStats();
+    MithrilDirectMetalBufferStatsV1 buffer_stats = EmptyBufferStats();
+    std::vector<PendingResidentCopy> pending_resident_copies;
+    std::vector<id<MTLBuffer>> resident_retire_on_submit;
+    std::vector<RetiredResidentBuffer> retired_resident_buffers;
+    std::vector<id<MTLBuffer>> resident_buffer_pool;
     std::vector<PendingDraw> draws;
     std::vector<uint8_t> readback_pixels;
     bool initialized = false;
@@ -296,40 +321,108 @@ Engine& GetEngine() {
 void WarnUnsupported(const char* feature);
 MTLCompareFunction CompareFunction(GLenum function);
 
+bool CompletionReady(const std::shared_ptr<CommandCompletion>& completion) {
+    if (!completion) return true;
+    std::lock_guard<std::mutex> lock(completion->mutex);
+    return completion->completed;
+}
+
+constexpr size_t kMaxResidentBufferPoolEntries = 32;
+
+void ReclaimResidentBuffers() {
+    auto& engine = GetEngine();
+    for (auto it = engine.retired_resident_buffers.begin();
+         it != engine.retired_resident_buffers.end();) {
+        if (!CompletionReady(it->completion)) {
+            ++it;
+            continue;
+        }
+        if (it->buffer &&
+            engine.resident_buffer_pool.size() < kMaxResidentBufferPoolEntries)
+            engine.resident_buffer_pool.push_back(it->buffer);
+        it = engine.retired_resident_buffers.erase(it);
+    }
+}
+
+id<MTLBuffer> AcquireResidentBuffer(size_t size) {
+    auto& engine = GetEngine();
+    ReclaimResidentBuffers();
+    for (size_t i = 0; i < engine.resident_buffer_pool.size(); ++i) {
+        id<MTLBuffer> candidate = engine.resident_buffer_pool[i];
+        if (candidate && [candidate length] == size) {
+            engine.resident_buffer_pool[i] = engine.resident_buffer_pool.back();
+            engine.resident_buffer_pool.pop_back();
+            ++engine.buffer_stats.resident_reuses;
+            return candidate;
+        }
+    }
+    id<MTLBuffer> buffer = [engine.device
+        newBufferWithLength:size options:MTLResourceStorageModeShared];
+    if (buffer) ++engine.buffer_stats.resident_allocations;
+    return buffer;
+}
+
 id<MTLBuffer> RetainResidentBytes(const uint8_t* source_data,
                                   size_t source_size,
                                   uint64_t lifetime_id,
-                                  uint64_t content_version) {
+                                  uint64_t content_version,
+                                  uint64_t previous_content_version,
+                                  size_t update_offset,
+                                  size_t update_size,
+                                  bool update_is_partial) {
     if (!source_data || !source_size || !lifetime_id) return nil;
     auto& engine = GetEngine();
     ResidentBuffer& resident = engine.resident_buffers[lifetime_id];
-    if (!resident.buffer || resident.content_version != content_version ||
-        resident.size != source_size) {
-        resident.buffer = [engine.device newBufferWithBytes:source_data
-                                                    length:source_size
-                                                   options:MTLResourceStorageModeShared];
-        if (!resident.buffer) {
-            engine.resident_buffers.erase(lifetime_id);
-            return nil;
-        }
-        resident.buffer.label = @"Mithril resident GL buffer";
-        resident.content_version = content_version;
-        resident.size = source_size;
-        static bool logged_resident_path = false;
-        if (!logged_resident_path) {
-            ML_LOG_INFO("metal: resident GL buffer path active "
-                        "(lifetime/version keyed)");
-            logged_resident_path = true;
-        }
+    if (resident.buffer && resident.content_version == content_version &&
+        resident.size == source_size)
+        return resident.buffer;
+
+    const bool valid_update_range = update_offset <= source_size &&
+        update_size <= source_size - update_offset;
+    const size_t update_end = valid_update_range ? update_offset + update_size : 0;
+    const bool can_preserve_with_blit =
+        resident.buffer && resident.size == source_size &&
+        resident.content_version == previous_content_version &&
+        update_is_partial && update_size != 0 && valid_update_range &&
+        source_size % 4 == 0 && update_offset % 4 == 0 &&
+        update_size % 4 == 0 && update_end % 4 == 0;
+
+    id<MTLBuffer> replacement = AcquireResidentBuffer(source_size);
+    if (!replacement) return nil;
+
+    if (can_preserve_with_blit) {
+        std::memcpy(static_cast<uint8_t*>(replacement.contents) + update_offset,
+                    source_data + update_offset, update_size);
+        engine.buffer_stats.partial_cpu_upload_bytes += update_size;
+        engine.buffer_stats.preserve_blit_bytes += source_size - update_size;
+        engine.pending_resident_copies.push_back({
+            resident.buffer, replacement,
+            static_cast<NSUInteger>(update_offset),
+            static_cast<NSUInteger>(update_end),
+            static_cast<NSUInteger>(source_size - update_end)});
+    } else {
+        std::memcpy(replacement.contents, source_data, source_size);
+        engine.buffer_stats.full_cpu_upload_bytes += source_size;
     }
+
+    if (resident.buffer)
+        engine.resident_retire_on_submit.push_back(resident.buffer);
+    resident.buffer = replacement;
+    resident.buffer.label = @"Mithril resident GL buffer";
+    resident.content_version = content_version;
+    resident.size = source_size;
     return resident.buffer;
 }
 
 id<MTLBuffer> RetainResidentBuffer(const backend::VertexStream& stream) {
     if (!stream.HasResidentSource()) return nil;
-    return RetainResidentBytes(stream.source_data, stream.source_size,
-                               stream.source_lifetime_id,
-                               stream.source_content_version);
+    return RetainResidentBytes(
+        stream.source_data, stream.source_size,
+        stream.source_lifetime_id, stream.source_content_version,
+        stream.source_previous_content_version,
+        static_cast<size_t>(stream.source_update_offset),
+        static_cast<size_t>(stream.source_update_size),
+        stream.source_update_is_partial);
 }
 
 MTLSamplerMinMagFilter SamplerFilter(backend::TexFilter filter) {
@@ -2003,6 +2096,22 @@ bool SubmitInternal(bool wait_for_completion, bool copy_for_readback,
     if (!command) return false;
     command.label = @"Mithril DirectMetal frame";
 
+    if (!engine.pending_resident_copies.empty()) {
+        id<MTLBlitCommandEncoder> resident_blit = [command blitCommandEncoder];
+        if (!resident_blit) return false;
+        resident_blit.label = @"Mithril resident buffer preservation";
+        for (const auto& copy : engine.pending_resident_copies) {
+            if (copy.prefix_size)
+                [resident_blit copyFromBuffer:copy.source sourceOffset:0
+                    toBuffer:copy.destination destinationOffset:0 size:copy.prefix_size];
+            if (copy.suffix_size)
+                [resident_blit copyFromBuffer:copy.source
+                    sourceOffset:copy.suffix_offset toBuffer:copy.destination
+                    destinationOffset:copy.suffix_offset size:copy.suffix_size];
+        }
+        [resident_blit endEncoding];
+    }
+
     std::vector<std::shared_ptr<OcclusionQueryState>> query_states;
     std::unordered_map<OcclusionQueryState*, NSUInteger> query_offsets;
     std::unordered_map<OcclusionQueryState*, size_t> query_draw_counts;
@@ -2152,6 +2261,10 @@ bool SubmitInternal(bool wait_for_completion, bool copy_for_readback,
 
     auto completion = CommitCommandBuffer(command);
     if (!completion) return false;
+    for (id<MTLBuffer> buffer : engine.resident_retire_on_submit)
+        engine.retired_resident_buffers.push_back({buffer, completion});
+    engine.resident_retire_on_submit.clear();
+    engine.pending_resident_copies.clear();
     for (const auto& query : query_states) {
         const NSUInteger offset = query_offsets.at(query.get());
         query->segments.push_back({query_results, offset, completion});
@@ -2433,7 +2546,11 @@ bool Draw(backend::DrawParams params) {
         }
         id<MTLBuffer> resident = RetainResidentBytes(
             binding.source_data, binding.source_size,
-            binding.source_lifetime_id, binding.source_content_version);
+            binding.source_lifetime_id, binding.source_content_version,
+            binding.source_previous_content_version,
+            static_cast<size_t>(binding.source_update_offset),
+            static_cast<size_t>(binding.source_update_size),
+            binding.source_update_is_partial);
         if (!resident) return false;
         pending.uniform_buffers.push_back({
             static_cast<NSUInteger>(binding.internal_binding),
@@ -2916,6 +3033,17 @@ extern "C" int mithrilGetDirectMetalBindingStatsV1(
     MithrilDirectMetalBindingStatsV1* output, size_t output_size) {
     if (!output || output_size < sizeof(*output)) return 0;
     *output = GetEngine().binding_stats;
+    return 1;
+}
+
+extern "C" void mithrilResetDirectMetalBufferStats(void) {
+    GetEngine().buffer_stats = EmptyBufferStats();
+}
+
+extern "C" int mithrilGetDirectMetalBufferStatsV1(
+    MithrilDirectMetalBufferStatsV1* output, size_t output_size) {
+    if (!output || output_size < sizeof(*output)) return 0;
+    *output = GetEngine().buffer_stats;
     return 1;
 }
 

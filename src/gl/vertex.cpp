@@ -168,7 +168,8 @@ bool ResolvePixelPackBytes(void* pointer, size_t byte_count,
 
 void CommitPixelPackDestination(PixelPackDestination* destination) {
     if (!destination || !destination->buffer) return;
-    ++destination->buffer->content_version;
+    destination->buffer->RecordUpdate(
+        0, destination->buffer->data.size(), false);
     destination->buffer->defined = true;
 }
 
@@ -284,7 +285,7 @@ void APIENTRY glBufferData(GLenum target, GLsizeiptr size, const void* data, GLe
     } else {
         it->second.data.assign((size_t)size, 0);
     }
-    ++it->second.content_version;
+    it->second.RecordUpdate(0, it->second.data.size(), false);
     it->second.defined = data != nullptr;
 }
 
@@ -313,7 +314,11 @@ void APIENTRY glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, c
                     static_cast<size_t>(size)) == 0)
         return;
     std::memcpy(it->second.data.data() + offset, data, size);
-    ++it->second.content_version;
+    const size_t write_offset = static_cast<size_t>(offset);
+    const size_t write_size = static_cast<size_t>(size);
+    const bool full_write = write_offset == 0 &&
+                            write_size == it->second.data.size();
+    it->second.RecordUpdate(write_offset, write_size, !full_write);
     it->second.defined = true;
 }
 
@@ -444,7 +449,10 @@ void APIENTRY glCopyBufferSubData(GLenum readtarget, GLenum writetarget,
     }
     std::memmove(dst->data.data() + writeoffset, src->data.data() + readoffset,
                  size);
-    ++dst->content_version;
+    const bool full_write = writeoffset == 0 &&
+        static_cast<size_t>(size) == dst->data.size();
+    dst->RecordUpdate(static_cast<size_t>(writeoffset),
+                      static_cast<size_t>(size), !full_write);
     dst->defined = true;
 }
 
@@ -508,7 +516,7 @@ void* APIENTRY glMapBuffer(GLenum target, GLenum access) {
     b->map_offset = 0;
     b->map_writable = access != GL_READ_ONLY;
     if (b->map_writable) {
-        ++b->content_version;
+        b->RecordUpdate(0, b->data.size(), false);
         b->defined = true;
     }
     return b->data.data();
@@ -526,7 +534,11 @@ void* APIENTRY glMapBufferRange(GLenum target, GLintptr offset, GLsizeiptr lengt
     b->map_offset = static_cast<size_t>(offset);
     b->map_writable = access != GL_MAP_READ_BIT;
     if (b->map_writable) {
-        ++b->content_version;
+        const size_t map_offset = static_cast<size_t>(offset);
+        const size_t map_length = static_cast<size_t>(length);
+        const bool full_write = map_offset == 0 &&
+                                map_length == b->data.size();
+        b->RecordUpdate(map_offset, map_length, !full_write);
         b->defined = true;
     }
     return b->data.data() + offset;
@@ -553,7 +565,7 @@ void APIENTRY glFlushMappedBufferRange(GLenum target, GLintptr offset,
         PUSH_ERROR(GL_INVALID_VALUE);
         return;
     }
-    ++b->content_version;
+    b->RecordUpdate(0, b->data.size(), false);
     b->defined = true;
 }
 

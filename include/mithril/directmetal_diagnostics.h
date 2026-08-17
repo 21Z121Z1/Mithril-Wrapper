@@ -34,6 +34,22 @@ void mithrilResetDirectMetalBindingStats(void);
 int mithrilGetDirectMetalBindingStatsV1(
     MithrilDirectMetalBindingStatsV1* output, size_t output_size);
 
+#define MITHRIL_DIRECT_METAL_BUFFER_STATS_VERSION 1u
+
+typedef struct MithrilDirectMetalBufferStatsV1 {
+    uint32_t version;
+    uint32_t struct_size;
+    uint64_t resident_allocations;
+    uint64_t resident_reuses;
+    uint64_t full_cpu_upload_bytes;
+    uint64_t partial_cpu_upload_bytes;
+    uint64_t preserve_blit_bytes;
+} MithrilDirectMetalBufferStatsV1;
+
+void mithrilResetDirectMetalBufferStats(void);
+int mithrilGetDirectMetalBufferStatsV1(
+    MithrilDirectMetalBufferStatsV1* output, size_t output_size);
+
 #ifdef __cplusplus
 }
 #endif
