@@ -1,0 +1,85 @@
+name: verify-directmetal-uniform-snapshots
+
+on:
+  push:
+    branches: [perf/directmetal-uniform-snapshots-20260817]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: verify-directmetal-uniform-snapshots
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: perf/directmetal-uniform-snapshots-20260817
+          submodules: false
+          fetch-depth: 0
+
+      - name: Fetch DirectMetal shader submodules
+        run: >-
+          git submodule update --init --depth=1
+          third_party/SPIRV-Cross
+          third_party/SPIRV-Headers
+          third_party/glslang
+
+      - name: Apply uniform snapshot phase
+        run: python3 scripts/apply_directmetal_uniform_snapshots_phase6.py
+
+      - name: Verify source invariants
+        run: |
+          git diff --check
+          ! grep -q 'ComposeUniforms(' src/gl/draw.cpp
+          ! grep -q 'draw.uniforms.find(' src/metal/engine.mm
+          ! grep -q 'params.uniforms.find(' src/vk/draw.cpp
+          ! grep -q 'std::unordered_map<std::string, NSUInteger> uniform_memo' src/metal/engine.mm
+          grep -q 'GetOrCreateUniformSnapshot' src/metal/engine.mm
+          grep -q 'loose_uniform_version' src/shader/shader.h
+          grep -q 'directmetal_uniform_snapshot_smoke' cmake/MithrilSmokeTests.cmake
+
+      - name: Configure DirectMetal Release build
+        run: >-
+          cmake -S . -B build-direct -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DMITHRIL_BUILD_LEGACY=OFF
+          -DMITHRIL_BUILD_DIRECT=ON
+          -DMITHRIL_ENABLE_SHADER_TOOLCHAIN=ON
+
+      - name: Build DirectMetal and tests
+        run: cmake --build build-direct --parallel
+
+      - name: Run dedicated uniform snapshot regression
+        run: ctest --test-dir build-direct -R '^directmetal_uniform_snapshot_smoke$' --output-on-failure
+
+      - name: Run complete DirectMetal semantic suite
+        run: ctest --test-dir build-direct -L directmetal --output-on-failure
+
+      - name: Fetch Vulkan reference headers
+        run: git submodule update --init --depth=1 third_party/Vulkan-Headers
+
+      - name: Configure Vulkan reference build
+        run: >-
+          cmake -S . -B build-vulkan -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DMITHRIL_BUILD_LEGACY=ON
+          -DMITHRIL_BUILD_DIRECT=OFF
+          -DMITHRIL_ENABLE_SHADER_TOOLCHAIN=ON
+
+      - name: Build Vulkan reference
+        run: cmake --build build-vulkan --parallel
+
+      - name: Commit verified implementation
+        run: |
+          rm .github/workflows/verify-directmetal-uniform-snapshots.yml
+          rm scripts/apply_directmetal_uniform_snapshots_phase6.py
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          git commit -m 'perf: cache versioned loose-uniform snapshots'
+          git push origin HEAD:perf/directmetal-uniform-snapshots-20260817
