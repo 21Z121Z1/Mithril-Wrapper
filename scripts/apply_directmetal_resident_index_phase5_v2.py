@@ -97,6 +97,28 @@ exact("src/gl/draw.cpp",
 
 script = script[:start] + replacement + script[end:]
 
+# Preserve the exact observable errors of the existing LoadIndices path.
+old_range = '''        if (start != end && (value < start || value > end)) {
+            *err = GL_INVALID_OPERATION;
+            return ResidentIndexResult::Error;
+        }
+'''
+new_range = '''        if (start != end && (value < start || value > end)) {
+            *err = GL_INVALID_VALUE;
+            return ResidentIndexResult::Error;
+        }
+'''
+if script.count(old_range) != 1:
+    raise SystemExit("resident-index range-error source shape drifted")
+script = script.replace(old_range, new_range, 1)
+
+# The shared enum lives in backend::. Vulkan's engine header does not import it.
+old_vk_type = '''params.resident_indices.scalar_type == IndexScalarType::Uint16'''
+new_vk_type = '''params.resident_indices.scalar_type == backend::IndexScalarType::Uint16'''
+if script.count(old_vk_type) != 1:
+    raise SystemExit("Vulkan resident-index type source shape drifted")
+script = script.replace(old_vk_type, new_vk_type, 1)
+
 # Remove the obsolete text-shape guard tied to an older DrawElementsImpl.
 old_guard = '''if "DrawCommon(mode, idx, 0, count, base_vertex, instance_count);\\n        return;\\n    }\\n\\n    // Restart handling" not in gl:\n    raise SystemExit("compatibility restart path shape changed unexpectedly")\n'''
 if old_guard not in script:
