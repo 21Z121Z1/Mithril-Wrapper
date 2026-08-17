@@ -454,7 +454,9 @@ bool LowerFlatPrimitives(GLenum convention, v::DrawParams* draw) {
 // empty, `first`/`count` describe a glDrawArrays-style range and `base_vertex`
 // is ignored.
 void DrawCommon(GLenum mode, const std::vector<uint32_t>& idx, GLint first,
-                GLsizei count, GLint base_vertex, GLsizei instance_count) {
+                GLsizei count, GLint base_vertex, GLsizei instance_count,
+                const v::ResidentIndexSource* resident_indices = nullptr,
+                uint32_t resident_max_index = 0) {
     if (count < 0 || first < 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
     if (instance_count < 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
     int topo = GLModeToTopology(mode);
@@ -491,9 +493,13 @@ void DrawCommon(GLenum mode, const std::vector<uint32_t>& idx, GLint first,
     // i to buffer row (first + i); glDrawElements maps payload row i to
     // buffer row (base_vertex + i) and builds `v_count` payload records
     // indexed by raw index value.
-    GLint row_base = idx.empty() ? first : base_vertex;
+    const bool indexed = !idx.empty() ||
+        (resident_indices && resident_indices->HasResidentSource());
+    GLint row_base = indexed ? base_vertex : first;
     GLsizei v_count = 0;
-    if (idx.empty()) {
+    if (resident_indices && resident_indices->HasResidentSource()) {
+        v_count = static_cast<GLsizei>(resident_max_index + 1u);
+    } else if (idx.empty()) {
         v_count = count;
     } else {
         uint32_t m = 0;
@@ -662,7 +668,8 @@ void DrawCommon(GLenum mode, const std::vector<uint32_t>& idx, GLint first,
     dp.program = CreateBackendProgram(prog);
     dp.vertex_stream = std::move(vstream);
     dp.instance_stream = std::move(istream);
-    dp.indices = idx;  // raw u32 indices into the payload rows
+    dp.indices = idx;  // compatibility path: raw u32 indices into payload rows
+    if (resident_indices) dp.resident_indices = *resident_indices;
     dp.primitive_restart = std::find(idx.begin(), idx.end(), UINT32_MAX) !=
                            idx.end();
     dp.occlusion_query = CurrentOcclusionQueryHandle();
@@ -807,6 +814,102 @@ void DrawCommon(GLenum mode, const std::vector<uint32_t>& idx, GLint first,
         PUSH_ERROR(GL_INVALID_OPERATION);
 }
 
+enum class ResidentIndexResult {
+    NotEligible = 0,
+    Ready,
+    Error,
+};
+
+ResidentIndexResult TryResolveResidentIndices(
+    GLenum mode, GLenum type, const void* indices, GLsizei count,
+    GLuint start, GLuint end, v::ResidentIndexSource* output,
+    uint32_t* max_index, GLenum* err) {
+    *output = {};
+    *max_index = 0;
+    if (count <= 0 || g_bound_element_buffer == 0)
+        return ResidentIndexResult::NotEligible;
+    if (mode == GL_TRIANGLE_FAN || mode == GL_LINE_LOOP)
+        return ResidentIndexResult::NotEligible;
+    sh::Program* program = sh::GetProgram(s::GetState().current_program);
+    if (program && program->uses_flat_fragment_inputs)
+        return ResidentIndexResult::NotEligible;
+    const s::GLState& state = s::GetState();
+    if (state.caps.Test(GL_PRIMITIVE_RESTART))
+        return ResidentIndexResult::NotEligible;
+
+    uint32_t scalar_bytes = 0;
+    v::IndexScalarType scalar_type = v::IndexScalarType::Uint32;
+    uint32_t sentinel = UINT32_MAX;
+    if (type == GL_UNSIGNED_SHORT) {
+        scalar_bytes = 2;
+        scalar_type = v::IndexScalarType::Uint16;
+        sentinel = 0xFFFFu;
+    } else if (type == GL_UNSIGNED_INT) {
+        scalar_bytes = 4;
+        scalar_type = v::IndexScalarType::Uint32;
+    } else {
+        return ResidentIndexResult::NotEligible;
+    }
+
+    auto found = g_buffers.find(g_bound_element_buffer);
+    if (found == g_buffers.end()) {
+        *err = GL_INVALID_OPERATION;
+        return ResidentIndexResult::Error;
+    }
+    const uint64_t offset = reinterpret_cast<uintptr_t>(indices);
+    const uint64_t byte_count = static_cast<uint64_t>(count) * scalar_bytes;
+    if (offset % scalar_bytes != 0)
+        return ResidentIndexResult::NotEligible;
+    if (offset > found->second.Size() ||
+        byte_count > found->second.Size() - offset) {
+        *err = GL_INVALID_OPERATION;
+        return ResidentIndexResult::Error;
+    }
+    found->second.EnsureMaterialized();
+    const uint8_t* bytes = found->second.data.data() + offset;
+    uint32_t maximum = 0;
+    bool has_vertex = false;
+    for (GLsizei i = 0; i < count; ++i) {
+        uint32_t value = 0;
+        if (scalar_bytes == 2) {
+            uint16_t narrow = 0;
+            std::memcpy(&narrow, bytes + static_cast<size_t>(i) * 2, 2);
+            value = narrow;
+        } else {
+            std::memcpy(&value, bytes + static_cast<size_t>(i) * 4, 4);
+        }
+        if (value == sentinel) {
+            if (type == GL_UNSIGNED_INT) {
+                *err = GL_INVALID_OPERATION;
+                return ResidentIndexResult::Error;
+            }
+            return ResidentIndexResult::NotEligible;
+        }
+        if (start != end && (value < start || value > end)) {
+            *err = GL_INVALID_VALUE;
+            return ResidentIndexResult::Error;
+        }
+        maximum = std::max(maximum, value);
+        has_vertex = true;
+    }
+    if (!has_vertex) return ResidentIndexResult::NotEligible;
+
+    const BufferData& buffer = found->second;
+    output->source_data = buffer.data.data();
+    output->source_size = buffer.Size();
+    output->source_lifetime_id = buffer.lifetime_id;
+    output->source_content_version = buffer.content_version;
+    output->source_previous_content_version = buffer.previous_content_version;
+    output->source_update_offset = buffer.update_offset;
+    output->source_update_size = buffer.update_size;
+    output->source_update_is_partial = buffer.update_is_partial;
+    output->binding_offset = offset;
+    output->count = static_cast<uint32_t>(count);
+    output->scalar_type = scalar_type;
+    *max_index = maximum;
+    return ResidentIndexResult::Ready;
+}
+
 // Expand element indices from the bound GL_ELEMENT_ARRAY_BUFFER into raw
 // uint32 (payload space, base_vertex NOT applied).
 std::vector<uint32_t> LoadIndices(GLenum type, const void* indices,
@@ -906,6 +1009,23 @@ void DrawElementsImpl(GLenum mode, GLsizei count, GLenum type,
                       const void* indices, GLint base_vertex,
                       GLsizei instance_count, GLuint start, GLuint end) {
     if (count < 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+
+    v::ResidentIndexSource resident;
+    uint32_t resident_max = 0;
+    GLenum resident_error = GL_NO_ERROR;
+    const ResidentIndexResult resident_result = TryResolveResidentIndices(
+        mode, type, indices, count, start, end,
+        &resident, &resident_max, &resident_error);
+    if (resident_result == ResidentIndexResult::Error) {
+        PUSH_ERROR(resident_error);
+        return;
+    }
+    if (resident_result == ResidentIndexResult::Ready) {
+        DrawCommon(mode, {}, 0, count, base_vertex, instance_count,
+                   &resident, resident_max);
+        return;
+    }
+
     GLenum err = GL_NO_ERROR;
     std::vector<uint32_t> idx = LoadIndices(type, indices, count, start, end, &err);
     if (err) { PUSH_ERROR(err); return; }
@@ -915,10 +1035,6 @@ void DrawElementsImpl(GLenum mode, GLsizei count, GLenum type,
     const bool native_restart = mode == GL_TRIANGLE_STRIP ||
                                 mode == GL_LINE_STRIP;
     if (has_restart && !native_restart) {
-        // Metal has no native triangle-fan primitive, and Vulkan list restart
-        // is not universally available. Split these modes at the shared
-        // semantic layer; each segment keeps the original baseVertex and
-        // instance parameters, and no restart vertex is ever fetched.
         size_t begin = 0;
         for (size_t i = 0; i <= idx.size(); ++i) {
             if (i != idx.size() && idx[i] != UINT32_MAX) continue;

@@ -97,6 +97,33 @@ struct VertexStream {
     }
 };
 
+enum class IndexScalarType : uint8_t {
+    Uint16 = 0,
+    Uint32 = 1,
+};
+
+struct ResidentIndexSource {
+    const uint8_t* source_data = nullptr;
+    size_t source_size = 0;
+    uint64_t source_lifetime_id = 0;
+    uint64_t source_content_version = 0;
+    uint64_t source_previous_content_version = 0;
+    uint64_t source_update_offset = 0;
+    uint64_t source_update_size = 0;
+    bool source_update_is_partial = false;
+    uint64_t binding_offset = 0;
+    uint32_t count = 0;
+    IndexScalarType scalar_type = IndexScalarType::Uint32;
+
+    uint32_t ScalarBytes() const {
+        return scalar_type == IndexScalarType::Uint16 ? 2u : 4u;
+    }
+    bool HasResidentSource() const {
+        return source_data != nullptr && source_size != 0 &&
+               source_lifetime_id != 0 && count != 0;
+    }
+};
+
 struct PipelineState {
     bool scissor_test = false;
     bool depth_test = false;
@@ -241,6 +268,7 @@ struct DrawParams {
     VertexStream vertex_stream;
     VertexStream instance_stream;
     std::vector<uint32_t> indices;
+    ResidentIndexSource resident_indices;
     // Index values matching the GL restart index are normalized by the
     // frontend to UINT32_MAX. Metal consumes that sentinel natively; Vulkan
     // uses this flag to enable its matching input-assembly behavior.
