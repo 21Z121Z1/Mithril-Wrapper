@@ -268,6 +268,48 @@ MithrilDirectMetalBufferStatsV1 EmptyBufferStats() {
     return stats;
 }
 
+template <size_t Capacity>
+struct FixedNumericKey {
+    std::array<uint64_t, Capacity> words{};
+    uint16_t count = 0;
+
+    bool Push(uint64_t value) {
+        if (count >= Capacity) return false;
+        words[count++] = value;
+        return true;
+    }
+
+    bool operator==(const FixedNumericKey& other) const {
+        if (count != other.count) return false;
+        for (uint16_t i = 0; i < count; ++i)
+            if (words[i] != other.words[i]) return false;
+        return true;
+    }
+};
+
+template <size_t Capacity>
+struct FixedNumericKeyHash {
+    size_t operator()(const FixedNumericKey<Capacity>& key) const noexcept {
+        uint64_t hash = 1469598103934665603ULL;
+        for (uint16_t i = 0; i < key.count; ++i) {
+            uint64_t value = key.words[i];
+            for (int byte = 0; byte < 8; ++byte) {
+                hash ^= static_cast<uint8_t>(value);
+                hash *= 1099511628211ULL;
+                value >>= 8;
+            }
+        }
+        hash ^= key.count;
+        hash *= 1099511628211ULL;
+        return static_cast<size_t>(hash);
+    }
+};
+
+using PipelineCacheKey = FixedNumericKey<96>;
+using PipelineCacheKeyHash = FixedNumericKeyHash<96>;
+using SamplerCacheKey = FixedNumericKey<24>;
+using SamplerCacheKeyHash = FixedNumericKeyHash<24>;
+
 struct Engine {
     id<MTLDevice> device = nil;
     id<MTLCommandQueue> queue = nil;
@@ -281,11 +323,13 @@ struct Engine {
     NSUInteger width = kDefaultWidth;
     NSUInteger height = kDefaultHeight;
     std::unordered_map<uint64_t, Program> programs;
-    std::unordered_map<std::string, PipelineBundle> pipelines;
+    std::unordered_map<PipelineCacheKey, PipelineBundle, PipelineCacheKeyHash>
+        pipelines;
     std::unordered_map<std::string, ClearPipeline> clear_pipelines;
     std::unordered_map<uint64_t, ResidentBuffer> resident_buffers;
     std::unordered_map<uint64_t, ResidentTexture> textures;
-    std::unordered_map<std::string, CachedSampler> samplers;
+    std::unordered_map<SamplerCacheKey, CachedSampler, SamplerCacheKeyHash>
+        samplers;
     std::unordered_map<uint64_t, Renderbuffer> renderbuffers;
     std::unordered_map<uint64_t, Framebuffer> framebuffers;
     std::unordered_map<uint64_t, std::shared_ptr<CommandCompletion>> fences;
@@ -447,30 +491,41 @@ MTLSamplerMipFilter SamplerMipFilter(backend::TexMipFilter filter) {
     }
 }
 
-std::string SamplerCacheKey(const backend::TexSamplerInfo& info,
-                            NSUInteger levels) {
-    std::ostringstream key;
-    auto bits = [](float value) {
-        uint32_t output = 0;
-        static_assert(sizeof(output) == sizeof(value));
-        std::memcpy(&output, &value, sizeof(output));
-        return output;
-    };
-    key << static_cast<int>(info.mag) << ':' << static_cast<int>(info.min)
-        << ':' << static_cast<int>(info.mip) << ':' << info.wrap_s << ':'
-        << info.wrap_t << ':' << info.wrap_r << ':' << bits(info.lod_bias)
-        << ':' << info.compare_mode;
-    if (info.mip != backend::TexMipFilter::None)
-        key << ':' << bits(info.min_lod) << ':' << bits(info.max_lod)
-            << ':' << levels;
-    if (info.compare_mode != GL_NONE) key << ':' << info.compare_func;
-    if (info.wrap_s == GL_CLAMP_TO_BORDER ||
-        info.wrap_t == GL_CLAMP_TO_BORDER ||
-        info.wrap_r == GL_CLAMP_TO_BORDER)
-        for (float component : info.border_color) key << ':' << bits(component);
-    return key.str();
+uint32_t FloatBits(float value) {
+    uint32_t output = 0;
+    static_assert(sizeof(output) == sizeof(value));
+    std::memcpy(&output, &value, sizeof(output));
+    return output;
 }
 
+SamplerCacheKey BuildSamplerCacheKey(const backend::TexSamplerInfo& info,
+                                     NSUInteger levels) {
+    SamplerCacheKey key;
+    key.Push(static_cast<uint8_t>(info.mag));
+    key.Push(static_cast<uint8_t>(info.min));
+    key.Push(static_cast<uint8_t>(info.mip));
+    key.Push(info.wrap_s);
+    key.Push(info.wrap_t);
+    key.Push(info.wrap_r);
+    key.Push(FloatBits(info.lod_bias));
+    key.Push(info.compare_mode);
+
+    if (info.mip != backend::TexMipFilter::None) {
+        key.Push(FloatBits(info.min_lod));
+        key.Push(FloatBits(info.max_lod));
+        key.Push(levels);
+    } else {
+        key.Push(0); key.Push(0); key.Push(0);
+    }
+
+    key.Push(info.compare_mode != GL_NONE ? info.compare_func : 0);
+    const bool uses_border = info.wrap_s == GL_CLAMP_TO_BORDER ||
+                             info.wrap_t == GL_CLAMP_TO_BORDER ||
+                             info.wrap_r == GL_CLAMP_TO_BORDER;
+    for (float component : info.border_color)
+        key.Push(uses_border ? FloatBits(component) : 0);
+    return key;
+}
 bool ResolveMetalBorderColor(const backend::TexSamplerInfo& info,
                              MTLSamplerBorderColor* output) {
     const bool uses_border = info.wrap_s == GL_CLAMP_TO_BORDER ||
@@ -532,7 +587,7 @@ id<MTLSamplerState> CreateSampler(const backend::TexSamplerInfo& info,
 id<MTLSamplerState> GetOrCreateSampler(const backend::TexSamplerInfo& info,
                                        NSUInteger levels) {
     auto& engine = GetEngine();
-    const std::string key = SamplerCacheKey(info, levels);
+    const SamplerCacheKey key = BuildSamplerCacheKey(info, levels);
     auto cached = engine.samplers.find(key);
     if (cached != engine.samplers.end()) {
         cached->second.last_use = ++engine.sampler_clock;
@@ -1206,40 +1261,77 @@ MTLColorWriteMask ColorWriteMask(const backend::PipelineState& state) {
     return mask;
 }
 
-void AppendPipelineState(std::ostringstream& key,
-                         const backend::PipelineState& state) {
-    key << '|'
-        << state.depth_test << ':' << state.depth_func << ':' << (int)state.depth_write
-        << '|' << state.stencil_test << ':' << state.stencil_front_func << ':'
-        << state.stencil_back_func << ':' << state.stencil_front_read_mask << ':'
-        << state.stencil_back_read_mask << ':' << state.stencil_front_write_mask << ':'
-        << state.stencil_back_write_mask << ':' << state.stencil_front_op_fail << ':'
-        << state.stencil_front_op_zfail << ':' << state.stencil_front_op_zpass << ':'
-        << state.stencil_back_op_fail << ':' << state.stencil_back_op_zfail << ':'
-        << state.stencil_back_op_zpass
-        << '|' << state.blend_enable << ':' << state.blend_src_rgb << ':'
-        << state.blend_dst_rgb << ':' << state.blend_src_alpha << ':'
-        << state.blend_dst_alpha << ':' << state.blend_eq_rgb << ':'
-        << state.blend_eq_alpha
-        << '|' << (int)state.color_wmask_r << (int)state.color_wmask_g
-        << (int)state.color_wmask_b << (int)state.color_wmask_a;
+uint64_t PackVertexAttributeKey(const backend::VertexAttr& attr) {
+    return static_cast<uint64_t>(attr.location & 0x3fu) |
+           (static_cast<uint64_t>(attr.components & 0x7u) << 6) |
+           (static_cast<uint64_t>(static_cast<uint8_t>(attr.scalar_type) & 0xfu) << 9) |
+           (static_cast<uint64_t>(attr.normalized ? 1u : 0u) << 13) |
+           (static_cast<uint64_t>(attr.offset) << 16);
 }
 
-std::string PipelineKey(const backend::DrawParams& params) {
-    std::ostringstream key;
-    key << params.program << '|' << static_cast<int>(params.topology)
-        << "|v" << params.vertex_stream.stride;
-    for (const auto& attr : params.vertex_stream.attrs)
-        key << ':' << attr.location << '@' << attr.offset << '/' << attr.components
-            << ',' << static_cast<int>(attr.scalar_type) << ',' << attr.normalized;
-    key << "|i" << params.instance_stream.stride;
-    for (const auto& attr : params.instance_stream.attrs)
-        key << ':' << attr.location << '@' << attr.offset << '/' << attr.components
-            << ',' << static_cast<int>(attr.scalar_type) << ',' << attr.normalized;
-    AppendPipelineState(key, params.pipeline);
-    return key.str();
+bool AppendVertexStreamKey(PipelineCacheKey* key,
+                           const backend::VertexStream& stream) {
+    if (!key->Push(stream.stride) || !key->Push(stream.attrs.size())) return false;
+    for (const auto& attr : stream.attrs)
+        if (!key->Push(PackVertexAttributeKey(attr))) return false;
+    return true;
 }
 
+bool AppendPipelineStateKey(PipelineCacheKey* key,
+                            const backend::PipelineState& state) {
+    const uint64_t values[] = {
+        state.depth_test, state.depth_func, state.depth_write,
+        state.stencil_test, state.stencil_front_func, state.stencil_back_func,
+        state.stencil_front_read_mask, state.stencil_back_read_mask,
+        state.stencil_front_write_mask, state.stencil_back_write_mask,
+        state.stencil_front_op_fail, state.stencil_front_op_zfail,
+        state.stencil_front_op_zpass, state.stencil_back_op_fail,
+        state.stencil_back_op_zfail, state.stencil_back_op_zpass,
+        state.blend_enable, state.blend_src_rgb, state.blend_dst_rgb,
+        state.blend_src_alpha, state.blend_dst_alpha,
+        state.blend_eq_rgb, state.blend_eq_alpha,
+        state.color_wmask_r, state.color_wmask_g,
+        state.color_wmask_b, state.color_wmask_a,
+    };
+    for (uint64_t value : values)
+        if (!key->Push(value)) return false;
+    return true;
+}
+
+bool BuildPipelineCacheKey(const backend::DrawParams& params,
+                           const ResolvedTarget& target,
+                           const backend::FboSpec* fbo_spec,
+                           PipelineCacheKey* key) {
+    *key = {};
+    if (!key->Push(params.program) ||
+        !key->Push(static_cast<uint8_t>(params.topology)) ||
+        !AppendVertexStreamKey(key, params.vertex_stream) ||
+        !AppendVertexStreamKey(key, params.instance_stream) ||
+        !AppendPipelineStateKey(key, params.pipeline) ||
+        !key->Push(target.colors.size()))
+        return false;
+
+    uint64_t present_mask = 0;
+    uint64_t enabled_mask = 0;
+    for (NSUInteger i = 0; i < target.colors.size(); ++i) {
+        if (target.colors[i]) present_mask |= 1ULL << i;
+        bool enabled = true;
+        if (fbo_spec && !fbo_spec->draw_bufs.empty()) {
+            enabled = false;
+            for (GLenum draw_buffer : fbo_spec->draw_bufs)
+                if (draw_buffer == GL_COLOR_ATTACHMENT0 + i) enabled = true;
+        }
+        if (enabled) enabled_mask |= 1ULL << i;
+    }
+    if (!key->Push(present_mask) || !key->Push(enabled_mask) ||
+        !key->Push(target.depth_stencil != nil) ||
+        !key->Push(target.depth_stencil
+            ? static_cast<uint64_t>(target.depth_stencil.pixelFormat)
+            : static_cast<uint64_t>(MTLPixelFormatInvalid)) ||
+        !key->Push(target.has_stencil) || !key->Push(target.samples))
+        return false;
+    return true;
+}
 MTLStencilDescriptor* MakeStencilDescriptor(
     GLenum compare, GLenum fail, GLenum depth_fail, GLenum pass,
     GLuint read_mask, GLuint write_mask) {
@@ -1268,19 +1360,16 @@ PipelineBundle* GetOrCreatePipeline(const backend::DrawParams& params) {
     auto& engine = GetEngine();
     ResolvedTarget target;
     if (!ResolveTarget(engine.bound_draw_fbo, &target)) return nullptr;
-    std::ostringstream target_key;
-    target_key << PipelineKey(params) << "|rt:" << target.colors.size() << ':'
-               << (target.depth_stencil != nil)
-               << ':' << (target.depth_stencil
-                    ? target.depth_stencil.pixelFormat : MTLPixelFormatInvalid)
-               << ':' << target.has_stencil << ':' << target.samples;
+    const backend::FboSpec* fbo_spec = nullptr;
     if (engine.bound_draw_fbo) {
         auto fbo = engine.framebuffers.find(engine.bound_draw_fbo);
-        if (fbo != engine.framebuffers.end())
-            for (GLenum draw_buffer : fbo->second.spec.draw_bufs)
-                target_key << ':' << draw_buffer;
+        if (fbo != engine.framebuffers.end()) fbo_spec = &fbo->second.spec;
     }
-    const std::string key = target_key.str();
+    PipelineCacheKey key;
+    if (!BuildPipelineCacheKey(params, target, fbo_spec, &key)) {
+        ML_LOG_ERROR("metal: pipeline key exceeds fixed hot-path capacity");
+        return nullptr;
+    }
     auto cached = engine.pipelines.find(key);
     if (cached != engine.pipelines.end()) {
         cached->second.last_use = ++engine.pipeline_clock;
@@ -1327,11 +1416,6 @@ PipelineBundle* GetOrCreatePipeline(const backend::DrawParams& params) {
         ? target.depth_stencil.pixelFormat : MTLPixelFormatInvalid;
     descriptor.stencilAttachmentPixelFormat = target.has_stencil
         ? target.depth_stencil.pixelFormat : MTLPixelFormatInvalid;
-    const backend::FboSpec* fbo_spec = nullptr;
-    if (engine.bound_draw_fbo) {
-        auto fbo = engine.framebuffers.find(engine.bound_draw_fbo);
-        if (fbo != engine.framebuffers.end()) fbo_spec = &fbo->second.spec;
-    }
     for (NSUInteger i = 0; i < target.colors.size(); ++i) {
         if (!target.colors[i]) continue;
         auto* color = descriptor.colorAttachments[i];
