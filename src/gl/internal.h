@@ -70,10 +70,22 @@ struct BufferData {
     std::vector<uint8_t> data;
     uint64_t lifetime_id = 0;
     uint64_t content_version = 0;
+    uint64_t previous_content_version = 0;
+    size_t update_offset = 0;
+    size_t update_size = 0;
+    bool update_is_partial = false;
     bool defined = false;
     bool mapped = false;
     bool map_writable = false;
     size_t map_offset = 0;
+
+    void RecordUpdate(size_t offset, size_t size, bool partial) {
+        previous_content_version = content_version;
+        ++content_version;
+        update_offset = offset;
+        update_size = size;
+        update_is_partial = partial;
+    }
 };
 
 // Storage lives in vertex.cpp; the draw path reads these through the header.

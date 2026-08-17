@@ -543,6 +543,11 @@ void DrawCommon(GLenum mode, const std::vector<uint32_t>& idx, GLint first,
             vstream.source_size = bit->second.data.size();
             vstream.source_lifetime_id = bit->second.lifetime_id;
             vstream.source_content_version = bit->second.content_version;
+            vstream.source_previous_content_version =
+                bit->second.previous_content_version;
+            vstream.source_update_offset = bit->second.update_offset;
+            vstream.source_update_size = bit->second.update_size;
+            vstream.source_update_is_partial = bit->second.update_is_partial;
             vstream.binding_offset = start;
             vstream.record_count = (uint32_t)v_count;
         } else {
@@ -698,6 +703,11 @@ void DrawCommon(GLenum mode, const std::vector<uint32_t>& idx, GLint first,
             binding.source_size = buffer->second.data.size();
             binding.source_lifetime_id = buffer->second.lifetime_id;
             binding.source_content_version = buffer->second.content_version;
+            binding.source_previous_content_version =
+                buffer->second.previous_content_version;
+            binding.source_update_offset = buffer->second.update_offset;
+            binding.source_update_size = buffer->second.update_size;
+            binding.source_update_is_partial = buffer->second.update_is_partial;
             binding.offset = offset;
             binding.size = available;
             dp.uniform_buffers.push_back(binding);

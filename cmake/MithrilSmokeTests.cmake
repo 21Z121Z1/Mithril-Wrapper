@@ -51,7 +51,8 @@ set(_mithril_directmetal_smokes
     render3d_smoke
     fbo_smoke
     layered_fbo_smoke
-    directmetal_fbo_smoke)
+    directmetal_fbo_smoke
+    directmetal_buffer_streaming_smoke)
 
 if(APPLE AND TARGET mithril_direct)
     set(_mithril_runtime_target mithril_direct)

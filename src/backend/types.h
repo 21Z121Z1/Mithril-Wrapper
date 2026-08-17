@@ -83,6 +83,10 @@ struct VertexStream {
     size_t source_size = 0;
     uint64_t source_lifetime_id = 0;
     uint64_t source_content_version = 0;
+    uint64_t source_previous_content_version = 0;
+    uint64_t source_update_offset = 0;
+    uint64_t source_update_size = 0;
+    bool source_update_is_partial = false;
     uint64_t binding_offset = 0;
     uint32_t record_count = 0;
 
@@ -146,6 +150,10 @@ struct UniformBufferBinding {
     size_t source_size = 0;
     uint64_t source_lifetime_id = 0;
     uint64_t source_content_version = 0;
+    uint64_t source_previous_content_version = 0;
+    uint64_t source_update_offset = 0;
+    uint64_t source_update_size = 0;
+    bool source_update_is_partial = false;
     uint64_t offset = 0;
     uint64_t size = 0;
 };
