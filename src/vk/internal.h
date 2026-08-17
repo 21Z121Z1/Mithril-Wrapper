@@ -218,6 +218,7 @@ struct DrawOp {
     VkDeviceMemory index_mem = VK_NULL_HANDLE;
     uint32_t vertex_count = 0;
     uint32_t index_count = 0;
+    VkIndexType index_type = VK_INDEX_TYPE_UINT32;
     bool primitive_restart = false;
     uint32_t instance_count = 1;
     VkDeviceSize vertex_offset = 0;

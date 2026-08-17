@@ -134,7 +134,12 @@ void Draw(const DrawParams& params) {
         : (uint32_t)(vertex_bytes / op.v_stride);
     op.vertex_offset = params.vertex_stream.binding_offset;
     op.instance_offset = params.instance_stream.binding_offset;
-    op.index_count = (uint32_t)params.indices.size();
+    op.index_count = params.resident_indices.HasResidentSource()
+        ? params.resident_indices.count
+        : static_cast<uint32_t>(params.indices.size());
+    op.index_type = params.resident_indices.HasResidentSource() &&
+                    params.resident_indices.scalar_type == backend::IndexScalarType::Uint16
+        ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32;
     op.primitive_restart = params.primitive_restart;
     op.pipe = params.pipeline;
     op.dynamic = params.dynamic;
@@ -169,8 +174,16 @@ void Draw(const DrawParams& params) {
         g.fn.FreeMemory(g.device, op.vertex_mem, nullptr);
         return;
     }
+    const void* index_bytes = params.resident_indices.HasResidentSource()
+        ? static_cast<const void*>(params.resident_indices.source_data +
+                                  params.resident_indices.binding_offset)
+        : static_cast<const void*>(params.indices.data());
+    const size_t index_byte_count = params.resident_indices.HasResidentSource()
+        ? static_cast<size_t>(params.resident_indices.count) *
+              params.resident_indices.ScalarBytes()
+        : static_cast<size_t>(op.index_count) * sizeof(uint32_t);
     if (op.index_count &&
-        !StageBytes(params.indices.data(), op.index_count * sizeof(uint32_t),
+        !StageBytes(index_bytes, index_byte_count,
                     VK_BUFFER_USAGE_INDEX_BUFFER_BIT, &op.index_buffer,
                     &op.index_mem)) {
         g.fn.DestroyBuffer(g.device, op.vertex_buffer, nullptr);
@@ -511,7 +524,7 @@ void SubmitFlush() {
 
             if (op.index_count) {
                 g.fn.CmdBindIndexBuffer(g.cmd, op.index_buffer, 0,
-                                        VK_INDEX_TYPE_UINT32);
+                                        op.index_type);
             }
             uint32_t dyn = (uint32_t)op.ubo_offset;
             g.fn.CmdBindDescriptorSets(g.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,

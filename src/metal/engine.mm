@@ -215,6 +215,7 @@ struct PendingDraw {
     // Strong references make GL deletion safe for already-recorded work.
     id<MTLBuffer> resident_vertex = nil;
     id<MTLBuffer> resident_instance = nil;
+    id<MTLBuffer> resident_index = nil;
     std::vector<BoundUniformBuffer> uniform_buffers;
     std::vector<BoundTexture> textures;
     std::shared_ptr<OcclusionQueryState> occlusion;
@@ -264,6 +265,13 @@ MithrilDirectMetalBindingStatsV1 EmptyBindingStats() {
 MithrilDirectMetalBufferStatsV1 EmptyBufferStats() {
     MithrilDirectMetalBufferStatsV1 stats{};
     stats.version = MITHRIL_DIRECT_METAL_BUFFER_STATS_VERSION;
+    stats.struct_size = static_cast<uint32_t>(sizeof(stats));
+    return stats;
+}
+
+MithrilDirectMetalIndexStatsV1 EmptyIndexStats() {
+    MithrilDirectMetalIndexStatsV1 stats{};
+    stats.version = MITHRIL_DIRECT_METAL_INDEX_STATS_VERSION;
     stats.struct_size = static_cast<uint32_t>(sizeof(stats));
     return stats;
 }
@@ -341,6 +349,7 @@ struct Engine {
     uint64_t sampler_clock = 0;
     MithrilDirectMetalBindingStatsV1 binding_stats = EmptyBindingStats();
     MithrilDirectMetalBufferStatsV1 buffer_stats = EmptyBufferStats();
+    MithrilDirectMetalIndexStatsV1 index_stats = EmptyIndexStats();
     std::vector<PendingResidentCopy> pending_resident_copies;
     std::vector<id<MTLBuffer>> resident_retire_on_submit;
     std::vector<RetiredResidentBuffer> retired_resident_buffers;
@@ -1564,7 +1573,9 @@ NSUInteger RequiredUploadBytes() {
             add(draw.vertex_stream.data.size());
         if (!pending.resident_instance)
             add(draw.instance_stream.data.size());
-        if (draw.topology == backend::Topology::TriangleFan) {
+        if (pending.resident_index) {
+            // Native UInt16/UInt32 EBO is bound directly; no frame-arena copy.
+        } else if (draw.topology == backend::Topology::TriangleFan) {
             const NSUInteger source_count = draw.indices.empty()
                 ? (draw.vertex_stream.record_count
                     ? draw.vertex_stream.record_count
@@ -1967,15 +1978,33 @@ bool EncodeDraws(
 
         std::vector<uint32_t> fan_indices;
         const std::vector<uint32_t>* indices = &draw.indices;
-        if (draw.topology == backend::Topology::TriangleFan) {
-            fan_indices = ExpandTriangleFan(draw);
-            indices = &fan_indices;
-        }
+        id<MTLBuffer> index_buffer = pending.resident_index;
         NSUInteger index_offset = NSNotFound;
-        if (!indices->empty()) {
-            index_offset = AllocateUpload(frame, &cursor, indices->data(),
-                                           indices->size() * sizeof(uint32_t));
-            if (index_offset == NSNotFound) return false;
+        NSUInteger index_count = 0;
+        MTLIndexType index_type = MTLIndexTypeUInt32;
+        if (index_buffer) {
+            index_offset = static_cast<NSUInteger>(draw.resident_indices.binding_offset);
+            index_count = draw.resident_indices.count;
+            index_type = draw.resident_indices.scalar_type == backend::IndexScalarType::Uint16
+                ? MTLIndexTypeUInt16 : MTLIndexTypeUInt32;
+            ++engine.index_stats.resident_index_draws;
+            engine.index_stats.resident_index_bytes +=
+                static_cast<uint64_t>(index_count) * draw.resident_indices.ScalarBytes();
+        } else {
+            if (draw.topology == backend::Topology::TriangleFan) {
+                fan_indices = ExpandTriangleFan(draw);
+                indices = &fan_indices;
+            }
+            if (!indices->empty()) {
+                index_offset = AllocateUpload(frame, &cursor, indices->data(),
+                                               indices->size() * sizeof(uint32_t));
+                if (index_offset == NSNotFound) return false;
+                index_buffer = frame.upload;
+                index_count = indices->size();
+                ++engine.index_stats.transient_index_draws;
+                engine.index_stats.transient_index_bytes +=
+                    static_cast<uint64_t>(index_count) * sizeof(uint32_t);
+            }
         }
 
         const NSUInteger vertex_ubo = PackUniforms(
@@ -2072,11 +2101,11 @@ bool EncodeDraws(
             }
             active_occlusion = desired_occlusion;
         }
-        if (index_offset != NSNotFound) {
+        if (index_buffer && index_offset != NSNotFound) {
             [encoder drawIndexedPrimitives:primitive
-                                indexCount:indices->size()
-                                 indexType:MTLIndexTypeUInt32
-                               indexBuffer:frame.upload
+                                indexCount:index_count
+                                 indexType:index_type
+                               indexBuffer:index_buffer
                          indexBufferOffset:index_offset
                              instanceCount:instance_count];
         } else {
@@ -2617,6 +2646,21 @@ bool Draw(backend::DrawParams params) {
         pending.resident_instance = RetainResidentBuffer(params.instance_stream);
         if (!pending.resident_instance) return false;
     }
+    if (params.resident_indices.HasResidentSource()) {
+        const auto& source = params.resident_indices;
+        const uint64_t bytes = static_cast<uint64_t>(source.count) * source.ScalarBytes();
+        if (source.binding_offset > source.source_size ||
+            bytes > source.source_size - source.binding_offset)
+            return false;
+        pending.resident_index = RetainResidentBytes(
+            source.source_data, source.source_size,
+            source.source_lifetime_id, source.source_content_version,
+            source.source_previous_content_version,
+            static_cast<size_t>(source.source_update_offset),
+            static_cast<size_t>(source.source_update_size),
+            source.source_update_is_partial);
+        if (!pending.resident_index) return false;
+    }
     for (size_t i = 0; i < params.uniform_buffers.size(); ++i) {
         const auto& binding = params.uniform_buffers[i];
         if (binding.internal_binding < shader::kUserUniformBindingBase ||
@@ -2682,6 +2726,8 @@ bool Draw(backend::DrawParams params) {
     pending.params.vertex_stream.source_size = 0;
     pending.params.instance_stream.source_data = nullptr;
     pending.params.instance_stream.source_size = 0;
+    pending.params.resident_indices.source_data = nullptr;
+    pending.params.resident_indices.source_size = 0;
     for (auto& binding : pending.params.uniform_buffers) {
         binding.source_data = nullptr;
         binding.source_size = 0;
@@ -3128,6 +3174,17 @@ extern "C" int mithrilGetDirectMetalBufferStatsV1(
     MithrilDirectMetalBufferStatsV1* output, size_t output_size) {
     if (!output || output_size < sizeof(*output)) return 0;
     *output = GetEngine().buffer_stats;
+    return 1;
+}
+
+extern "C" void mithrilResetDirectMetalIndexStats(void) {
+    GetEngine().index_stats = EmptyIndexStats();
+}
+
+extern "C" int mithrilGetDirectMetalIndexStatsV1(
+    MithrilDirectMetalIndexStatsV1* output, size_t output_size) {
+    if (!output || output_size < sizeof(*output)) return 0;
+    *output = GetEngine().index_stats;
     return 1;
 }
 
