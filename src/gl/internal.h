@@ -67,7 +67,12 @@ struct VAOData {
 };
 
 struct BufferData {
+    // GL storage size is independent from whether undefined CPU bytes have
+    // ever been materialized. glBufferData(NULL) therefore performs no eager
+    // memset/zero-fill; undefined bytes are created only if a later CPU-visible
+    // operation actually needs them.
     std::vector<uint8_t> data;
+    size_t storage_size = 0;
     uint64_t lifetime_id = 0;
     uint64_t content_version = 0;
     uint64_t previous_content_version = 0;
@@ -78,6 +83,14 @@ struct BufferData {
     bool mapped = false;
     bool map_writable = false;
     size_t map_offset = 0;
+
+    size_t Size() const { return storage_size; }
+    bool IsMaterialized() const { return data.size() == storage_size; }
+    void EnsureMaterialized() {
+        // Contents after glBufferData(NULL) are undefined. Zero is simply a
+        // deterministic legal value when a later CPU read needs those bytes.
+        if (!IsMaterialized()) data.assign(storage_size, 0);
+    }
 
     void RecordUpdate(size_t offset, size_t size, bool partial) {
         previous_content_version = content_version;
