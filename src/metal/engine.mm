@@ -296,6 +296,13 @@ MithrilDirectMetalUniformStatsV1 EmptyUniformStats() {
     return stats;
 }
 
+MithrilDirectMetalProgramStatsV1 EmptyProgramStats() {
+    MithrilDirectMetalProgramStatsV1 stats{};
+    stats.version = MITHRIL_DIRECT_METAL_PROGRAM_STATS_VERSION;
+    stats.struct_size = static_cast<uint32_t>(sizeof(stats));
+    return stats;
+}
+
 template <size_t Capacity>
 struct FixedNumericKey {
     std::array<uint64_t, Capacity> words{};
@@ -371,6 +378,7 @@ struct Engine {
     MithrilDirectMetalBufferStatsV1 buffer_stats = EmptyBufferStats();
     MithrilDirectMetalIndexStatsV1 index_stats = EmptyIndexStats();
     MithrilDirectMetalUniformStatsV1 uniform_stats = EmptyUniformStats();
+    MithrilDirectMetalProgramStatsV1 program_stats = EmptyProgramStats();
     std::vector<PendingResidentCopy> pending_resident_copies;
     std::vector<id<MTLBuffer>> resident_retire_on_submit;
     std::vector<RetiredResidentBuffer> retired_resident_buffers;
@@ -2666,6 +2674,7 @@ uint64_t CreateProgram(const std::vector<uint32_t>& vs,
     auto existing = engine.programs.find(handle);
     if (existing != engine.programs.end()) {
         ++existing->second.references;
+        ++engine.program_stats.program_cache_hits;
         return handle;
     }
     @autoreleasepool {
@@ -2677,6 +2686,7 @@ uint64_t CreateProgram(const std::vector<uint32_t>& vs,
             !ResolveUniformMemberSlots(&program.fragment, uniform_names))
             return 0;
         engine.programs.emplace(handle, std::move(program));
+        ++engine.program_stats.program_compiles;
         ML_LOG_DEBUG("metal: created native program %llu",
                      (unsigned long long)handle);
         return handle;
@@ -3299,6 +3309,17 @@ extern "C" int mithrilGetDirectMetalUniformStatsV1(
     MithrilDirectMetalUniformStatsV1* output, size_t output_size) {
     if (!output || output_size < sizeof(*output)) return 0;
     *output = GetEngine().uniform_stats;
+    return 1;
+}
+
+extern "C" void mithrilResetDirectMetalProgramStats(void) {
+    GetEngine().program_stats = EmptyProgramStats();
+}
+
+extern "C" int mithrilGetDirectMetalProgramStatsV1(
+    MithrilDirectMetalProgramStatsV1* output, size_t output_size) {
+    if (!output || output_size < sizeof(*output)) return 0;
+    *output = GetEngine().program_stats;
     return 1;
 }
 

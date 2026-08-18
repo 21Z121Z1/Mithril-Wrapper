@@ -144,8 +144,13 @@ struct IndexedBufferBinding {
 extern std::array<IndexedBufferBinding, kMaxUniformBufferBindings>
     g_uniform_buffer_bindings;
 
-// GL program id -> selected-backend program handle (created on first draw).
+// GL program id -> selected-backend program handle. A linked program is
+// prewarmed when the backend already exists; first draw remains the fallback.
 extern std::unordered_map<GLuint, uint64_t> g_backend_programs;
+
+enum class BackendProgramCreateSite : uint8_t { Link = 0, Use, Draw };
+uint64_t EnsureBackendProgram(mithril::shader::Program* program,
+                              BackendProgramCreateSite site);
 
 // ---- shared texture state (texture.cpp owns the storage) ------------------
 
