@@ -1,0 +1,306 @@
+name: Final DirectMetal candidate closure
+
+on:
+  push:
+    branches: [validation/directmetal-performance-e2e-20260818]
+  pull_request:
+    branches: [ci/minecraft-on-mithril-e2e-20260815]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: final-directmetal-candidate-closure-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CANDIDATE_SHA: 405428c07aea523e2aad621f2fa902c4ef8709be
+
+jobs:
+  directmetal-minecraft:
+    name: macOS DirectMetal semantics + real Minecraft 26.2
+    runs-on: macos-26
+    timeout-minutes: 40
+    env:
+      E2E_ROOT: ${{ github.workspace }}/build/final-directmetal-e2e
+      MTL_DEBUG_LAYER: '1'
+      MTL_SHADER_VALIDATION: '0'
+      MITHRIL_BACKEND: metal
+      CPATH: ${{ github.workspace }}/ci/minecraft-e2e/native/abi:${{ github.workspace }}/candidate/third_party
+    steps:
+      - name: Checkout validation harness
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: validation/directmetal-performance-e2e-20260818
+          submodules: false
+          persist-credentials: false
+
+      - name: Checkout exact final product candidate
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: 405428c07aea523e2aad621f2fa902c4ef8709be
+          path: candidate
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Prove exact candidate source identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C candidate rev-parse HEAD)" = "$CANDIDATE_SHA"
+          test -z "$(git -C candidate status --porcelain)"
+          python3 ci/minecraft-e2e/evidence.py --root "$E2E_ROOT" init
+          python3 ci/minecraft-e2e/evidence.py --root "$E2E_ROOT" event \
+            --event candidate_source_pinned --phase preflight \
+            --message "final DirectMetal product candidate $CANDIDATE_SHA"
+
+      - name: Setup Java 25
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - name: Setup Gradle 9.4.1
+        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb
+        with:
+          gradle-version: '9.4.1'
+          cache-read-only: true
+          cache-cleanup: on-success
+
+      - name: Install native dependencies
+        shell: bash
+        run: brew install glfw ninja
+
+      - name: Build exact DirectMetal candidate
+        id: native
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S candidate -B build-candidate -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DMITHRIL_BUILD_LEGACY=OFF \
+            -DMITHRIL_BUILD_DIRECT=ON \
+            -DMITHRIL_ENABLE_SHADER_TOOLCHAIN=ON \
+            -DMITHRIL_OUTPUT_DIRECTORY="$PWD/build-candidate/artifacts" \
+            2>&1 | tee "$E2E_ROOT/cmake-configure.log"
+          cmake --build build-candidate --parallel \
+            2>&1 | tee "$E2E_ROOT/cmake-build.log"
+          dylib="$PWD/build-candidate/artifacts/libmithril.dylib"
+          test -s "$dylib"
+          echo "dylib=$dylib" >> "$GITHUB_OUTPUT"
+          shasum -a 256 "$dylib" | tee "$E2E_ROOT/mithril.sha256"
+          file "$dylib" | tee "$E2E_ROOT/mithril.file.txt"
+          otool -L "$dylib" | tee "$E2E_ROOT/mithril.otool.txt"
+
+      - name: DirectMetal semantic and GPU gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          ctest --test-dir build-candidate -L directmetal --output-on-failure \
+            2>&1 | tee "$E2E_ROOT/directmetal-ctest.log"
+          grep -q '100% tests passed' "$E2E_ROOT/directmetal-ctest.log"
+          grep -q 'directmetal_incomplete_fbo_smoke' "$E2E_ROOT/directmetal-ctest.log"
+          grep -q 'amethyst_egl_smoke' "$E2E_ROOT/directmetal-ctest.log"
+          grep -q 'directmetal_incomplete_fbo_smoke.*Passed' "$E2E_ROOT/directmetal-ctest.log"
+          candidate/scripts/verify_directmetal_artifact.sh \
+            "${{ steps.native.outputs.dylib }}" build-candidate/mithril_direct.boundary.json \
+            2>&1 | tee "$E2E_ROOT/directmetal-boundary.log"
+
+      - name: Prove zero-work incomplete-FBO regression cases ran
+        shell: bash
+        env:
+          MITHRIL_LIBRARY: ${{ steps.native.outputs.dylib }}
+          MITHRIL_BACKEND: metal
+          MITHRIL_EXPECT_RENDERER: DirectMetal
+        run: |
+          set -euo pipefail
+          ./build-candidate/directmetal_incomplete_fbo_smoke \
+            2>&1 | tee "$E2E_ROOT/incomplete-fbo-detail.log"
+          grep -q 'glClear(zero-mask).*GL_INVALID_FRAMEBUFFER_OPERATION' "$E2E_ROOT/incomplete-fbo-detail.log"
+          grep -q 'line-loop zero-count.*GL_INVALID_FRAMEBUFFER_OPERATION' "$E2E_ROOT/incomplete-fbo-detail.log"
+          grep -q 'glDrawElements(zero-count).*GL_INVALID_FRAMEBUFFER_OPERATION' "$E2E_ROOT/incomplete-fbo-detail.log"
+          grep -q 'glMultiDrawArrays(zero-drawcount).*GL_INVALID_FRAMEBUFFER_OPERATION' "$E2E_ROOT/incomplete-fbo-detail.log"
+          grep -q 'directmetal_incomplete_fbo_smoke: PASS' "$E2E_ROOT/incomplete-fbo-detail.log"
+
+      - name: Build GLFW to Mithril EGL/CAMetalLayer bridge
+        id: bridge
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build-candidate/bridge
+          GLFW_PREFIX=$(brew --prefix glfw)
+          GLFW_REAL="$GLFW_PREFIX/lib/libglfw.3.dylib"
+          test -f "$GLFW_REAL" || GLFW_REAL="$GLFW_PREFIX/lib/libglfw.dylib"
+          BRIDGE="$PWD/build-candidate/bridge/libglfw_mithril.dylib"
+          clang++ -std=c++20 -fobjc-arc -dynamiclib -Wall -Wextra -Werror \
+            ci/minecraft-e2e/native/glfw_mithril_bridge.mm \
+            ci/minecraft-e2e/native/prepresent_capture.mm \
+            -I"$GLFW_PREFIX/include" -Icandidate/include \
+            -framework AppKit -framework QuartzCore -framework Foundation \
+            -Wl,-reexport_library,"$GLFW_REAL" \
+            -o "$BRIDGE"
+          echo "bridge=$BRIDGE" >> "$GITHUB_OUTPUT"
+          echo "glfw_real=$GLFW_REAL" >> "$GITHUB_OUTPUT"
+          file "$BRIDGE" | tee "$E2E_ROOT/glfw-bridge.file.txt"
+          otool -L "$BRIDGE" | tee "$E2E_ROOT/glfw-bridge.otool.txt"
+
+      - name: Run real Minecraft 26.2 production Client GameTest
+        shell: bash
+        run: |
+          set -euo pipefail
+          gradle -p .github/ci/minecraft-e2e --build-cache --stacktrace \
+            -PmithrilDylib="${{ steps.native.outputs.dylib }}" \
+            -PglfwBridge="${{ steps.bridge.outputs.bridge }}" \
+            -PglfwDelegate="${{ steps.bridge.outputs.glfw_real }}" \
+            -PevidenceRoot="$E2E_ROOT" \
+            runProductionClientGameTest \
+            2>&1 | tee "$E2E_ROOT/minecraft-gradle.log"
+
+      - name: Verify exact loaded image and DirectMetal presentation
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - "$E2E_ROOT" "${{ steps.native.outputs.dylib }}" "$CANDIDATE_SHA" <<'PY'
+          import hashlib, json, pathlib, sys
+          root=pathlib.Path(sys.argv[1]); built=pathlib.Path(sys.argv[2]).resolve(); candidate=sys.argv[3]
+          state=json.loads((root/'bridge-state.json').read_text())
+          loaded=pathlib.Path(state['mithril_path']).resolve()
+          sha=lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
+          result={
+              'candidate_sha':candidate,
+              'built_path':str(built), 'loaded_path':str(loaded),
+              'built_sha256':sha(built), 'loaded_sha256':sha(loaded),
+              'exact_image':sha(built)==sha(loaded),
+              'context_count':state.get('context_count',0),
+              'swap_count':state.get('swap_count',0),
+              'get_proc_address_count':state.get('get_proc_address_count',0),
+              'gl_vendor':state.get('gl_vendor',''),
+              'gl_renderer':state.get('gl_renderer',''),
+              'gl_version':state.get('gl_version','')}
+          (root/'final-runtime-identity.json').write_text(json.dumps(result,indent=2)+'\n')
+          print(json.dumps(result,indent=2))
+          assert result['exact_image']
+          assert result['context_count'] >= 1
+          assert result['swap_count'] >= 2
+          assert result['get_proc_address_count'] > 0
+          assert 'Mithril-Wrapper' in result['gl_version'] and 'Metal 3 (DirectMetal)' in result['gl_version']
+          assert 'Mithril-Wrapper' in result['gl_renderer'] and 'DirectMetal' in result['gl_renderer']
+          PY
+
+      - name: Collect diagnostics and evidence
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: |
+          ci/minecraft-e2e/collect-diagnostics.sh \
+            "$E2E_ROOT" \
+            "$PWD/.github/ci/minecraft-e2e/build/run/clientGameTest"
+          python3 ci/minecraft-e2e/evidence.py --root "$E2E_ROOT" finalize || true
+
+      - name: Upload DirectMetal/Minecraft evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: final-directmetal-minecraft-${{ github.sha }}-${{ github.run_attempt }}
+          retention-days: 14
+          if-no-files-found: error
+          path: build/final-directmetal-e2e/**
+
+  iphoneos-shipping:
+    name: iPhoneOS arm64 shipping contract
+    runs-on: macos-26
+    timeout-minutes: 35
+    steps:
+      - name: Checkout exact final product candidate
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: 405428c07aea523e2aad621f2fa902c4ef8709be
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Prove source identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          test -z "$(git status --porcelain)"
+
+      - name: Build and verify iPhoneOS DirectMetal dylib
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ios-evidence
+          MITHRIL_IOS_BUILD_DIR="$PWD/build-ios-final" \
+          MITHRIL_IOS_OUTPUT_DIR="$PWD/build-ios-final/artifacts" \
+          MITHRIL_IOS_DEPLOYMENT_TARGET=16.0 \
+            scripts/build_iphoneos.sh 2>&1 | tee ios-evidence/build.log
+          DYLIB="$PWD/build-ios-final/artifacts/libmithril.dylib"
+          test -s "$DYLIB"
+          codesign --force --sign - "$DYLIB"
+          codesign --verify --verbose=2 "$DYLIB"
+          file "$DYLIB" | tee ios-evidence/file.txt
+          lipo -archs "$DYLIB" | tee ios-evidence/archs.txt
+          vtool -show-build "$DYLIB" | tee ios-evidence/build-version.txt
+          otool -D "$DYLIB" | tee ios-evidence/install-name.txt
+          otool -L "$DYLIB" | tee ios-evidence/dependencies.txt
+          nm -gUj "$DYLIB" | sort > ios-evidence/exports.txt
+          grep -q 'platform IOS' ios-evidence/build-version.txt
+          grep -q 'minos 16.0' ios-evidence/build-version.txt
+          grep -qx '@rpath/libmithril.dylib' <(tail -n +2 ios-evidence/install-name.txt)
+          ! grep -Eiq 'vulkan|moltenvk' ios-evidence/dependencies.txt
+          grep -qx '_eglSwapBuffers' ios-evidence/exports.txt
+          grep -qx '_glCompileShader' ios-evidence/exports.txt
+          grep -qx '_glDrawElements' ios-evidence/exports.txt
+
+      - name: Upload iPhoneOS evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: final-iphoneos-shipping-${{ github.sha }}-${{ github.run_attempt }}
+          retention-days: 14
+          if-no-files-found: error
+          path: ios-evidence/**
+
+  legacy-regression:
+    name: Vulkan reference regression
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout exact final product candidate
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: 405428c07aea523e2aad621f2fa902c4ef8709be
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Prove source identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          test -z "$(git status --porcelain)"
+
+      - name: Install Vulkan CPU runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libvulkan1 mesa-vulkan-drivers vulkan-tools ninja-build
+          vulkaninfo --summary | head -20
+
+      - name: Build and run legacy regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-legacy-final -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DMITHRIL_BUILD_LEGACY=ON \
+            -DMITHRIL_BUILD_DIRECT=OFF \
+            -DMITHRIL_ENABLE_SHADER_TOOLCHAIN=ON \
+            -DMITHRIL_OUTPUT_DIRECTORY="$PWD/build-legacy-final/artifacts"
+          cmake --build build-legacy-final --parallel
+          ctest --test-dir build-legacy-final -L vulkan --output-on-failure
+          test -s build-legacy-final/artifacts/libmithril.so
+          nm -D --defined-only build-legacy-final/artifacts/libmithril.so | \
+            awk '{print $3}' | grep -q '^glDrawArrays$'
