@@ -4,6 +4,8 @@ name: verify-program-prewarm
 on:
   push:
     branches: [perf/directmetal-program-prewarm-20260818]
+  pull_request:
+    branches: [integration/directmetal-next]
 
 permissions:
   contents: write
