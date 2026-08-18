@@ -9,6 +9,10 @@ extern "C" {
 
 #define MITHRIL_DRAW_LOWERING_STATS_VERSION 1u
 
+// Frontend performance-shape diagnostics. A shared-state resolve means one
+// complete program/VAO/UBO/sampler/pipeline/target resolution; a geometry
+// lowering means one subdraw-specific first/count/baseVertex/index lowering.
+// Counters are observational only and never participate in GL semantics.
 typedef struct MithrilDrawLoweringStatsV1 {
     uint32_t version;
     uint32_t struct_size;
