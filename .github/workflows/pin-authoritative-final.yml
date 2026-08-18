@@ -1,0 +1,38 @@
+name: pin-authoritative-final
+
+on:
+  push:
+    branches: [validation/directmetal-performance-e2e-20260818]
+
+permissions:
+  contents: write
+
+jobs:
+  pin:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: validation/directmetal-performance-e2e-20260818
+          fetch-depth: 0
+      - name: Pin closure workflow to final product SHA
+        shell: python
+        run: |
+          from pathlib import Path
+          p=Path('.github/workflows/final-candidate-closure.yml')
+          text=p.read_text()
+          old='405428c07aea523e2aad621f2fa902c4ef8709be'
+          new='a09c8227be9ba599bab0747326f199770f8ebd91'
+          if old not in text and new not in text:
+              raise SystemExit('closure candidate pin not found')
+          p.write_text(text.replace(old,new))
+      - name: Commit pin
+        run: |
+          git diff --check
+          grep -q 'a09c8227be9ba599bab0747326f199770f8ebd91' .github/workflows/final-candidate-closure.yml
+          ! grep -q '405428c07aea523e2aad621f2fa902c4ef8709be' .github/workflows/final-candidate-closure.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add .github/workflows/final-candidate-closure.yml
+          git commit -m 'validation: pin authoritative product SHA a09c8227'
+          git push origin HEAD:validation/directmetal-performance-e2e-20260818
