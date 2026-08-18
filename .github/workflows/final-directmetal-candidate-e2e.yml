@@ -3,13 +3,15 @@ name: Final DirectMetal candidate Minecraft 26.2 E2E
 on:
   push:
     branches: [validation/directmetal-performance-e2e-20260818]
+  pull_request:
+    branches: [ci/minecraft-on-mithril-e2e-20260815]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: final-directmetal-candidate-e2e
+  group: final-directmetal-candidate-e2e-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -17,7 +19,7 @@ jobs:
     runs-on: macos-26
     timeout-minutes: 35
     env:
-      CANDIDATE_SHA: ff87ed0ac97867fdc5d36c6974627e3faea1f43b
+      CANDIDATE_SHA: 230ad9c5d4550a4deedb1ce179f8d4da739a4ae5
       E2E_ROOT: ${{ github.workspace }}/build/final-directmetal-e2e
       MTL_DEBUG_LAYER: '1'
       MTL_SHADER_VALIDATION: '0'
@@ -34,7 +36,7 @@ jobs:
       - name: Checkout exact final product candidate
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
-          ref: ff87ed0ac97867fdc5d36c6974627e3faea1f43b
+          ref: 230ad9c5d4550a4deedb1ce179f8d4da739a4ae5
           path: candidate
           submodules: recursive
           persist-credentials: false
