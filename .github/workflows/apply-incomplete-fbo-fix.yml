@@ -1,0 +1,114 @@
+name: apply-incomplete-fbo-fix
+
+on:
+  push:
+    branches: [fix/directmetal-incomplete-fbo-20260819]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: ${{ !contains(github.event.head_commit.message, '[fbo-guard-applied]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/directmetal-incomplete-fbo-20260819
+          fetch-depth: 0
+
+      - name: Apply spec-compliant incomplete-FBO guards
+        shell: python
+        run: |
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              if new in text:
+                  return
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{path}: expected exactly one patch anchor, found {count}")
+              p.write_text(text.replace(old, new, 1))
+
+          replace_once(
+              "src/gl/state.cpp",
+              """static bool SubmitClear(v::ClearParams clear) {\n    if (!ConditionalRenderingAllowsCommands()) return true;\n""",
+              """static bool SubmitClear(v::ClearParams clear) {\n    // OpenGL 4.6 section 9.4.4: rendering to an incomplete draw\n    // framebuffer generates GL_INVALID_FRAMEBUFFER_OPERATION and the command\n    // is ignored. Validate before conditional rendering or lazy backend init\n    // so invalid GL state never reaches a native render-target resolver.\n    if (glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) !=\n        GL_FRAMEBUFFER_COMPLETE) {\n        PUSH_ERROR(GL_INVALID_FRAMEBUFFER_OPERATION);\n        return false;\n    }\n    if (!ConditionalRenderingAllowsCommands()) return true;\n""",
+          )
+
+          replace_once(
+              "src/gl/draw.cpp",
+              """    int topo = GLModeToTopology(mode);\n    if (topo < 0) { PUSH_ERROR(GL_INVALID_ENUM); return; }\n    if (count == 0 || instance_count == 0) return;\n""",
+              """    int topo = GLModeToTopology(mode);\n    if (topo < 0) { PUSH_ERROR(GL_INVALID_ENUM); return; }\n    // Completeness is a command-level rendering prerequisite even when the\n    // draw produces no fragments (for example count == 0). Keep this ahead\n    // of all draw-state lowering and backend work.\n    if (glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) !=\n        GL_FRAMEBUFFER_COMPLETE) {\n        PUSH_ERROR(GL_INVALID_FRAMEBUFFER_OPERATION);\n        return;\n    }\n    if (count == 0 || instance_count == 0) return;\n""",
+          )
+
+          replace_once(
+              "src/gl/draw.cpp",
+              """    if (format != GL_RGBA || type != GL_UNSIGNED_BYTE || width < 0 || height < 0) {\n        PUSH_ERROR(GL_INVALID_OPERATION);\n        return;\n    }\n    PixelPackDestination destination;\n""",
+              """    if (format != GL_RGBA || type != GL_UNSIGNED_BYTE || width < 0 || height < 0) {\n        PUSH_ERROR(GL_INVALID_OPERATION);\n        return;\n    }\n    if (glCheckFramebufferStatus(GL_READ_FRAMEBUFFER) !=\n        GL_FRAMEBUFFER_COMPLETE) {\n        PUSH_ERROR(GL_INVALID_FRAMEBUFFER_OPERATION);\n        return;\n    }\n    PixelPackDestination destination;\n""",
+          )
+
+          replace_once(
+              "src/gl/fbo.cpp",
+              """    if (mask & ~(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT |\n                 GL_STENCIL_BUFFER_BIT)) {\n        PUSH_ERROR(GL_INVALID_VALUE);\n        return;\n    }\n    if (srcX0 == srcX1 || srcY0 == srcY1 || dstX0 == dstX1 || dstY0 == dstY1)\n        return;   // zero-area blit is a no-op\n""",
+              """    if (mask & ~(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT |\n                 GL_STENCIL_BUFFER_BIT)) {\n        PUSH_ERROR(GL_INVALID_VALUE);\n        return;\n    }\n    // Both source and destination completeness are required before any blit,\n    // including a zero-area no-op. Reject invalid GL state before flushing\n    // deferred work or asking a native backend to resolve either target.\n    if (glCheckFramebufferStatus(GL_READ_FRAMEBUFFER) !=\n            GL_FRAMEBUFFER_COMPLETE ||\n        glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) !=\n            GL_FRAMEBUFFER_COMPLETE) {\n        PUSH_ERROR(GL_INVALID_FRAMEBUFFER_OPERATION);\n        return;\n    }\n    if (srcX0 == srcX1 || srcY0 == srcY1 || dstX0 == dstX1 || dstY0 == dstY1)\n        return;   // zero-area blit is a no-op after framebuffer validation\n""",
+          )
+
+          def guard_copy_function(name):
+              path = Path("src/gl/texture.cpp")
+              text = path.read_text()
+              marker = f"void APIENTRY {name}("
+              start = text.find(marker)
+              if start < 0:
+                  raise SystemExit(f"missing function {name}")
+              end = text.find("\nvoid APIENTRY ", start + len(marker))
+              if end < 0:
+                  end = len(text)
+              body = text[start:end]
+              guard = """    if (glCheckFramebufferStatus(GL_READ_FRAMEBUFFER) !=\n        GL_FRAMEBUFFER_COMPLETE) {\n        PUSH_ERROR(GL_INVALID_FRAMEBUFFER_OPERATION);\n        return;\n    }\n"""
+              if guard in body:
+                  return
+              needle = "    if (!id) return;\n"
+              offset = body.find(needle)
+              if offset < 0:
+                  raise SystemExit(f"{name}: missing bound-texture anchor")
+              at = start + offset + len(needle)
+              text = text[:at] + guard + text[at:]
+              path.write_text(text)
+
+          for fn in (
+              "glCopyTexImage1D",
+              "glCopyTexImage2D",
+              "glCopyTexSubImage1D",
+              "glCopyTexSubImage2D",
+              "glCopyTexSubImage3D",
+          ):
+              guard_copy_function(fn)
+
+          replace_once(
+              "cmake/MithrilSmokeTests.cmake",
+              """    layered_fbo_smoke\n    directmetal_fbo_smoke\n    directmetal_buffer_streaming_smoke\n""",
+              """    layered_fbo_smoke\n    directmetal_fbo_smoke\n    directmetal_incomplete_fbo_smoke\n    directmetal_buffer_streaming_smoke\n""",
+          )
+
+      - name: Mechanical checks
+        run: |
+          git diff --check
+          grep -R "GL_INVALID_FRAMEBUFFER_OPERATION" \
+            src/gl/state.cpp src/gl/draw.cpp src/gl/fbo.cpp src/gl/texture.cpp \
+            tests/directmetal_incomplete_fbo_smoke.c
+
+      - name: Commit patch
+        run: |
+          if git diff --quiet; then
+            echo "Patch already applied"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/gl/state.cpp src/gl/draw.cpp src/gl/fbo.cpp src/gl/texture.cpp \
+                  cmake/MithrilSmokeTests.cmake
+          git commit -m "fix: reject incomplete framebuffer operations [fbo-guard-applied]"
+          git push origin HEAD:fix/directmetal-incomplete-fbo-20260819
