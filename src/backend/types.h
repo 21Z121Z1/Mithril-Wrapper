@@ -20,6 +20,10 @@ namespace mithril::backend {
 constexpr uint32_t kMaxTextureUnits = 16;
 constexpr size_t kMaxVertexAttributes = 16;
 
+// Fixed-capacity metadata storage for API-bounded hot state. push_back reports
+// overflow instead of reallocating; valid callers derive Capacity from the GL
+// or shader contract, so overflow is a violated renderer invariant rather than
+// a representable state that should spill to the heap.
 template <typename T, size_t Capacity>
 class FixedList {
 public:
@@ -374,12 +378,12 @@ struct FboAttach {
 };
 
 struct FboSpec {
-    std::vector<FboAttach> color;
+    std::vector<FboAttach> colors;
+    FboAttach depth_stencil;
+    bool has_depth_stencil = false;
+    GLenum depth_stencil_format = GL_DEPTH24_STENCIL8;
     std::vector<GLenum> draw_bufs;
     GLenum read_buf = GL_COLOR_ATTACHMENT0;
-    bool has_depth = false;
-    FboAttach depth;
-    uint32_t width = 0, height = 0;
 };
 
 } // namespace mithril::backend
