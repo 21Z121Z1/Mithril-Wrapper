@@ -18,6 +18,38 @@
 namespace mithril::backend {
 
 constexpr uint32_t kMaxTextureUnits = 16;
+constexpr size_t kMaxVertexAttributes = 16;
+
+// Fixed-capacity metadata storage for API-bounded hot state. push_back reports
+// overflow instead of reallocating; valid callers derive Capacity from the GL
+// or shader contract, so overflow is a violated renderer invariant rather than
+// a representable state that should spill to the heap.
+template <typename T, size_t Capacity>
+class FixedList {
+public:
+    bool push_back(const T& value) {
+        if (size_ >= Capacity) return false;
+        values_[size_++] = value;
+        return true;
+    }
+    void clear() { size_ = 0; }
+    void reserve(size_t requested) const { (void)requested; }
+    size_t size() const { return size_; }
+    bool empty() const { return size_ == 0; }
+    T* data() { return values_.data(); }
+    const T* data() const { return values_.data(); }
+    T& front() { return values_[0]; }
+    const T& front() const { return values_[0]; }
+    T& operator[](size_t index) { return values_[index]; }
+    const T& operator[](size_t index) const { return values_[index]; }
+    auto begin() { return values_.begin(); }
+    auto end() { return values_.begin() + static_cast<ptrdiff_t>(size_); }
+    auto begin() const { return values_.begin(); }
+    auto end() const { return values_.begin() + static_cast<ptrdiff_t>(size_); }
+private:
+    std::array<T, Capacity> values_{};
+    size_t size_ = 0;
+};
 
 enum class Topology {
     Triangles = 0,
@@ -73,7 +105,7 @@ struct VertexStream {
     // uint inputs with distinct shader ABIs.
     std::vector<uint8_t> data;
     uint32_t stride = 0;
-    std::vector<VertexAttr> attrs;
+    FixedList<VertexAttr, kMaxVertexAttributes> attrs;
 
     // Resident-source fast path. `source_data` is borrowed only for the
     // synchronous backend Draw() call. Backends retain/copy it before Draw

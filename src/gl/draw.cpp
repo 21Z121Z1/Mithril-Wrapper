@@ -453,12 +453,14 @@ struct SharedDrawState {
     sh::Program* program = nullptr;
     const VAOData* vao = nullptr;
     uint64_t backend_program = 0;
-    std::vector<GLuint> vertex_slots;
-    std::vector<GLuint> instance_slots;
-    std::vector<sh::VertexInput> constant_inputs;
+    v::FixedList<GLuint, kMaxAttribs> vertex_slots;
+    v::FixedList<GLuint, kMaxAttribs> instance_slots;
+    v::FixedList<sh::VertexInput, kMaxAttribs> constant_inputs;
     v::LooseUniformSource loose_uniforms;
-    std::vector<v::UniformBufferBinding> uniform_buffers;
-    std::vector<v::SampledTextureBinding> sampled_textures;
+    v::FixedList<v::UniformBufferBinding,
+                 sh::kMaxUserUniformBlocksPerStage * 2> uniform_buffers;
+    v::FixedList<v::SampledTextureBinding,
+                 v::kMaxTextureUnits * 2> sampled_textures;
     v::PipelineState pipeline;
     v::DynamicState dynamic;
     uint64_t occlusion_query = 0;
@@ -721,7 +723,7 @@ void DrawCommon(GLenum mode, const std::vector<uint32_t>& idx, GLint first,
         auto bit = g_buffers.find(resident_buffer);
         resident = resident && resident_buffer != 0 && resident_stride > 0 &&
                    bit != g_buffers.end() && bit->second.defined;
-        std::vector<v::VertexAttr> native_attrs;
+        v::FixedList<v::VertexAttr, v::kMaxVertexAttributes> native_attrs;
         for (GLuint slot : vertex_slots) {
             const AttribData& a = vao.attribs[slot];
             v::VertexAttr native;
