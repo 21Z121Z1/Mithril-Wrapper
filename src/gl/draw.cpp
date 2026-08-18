@@ -11,6 +11,7 @@
 #include <utility>
 
 #include <util/log.h>
+#include <mithril/draw_diagnostics.h>
 
 namespace {
 namespace sh = mithril::shader;
@@ -445,6 +446,220 @@ bool LowerFlatPrimitives(GLenum convention, v::DrawParams* draw) {
     return true;
 }
 
+
+struct SharedDrawState {
+    bool ready = false;
+    bool failed = false;
+    sh::Program* program = nullptr;
+    const VAOData* vao = nullptr;
+    uint64_t backend_program = 0;
+    std::vector<GLuint> vertex_slots;
+    std::vector<GLuint> instance_slots;
+    std::vector<sh::VertexInput> constant_inputs;
+    v::LooseUniformSource loose_uniforms;
+    std::vector<v::UniformBufferBinding> uniform_buffers;
+    std::vector<v::SampledTextureBinding> sampled_textures;
+    v::PipelineState pipeline;
+    v::DynamicState dynamic;
+    uint64_t occlusion_query = 0;
+    GLenum provoking_vertex = GL_LAST_VERTEX_CONVENTION;
+};
+
+MithrilDrawLoweringStatsV1 EmptyDrawLoweringStats() {
+    MithrilDrawLoweringStatsV1 stats{};
+    stats.version = MITHRIL_DRAW_LOWERING_STATS_VERSION;
+    stats.struct_size = static_cast<uint32_t>(sizeof(stats));
+    return stats;
+}
+
+MithrilDrawLoweringStatsV1 g_draw_lowering_stats = EmptyDrawLoweringStats();
+
+bool ResolveDrawSharedState(SharedDrawState* shared) {
+    if (!shared) return false;
+    if (shared->ready) return true;
+    if (shared->failed) return false;
+    ++g_draw_lowering_stats.shared_state_resolves;
+
+    sh::Program* prog = sh::GetProgram(s::GetState().current_program);
+    if (!prog || !prog->linked) {
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        shared->failed = true;
+        return false;
+    }
+    if (!v::EnsureInit()) {
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        shared->failed = true;
+        return false;
+    }
+    if (!g_dirty_textures.empty()) FlushDirtyTextureUploads();
+    const uint64_t backend_program = CreateBackendProgram(prog);
+    if (!backend_program) {
+        PUSH_ERROR(GL_INVALID_OPERATION);
+        shared->failed = true;
+        return false;
+    }
+
+    shared->program = prog;
+    shared->backend_program = backend_program;
+    shared->vao = &g_vaos[g_bound_vao];
+    shared->vertex_slots.clear();
+    shared->instance_slots.clear();
+    shared->vertex_slots.reserve(kMaxAttribs);
+    shared->instance_slots.reserve(kMaxAttribs);
+    for (GLuint slot = 0; slot < kMaxAttribs; ++slot) {
+        const AttribData& a = shared->vao->attribs[slot];
+        if (!a.enabled) continue;
+        (a.divisor ? shared->instance_slots : shared->vertex_slots).push_back(slot);
+    }
+    shared->constant_inputs.clear();
+    shared->constant_inputs.reserve(prog->vertex_inputs.size());
+    for (const sh::VertexInput& input : prog->vertex_inputs) {
+        if (input.location >= kMaxAttribs) {
+            PUSH_ERROR(GL_INVALID_OPERATION);
+            shared->failed = true;
+            return false;
+        }
+        if (!shared->vao->attribs[input.location].enabled)
+            shared->constant_inputs.push_back(input);
+    }
+
+    shared->loose_uniforms.values = prog->loose_uniform_views.empty()
+        ? nullptr : prog->loose_uniform_views.data();
+    shared->loose_uniforms.count =
+        static_cast<uint32_t>(prog->loose_uniform_views.size());
+    shared->loose_uniforms.version = prog->loose_uniform_version;
+
+    shared->uniform_buffers.clear();
+    for (const auto& block : prog->uniform_blocks) {
+        if (block.binding >= kMaxUniformBufferBindings) {
+            PUSH_ERROR(GL_INVALID_OPERATION);
+            shared->failed = true;
+            return false;
+        }
+        const IndexedBufferBinding& indexed =
+            g_uniform_buffer_bindings[block.binding];
+        auto buffer = g_buffers.find(indexed.buffer);
+        if (!indexed.buffer || buffer == g_buffers.end()) {
+            PUSH_ERROR(GL_INVALID_OPERATION);
+            shared->failed = true;
+            return false;
+        }
+        const uint64_t offset = static_cast<uint64_t>(indexed.offset);
+        const uint64_t available = indexed.whole_buffer
+            ? static_cast<uint64_t>(buffer->second.Size())
+            : static_cast<uint64_t>(indexed.size);
+        if (available < static_cast<uint64_t>(block.data_size) ||
+            offset > buffer->second.Size() ||
+            static_cast<uint64_t>(block.data_size) >
+                buffer->second.Size() - offset) {
+            ML_LOG_ERROR("uniform block %s needs %d bytes but binding %u "
+                         "does not provide a complete range",
+                         block.name.c_str(), block.data_size, block.binding);
+            PUSH_ERROR(GL_INVALID_OPERATION);
+            shared->failed = true;
+            return false;
+        }
+        buffer->second.EnsureMaterialized();
+        auto append_binding = [&](uint32_t internal_binding,
+                                  bool vertex_stage,
+                                  bool fragment_stage) {
+            v::UniformBufferBinding binding;
+            binding.internal_binding = internal_binding;
+            binding.vertex_stage = vertex_stage;
+            binding.fragment_stage = fragment_stage;
+            binding.source_data = buffer->second.data.data();
+            binding.source_size = buffer->second.Size();
+            binding.source_lifetime_id = buffer->second.lifetime_id;
+            binding.source_content_version = buffer->second.content_version;
+            binding.source_previous_content_version =
+                buffer->second.previous_content_version;
+            binding.source_update_offset = buffer->second.update_offset;
+            binding.source_update_size = buffer->second.update_size;
+            binding.source_update_is_partial = buffer->second.update_is_partial;
+            binding.offset = offset;
+            binding.size = available;
+            shared->uniform_buffers.push_back(binding);
+        };
+        if (block.referenced_vertex)
+            append_binding(block.vertex_internal_binding, true, false);
+        if (block.referenced_fragment)
+            append_binding(block.fragment_internal_binding, false, true);
+    }
+
+    shared->pipeline = BuildPipelineState();
+    const s::GLState& state = s::GetState();
+    const uint32_t target_width = v::DrawTargetWidth();
+    const uint32_t target_height = v::DrawTargetHeight();
+    shared->dynamic.viewport = state.viewport.initialized
+        ? std::array<float, 4>{(float)state.viewport.x, (float)state.viewport.y,
+                              (float)state.viewport.w, (float)state.viewport.h}
+        : std::array<float, 4>{0.f, 0.f, (float)target_width,
+                              (float)target_height};
+    shared->dynamic.scissor = state.scissor.initialized
+        ? std::array<float, 4>{(float)state.scissor.x, (float)state.scissor.y,
+                              (float)state.scissor.w, (float)state.scissor.h}
+        : std::array<float, 4>{0.f, 0.f, (float)target_width,
+                              (float)target_height};
+
+    shared->sampled_textures.clear();
+    for (const auto& smp : prog->samplers) {
+        auto uit = prog->uniform_by_location.find(smp.location);
+        const sh::Uniform* uniform = uit == prog->uniform_by_location.end()
+            ? nullptr : &prog->uniforms[uit->second];
+        const GLint element_count = std::max<GLint>(smp.size, 1);
+        for (GLint element = 0; element < element_count; ++element) {
+            GLint unit = 0;
+            if (uniform && static_cast<size_t>(element) < uniform->value.size())
+                unit = static_cast<GLint>(uniform->value[element]);
+            const GLenum target = TextureTargetForSampler(smp.type);
+            GLuint tex = unit >= 0
+                ? TextureBindingForUnit(static_cast<GLuint>(unit), target) : 0;
+            if (tex) PrepareTextureForDraw(tex);
+            const auto texture = g_textures.find(tex);
+            const TexState default_texture;
+            const TexState& texture_state = texture == g_textures.end()
+                ? default_texture : texture->second;
+            const v::TexSamplerInfo sampler = ResolveSamplerInfo(
+                unit >= 0 ? static_cast<GLuint>(unit) : kMaxTexUnits,
+                texture_state);
+            const bool shader_compares_depth = SamplerUsesDepthCompare(smp.type);
+            const bool texture_is_depth = texture != g_textures.end() &&
+                texture_state.image_backend_format == v::TexelFormat::Depth32Float;
+            if ((shader_compares_depth &&
+                 (!texture_is_depth ||
+                  sampler.compare_mode != GL_COMPARE_REF_TO_TEXTURE)) ||
+                (!shader_compares_depth && sampler.compare_mode != GL_NONE)) {
+                PUSH_ERROR(GL_INVALID_OPERATION);
+                shared->failed = true;
+                return false;
+            }
+
+            const uint32_t vertex_binding = smp.vertex_binding == UINT32_MAX
+                ? UINT32_MAX
+                : smp.vertex_binding + static_cast<uint32_t>(element);
+            const uint32_t fragment_binding = smp.fragment_binding == UINT32_MAX
+                ? UINT32_MAX
+                : smp.fragment_binding + static_cast<uint32_t>(element);
+            if (vertex_binding != UINT32_MAX &&
+                vertex_binding == fragment_binding) {
+                shared->sampled_textures.push_back({
+                    vertex_binding, tex, sampler, true, true});
+            } else {
+                if (vertex_binding != UINT32_MAX)
+                    shared->sampled_textures.push_back({
+                        vertex_binding, tex, sampler, true, false});
+                if (fragment_binding != UINT32_MAX)
+                    shared->sampled_textures.push_back({
+                        fragment_binding, tex, sampler, false, true});
+            }
+        }
+    }
+    shared->occlusion_query = CurrentOcclusionQueryHandle();
+    shared->provoking_vertex = state.provoking_vertex;
+    shared->ready = true;
+    return true;
+}
+
 // Core draw: resolve the current VAO into typed streams and hand them to the
 // selected backend. `idx` holds raw indices (glDrawElements path); when
 // empty, `first`/`count` describe a glDrawArrays-style range and `base_vertex`
@@ -452,38 +667,23 @@ bool LowerFlatPrimitives(GLenum convention, v::DrawParams* draw) {
 void DrawCommon(GLenum mode, const std::vector<uint32_t>& idx, GLint first,
                 GLsizei count, GLint base_vertex, GLsizei instance_count,
                 const v::ResidentIndexSource* resident_indices = nullptr,
-                uint32_t resident_max_index = 0) {
+                uint32_t resident_max_index = 0,
+                SharedDrawState* shared_state = nullptr) {
     if (count < 0 || first < 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
     if (instance_count < 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
     int topo = GLModeToTopology(mode);
     if (topo < 0) { PUSH_ERROR(GL_INVALID_ENUM); return; }
     if (count == 0 || instance_count == 0) return;
 
-    sh::Program* prog = sh::GetProgram(s::GetState().current_program);
-    if (!prog || !prog->linked) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
-    if (!v::EnsureInit()) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
-    // Replay texture uploads that happened before the backend came up.
-    if (!g_dirty_textures.empty()) FlushDirtyTextureUploads();
-    if (!CreateBackendProgram(prog)) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
-
-    const VAOData& vao = g_vaos[g_bound_vao];
-
-    std::vector<GLuint> vertex_slots;    // enabled, divisor == 0
-    std::vector<GLuint> instance_slots;  // enabled, divisor != 0
-    for (GLuint slot = 0; slot < kMaxAttribs; ++slot) {
-        const AttribData& a = vao.attribs[slot];
-        if (!a.enabled) continue;
-        (a.divisor ? instance_slots : vertex_slots).push_back(slot);
-    }
-    std::vector<sh::VertexInput> constant_inputs;
-    for (const sh::VertexInput& input : prog->vertex_inputs) {
-        if (input.location >= kMaxAttribs) {
-            PUSH_ERROR(GL_INVALID_OPERATION);
-            return;
-        }
-        if (!vao.attribs[input.location].enabled)
-            constant_inputs.push_back(input);
-    }
+    SharedDrawState local_shared;
+    SharedDrawState* shared = shared_state ? shared_state : &local_shared;
+    if (!ResolveDrawSharedState(shared)) return;
+    ++g_draw_lowering_stats.geometry_lowerings;
+    sh::Program* prog = shared->program;
+    const VAOData& vao = *shared->vao;
+    const auto& vertex_slots = shared->vertex_slots;
+    const auto& instance_slots = shared->instance_slots;
+    const auto& constant_inputs = shared->constant_inputs;
 
     // Rows referenced by each payload record: glDrawArrays maps payload row
     // i to buffer row (first + i); glDrawElements maps payload row i to
@@ -661,152 +861,23 @@ void DrawCommon(GLenum mode, const std::vector<uint32_t>& idx, GLint first,
     }
 
     v::DrawParams dp;
-    dp.program = CreateBackendProgram(prog);
+    dp.program = shared->backend_program;
     dp.vertex_stream = std::move(vstream);
     dp.instance_stream = std::move(istream);
-    dp.indices = idx;  // compatibility path: raw u32 indices into payload rows
+    dp.indices = idx;
     if (resident_indices) dp.resident_indices = *resident_indices;
     dp.primitive_restart = std::find(idx.begin(), idx.end(), UINT32_MAX) !=
                            idx.end();
-    dp.occlusion_query = CurrentOcclusionQueryHandle();
+    dp.occlusion_query = shared->occlusion_query;
     dp.instance_count = (uint32_t)instance_count;
     dp.topology = (v::Topology)topo;
-    dp.loose_uniforms.values = prog->loose_uniform_views.empty()
-        ? nullptr : prog->loose_uniform_views.data();
-    dp.loose_uniforms.count = static_cast<uint32_t>(prog->loose_uniform_views.size());
-    dp.loose_uniforms.version = prog->loose_uniform_version;
-    for (const auto& block : prog->uniform_blocks) {
-        if (block.binding >= kMaxUniformBufferBindings) {
-            PUSH_ERROR(GL_INVALID_OPERATION);
-            return;
-        }
-        const IndexedBufferBinding& indexed =
-            g_uniform_buffer_bindings[block.binding];
-        auto buffer = g_buffers.find(indexed.buffer);
-        if (!indexed.buffer || buffer == g_buffers.end()) {
-            PUSH_ERROR(GL_INVALID_OPERATION);
-            return;
-        }
-        const uint64_t offset = static_cast<uint64_t>(indexed.offset);
-        const uint64_t available = indexed.whole_buffer
-            ? static_cast<uint64_t>(buffer->second.Size())
-            : static_cast<uint64_t>(indexed.size);
-        if (available < static_cast<uint64_t>(block.data_size) ||
-            offset > buffer->second.Size() ||
-            static_cast<uint64_t>(block.data_size) >
-                buffer->second.Size() - offset) {
-            ML_LOG_ERROR("uniform block %s needs %d bytes but binding %u "
-                         "does not provide a complete range",
-                         block.name.c_str(), block.data_size, block.binding);
-            PUSH_ERROR(GL_INVALID_OPERATION);
-            return;
-        }
-        buffer->second.EnsureMaterialized();
-        auto append_binding = [&](uint32_t internal_binding,
-                                  bool vertex_stage,
-                                  bool fragment_stage) {
-            v::UniformBufferBinding binding;
-            binding.internal_binding = internal_binding;
-            binding.vertex_stage = vertex_stage;
-            binding.fragment_stage = fragment_stage;
-            binding.source_data = buffer->second.data.data();
-            binding.source_size = buffer->second.Size();
-            binding.source_lifetime_id = buffer->second.lifetime_id;
-            binding.source_content_version = buffer->second.content_version;
-            binding.source_previous_content_version =
-                buffer->second.previous_content_version;
-            binding.source_update_offset = buffer->second.update_offset;
-            binding.source_update_size = buffer->second.update_size;
-            binding.source_update_is_partial = buffer->second.update_is_partial;
-            binding.offset = offset;
-            binding.size = available;
-            dp.uniform_buffers.push_back(binding);
-        };
-        if (block.referenced_vertex)
-            append_binding(block.vertex_internal_binding, true, false);
-        if (block.referenced_fragment)
-            append_binding(block.fragment_internal_binding, false, true);
-    }
-    dp.pipeline = BuildPipelineState();
-    const s::GLState& state = s::GetState();
-    const uint32_t target_width = v::DrawTargetWidth();
-    const uint32_t target_height = v::DrawTargetHeight();
-    dp.dynamic.viewport = state.viewport.initialized
-        ? std::array<float, 4>{(float)state.viewport.x, (float)state.viewport.y,
-                              (float)state.viewport.w, (float)state.viewport.h}
-        : std::array<float, 4>{0.f, 0.f, (float)target_width,
-                              (float)target_height};
-    dp.dynamic.scissor = state.scissor.initialized
-        ? std::array<float, 4>{(float)state.scissor.x, (float)state.scissor.y,
-                              (float)state.scissor.w, (float)state.scissor.h}
-        : std::array<float, 4>{0.f, 0.f, (float)target_width,
-                              (float)target_height};
-
-    // Resolve each sampler (or each active sampler-array element) to the GL
-    // texture unit last written through glUniform1i/glUniform1iv. Shader
-    // lowering reserves consecutive descriptor binding numbers for fixed
-    // arrays; DirectMetal maps binding N to classic Metal slot N-1, so adding
-    // `element` here lands on the matching texture/sampler array element.
-    dp.sampled_textures.clear();
-    for (const auto& smp : prog->samplers) {
-        auto uit = prog->uniform_by_location.find(smp.location);
-        const sh::Uniform* uniform = uit == prog->uniform_by_location.end()
-            ? nullptr : &prog->uniforms[uit->second];
-        const GLint element_count = std::max<GLint>(smp.size, 1);
-        for (GLint element = 0; element < element_count; ++element) {
-            GLint unit = 0;
-            if (uniform && static_cast<size_t>(element) < uniform->value.size())
-                unit = static_cast<GLint>(uniform->value[element]);
-            const GLenum target = TextureTargetForSampler(smp.type);
-            GLuint tex = unit >= 0
-                ? TextureBindingForUnit(static_cast<GLuint>(unit), target) : 0;
-            if (tex) PrepareTextureForDraw(tex);
-            const auto texture = g_textures.find(tex);
-            const TexState default_texture;
-            const TexState& texture_state = texture == g_textures.end()
-                ? default_texture : texture->second;
-            const v::TexSamplerInfo sampler = ResolveSamplerInfo(
-                unit >= 0 ? static_cast<GLuint>(unit) : kMaxTexUnits,
-                texture_state);
-            const bool shader_compares_depth = SamplerUsesDepthCompare(smp.type);
-            const bool texture_is_depth = texture != g_textures.end() &&
-                texture_state.image_backend_format == v::TexelFormat::Depth32Float;
-            if ((shader_compares_depth &&
-                 (!texture_is_depth ||
-                  sampler.compare_mode != GL_COMPARE_REF_TO_TEXTURE)) ||
-                (!shader_compares_depth && sampler.compare_mode != GL_NONE)) {
-                // A shadow/non-shadow shader type must agree with the effective
-                // texture/sampler comparison state. Do not bind an incompatible
-                // Metal texture/sampler pair and produce driver-dependent output.
-                PUSH_ERROR(GL_INVALID_OPERATION);
-                return;
-            }
-
-            const uint32_t vertex_binding = smp.vertex_binding == UINT32_MAX
-                ? UINT32_MAX
-                : smp.vertex_binding + static_cast<uint32_t>(element);
-            const uint32_t fragment_binding = smp.fragment_binding == UINT32_MAX
-                ? UINT32_MAX
-                : smp.fragment_binding + static_cast<uint32_t>(element);
-            // A sampler is one GL program uniform even when both shader stages
-            // reference it. Internal SPIR-V base bindings may differ with stage
-            // declaration order; the fixed array element offset is identical.
-            if (vertex_binding != UINT32_MAX &&
-                vertex_binding == fragment_binding) {
-                dp.sampled_textures.push_back({
-                    vertex_binding, tex, sampler, true, true});
-            } else {
-                if (vertex_binding != UINT32_MAX)
-                    dp.sampled_textures.push_back({
-                        vertex_binding, tex, sampler, true, false});
-                if (fragment_binding != UINT32_MAX)
-                    dp.sampled_textures.push_back({
-                        fragment_binding, tex, sampler, false, true});
-            }
-        }
-    }
+    dp.loose_uniforms = shared->loose_uniforms;
+    dp.uniform_buffers = shared->uniform_buffers;
+    dp.sampled_textures = shared->sampled_textures;
+    dp.pipeline = shared->pipeline;
+    dp.dynamic = shared->dynamic;
     if (prog->uses_flat_fragment_inputs &&
-        !LowerFlatPrimitives(state.provoking_vertex, &dp))
+        !LowerFlatPrimitives(shared->provoking_vertex, &dp))
         return;
     if (ConditionalRenderingAllowsCommands() &&
         dp.vertex_stream.HasStorage() && !v::Draw(std::move(dp)))
@@ -976,23 +1047,26 @@ void ExpandLineLoop(const std::vector<uint32_t>& loop,
 }
 
 void SubmitIndexSegment(GLenum mode, const std::vector<uint32_t>& segment,
-                        GLint base_vertex, GLsizei instance_count) {
+                        GLint base_vertex, GLsizei instance_count,
+                        SharedDrawState* shared_state = nullptr) {
     if (mode == GL_LINE_LOOP) {
         std::vector<uint32_t> lines;
         ExpandLineLoop(segment, &lines);
         if (!lines.empty())
             DrawCommon(GL_LINES, lines, 0, static_cast<GLsizei>(lines.size()),
-                       base_vertex, instance_count);
+                       base_vertex, instance_count, nullptr, 0, shared_state);
         return;
     }
     DrawCommon(mode, segment, 0, static_cast<GLsizei>(segment.size()),
-               base_vertex, instance_count);
+               base_vertex, instance_count, nullptr, 0, shared_state);
 }
 
 void DrawArraysImpl(GLenum mode, GLint first, GLsizei count,
-                    GLsizei instance_count) {
+                    GLsizei instance_count,
+                    SharedDrawState* shared_state = nullptr) {
     if (mode != GL_LINE_LOOP) {
-        DrawCommon(mode, {}, first, count, 0, instance_count);
+        DrawCommon(mode, {}, first, count, 0, instance_count, nullptr, 0,
+                   shared_state);
         return;
     }
     if (count < 0 || first < 0 || instance_count < 0) {
@@ -1001,12 +1075,13 @@ void DrawArraysImpl(GLenum mode, GLint first, GLsizei count,
     }
     std::vector<uint32_t> loop(static_cast<size_t>(count));
     for (uint32_t i = 0; i < loop.size(); ++i) loop[i] = i;
-    SubmitIndexSegment(mode, loop, first, instance_count);
+    SubmitIndexSegment(mode, loop, first, instance_count, shared_state);
 }
 
 void DrawElementsImpl(GLenum mode, GLsizei count, GLenum type,
                       const void* indices, GLint base_vertex,
-                      GLsizei instance_count, GLuint start, GLuint end) {
+                      GLsizei instance_count, GLuint start, GLuint end,
+                      SharedDrawState* shared_state = nullptr) {
     if (count < 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
 
     v::ResidentIndexSource resident;
@@ -1021,7 +1096,7 @@ void DrawElementsImpl(GLenum mode, GLsizei count, GLenum type,
     }
     if (resident_result == ResidentIndexResult::Ready) {
         DrawCommon(mode, {}, 0, count, base_vertex, instance_count,
-                   &resident, resident_max);
+                   &resident, resident_max, shared_state);
         return;
     }
 
@@ -1041,13 +1116,13 @@ void DrawElementsImpl(GLenum mode, GLsizei count, GLenum type,
                 std::vector<uint32_t> segment(idx.begin() + begin,
                                               idx.begin() + i);
                 SubmitIndexSegment(mode, segment, base_vertex,
-                                   instance_count);
+                                   instance_count, shared_state);
             }
             begin = i + 1;
         }
         return;
     }
-    SubmitIndexSegment(mode, idx, base_vertex, instance_count);
+    SubmitIndexSegment(mode, idx, base_vertex, instance_count, shared_state);
 }
 
 } // namespace
@@ -1099,15 +1174,21 @@ void APIENTRY glDrawRangeElementsBaseVertex(GLenum mode, GLuint start, GLuint en
 void APIENTRY glMultiDrawArrays(GLenum mode, const GLint* first,
                                 const GLsizei* count, GLsizei drawcount) {
     if (drawcount < 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+    ++g_draw_lowering_stats.multi_draw_calls;
+    g_draw_lowering_stats.multi_draw_subdraws += static_cast<uint64_t>(drawcount);
+    SharedDrawState shared;
     for (GLsizei i = 0; i < drawcount; ++i)
-        DrawArraysImpl(mode, first[i], count[i], 1);
+        DrawArraysImpl(mode, first[i], count[i], 1, &shared);
 }
 
 void APIENTRY glMultiDrawElements(GLenum mode, const GLsizei* count, GLenum type,
                                   const void* const* indices, GLsizei drawcount) {
     if (drawcount < 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+    ++g_draw_lowering_stats.multi_draw_calls;
+    g_draw_lowering_stats.multi_draw_subdraws += static_cast<uint64_t>(drawcount);
+    SharedDrawState shared;
     for (GLsizei i = 0; i < drawcount; ++i)
-        DrawElementsImpl(mode, count[i], type, indices[i], 0, 1, 0, 0);
+        DrawElementsImpl(mode, count[i], type, indices[i], 0, 1, 0, 0, &shared);
 }
 
 void APIENTRY glMultiDrawElementsBaseVertex(GLenum mode, const GLsizei* count,
@@ -1116,8 +1197,23 @@ void APIENTRY glMultiDrawElementsBaseVertex(GLenum mode, const GLsizei* count,
                                             GLsizei drawcount,
                                             const GLint* basevertex) {
     if (drawcount < 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+    ++g_draw_lowering_stats.multi_draw_calls;
+    g_draw_lowering_stats.multi_draw_subdraws += static_cast<uint64_t>(drawcount);
+    SharedDrawState shared;
     for (GLsizei i = 0; i < drawcount; ++i)
-        DrawElementsImpl(mode, count[i], type, indices[i], basevertex[i], 1, 0, 0);
+        DrawElementsImpl(mode, count[i], type, indices[i], basevertex[i], 1, 0, 0,
+                         &shared);
+}
+
+void mithrilResetDrawLoweringStats(void) {
+    g_draw_lowering_stats = EmptyDrawLoweringStats();
+}
+
+int mithrilGetDrawLoweringStatsV1(
+    MithrilDrawLoweringStatsV1* output, size_t output_size) {
+    if (!output || output_size < sizeof(*output)) return 0;
+    *output = g_draw_lowering_stats;
+    return 1;
 }
 
 void APIENTRY glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height,

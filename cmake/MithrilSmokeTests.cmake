@@ -56,6 +56,7 @@ set(_mithril_directmetal_smokes
     directmetal_buffer_streaming_smoke
     directmetal_resident_index_smoke
     directmetal_uniform_snapshot_smoke
+    directmetal_multidraw_lowering_smoke
     lazy_buffer_storage_smoke)
 
 if(APPLE AND TARGET mithril_direct)
