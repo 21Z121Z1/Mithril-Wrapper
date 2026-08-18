@@ -115,7 +115,7 @@ jobs:
           MITHRIL_EXPECT_RENDERER: DirectMetal
         run: |
           set -euo pipefail
-          ./build-candidate/directmetal_incomplete_fbo_smoke \
+          ./build-candidate/tests/directmetal_incomplete_fbo_smoke \
             2>&1 | tee "$E2E_ROOT/incomplete-fbo-detail.log"
           grep -q 'glClear(zero-mask).*GL_INVALID_FRAMEBUFFER_OPERATION' "$E2E_ROOT/incomplete-fbo-detail.log"
           grep -q 'line-loop zero-count.*GL_INVALID_FRAMEBUFFER_OPERATION' "$E2E_ROOT/incomplete-fbo-detail.log"
