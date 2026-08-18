@@ -111,7 +111,7 @@ if script.count("DestroyDrawOp(op);") != 3:
         f"Vulkan generated cleanup count drifted: {script.count('DestroyDrawOp(op);')}")
 script = script.replace("DestroyDrawOp(op);", "DestroyStagedDrawBuffers(op);")
 
-script += r'''
+script += r"""
 
 exact("src/vk/draw.cpp",
 '''bool StageStream(const VertexStream& stream, VkBuffer* buf,
@@ -157,7 +157,7 @@ void DestroyStagedDrawBuffers(const DrawOp& op) {
 
 } // namespace
 ''')
-'''
+"""
 
 compile(script, str(base), "exec")
 exec(compile(script, str(base), "exec"),
