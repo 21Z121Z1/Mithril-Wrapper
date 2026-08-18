@@ -1,0 +1,89 @@
+name: verify-directmetal-multidraw-lowering
+
+on:
+  push:
+    branches: [perf/directmetal-multidraw-lowering-20260818]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: verify-directmetal-multidraw-lowering
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: perf/directmetal-multidraw-lowering-20260818
+          submodules: false
+          fetch-depth: 0
+
+      - name: Fetch shader submodules
+        run: >-
+          git submodule update --init --depth=1
+          third_party/SPIRV-Cross
+          third_party/SPIRV-Headers
+          third_party/glslang
+
+      - name: Apply MultiDraw lowering phase
+        run: python3 scripts/apply_multidraw_shared_lowering.py
+
+      - name: Verify source invariants
+        run: |
+          git diff --check
+          grep -q 'struct SharedDrawState' src/gl/draw.cpp
+          grep -q 'ResolveDrawSharedState' src/gl/draw.cpp
+          grep -q 'directmetal_multidraw_lowering_smoke' cmake/MithrilSmokeTests.cmake
+          grep -q 'mithrilGetDrawLoweringStatsV1' src/gl/draw.cpp
+          python3 - <<'PY'
+          from pathlib import Path
+          s=Path('src/gl/draw.cpp').read_text()
+          assert 'DrawArraysImpl(mode, first[i], count[i], 1, &shared);' in s
+          assert 'DrawElementsImpl(mode, count[i], type, indices[i], 0, 1, 0, 0, &shared);' in s
+          assert s.count('SharedDrawState shared;') == 3
+          PY
+
+      - name: Materialize implementation
+        run: |
+          rm .github/workflows/verify-directmetal-multidraw-lowering.yml
+          rm scripts/apply_multidraw_shared_lowering.py
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          git commit -m 'perf: lower MultiDraw shared state once'
+          git push origin HEAD:perf/directmetal-multidraw-lowering-20260818
+
+      - name: Configure DirectMetal Release
+        run: >-
+          cmake -S . -B build-direct -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DMITHRIL_BUILD_LEGACY=OFF
+          -DMITHRIL_BUILD_DIRECT=ON
+          -DMITHRIL_ENABLE_SHADER_TOOLCHAIN=ON
+
+      - name: Build DirectMetal
+        run: cmake --build build-direct --parallel
+
+      - name: Run dedicated MultiDraw regression
+        run: ctest --test-dir build-direct -R '^directmetal_multidraw_lowering_smoke$' --output-on-failure
+
+      - name: Run full DirectMetal suite
+        run: ctest --test-dir build-direct -L directmetal --output-on-failure
+
+      - name: Fetch Vulkan headers
+        run: git submodule update --init --depth=1 third_party/Vulkan-Headers
+
+      - name: Configure Vulkan reference
+        run: >-
+          cmake -S . -B build-vulkan -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DMITHRIL_BUILD_LEGACY=ON
+          -DMITHRIL_BUILD_DIRECT=OFF
+          -DMITHRIL_ENABLE_SHADER_TOOLCHAIN=ON
+
+      - name: Build Vulkan reference
+        run: cmake --build build-vulkan --parallel
