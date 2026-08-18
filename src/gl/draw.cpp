@@ -663,6 +663,14 @@ void DrawCommon(GLenum mode, const std::vector<uint32_t>& idx, GLint first,
     if (instance_count < 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
     int topo = GLModeToTopology(mode);
     if (topo < 0) { PUSH_ERROR(GL_INVALID_ENUM); return; }
+    // Completeness is a command-level rendering prerequisite even when the
+    // draw produces no fragments (for example count == 0). Keep this ahead
+    // of all draw-state lowering and backend work.
+    if (glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) !=
+        GL_FRAMEBUFFER_COMPLETE) {
+        PUSH_ERROR(GL_INVALID_FRAMEBUFFER_OPERATION);
+        return;
+    }
     if (count == 0 || instance_count == 0) return;
 
     SharedDrawState local_shared;
@@ -1212,6 +1220,11 @@ void APIENTRY glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height,
                            GLenum format, GLenum type, void* pixels) {
     if (format != GL_RGBA || type != GL_UNSIGNED_BYTE || width < 0 || height < 0) {
         PUSH_ERROR(GL_INVALID_OPERATION);
+        return;
+    }
+    if (glCheckFramebufferStatus(GL_READ_FRAMEBUFFER) !=
+        GL_FRAMEBUFFER_COMPLETE) {
+        PUSH_ERROR(GL_INVALID_FRAMEBUFFER_OPERATION);
         return;
     }
     PixelPackDestination destination;

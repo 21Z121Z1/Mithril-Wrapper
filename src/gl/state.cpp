@@ -40,6 +40,15 @@ static void SetCap(GLenum cap, bool on) {
 }
 
 static bool SubmitClear(v::ClearParams clear) {
+    // OpenGL 4.6 section 9.4.4: rendering to an incomplete draw
+    // framebuffer generates GL_INVALID_FRAMEBUFFER_OPERATION and the command
+    // is ignored. Validate before conditional rendering or lazy backend init
+    // so invalid GL state never reaches a native render-target resolver.
+    if (glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) !=
+        GL_FRAMEBUFFER_COMPLETE) {
+        PUSH_ERROR(GL_INVALID_FRAMEBUFFER_OPERATION);
+        return false;
+    }
     if (!ConditionalRenderingAllowsCommands()) return true;
     if (!v::EnsureInit()) {
         PUSH_ERROR(GL_INVALID_OPERATION);
