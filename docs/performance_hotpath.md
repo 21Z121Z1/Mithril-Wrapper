@@ -34,3 +34,8 @@ creation, and native shader functions. A render PSO additionally depends on
 vertex layout, render-target formats/sample count, raster state, blending, and
 depth/stencil state; PSO compilation therefore needs its own cache/precompile
 strategy and must not be reported as solved by program prewarm.
+
+Because the program-creation contract is shared, every prewarm change must also
+pass the Vulkan reference build/regression gate in addition to the DirectMetal
+macOS semantic suite and iPhoneOS arm64 shipping build. Platform-specific
+first-use optimization is not allowed to silently fork shared GL semantics.
