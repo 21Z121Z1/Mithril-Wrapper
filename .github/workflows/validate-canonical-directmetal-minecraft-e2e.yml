@@ -26,7 +26,7 @@ jobs:
       GRADLE_OPTS: -Dorg.gradle.caching=true
       MTL_DEBUG_LAYER: '1'
       MTL_SHADER_VALIDATION: '0'
-      CPATH: ${{ github.workspace }}/candidate/third_party
+      CPATH: ${{ github.workspace }}/ci/minecraft-e2e/native/abi:${{ github.workspace }}/candidate/third_party
 
     steps:
       - name: Checkout E2E harness only
