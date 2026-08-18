@@ -164,8 +164,6 @@ void ConvertIntegerComponents(const uint8_t* bytes, uint8_t* output,
 
 } // namespace
 
-extern "C" {
-
 // ---- draw (M3) -------------------------------------------------------------
 
 namespace {
@@ -663,6 +661,14 @@ void DrawCommon(GLenum mode, const std::vector<uint32_t>& idx, GLint first,
     if (instance_count < 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
     int topo = GLModeToTopology(mode);
     if (topo < 0) { PUSH_ERROR(GL_INVALID_ENUM); return; }
+    // Completeness is a command-level rendering prerequisite even when the
+    // draw produces no fragments (for example count == 0). Keep this ahead
+    // of all draw-state lowering and backend work.
+    if (glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) !=
+        GL_FRAMEBUFFER_COMPLETE) {
+        PUSH_ERROR(GL_INVALID_FRAMEBUFFER_OPERATION);
+        return;
+    }
     if (count == 0 || instance_count == 0) return;
 
     SharedDrawState local_shared;
@@ -1065,6 +1071,15 @@ void DrawArraysImpl(GLenum mode, GLint first, GLsizei count,
         PUSH_ERROR(GL_INVALID_VALUE);
         return;
     }
+    // GL_LINE_LOOP is lowered through a synthetic index list. Small/degenerate
+    // loops may produce no synthetic line segment and therefore no DrawCommon
+    // call, but the original GL command is still a rendering command. Validate
+    // once here before primitive expansion so count==0/1 cannot bypass 9.4.4.
+    if (glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) !=
+        GL_FRAMEBUFFER_COMPLETE) {
+        PUSH_ERROR(GL_INVALID_FRAMEBUFFER_OPERATION);
+        return;
+    }
     std::vector<uint32_t> loop(static_cast<size_t>(count));
     for (uint32_t i = 0; i < loop.size(); ++i) loop[i] = i;
     SubmitIndexSegment(mode, loop, first, instance_count, shared_state);
@@ -1095,6 +1110,14 @@ void DrawElementsImpl(GLenum mode, GLsizei count, GLenum type,
     GLenum err = GL_NO_ERROR;
     std::vector<uint32_t> idx = LoadIndices(type, indices, count, start, end, &err);
     if (err) { PUSH_ERROR(err); return; }
+    // The fallback indexed path may lower LINE_LOOP with fewer than two
+    // vertices to no native segment. Validate before that lowering so every
+    // valid indexed rendering command observes framebuffer completeness.
+    if (glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) !=
+        GL_FRAMEBUFFER_COMPLETE) {
+        PUSH_ERROR(GL_INVALID_FRAMEBUFFER_OPERATION);
+        return;
+    }
     if (idx.empty()) return;
     const bool has_restart = std::find(idx.begin(), idx.end(), UINT32_MAX) !=
                              idx.end();
@@ -1118,6 +1141,8 @@ void DrawElementsImpl(GLenum mode, GLsizei count, GLenum type,
 }
 
 } // namespace
+
+extern "C" {
 
 void APIENTRY glDrawArrays(GLenum mode, GLint first, GLsizei count) {
     DrawArraysImpl(mode, first, count, 1);
@@ -1166,6 +1191,13 @@ void APIENTRY glDrawRangeElementsBaseVertex(GLenum mode, GLuint start, GLuint en
 void APIENTRY glMultiDrawArrays(GLenum mode, const GLint* first,
                                 const GLsizei* count, GLsizei drawcount) {
     if (drawcount < 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+    // MultiDraw* is itself a rendering command. drawcount==0 must not
+    // bypass framebuffer completeness validation.
+    if (drawcount == 0 && glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) !=
+                              GL_FRAMEBUFFER_COMPLETE) {
+        PUSH_ERROR(GL_INVALID_FRAMEBUFFER_OPERATION);
+        return;
+    }
     ++g_draw_lowering_stats.multi_draw_calls;
     g_draw_lowering_stats.multi_draw_subdraws += static_cast<uint64_t>(drawcount);
     SharedDrawState shared;
@@ -1176,6 +1208,13 @@ void APIENTRY glMultiDrawArrays(GLenum mode, const GLint* first,
 void APIENTRY glMultiDrawElements(GLenum mode, const GLsizei* count, GLenum type,
                                   const void* const* indices, GLsizei drawcount) {
     if (drawcount < 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+    // MultiDraw* is itself a rendering command. drawcount==0 must not
+    // bypass framebuffer completeness validation.
+    if (drawcount == 0 && glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) !=
+                              GL_FRAMEBUFFER_COMPLETE) {
+        PUSH_ERROR(GL_INVALID_FRAMEBUFFER_OPERATION);
+        return;
+    }
     ++g_draw_lowering_stats.multi_draw_calls;
     g_draw_lowering_stats.multi_draw_subdraws += static_cast<uint64_t>(drawcount);
     SharedDrawState shared;
@@ -1189,6 +1228,13 @@ void APIENTRY glMultiDrawElementsBaseVertex(GLenum mode, const GLsizei* count,
                                             GLsizei drawcount,
                                             const GLint* basevertex) {
     if (drawcount < 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+    // MultiDraw* is itself a rendering command. drawcount==0 must not
+    // bypass framebuffer completeness validation.
+    if (drawcount == 0 && glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) !=
+                              GL_FRAMEBUFFER_COMPLETE) {
+        PUSH_ERROR(GL_INVALID_FRAMEBUFFER_OPERATION);
+        return;
+    }
     ++g_draw_lowering_stats.multi_draw_calls;
     g_draw_lowering_stats.multi_draw_subdraws += static_cast<uint64_t>(drawcount);
     SharedDrawState shared;
@@ -1212,6 +1258,11 @@ void APIENTRY glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height,
                            GLenum format, GLenum type, void* pixels) {
     if (format != GL_RGBA || type != GL_UNSIGNED_BYTE || width < 0 || height < 0) {
         PUSH_ERROR(GL_INVALID_OPERATION);
+        return;
+    }
+    if (glCheckFramebufferStatus(GL_READ_FRAMEBUFFER) !=
+        GL_FRAMEBUFFER_COMPLETE) {
+        PUSH_ERROR(GL_INVALID_FRAMEBUFFER_OPERATION);
         return;
     }
     PixelPackDestination destination;

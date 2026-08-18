@@ -57,8 +57,6 @@ uint64_t EnsureBackendProgram(mithril::shader::Program* program,
     return handle;
 }
 
-extern "C" {
-
 // ---- shaders / programs / uniforms (S2) ------------------------------------
 
 namespace {
@@ -318,6 +316,8 @@ bool UniformSetterMatches(GLenum uniform_type, GLenum setter_type) {
     return uniform_type == setter_type;
 }
 } // namespace
+
+extern "C" {
 
 GLuint APIENTRY glCreateShader(GLenum type) {
     if (type != GL_VERTEX_SHADER && type != GL_FRAGMENT_SHADER &&
