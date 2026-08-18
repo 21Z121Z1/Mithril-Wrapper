@@ -36,7 +36,8 @@ public:
     bool Clear(const backend::ClearParams& params);
 
     uint64_t CreateProgram(const std::vector<uint32_t>& vertex,
-                           const std::vector<uint32_t>& fragment);
+                           const std::vector<uint32_t>& fragment,
+                           const std::vector<std::string>& uniform_names);
     void DestroyProgram(uint64_t program);
     bool Draw(backend::DrawParams params);
     void SubmitFlush(bool waitForCompletion);

@@ -407,7 +407,8 @@ VkPipeline GetOrCreatePipeline(const Program& prog, const DrawOp& op) {
 }
 
 uint64_t CreateProgram(const std::vector<uint32_t>& vs,
-                       const std::vector<uint32_t>& fs) {
+                       const std::vector<uint32_t>& fs,
+                       const std::vector<std::string>& uniform_names) {
     if (!g.initialized || vs.empty() || fs.empty()) return 0;
 
     // The reference backend currently owns only binding 0 for Mithril's
@@ -519,6 +520,21 @@ uint64_t CreateProgram(const std::vector<uint32_t>& vs,
                                        return a.name == b.name;
                                    });
             p.members.erase(dup, p.members.end());
+            p.member_value_indices.clear();
+            p.member_value_indices.reserve(p.members.size());
+            for (const auto& member : p.members) {
+                auto found = std::find(uniform_names.begin(), uniform_names.end(),
+                                       member.name);
+                if (found == uniform_names.end()) {
+                    ML_LOG_ERROR("vk: reflected loose uniform '%s' has no frontend slot",
+                                 member.name.c_str());
+                    g.fn.DestroyShaderModule(g.device, p.vs_mod, nullptr);
+                    g.fn.DestroyShaderModule(g.device, p.fs_mod, nullptr);
+                    return 0;
+                }
+                p.member_value_indices.push_back(
+                    static_cast<uint32_t>(found - uniform_names.begin()));
+            }
             ML_LOG_DEBUG("vk: program %llu UBO %zu bytes (%zu members)",
                          (unsigned long long)h, (size_t)p.ubo_size,
                          p.members.size());

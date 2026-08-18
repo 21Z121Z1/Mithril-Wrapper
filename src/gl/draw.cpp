@@ -183,18 +183,14 @@ int GLModeToTopology(GLenum mode) {
 uint64_t CreateBackendProgram(sh::Program* prog) {
     auto it = g_backend_programs.find(prog->id);
     if (it != g_backend_programs.end()) return it->second;
-    uint64_t handle = v::CreateProgram(prog->vertex_spirv, prog->fragment_spirv);
+    std::vector<std::string> uniform_names;
+    uniform_names.reserve(prog->uniforms.size());
+    for (const auto& uniform : prog->uniforms)
+        uniform_names.push_back(uniform.name);
+    uint64_t handle = v::CreateProgram(
+        prog->vertex_spirv, prog->fragment_spirv, uniform_names);
     if (handle) g_backend_programs.emplace(prog->id, handle);
     return handle;
-}
-
-std::unordered_map<std::string, std::vector<uint8_t>> ComposeUniforms(
-    sh::Program* prog) {
-    std::unordered_map<std::string, std::vector<uint8_t>> uniforms;
-    for (const auto& u : prog->uniforms)
-        if (u.location >= 0 && !u.raw_value.empty())
-            uniforms[u.name] = u.raw_value;
-    return uniforms;
 }
 
 // Snapshot the current GL context into the backend's pipeline state. The
@@ -675,7 +671,10 @@ void DrawCommon(GLenum mode, const std::vector<uint32_t>& idx, GLint first,
     dp.occlusion_query = CurrentOcclusionQueryHandle();
     dp.instance_count = (uint32_t)instance_count;
     dp.topology = (v::Topology)topo;
-    dp.uniforms = ComposeUniforms(prog);
+    dp.loose_uniforms.values = prog->loose_uniform_views.empty()
+        ? nullptr : prog->loose_uniform_views.data();
+    dp.loose_uniforms.count = static_cast<uint32_t>(prog->loose_uniform_views.size());
+    dp.loose_uniforms.version = prog->loose_uniform_version;
     for (const auto& block : prog->uniform_blocks) {
         if (block.binding >= kMaxUniformBufferBindings) {
             PUSH_ERROR(GL_INVALID_OPERATION);

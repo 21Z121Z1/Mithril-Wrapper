@@ -123,6 +123,7 @@ struct Program {
     VkShaderModule vs_mod = VK_NULL_HANDLE;
     VkShaderModule fs_mod = VK_NULL_HANDLE;
     std::vector<UboMember> members;
+    std::vector<uint32_t> member_value_indices;
     VkDeviceSize ubo_size = 0;
     bool has_ubo = false;
     // Sampler uniforms (descriptor binding mirrors the GLSL layout() we

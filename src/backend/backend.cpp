@@ -78,12 +78,12 @@ const char* RendererName() {
 }
 
 bool PackUniformValue(const UniformMemberLayout& layout,
-                      const std::vector<uint8_t>& value,
+                      const uint8_t* value_data, size_t value_size,
                       uint8_t* block, size_t block_size) {
     constexpr size_t kScalarBytes = sizeof(uint32_t);
     if (!block || layout.offset > block_size ||
         layout.size > block_size - layout.offset ||
-        value.size() % kScalarBytes != 0)
+        value_size % kScalarBytes != 0)
         return false;
 
     const size_t member_end = layout.offset + layout.size;
@@ -98,26 +98,26 @@ bool PackUniformValue(const UniformMemberLayout& layout,
         ? layout.matrix_stride : static_cast<size_t>(rows) * kScalarBytes;
 
     auto copy_scalar = [&](size_t destination, size_t source) {
-        if (source + kScalarBytes > value.size() ||
+        if (source + kScalarBytes > value_size ||
             destination + kScalarBytes > member_end)
             return false;
-        std::memcpy(block + destination, value.data() + source, kScalarBytes);
+        std::memcpy(block + destination, value_data + source, kScalarBytes);
         return true;
     };
 
     for (uint32_t element = 0; element < elements; ++element) {
         const size_t source_base =
             static_cast<size_t>(element) * tight_element_bytes;
-        if (source_base >= value.size()) break;
+        if (source_base >= value_size) break;
         const size_t destination_base =
             layout.offset + static_cast<size_t>(element) * array_stride;
         if (columns == 1) {
             const size_t bytes = std::min<size_t>(
                 static_cast<size_t>(rows) * kScalarBytes,
-                value.size() - source_base);
+                value_size - source_base);
             if (destination_base + bytes > member_end) return false;
             std::memcpy(block + destination_base,
-                        value.data() + source_base, bytes);
+                        value_data + source_base, bytes);
             continue;
         }
         if (!layout.row_major) {
@@ -263,8 +263,10 @@ bool SupportsDepthTextures() {
     }
 }
 bool Clear(const ClearParams& params) { DISPATCH_RET(Clear, false, params); }
-uint64_t CreateProgram(const std::vector<uint32_t>& vs, const std::vector<uint32_t>& fs) {
-    DISPATCH_RET(CreateProgram, 0, vs, fs);
+uint64_t CreateProgram(const std::vector<uint32_t>& vs,
+                       const std::vector<uint32_t>& fs,
+                       const std::vector<std::string>& uniform_names) {
+    DISPATCH_RET(CreateProgram, 0, vs, fs, uniform_names);
 }
 void DestroyProgram(uint64_t program) { DISPATCH_VOID(DestroyProgram, program); }
 
