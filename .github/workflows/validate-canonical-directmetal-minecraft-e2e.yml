@@ -4,6 +4,8 @@ name: Validate canonical DirectMetal in Minecraft 26.2
 on:
   push:
     branches: [validation/directmetal-performance-e2e-20260818]
+  pull_request:
+    branches: [ci/minecraft-on-mithril-e2e-20260815]
   workflow_dispatch:
 
 permissions:
