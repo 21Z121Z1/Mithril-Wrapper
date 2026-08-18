@@ -164,8 +164,6 @@ void ConvertIntegerComponents(const uint8_t* bytes, uint8_t* output,
 
 } // namespace
 
-extern "C" {
-
 // ---- draw (M3) -------------------------------------------------------------
 
 namespace {
@@ -1126,6 +1124,8 @@ void DrawElementsImpl(GLenum mode, GLsizei count, GLenum type,
 }
 
 } // namespace
+
+extern "C" {
 
 void APIENTRY glDrawArrays(GLenum mode, GLint first, GLsizei count) {
     DrawArraysImpl(mode, first, count, 1);
