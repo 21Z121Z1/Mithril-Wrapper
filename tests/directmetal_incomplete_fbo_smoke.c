@@ -16,6 +16,7 @@
 #define GL_NO_ERROR 0
 #define GL_NONE 0
 #define GL_INVALID_FRAMEBUFFER_OPERATION 0x0506
+#define GL_LINE_LOOP 0x0002
 #define GL_TRIANGLES 0x0004
 #define GL_COLOR_BUFFER_BIT 0x00004000
 #define GL_DEPTH_BUFFER_BIT 0x00000100
@@ -24,6 +25,8 @@
 #define GL_UNSIGNED_BYTE 0x1401
 #define GL_FLOAT 0x1406
 #define GL_TEXTURE_2D 0x0DE1
+#define GL_ELEMENT_ARRAY_BUFFER 0x8893
+#define GL_STATIC_DRAW 0x88E4
 #define GL_RGBA8 0x8058
 #define GL_DEPTH_COMPONENT32F 0x8CAC
 #define GL_FRAMEBUFFER 0x8D40
@@ -54,6 +57,12 @@ typedef void (*fn_glDrawBuffer)(GLenum);
 typedef void (*fn_glReadBuffer)(GLenum);
 typedef void (*fn_glClear)(GLbitfield);
 typedef void (*fn_glDrawArrays)(GLenum, GLint, GLsizei);
+typedef void (*fn_glDrawElements)(GLenum, GLsizei, GLenum, const void*);
+typedef void (*fn_glMultiDrawArrays)(GLenum, const GLint*, const GLsizei*, GLsizei);
+typedef void (*fn_glMultiDrawElements)(GLenum, const GLsizei*, GLenum, const void* const*, GLsizei);
+typedef void (*fn_glGenBuffers)(GLsizei, GLuint*);
+typedef void (*fn_glBindBuffer)(GLenum, GLuint);
+typedef void (*fn_glBufferData)(GLenum, long, const void*, GLenum);
 typedef void (*fn_glReadPixels)(GLint, GLint, GLsizei, GLsizei, GLenum, GLenum,
                                  void*);
 typedef void (*fn_glCopyTexImage2D)(GLenum, GLint, GLenum, GLint, GLint,
@@ -103,6 +112,12 @@ int main(void) {
     LOAD(fn_glReadBuffer, glReadBuffer);
     LOAD(fn_glClear, glClear);
     LOAD(fn_glDrawArrays, glDrawArrays);
+    LOAD(fn_glDrawElements, glDrawElements);
+    LOAD(fn_glMultiDrawArrays, glMultiDrawArrays);
+    LOAD(fn_glMultiDrawElements, glMultiDrawElements);
+    LOAD(fn_glGenBuffers, glGenBuffers);
+    LOAD(fn_glBindBuffer, glBindBuffer);
+    LOAD(fn_glBufferData, glBufferData);
     LOAD(fn_glReadPixels, glReadPixels);
     LOAD(fn_glCopyTexImage2D, glCopyTexImage2D);
     LOAD(fn_glBlitFramebuffer, glBlitFramebuffer);
@@ -111,7 +126,9 @@ int main(void) {
     CHECK(glGetError && glGenTextures && glBindTexture && glTexImage2D &&
           glGenFramebuffers && glBindFramebuffer && glFramebufferTexture2D &&
           glCheckFramebufferStatus && glDrawBuffer && glReadBuffer && glClear &&
-          glDrawArrays && glReadPixels && glCopyTexImage2D && glBlitFramebuffer,
+          glDrawArrays && glDrawElements && glMultiDrawArrays &&
+          glMultiDrawElements && glGenBuffers && glBindBuffer && glBufferData &&
+          glReadPixels && glCopyTexImage2D && glBlitFramebuffer,
           "all incomplete-FBO regression symbols resolved");
     if (failures) return 1;
 
@@ -132,6 +149,8 @@ int main(void) {
      * can be produced (zero count / zero-sized read / zero-area blit). */
     glClear(GL_DEPTH_BUFFER_BIT);
     expect_error(glGetError, GL_INVALID_FRAMEBUFFER_OPERATION, "glClear");
+    glClear(0);
+    expect_error(glGetError, GL_INVALID_FRAMEBUFFER_OPERATION, "glClear(zero-mask)");
 
     glDrawArrays(GL_TRIANGLES, 0, 3);
     expect_error(glGetError, GL_INVALID_FRAMEBUFFER_OPERATION,
@@ -139,6 +158,23 @@ int main(void) {
     glDrawArrays(GL_TRIANGLES, 0, 0);
     expect_error(glGetError, GL_INVALID_FRAMEBUFFER_OPERATION,
                  "glDrawArrays(zero-count)");
+    glDrawArrays(GL_LINE_LOOP, 0, 0);
+    expect_error(glGetError, GL_INVALID_FRAMEBUFFER_OPERATION,
+                 "glDrawArrays(line-loop zero-count)");
+
+    GLuint ebo = 0;
+    glGenBuffers(1, &ebo);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, 0, NULL, GL_STATIC_DRAW);
+    glDrawElements(GL_TRIANGLES, 0, GL_UNSIGNED_BYTE, (const void*)0);
+    expect_error(glGetError, GL_INVALID_FRAMEBUFFER_OPERATION,
+                 "glDrawElements(zero-count)");
+    glMultiDrawArrays(GL_TRIANGLES, NULL, NULL, 0);
+    expect_error(glGetError, GL_INVALID_FRAMEBUFFER_OPERATION,
+                 "glMultiDrawArrays(zero-drawcount)");
+    glMultiDrawElements(GL_TRIANGLES, NULL, GL_UNSIGNED_BYTE, NULL, 0);
+    expect_error(glGetError, GL_INVALID_FRAMEBUFFER_OPERATION,
+                 "glMultiDrawElements(zero-drawcount)");
 
     unsigned char sentinel[4] = {17, 34, 51, 68};
     glReadPixels(0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, sentinel);
