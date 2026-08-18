@@ -1,0 +1,62 @@
+name: apply-line-loop-fbo-closure
+
+on:
+  push:
+    branches: [fix/directmetal-incomplete-fbo-20260819]
+  pull_request:
+    branches: [integration/directmetal-next]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/directmetal-incomplete-fbo-20260819
+          fetch-depth: 0
+      - name: Close LINE_LOOP no-primitive FBO gaps
+        shell: python
+        run: |
+          from pathlib import Path
+          p=Path('src/gl/draw.cpp')
+          text=p.read_text()
+          old='''    // GL_LINE_LOOP is lowered through a synthetic index list. With count==0\n    // there is no segment and therefore no DrawCommon call, but the original\n    // GL command is still a rendering command and must validate the FBO.\n    if (count == 0 && glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) !=\n                          GL_FRAMEBUFFER_COMPLETE) {\n        PUSH_ERROR(GL_INVALID_FRAMEBUFFER_OPERATION);\n        return;\n    }\n'''
+          new='''    // GL_LINE_LOOP is lowered through a synthetic index list. Small/degenerate\n    // loops may produce no synthetic line segment and therefore no DrawCommon\n    // call, but the original GL command is still a rendering command. Validate\n    // once here before primitive expansion so count==0/1 cannot bypass 9.4.4.\n    if (glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) !=\n        GL_FRAMEBUFFER_COMPLETE) {\n        PUSH_ERROR(GL_INVALID_FRAMEBUFFER_OPERATION);\n        return;\n    }\n'''
+          if new not in text:
+              if text.count(old)!=1: raise SystemExit('DrawArrays LINE_LOOP anchor changed')
+              text=text.replace(old,new,1)
+          old='''    // A valid zero-count indexed draw produces an empty decoded index list.\n    // Validate completeness before treating it as a no-op.\n    if (idx.empty()) {\n        if (glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) !=\n            GL_FRAMEBUFFER_COMPLETE)\n            PUSH_ERROR(GL_INVALID_FRAMEBUFFER_OPERATION);\n        return;\n    }\n'''
+          new='''    // The fallback indexed path may lower LINE_LOOP with fewer than two\n    // vertices to no native segment. Validate before that lowering so every\n    // valid indexed rendering command observes framebuffer completeness.\n    if (glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) !=\n        GL_FRAMEBUFFER_COMPLETE) {\n        PUSH_ERROR(GL_INVALID_FRAMEBUFFER_OPERATION);\n        return;\n    }\n    if (idx.empty()) return;\n'''
+          if new not in text:
+              if text.count(old)!=1: raise SystemExit('DrawElements fallback anchor changed')
+              text=text.replace(old,new,1)
+          p.write_text(text)
+
+          p=Path('tests/directmetal_incomplete_fbo_smoke.c')
+          text=p.read_text()
+          old='''    glDrawArrays(GL_LINE_LOOP, 0, 0);\n    expect_error(glGetError, GL_INVALID_FRAMEBUFFER_OPERATION,\n                 "glDrawArrays(line-loop zero-count)");\n\n    GLuint ebo = 0;\n'''
+          new='''    glDrawArrays(GL_LINE_LOOP, 0, 0);\n    expect_error(glGetError, GL_INVALID_FRAMEBUFFER_OPERATION,\n                 "glDrawArrays(line-loop zero-count)");\n    glDrawArrays(GL_LINE_LOOP, 0, 1);\n    expect_error(glGetError, GL_INVALID_FRAMEBUFFER_OPERATION,\n                 "glDrawArrays(line-loop one-count)");\n\n    GLuint ebo = 0;\n'''
+          if new not in text:
+              if text.count(old)!=1: raise SystemExit('line-loop test anchor changed')
+              text=text.replace(old,new,1)
+          old='''    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);\n    glBufferData(GL_ELEMENT_ARRAY_BUFFER, 0, NULL, GL_STATIC_DRAW);\n    glDrawElements(GL_TRIANGLES, 0, GL_UNSIGNED_BYTE, (const void*)0);\n    expect_error(glGetError, GL_INVALID_FRAMEBUFFER_OPERATION,\n                 "glDrawElements(zero-count)");\n'''
+          new='''    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);\n    const GLubyte oneIndex = 0;\n    glBufferData(GL_ELEMENT_ARRAY_BUFFER, 1, &oneIndex, GL_STATIC_DRAW);\n    glDrawElements(GL_TRIANGLES, 0, GL_UNSIGNED_BYTE, (const void*)0);\n    expect_error(glGetError, GL_INVALID_FRAMEBUFFER_OPERATION,\n                 "glDrawElements(zero-count)");\n    glDrawElements(GL_LINE_LOOP, 1, GL_UNSIGNED_BYTE, (const void*)0);\n    expect_error(glGetError, GL_INVALID_FRAMEBUFFER_OPERATION,\n                 "glDrawElements(line-loop one-count)");\n'''
+          if new not in text:
+              if text.count(old)!=1: raise SystemExit('indexed line-loop test anchor changed')
+              text=text.replace(old,new,1)
+          p.write_text(text)
+      - name: Check patch
+        run: |
+          git diff --check
+          grep -q 'glDrawArrays(line-loop one-count)' tests/directmetal_incomplete_fbo_smoke.c
+          grep -q 'glDrawElements(line-loop one-count)' tests/directmetal_incomplete_fbo_smoke.c
+      - name: Commit patch
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/gl/draw.cpp tests/directmetal_incomplete_fbo_smoke.c
+          git commit -m 'fix: validate incomplete FBO before LINE_LOOP lowering'
+          git push origin HEAD:fix/directmetal-incomplete-fbo-20260819
