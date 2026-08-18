@@ -220,6 +220,7 @@ struct ResolvedTarget {
 };
 
 struct OcclusionQueryState;
+struct PendingPipelineCompile;
 
 struct PendingDraw {
     backend::DrawParams params;
@@ -228,6 +229,7 @@ struct PendingDraw {
     id<MTLBuffer> resident_instance = nil;
     id<MTLBuffer> resident_index = nil;
     std::shared_ptr<PackedUniformSnapshot> uniform_snapshot;
+    std::shared_ptr<PendingPipelineCompile> pipeline_compile;
     InlineList<BoundUniformBuffer, kMaxPendingUniformBufferBindings>
         uniform_buffers;
     InlineList<BoundTexture, kMaxPendingTextureBindings> textures;
@@ -303,6 +305,13 @@ MithrilDirectMetalProgramStatsV1 EmptyProgramStats() {
     return stats;
 }
 
+MithrilDirectMetalPipelineStatsV1 EmptyPipelineStats() {
+    MithrilDirectMetalPipelineStatsV1 stats{};
+    stats.version = MITHRIL_DIRECT_METAL_PIPELINE_STATS_VERSION;
+    stats.struct_size = static_cast<uint32_t>(sizeof(stats));
+    return stats;
+}
+
 template <size_t Capacity>
 struct FixedNumericKey {
     std::array<uint64_t, Capacity> words{};
@@ -345,6 +354,17 @@ using PipelineCacheKeyHash = FixedNumericKeyHash<96>;
 using SamplerCacheKey = FixedNumericKey<24>;
 using SamplerCacheKeyHash = FixedNumericKeyHash<24>;
 
+struct PendingPipelineCompile {
+    PipelineCacheKey key;
+    std::mutex mutex;
+    std::condition_variable condition;
+    bool completed = false;
+    id<MTLRenderPipelineState> pipeline = nil;
+    id<MTLDepthStencilState> depth_stencil = nil;
+    uint64_t program = 0;
+    std::string error;
+};
+
 struct Engine {
     id<MTLDevice> device = nil;
     id<MTLCommandQueue> queue = nil;
@@ -360,6 +380,8 @@ struct Engine {
     std::unordered_map<uint64_t, Program> programs;
     std::unordered_map<PipelineCacheKey, PipelineBundle, PipelineCacheKeyHash>
         pipelines;
+    std::unordered_map<PipelineCacheKey, std::shared_ptr<PendingPipelineCompile>,
+                       PipelineCacheKeyHash> pending_pipelines;
     std::unordered_map<std::string, ClearPipeline> clear_pipelines;
     std::unordered_map<uint64_t, ResidentBuffer> resident_buffers;
     std::unordered_map<uint64_t, ResidentTexture> textures;
@@ -379,6 +401,7 @@ struct Engine {
     MithrilDirectMetalIndexStatsV1 index_stats = EmptyIndexStats();
     MithrilDirectMetalUniformStatsV1 uniform_stats = EmptyUniformStats();
     MithrilDirectMetalProgramStatsV1 program_stats = EmptyProgramStats();
+    MithrilDirectMetalPipelineStatsV1 pipeline_stats = EmptyPipelineStats();
     std::vector<PendingResidentCopy> pending_resident_copies;
     std::vector<id<MTLBuffer>> resident_retire_on_submit;
     std::vector<RetiredResidentBuffer> retired_resident_buffers;
@@ -1394,27 +1417,32 @@ void EvictOldPipelineIfNeeded() {
     if (oldest != engine.pipelines.end()) engine.pipelines.erase(oldest);
 }
 
-PipelineBundle* GetOrCreatePipeline(const backend::DrawParams& params) {
-    auto& engine = GetEngine();
-    ResolvedTarget target;
-    if (!ResolveTarget(engine.bound_draw_fbo, &target)) return nullptr;
-    const backend::FboSpec* fbo_spec = nullptr;
-    if (engine.bound_draw_fbo) {
-        auto fbo = engine.framebuffers.find(engine.bound_draw_fbo);
-        if (fbo != engine.framebuffers.end()) fbo_spec = &fbo->second.spec;
-    }
+struct PipelineBuildInputs {
     PipelineCacheKey key;
-    if (!BuildPipelineCacheKey(params, target, fbo_spec, &key)) {
+    MTLRenderPipelineDescriptor* descriptor = nil;
+    id<MTLDepthStencilState> depth_stencil = nil;
+    uint64_t program = 0;
+};
+
+const backend::FboSpec* BoundDrawFboSpec() {
+    auto& engine = GetEngine();
+    if (!engine.bound_draw_fbo) return nullptr;
+    auto found = engine.framebuffers.find(engine.bound_draw_fbo);
+    return found == engine.framebuffers.end() ? nullptr : &found->second.spec;
+}
+
+bool BuildPipelineInputs(const backend::DrawParams& params,
+                         const ResolvedTarget& target,
+                         const backend::FboSpec* fbo_spec,
+                         PipelineBuildInputs* output) {
+    if (!output ||
+        !BuildPipelineCacheKey(params, target, fbo_spec, &output->key)) {
         ML_LOG_ERROR("metal: pipeline key exceeds fixed hot-path capacity");
-        return nullptr;
+        return false;
     }
-    auto cached = engine.pipelines.find(key);
-    if (cached != engine.pipelines.end()) {
-        cached->second.last_use = ++engine.pipeline_clock;
-        return &cached->second;
-    }
+    auto& engine = GetEngine();
     auto program_it = engine.programs.find(params.program);
-    if (program_it == engine.programs.end()) return nullptr;
+    if (program_it == engine.programs.end()) return false;
 
     MTLVertexDescriptor* vertex_descriptor = [MTLVertexDescriptor vertexDescriptor];
     auto add_stream = [&](const backend::VertexStream& stream, NSUInteger buffer_index,
@@ -1442,7 +1470,7 @@ PipelineBundle* GetOrCreatePipeline(const backend::DrawParams& params) {
     if (!add_stream(params.vertex_stream, 0, MTLVertexStepFunctionPerVertex) ||
         !add_stream(params.instance_stream, 1, MTLVertexStepFunctionPerInstance)) {
         ML_LOG_ERROR("metal: invalid vertex stream description");
-        return nullptr;
+        return false;
     }
 
     MTLRenderPipelineDescriptor* descriptor = [MTLRenderPipelineDescriptor new];
@@ -1475,15 +1503,6 @@ PipelineBundle* GetOrCreatePipeline(const backend::DrawParams& params) {
         color.alphaBlendOperation = BlendOperation(params.pipeline.blend_eq_alpha);
     }
 
-    NSError* error = nil;
-    id<MTLRenderPipelineState> pipeline =
-        [engine.device newRenderPipelineStateWithDescriptor:descriptor error:&error];
-    if (!pipeline) {
-        ML_LOG_ERROR("metal: render pipeline creation failed: %s",
-                     error.localizedDescription.UTF8String ?: "unknown error");
-        return nullptr;
-    }
-
     MTLDepthStencilDescriptor* depth_descriptor = [MTLDepthStencilDescriptor new];
     depth_descriptor.depthCompareFunction = target.depth_stencil &&
                                              params.pipeline.depth_test
@@ -1509,15 +1528,135 @@ PipelineBundle* GetOrCreatePipeline(const backend::DrawParams& params) {
     }
     id<MTLDepthStencilState> depth_state =
         [engine.device newDepthStencilStateWithDescriptor:depth_descriptor];
-    if (!depth_state) return nullptr;
+    if (!depth_state) return false;
+
+    output->descriptor = descriptor;
+    output->depth_stencil = depth_state;
+    output->program = params.program;
+    return true;
+}
+
+std::shared_ptr<PendingPipelineCompile> PreparePipelineCompile(
+    const backend::DrawParams& params, const ResolvedTarget& target,
+    const backend::FboSpec* fbo_spec) {
+    auto& engine = GetEngine();
+    PipelineCacheKey key;
+    if (!BuildPipelineCacheKey(params, target, fbo_spec, &key)) return nullptr;
+    if (engine.pipelines.find(key) != engine.pipelines.end()) {
+        ++engine.pipeline_stats.pipeline_cache_hits;
+        return nullptr;
+    }
+    auto pending = engine.pending_pipelines.find(key);
+    if (pending != engine.pending_pipelines.end()) {
+        ++engine.pipeline_stats.async_reuses;
+        return pending->second;
+    }
+    if (engine.pending_pipelines.size() >= kMaxPipelineCacheEntries)
+        return nullptr;
+
+    PipelineBuildInputs inputs;
+    if (!BuildPipelineInputs(params, target, fbo_spec, &inputs)) return nullptr;
+    auto future = std::make_shared<PendingPipelineCompile>();
+    future->key = inputs.key;
+    future->depth_stencil = inputs.depth_stencil;
+    future->program = inputs.program;
+    engine.pending_pipelines.emplace(future->key, future);
+    ++engine.pipeline_stats.async_requests;
+
+    [engine.device newRenderPipelineStateWithDescriptor:inputs.descriptor
+        completionHandler:^(id<MTLRenderPipelineState> pipeline, NSError* error) {
+            std::lock_guard<std::mutex> lock(future->mutex);
+            future->pipeline = pipeline;
+            if (!pipeline && error) {
+                const char* message = error.localizedDescription.UTF8String;
+                future->error = message ? message : "unknown error";
+            }
+            future->completed = true;
+            future->condition.notify_all();
+        }];
+    return future;
+}
+
+PipelineBundle* ResolvePreparedPipeline(
+    const PipelineCacheKey& key,
+    const std::shared_ptr<PendingPipelineCompile>& future) {
+    if (!future || !(future->key == key)) return nullptr;
+    auto& engine = GetEngine();
+    id<MTLRenderPipelineState> pipeline = nil;
+    id<MTLDepthStencilState> depth_state = nil;
+    uint64_t program = 0;
+    std::string error;
+    {
+        std::unique_lock<std::mutex> lock(future->mutex);
+        if (!future->completed) {
+            ++engine.pipeline_stats.encode_waits;
+            future->condition.wait(lock, [&future] { return future->completed; });
+        }
+        pipeline = future->pipeline;
+        depth_state = future->depth_stencil;
+        program = future->program;
+        error = future->error;
+    }
+    auto pending = engine.pending_pipelines.find(key);
+    if (pending != engine.pending_pipelines.end() && pending->second == future)
+        engine.pending_pipelines.erase(pending);
+    if (!pipeline || !depth_state) {
+        if (!error.empty())
+            ML_LOG_WARN("metal: async render pipeline compile failed: %s; "
+                        "retrying synchronously", error.c_str());
+        return nullptr;
+    }
 
     EvictOldPipelineIfNeeded();
     PipelineBundle bundle;
     bundle.pipeline = pipeline;
     bundle.depth_stencil = depth_state;
-    bundle.program = params.program;
+    bundle.program = program;
     bundle.last_use = ++engine.pipeline_clock;
     auto inserted = engine.pipelines.emplace(key, std::move(bundle));
+    ++engine.pipeline_stats.async_resolved;
+    return &inserted.first->second;
+}
+
+PipelineBundle* GetOrCreatePipeline(
+    const backend::DrawParams& params, const ResolvedTarget& target,
+    const backend::FboSpec* fbo_spec,
+    const std::shared_ptr<PendingPipelineCompile>& prepared) {
+    auto& engine = GetEngine();
+    PipelineCacheKey key;
+    if (!BuildPipelineCacheKey(params, target, fbo_spec, &key)) {
+        ML_LOG_ERROR("metal: pipeline key exceeds fixed hot-path capacity");
+        return nullptr;
+    }
+    auto cached = engine.pipelines.find(key);
+    if (cached != engine.pipelines.end()) {
+        cached->second.last_use = ++engine.pipeline_clock;
+        ++engine.pipeline_stats.pipeline_cache_hits;
+        return &cached->second;
+    }
+    if (PipelineBundle* resolved = ResolvePreparedPipeline(key, prepared))
+        return resolved;
+
+    ++engine.pipeline_stats.sync_fallbacks;
+    PipelineBuildInputs inputs;
+    if (!BuildPipelineInputs(params, target, fbo_spec, &inputs)) return nullptr;
+    NSError* error = nil;
+    id<MTLRenderPipelineState> pipeline =
+        [engine.device newRenderPipelineStateWithDescriptor:inputs.descriptor
+                                                       error:&error];
+    if (!pipeline) {
+        ML_LOG_ERROR("metal: render pipeline creation failed: %s",
+                     error.localizedDescription.UTF8String ?: "unknown error");
+        return nullptr;
+    }
+
+    EvictOldPipelineIfNeeded();
+    PipelineBundle bundle;
+    bundle.pipeline = pipeline;
+    bundle.depth_stencil = inputs.depth_stencil;
+    bundle.program = inputs.program;
+    bundle.last_use = ++engine.pipeline_clock;
+    auto inserted = engine.pipelines.emplace(inputs.key, std::move(bundle));
     return &inserted.first->second;
 }
 
@@ -2024,6 +2163,7 @@ bool EncodeDraws(
     auto& engine = GetEngine();
     ResolvedTarget target;
     if (!ResolveTarget(engine.bound_draw_fbo, &target)) return false;
+    const backend::FboSpec* fbo_spec = BoundDrawFboSpec();
     NSUInteger cursor = 0;
     std::unordered_map<const PackedUniformSnapshot*, UniformFrameOffsets>
         uniform_memo;
@@ -2042,7 +2182,8 @@ bool EncodeDraws(
     OcclusionQueryState* active_occlusion = nullptr;
     for (const auto& pending : engine.draws) {
         const auto& draw = pending.params;
-        PipelineBundle* pipeline = GetOrCreatePipeline(draw);
+        PipelineBundle* pipeline = GetOrCreatePipeline(
+            draw, target, fbo_spec, pending.pipeline_compile);
         auto program = engine.programs.find(draw.program);
         if (!pipeline || program == engine.programs.end()) return false;
 
@@ -2832,6 +2973,9 @@ bool Draw(backend::DrawParams params) {
             texture->second.backing_buffer,
             bind.vertex_stage, bind.fragment_stage});
     }
+    const backend::FboSpec* fbo_spec = BoundDrawFboSpec();
+    pending.pipeline_compile = PreparePipelineCompile(
+        params, draw_target, fbo_spec);
     // All borrowed source pointers have been retained above. Move the
     // rich frontend snapshot into deferred storage exactly once instead of
     // deep-copying its vectors/maps at every draw.
@@ -3320,6 +3464,17 @@ extern "C" int mithrilGetDirectMetalProgramStatsV1(
     MithrilDirectMetalProgramStatsV1* output, size_t output_size) {
     if (!output || output_size < sizeof(*output)) return 0;
     *output = GetEngine().program_stats;
+    return 1;
+}
+
+extern "C" void mithrilResetDirectMetalPipelineStats(void) {
+    GetEngine().pipeline_stats = EmptyPipelineStats();
+}
+
+extern "C" int mithrilGetDirectMetalPipelineStatsV1(
+    MithrilDirectMetalPipelineStatsV1* output, size_t output_size) {
+    if (!output || output_size < sizeof(*output)) return 0;
+    *output = GetEngine().pipeline_stats;
     return 1;
 }
 

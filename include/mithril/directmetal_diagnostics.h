@@ -93,6 +93,23 @@ void mithrilResetDirectMetalProgramStats(void);
 int mithrilGetDirectMetalProgramStatsV1(
     MithrilDirectMetalProgramStatsV1* output, size_t output_size);
 
+#define MITHRIL_DIRECT_METAL_PIPELINE_STATS_VERSION 1u
+
+typedef struct MithrilDirectMetalPipelineStatsV1 {
+    uint32_t version;
+    uint32_t struct_size;
+    uint64_t async_requests;
+    uint64_t async_reuses;
+    uint64_t async_resolved;
+    uint64_t encode_waits;
+    uint64_t sync_fallbacks;
+    uint64_t pipeline_cache_hits;
+} MithrilDirectMetalPipelineStatsV1;
+
+void mithrilResetDirectMetalPipelineStats(void);
+int mithrilGetDirectMetalPipelineStatsV1(
+    MithrilDirectMetalPipelineStatsV1* output, size_t output_size);
+
 #ifdef __cplusplus
 }
 #endif
