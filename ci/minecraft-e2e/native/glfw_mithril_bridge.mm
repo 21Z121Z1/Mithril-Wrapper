@@ -3,7 +3,11 @@
 #include <GLFW/glfw3.h>
 #include <GLFW/glfw3native.h>
 #include <EGL/egl.h>
+#if defined(__APPLE__)
+#include <OpenGL/gl3.h>
+#else
 #include <GL/gl.h>
+#endif
 
 #import <AppKit/AppKit.h>
 #import <QuartzCore/QuartzCore.h>
@@ -259,55 +263,45 @@ GLFWwindow* glfwCreateWindow(int width, int height, const char* title,
     if (!view.layer) {
         auto destroy = real_glfw<void (*)(GLFWwindow*)>("glfwDestroyWindow");
         if (destroy) destroy(window);
-        emit_event("bridge_error", "Cocoa content view has no backing CALayer");
+        emit_event("bridge_error", "Cocoa contentView has no backing layer");
         return nullptr;
     }
-    view.layer.contentsScale = cocoa.backingScaleFactor > 0.0 ? cocoa.backingScaleFactor : 1.0;
+    CAMetalLayer* layer = [CAMetalLayer layer];
+    layer.frame = view.bounds;
+    view.layer = layer;
 
     auto& m = mithril();
     EGLDisplay display = m.getDisplay(EGL_DEFAULT_DISPLAY);
-    EGLint major = 0, minor = 0;
-    if (display == EGL_NO_DISPLAY || m.initialize(display, &major, &minor) != EGL_TRUE ||
-        m.bindAPI(EGL_OPENGL_API) != EGL_TRUE) {
-        emit_event("bridge_error", "Mithril EGL display initialization failed");
+    if (display == EGL_NO_DISPLAY || !m.initialize(display, nullptr, nullptr)) {
+        emit_event("bridge_error", "Mithril eglInitialize failed");
         return nullptr;
     }
-    const EGLint configAttribs[] = {
-        EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8,
-        EGL_DEPTH_SIZE, 24, EGL_STENCIL_SIZE, 8,
+    EGLint attributes[] = {
         EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
         EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT,
+        EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8,
+        EGL_DEPTH_SIZE, 24,
         EGL_NONE
     };
     EGLConfig config = nullptr;
     EGLint count = 0;
-    if (m.chooseConfig(display, configAttribs, &config, 1, &count) != EGL_TRUE ||
-        count != 1 || !config) {
-        emit_event("bridge_error", "Mithril EGL config selection failed");
+    if (!m.chooseConfig(display, attributes, &config, 1, &count) || count < 1 || !config) {
+        emit_event("bridge_error", "Mithril eglChooseConfig failed");
+        return nullptr;
+    }
+    if (!m.bindAPI(EGL_OPENGL_API)) {
+        emit_event("bridge_error", "Mithril eglBindAPI(EGL_OPENGL_API) failed");
         return nullptr;
     }
     EGLSurface surface = m.createWindowSurface(display, config,
-                                                (__bridge void*)view.layer, nullptr);
+        reinterpret_cast<EGLNativeWindowType>(layer), nullptr);
     if (surface == EGL_NO_SURFACE) {
-        emit_event("bridge_error", "Mithril EGL window surface creation failed");
+        emit_event("bridge_error", "Mithril eglCreateWindowSurface(CAMetalLayer) failed");
         return nullptr;
     }
-    const EGLint contextAttribs[] = {
-        EGL_CONTEXT_MAJOR_VERSION, 4,
-        EGL_CONTEXT_MINOR_VERSION, 6,
-        EGL_CONTEXT_OPENGL_PROFILE_MASK, EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT,
-        EGL_NONE
-    };
-    EGLContext shareContext = EGL_NO_CONTEXT;
-    if (share) {
-        std::lock_guard<std::mutex> lock(g_mutex);
-        auto it = g_contexts.find(share);
-        if (it != g_contexts.end()) shareContext = it->second.context;
-    }
-    EGLContext context = m.createContext(display, config, shareContext, contextAttribs);
+    EGLContext context = m.createContext(display, config, EGL_NO_CONTEXT, nullptr);
     if (context == EGL_NO_CONTEXT) {
-        m.destroySurface(display, surface);
-        emit_event("bridge_error", "Mithril EGL context creation failed");
+        emit_event("bridge_error", "Mithril eglCreateContext failed");
         return nullptr;
     }
     {
@@ -315,48 +309,28 @@ GLFWwindow* glfwCreateWindow(int width, int height, const char* title,
         g_contexts[window] = ContextState{display, context, surface};
     }
     g_context_count.fetch_add(1);
-    emit_event("glfw_window_created", "NO_API Cocoa window bridged to Mithril EGL/CAMetalLayer");
-    write_state("window_created");
+    emit_event("bridge_context_created", "Cocoa CAMetalLayer -> Mithril EGL context ready");
+    write_state("context_created");
+    (void)share;
     return window;
-}
-
-void glfwDestroyWindow(GLFWwindow* window) {
-    ContextState state{};
-    bool found = false;
-    {
-        std::lock_guard<std::mutex> lock(g_mutex);
-        auto it = g_contexts.find(window);
-        if (it != g_contexts.end()) {
-            state = it->second;
-            g_contexts.erase(it);
-            found = true;
-        }
-    }
-    auto& m = mithril();
-    if (found) {
-        if (g_current == window) {
-            m.makeCurrent(state.display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
-            g_current = nullptr;
-        }
-        m.destroySurface(state.display, state.surface);
-        m.destroyContext(state.display, state.context);
-    }
-    write_state("window_destroyed");
-    auto destroy = real_glfw<void (*)(GLFWwindow*)>("glfwDestroyWindow");
-    if (destroy) destroy(window);
 }
 
 void glfwMakeContextCurrent(GLFWwindow* window) {
     auto& m = mithril();
     if (!window) {
         if (g_current) {
-            std::lock_guard<std::mutex> lock(g_mutex);
-            auto it = g_contexts.find(g_current);
-            if (it != g_contexts.end())
-                m.makeCurrent(it->second.display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+            ContextState state{};
+            {
+                std::lock_guard<std::mutex> lock(g_mutex);
+                auto it = g_contexts.find(g_current);
+                if (it != g_contexts.end()) state = it->second;
+            }
+            if (state.display != EGL_NO_DISPLAY) {
+                m.makeCurrent(state.display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+            }
         }
         g_current = nullptr;
-        write_state("context_detached");
+        write_state("context_cleared");
         return;
     }
     ContextState state{};
@@ -366,17 +340,27 @@ void glfwMakeContextCurrent(GLFWwindow* window) {
         if (it == g_contexts.end()) return;
         state = it->second;
     }
-    if (m.makeCurrent(state.display, state.surface, state.surface, state.context) == EGL_TRUE) {
+    if (m.makeCurrent(state.display, state.surface, state.surface, state.context)) {
         g_current = window;
-        emit_event("context_current", "Mithril EGL context made current for Minecraft GLFW window");
+        emit_event("bridge_context_current", "Mithril EGL context made current");
         write_state("context_current");
-    } else {
-        emit_event("bridge_error", "eglMakeCurrent failed");
     }
 }
 
 GLFWwindow* glfwGetCurrentContext(void) {
     return g_current;
+}
+
+void glfwSwapInterval(int interval) {
+    if (!g_current) return;
+    ContextState state{};
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        auto it = g_contexts.find(g_current);
+        if (it == g_contexts.end()) return;
+        state = it->second;
+    }
+    mithril().swapInterval(state.display, interval);
 }
 
 void glfwSwapBuffers(GLFWwindow* window) {
@@ -387,53 +371,50 @@ void glfwSwapBuffers(GLFWwindow* window) {
         if (it == g_contexts.end()) return;
         state = it->second;
     }
-
-    // This is the authoritative L4 capture seam: the frame is fully encoded by
-    // Minecraft but eglSwapBuffers has not yet presented it or acquired the
-    // next drawable. The helper is a no-op unless the Client GameTest has
-    // atomically posted a one-shot capture request.
-    auto getFramebufferSize = real_glfw<void (*)(GLFWwindow*, int*, int*)>("glfwGetFramebufferSize");
-    if (getFramebufferSize) {
-        int width = 0, height = 0;
-        getFramebufferSize(window, &width, &height);
-        mithril_e2e_capture_before_present(width, height, mithril().handle);
+    auto [width, height] = std::pair<int, int>{0, 0};
+    using FbSizeFn = void (*)(GLFWwindow*, int*, int*);
+    FbSizeFn fbsize = real_glfw<FbSizeFn>("glfwGetFramebufferSize");
+    if (fbsize) fbsize(window, &width, &height);
+    mithril_e2e_capture_before_present(width, height, mithril().handle);
+    if (!mithril().swapBuffers(state.display, state.surface)) {
+        emit_event("bridge_error", "Mithril eglSwapBuffers failed");
+        return;
     }
-
-    if (mithril().swapBuffers(state.display, state.surface) == EGL_TRUE) {
-        auto count = g_swap_count.fetch_add(1) + 1;
-        if (count <= 3 || count % 120 == 0) write_state("swap_buffers");
-    } else {
-        emit_event("bridge_error", "eglSwapBuffers failed");
-        write_state("swap_failed");
-    }
+    g_swap_count.fetch_add(1);
+    emit_event("bridge_swap_present", "eglSwapBuffers submitted DirectMetal present");
+    write_state("swap_presented");
 }
 
-void glfwSwapInterval(int interval) {
-    if (!g_current) return;
-    std::lock_guard<std::mutex> lock(g_mutex);
-    auto it = g_contexts.find(g_current);
-    if (it != g_contexts.end()) mithril().swapInterval(it->second.display, interval);
-}
-
-GLFWglproc glfwGetProcAddress(const char* procname) {
-    if (!procname || !mithril().handle) return nullptr;
+GLFWglproc glfwGetProcAddress(const char* name) {
     g_proc_count.fetch_add(1);
-    void* address = dlsym(mithril().handle, procname);
-    return reinterpret_cast<GLFWglproc>(address);
-}
-
-int glfwGetWindowAttrib(GLFWwindow* window, int attrib) {
-    switch (attrib) {
-        case GLFW_CLIENT_API: return GLFW_OPENGL_API;
-        case GLFW_CONTEXT_VERSION_MAJOR: return 4;
-        case GLFW_CONTEXT_VERSION_MINOR: return 6;
-        case GLFW_OPENGL_PROFILE: return GLFW_OPENGL_CORE_PROFILE;
-        case GLFW_OPENGL_FORWARD_COMPAT: return GLFW_TRUE;
-        case GLFW_CONTEXT_CREATION_API: return GLFW_NATIVE_CONTEXT_API;
-        default: break;
+    void* p = mithril().handle ? dlsym(mithril().handle, name) : nullptr;
+    if (!p) {
+        emit_event("bridge_symbol_missing", name ? name : "<null>");
     }
-    auto fn = real_glfw<int (*)(GLFWwindow*, int)>("glfwGetWindowAttrib");
-    return fn ? fn(window, attrib) : 0;
+    return reinterpret_cast<GLFWglproc>(p);
 }
 
-} // extern C
+void glfwDestroyWindow(GLFWwindow* window) {
+    ContextState state{};
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        auto it = g_contexts.find(window);
+        if (it != g_contexts.end()) {
+            state = it->second;
+            g_contexts.erase(it);
+        }
+    }
+    auto& m = mithril();
+    if (state.display != EGL_NO_DISPLAY) {
+        m.makeCurrent(state.display, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        if (state.surface != EGL_NO_SURFACE) m.destroySurface(state.display, state.surface);
+        if (state.context != EGL_NO_CONTEXT) m.destroyContext(state.display, state.context);
+    }
+    if (g_current == window) g_current = nullptr;
+    using Fn = void (*)(GLFWwindow*);
+    Fn fn = real_glfw<Fn>("glfwDestroyWindow");
+    if (fn) fn(window);
+    write_state("window_destroyed");
+}
+
+} // extern "C"
