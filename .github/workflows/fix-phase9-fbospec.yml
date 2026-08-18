@@ -1,0 +1,40 @@
+name: fix-phase9-fbospec
+
+on:
+  push:
+    branches: [perf/directmetal-fixed-hot-metadata-20260818]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: fix-phase9-fbospec
+  cancel-in-progress: true
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: perf/directmetal-fixed-hot-metadata-20260818
+          fetch-depth: 0
+      - name: Restore current integration FboSpec
+        run: python3 scripts/fix_phase9_fbospec_regression.py
+      - name: Verify only intended contract restoration
+        run: |
+          git diff --check
+          grep -q 'std::vector<FboAttach> color;' src/backend/types.h
+          grep -q 'bool has_depth = false;' src/backend/types.h
+          grep -q 'uint32_t width = 0, height = 0;' src/backend/types.h
+          ! grep -q 'std::vector<FboAttach> colors;' src/backend/types.h
+      - name: Materialize restoration
+        run: |
+          rm .github/workflows/fix-phase9-fbospec.yml
+          rm scripts/fix_phase9_fbospec_regression.py
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          git commit -m 'fix: restore current FboSpec contract'
+          git push origin HEAD:perf/directmetal-fixed-hot-metadata-20260818
