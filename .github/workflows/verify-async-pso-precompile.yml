@@ -1,0 +1,93 @@
+# Temporary verifier; deleted after the implementation is materialized.
+name: verify-async-pso-precompile
+
+on:
+  pull_request:
+    branches: [integration/directmetal-next]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: verify-async-pso-precompile
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: perf/directmetal-async-pso-precompile-20260818
+          submodules: false
+          fetch-depth: 0
+
+      - name: Fetch shader submodules
+        run: >-
+          git submodule update --init --depth=1
+          third_party/SPIRV-Cross
+          third_party/SPIRV-Headers
+          third_party/glslang
+
+      - name: Apply async PSO phase
+        run: python3 scripts/apply_async_pso_precompile.py
+
+      - name: Verify source invariants
+        run: |
+          git diff --check
+          grep -q 'newRenderPipelineStateWithDescriptor:inputs.descriptor' src/metal/engine.mm
+          grep -q 'completionHandler:' src/metal/engine.mm
+          grep -q 'pending.pipeline_compile = PreparePipelineCompile' src/metal/engine.mm
+          grep -q 'ResolvePreparedPipeline' src/metal/engine.mm
+          grep -q 'pending_pipelines' src/metal/engine.mm
+          grep -q 'encode_waits' include/mithril/directmetal_diagnostics.h
+          grep -q 'directmetal_async_pso_smoke' cmake/MithrilSmokeTests.cmake
+          python3 - <<'PY'
+          from pathlib import Path
+          s=Path('src/metal/engine.mm').read_text()
+          assert 'PipelineBundle* GetOrCreatePipeline(\n    const backend::DrawParams& params, const ResolvedTarget& target,' in s
+          assert 'PipelineBundle* pipeline = GetOrCreatePipeline(\n            draw, target, fbo_spec, pending.pipeline_compile);' in s
+          assert 'PipelineBundle* GetOrCreatePipeline(const backend::DrawParams& params)' not in s
+          PY
+
+      - name: Materialize implementation
+        run: |
+          rm .github/workflows/verify-async-pso-precompile.yml
+          rm scripts/apply_async_pso_precompile.py
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          git commit -m 'perf: precompile DirectMetal render PSOs asynchronously'
+          git push origin HEAD:perf/directmetal-async-pso-precompile-20260818
+
+      - name: Configure DirectMetal Release
+        run: >-
+          cmake -S . -B build-direct -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DMITHRIL_BUILD_LEGACY=OFF
+          -DMITHRIL_BUILD_DIRECT=ON
+          -DMITHRIL_ENABLE_SHADER_TOOLCHAIN=ON
+
+      - name: Build DirectMetal
+        run: cmake --build build-direct --parallel
+
+      - name: Run dedicated async PSO regression
+        run: ctest --test-dir build-direct -R '^directmetal_async_pso_smoke$' --output-on-failure
+
+      - name: Run complete DirectMetal suite
+        run: ctest --test-dir build-direct -L directmetal --output-on-failure
+
+      - name: Fetch Vulkan headers
+        run: git submodule update --init --depth=1 third_party/Vulkan-Headers
+
+      - name: Configure Vulkan reference
+        run: >-
+          cmake -S . -B build-vulkan -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DMITHRIL_BUILD_LEGACY=ON
+          -DMITHRIL_BUILD_DIRECT=OFF
+          -DMITHRIL_ENABLE_SHADER_TOOLCHAIN=ON
+
+      - name: Build Vulkan reference
+        run: cmake --build build-vulkan --parallel
