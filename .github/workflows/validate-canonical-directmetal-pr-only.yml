@@ -21,6 +21,7 @@ jobs:
       MTL_DEBUG_LAYER: '1'
       MTL_SHADER_VALIDATION: '0'
       MITHRIL_BACKEND: metal
+      CPATH: ${{ github.workspace }}/ci/minecraft-e2e/native/abi
 
     steps:
       - name: Checkout validation harness
