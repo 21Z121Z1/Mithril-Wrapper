@@ -1,5 +1,5 @@
-# Validation-only workflow: harness branch is not product code; the tested dylib is built from exact canonical SHA below.
-name: Validate canonical DirectMetal in Minecraft 26.2
+# Validation-only workflow: harness branch is not product code; the tested dylib is built from the exact candidate SHA below.
+name: Validate DirectMetal fix candidate in Minecraft 26.2
 
 on:
   push:
@@ -12,21 +12,21 @@ permissions:
   contents: read
 
 concurrency:
-  group: validate-canonical-directmetal-minecraft-e2e
+  group: validate-directmetal-fix-candidate-minecraft-e2e
   cancel-in-progress: true
 
 jobs:
-  minecraft-canonical-directmetal:
-    name: Canonical 094e8a6f / real Minecraft / GPU evidence
+  minecraft-directmetal-candidate:
+    name: Candidate 5e94df04 / CTest / real Minecraft / GPU evidence
     runs-on: macos-26
     timeout-minutes: 30
     env:
-      CANONICAL_SHA: 094e8a6f7f47d10c9211f7ffd513511804f42993
-      E2E_ROOT: ${{ github.workspace }}/build/canonical-minecraft-e2e-artifacts
+      CANDIDATE_SHA: 5e94df04d73a5aa1244d5c737e8c05758247644d
+      E2E_ROOT: ${{ github.workspace }}/build/candidate-minecraft-e2e-artifacts
       GRADLE_OPTS: -Dorg.gradle.caching=true
       MTL_DEBUG_LAYER: '1'
       MTL_SHADER_VALIDATION: '0'
-      CPATH: ${{ github.workspace }}/canonical/third_party
+      CPATH: ${{ github.workspace }}/candidate/third_party
 
     steps:
       - name: Checkout E2E harness only
@@ -36,11 +36,11 @@ jobs:
           submodules: false
           persist-credentials: false
 
-      - name: Checkout exact canonical source under test
+      - name: Checkout exact DirectMetal fix candidate under test
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
-          ref: 094e8a6f7f47d10c9211f7ffd513511804f42993
-          path: canonical
+          ref: 5e94df04d73a5aa1244d5c737e8c05758247644d
+          path: candidate
           submodules: recursive
           persist-credentials: false
 
@@ -48,14 +48,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          test "$(git -C canonical rev-parse HEAD)" = "$CANONICAL_SHA"
-          printf '%s\n' "$CANONICAL_SHA" > canonical-tested.sha
-          git -C canonical status --short
-          test -z "$(git -C canonical status --porcelain)"
+          test "$(git -C candidate rev-parse HEAD)" = "$CANDIDATE_SHA"
+          printf '%s\n' "$CANDIDATE_SHA" > candidate-tested.sha
+          test -z "$(git -C candidate status --porcelain)"
           python3 ci/minecraft-e2e/evidence.py --root "$E2E_ROOT" init
           python3 ci/minecraft-e2e/evidence.py --root "$E2E_ROOT" event \
-            --event canonical_source_pinned --phase preflight \
-            --message "testing integration/directmetal-next exact SHA $CANONICAL_SHA; E2E harness is external test-only code"
+            --event candidate_source_pinned --phase preflight \
+            --message "testing DirectMetal fix candidate exact SHA $CANDIDATE_SHA; E2E harness is external validation-only code"
 
       - name: Fingerprint macOS / Metal host
         shell: bash
@@ -85,78 +84,65 @@ jobs:
 
       - name: Install native runtime dependencies
         shell: bash
-        run: brew install glfw vulkan-loader molten-vk ninja
+        run: brew install glfw ninja
 
-      - name: Build exact canonical DirectMetal dylib
+      - name: Build exact DirectMetal candidate and semantic tests
         id: mithril
         shell: bash
         run: |
           set -euo pipefail
-          cmake -S canonical -B build-canonical -G Ninja \
+          cmake -S candidate -B build-candidate -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DMITHRIL_BUILD_LEGACY=OFF \
             -DMITHRIL_BUILD_DIRECT=ON \
             -DMITHRIL_ENABLE_SHADER_TOOLCHAIN=ON \
-            -DMITHRIL_OUTPUT_DIRECTORY="$PWD/build-canonical/artifacts"
-          cmake --build build-canonical --target mithril_direct --parallel
-          dylib="$PWD/build-canonical/artifacts/libmithril.dylib"
+            -DMITHRIL_OUTPUT_DIRECTORY="$PWD/build-candidate/artifacts"
+          cmake --build build-candidate --parallel
+          dylib="$PWD/build-candidate/artifacts/libmithril.dylib"
           test -s "$dylib"
           echo "dylib=$dylib" >> "$GITHUB_OUTPUT"
           shasum -a 256 "$dylib" | tee "$E2E_ROOT/built-mithril.sha256"
           file "$dylib" | tee "$E2E_ROOT/built-mithril.file.txt"
           otool -L "$dylib" | tee "$E2E_ROOT/built-mithril.otool.txt"
           nm -gU "$dylib" | sort > "$E2E_ROOT/built-mithril.exports.txt"
-          python3 ci/minecraft-e2e/evidence.py --root "$E2E_ROOT" event \
-            --event canonical_directmetal_built --phase native_build \
-            --message "built DirectMetal dylib from exact canonical SHA $CANONICAL_SHA"
 
-      - name: Prove canonical native real-GPU draw/readback control
+      - name: Authoritative DirectMetal semantic and real-GPU gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          ctest --test-dir build-candidate -L directmetal --output-on-failure \
+            2>&1 | tee "$E2E_ROOT/directmetal-ctest.log"
+          grep -q '100% tests passed' "$E2E_ROOT/directmetal-ctest.log"
+          grep -q 'directmetal_incomplete_fbo_smoke' "$E2E_ROOT/directmetal-ctest.log"
+          grep -q 'amethyst_egl_smoke' "$E2E_ROOT/directmetal-ctest.log"
+          python3 ci/minecraft-e2e/evidence.py --root "$E2E_ROOT" event \
+            --event directmetal_semantic_gpu_gate_passed --phase native_control \
+            --message "candidate DirectMetal CTest including incomplete-FBO fail-closed and CAMetalLayer presentation smoke passed"
+
+      - name: Prove shipping DirectMetal boundary
         shell: bash
         env:
           MITHRIL_DYLIB: ${{ steps.mithril.outputs.dylib }}
-          MITHRIL_BACKEND: metal
         run: |
           set -euo pipefail
-          export DYLD_LIBRARY_PATH="$(brew --prefix)/lib"
-          clang -std=c11 -O0 -Wall -Wextra -Icanonical/include \
-            -o build-canonical/render_smoke tests/render_smoke.c -ldl
-          build-canonical/render_smoke "$MITHRIL_DYLIB" \
-            | tee "$E2E_ROOT/native-render-smoke.log"
-          python3 ci/minecraft-e2e/evidence.py --root "$E2E_ROOT" event \
-            --event canonical_native_gpu_control_passed --phase native_control \
-            --message "exact canonical DirectMetal dylib passed real-GPU draw/readback control"
+          candidate/scripts/verify_directmetal_artifact.sh \
+            "$MITHRIL_DYLIB" build-candidate/mithril_direct.boundary.json \
+            | tee "$E2E_ROOT/directmetal-boundary.txt"
 
-      - name: Prove canonical layered texture semantics
-        shell: bash
-        env:
-          MITHRIL_DYLIB: ${{ steps.mithril.outputs.dylib }}
-          MITHRIL_BACKEND: metal
-        run: |
-          set -euo pipefail
-          export DYLD_LIBRARY_PATH="$(brew --prefix)/lib"
-          clang -std=c11 -O0 -Wall -Wextra -Werror -Icanonical/include \
-            -o build-canonical/directmetal_layered_texture_smoke \
-            tests/directmetal_layered_texture_smoke.c -ldl
-          build-canonical/directmetal_layered_texture_smoke "$MITHRIL_DYLIB" \
-            | tee "$E2E_ROOT/native-layered-texture-smoke.log"
-          python3 ci/minecraft-e2e/evidence.py --root "$E2E_ROOT" event \
-            --event canonical_layered_texture_control_passed --phase native_control \
-            --message "exact canonical DirectMetal dylib passed cubemap/array slice control"
-
-      - name: Build GLFW -> canonical Mithril EGL/CAMetalLayer bridge
+      - name: Build GLFW -> candidate Mithril EGL/CAMetalLayer bridge
         id: bridge
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p build-canonical/bridge
+          mkdir -p build-candidate/bridge
           GLFW_PREFIX=$(brew --prefix glfw)
           GLFW_REAL="$GLFW_PREFIX/lib/libglfw.3.dylib"
           test -f "$GLFW_REAL" || GLFW_REAL="$GLFW_PREFIX/lib/libglfw.dylib"
-          BRIDGE="$PWD/build-canonical/bridge/libglfw_mithril.dylib"
+          BRIDGE="$PWD/build-candidate/bridge/libglfw_mithril.dylib"
           clang++ -std=c++20 -fobjc-arc -dynamiclib -Wall -Wextra -Werror \
             ci/minecraft-e2e/native/glfw_mithril_bridge.mm \
             ci/minecraft-e2e/native/prepresent_capture.mm \
-            -I"$GLFW_PREFIX/include" -Icanonical/include \
+            -I"$GLFW_PREFIX/include" -Icandidate/include \
             -framework AppKit -framework QuartzCore -framework Foundation \
             -Wl,-reexport_library,"$GLFW_REAL" \
             -o "$BRIDGE"
@@ -165,7 +151,7 @@ jobs:
           file "$BRIDGE" | tee "$E2E_ROOT/glfw-bridge.file.txt"
           otool -L "$BRIDGE" | tee "$E2E_ROOT/glfw-bridge.otool.txt"
 
-      - name: Run real Minecraft 26.2 production Client GameTest on canonical dylib
+      - name: Run real Minecraft 26.2 production Client GameTest on candidate dylib
         shell: bash
         run: |
           set +e
@@ -198,24 +184,24 @@ jobs:
             fi
             python3 ci/minecraft-e2e/evidence.py --root "$E2E_ROOT" fail \
               --failure-id RUNTIME_MINECRAFT_E2E_FAILED --phase minecraft_client \
-              --message "Canonical $CANONICAL_SHA production Client GameTest failed; preserve more specific in-game failure if present"
+              --message "DirectMetal candidate $CANDIDATE_SHA production Client GameTest failed; preserve more specific in-game failure if present"
             exit $rc
           fi
 
-      - name: Verify exact canonical image and DirectMetal activity
+      - name: Verify exact candidate image and DirectMetal activity
         shell: bash
         env:
           MITHRIL_DYLIB: ${{ steps.mithril.outputs.dylib }}
         run: |
           set -euo pipefail
-          python3 - "$E2E_ROOT" "$MITHRIL_DYLIB" "$CANONICAL_SHA" <<'PY'
+          python3 - "$E2E_ROOT" "$MITHRIL_DYLIB" "$CANDIDATE_SHA" <<'PY'
           import hashlib, json, pathlib, sys
-          root=pathlib.Path(sys.argv[1]); built=pathlib.Path(sys.argv[2]).resolve(); canonical=sys.argv[3]
+          root=pathlib.Path(sys.argv[1]); built=pathlib.Path(sys.argv[2]).resolve(); candidate=sys.argv[3]
           state=json.loads((root/'bridge-state.json').read_text())
           loaded=pathlib.Path(state['mithril_path']).resolve()
           def sha(p): return hashlib.sha256(p.read_bytes()).hexdigest()
           identity={
-            'schema_version':'1.1', 'canonical_sha':canonical,
+            'schema_version':'1.2', 'candidate_sha':candidate,
             'built_path':str(built), 'loaded_path':str(loaded),
             'built_sha256':sha(built), 'loaded_sha256':sha(loaded),
             'exact_image':sha(built)==sha(loaded),
@@ -260,12 +246,12 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: canonical-directmetal-minecraft-e2e-${{ github.sha }}-${{ github.run_attempt }}
+          name: directmetal-candidate-minecraft-e2e-${{ github.sha }}-${{ github.run_attempt }}
           retention-days: 7
           if-no-files-found: error
           path: |
-            build/canonical-minecraft-e2e-artifacts/**
-            canonical-tested.sha
+            build/candidate-minecraft-e2e-artifacts/**
+            candidate-tested.sha
 
       - name: Enforce required E2E oracles
         if: always()
