@@ -1071,11 +1071,12 @@ void DrawArraysImpl(GLenum mode, GLint first, GLsizei count,
         PUSH_ERROR(GL_INVALID_VALUE);
         return;
     }
-    // GL_LINE_LOOP is lowered through a synthetic index list. With count==0
-    // there is no segment and therefore no DrawCommon call, but the original
-    // GL command is still a rendering command and must validate the FBO.
-    if (count == 0 && glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) !=
-                          GL_FRAMEBUFFER_COMPLETE) {
+    // GL_LINE_LOOP is lowered through a synthetic index list. Small/degenerate
+    // loops may produce no synthetic line segment and therefore no DrawCommon
+    // call, but the original GL command is still a rendering command. Validate
+    // once here before primitive expansion so count==0/1 cannot bypass 9.4.4.
+    if (glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) !=
+        GL_FRAMEBUFFER_COMPLETE) {
         PUSH_ERROR(GL_INVALID_FRAMEBUFFER_OPERATION);
         return;
     }
@@ -1109,14 +1110,15 @@ void DrawElementsImpl(GLenum mode, GLsizei count, GLenum type,
     GLenum err = GL_NO_ERROR;
     std::vector<uint32_t> idx = LoadIndices(type, indices, count, start, end, &err);
     if (err) { PUSH_ERROR(err); return; }
-    // A valid zero-count indexed draw produces an empty decoded index list.
-    // Validate completeness before treating it as a no-op.
-    if (idx.empty()) {
-        if (glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) !=
-            GL_FRAMEBUFFER_COMPLETE)
-            PUSH_ERROR(GL_INVALID_FRAMEBUFFER_OPERATION);
+    // The fallback indexed path may lower LINE_LOOP with fewer than two
+    // vertices to no native segment. Validate before that lowering so every
+    // valid indexed rendering command observes framebuffer completeness.
+    if (glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) !=
+        GL_FRAMEBUFFER_COMPLETE) {
+        PUSH_ERROR(GL_INVALID_FRAMEBUFFER_OPERATION);
         return;
     }
+    if (idx.empty()) return;
     const bool has_restart = std::find(idx.begin(), idx.end(), UINT32_MAX) !=
                              idx.end();
     const bool native_restart = mode == GL_TRIANGLE_STRIP ||

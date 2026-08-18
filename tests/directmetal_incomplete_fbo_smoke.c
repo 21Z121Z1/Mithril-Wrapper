@@ -161,14 +161,21 @@ int main(void) {
     glDrawArrays(GL_LINE_LOOP, 0, 0);
     expect_error(glGetError, GL_INVALID_FRAMEBUFFER_OPERATION,
                  "glDrawArrays(line-loop zero-count)");
+    glDrawArrays(GL_LINE_LOOP, 0, 1);
+    expect_error(glGetError, GL_INVALID_FRAMEBUFFER_OPERATION,
+                 "glDrawArrays(line-loop one-count)");
 
     GLuint ebo = 0;
     glGenBuffers(1, &ebo);
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
-    glBufferData(GL_ELEMENT_ARRAY_BUFFER, 0, NULL, GL_STATIC_DRAW);
+    const GLubyte oneIndex = 0;
+    glBufferData(GL_ELEMENT_ARRAY_BUFFER, 1, &oneIndex, GL_STATIC_DRAW);
     glDrawElements(GL_TRIANGLES, 0, GL_UNSIGNED_BYTE, (const void*)0);
     expect_error(glGetError, GL_INVALID_FRAMEBUFFER_OPERATION,
                  "glDrawElements(zero-count)");
+    glDrawElements(GL_LINE_LOOP, 1, GL_UNSIGNED_BYTE, (const void*)0);
+    expect_error(glGetError, GL_INVALID_FRAMEBUFFER_OPERATION,
+                 "glDrawElements(line-loop one-count)");
     glMultiDrawArrays(GL_TRIANGLES, NULL, NULL, 0);
     expect_error(glGetError, GL_INVALID_FRAMEBUFFER_OPERATION,
                  "glMultiDrawArrays(zero-drawcount)");
