@@ -1,3 +1,4 @@
+# Validation-only workflow: harness branch is not product code; the tested dylib is built from exact canonical SHA below.
 name: Validate canonical DirectMetal in Minecraft 26.2
 
 on:
