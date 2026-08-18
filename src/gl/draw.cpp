@@ -872,8 +872,10 @@ void DrawCommon(GLenum mode, const std::vector<uint32_t>& idx, GLint first,
     dp.instance_count = (uint32_t)instance_count;
     dp.topology = (v::Topology)topo;
     dp.loose_uniforms = shared->loose_uniforms;
-    dp.uniform_buffers = shared->uniform_buffers;
-    dp.sampled_textures = shared->sampled_textures;
+    dp.uniform_buffers = {
+        shared->uniform_buffers.data(), shared->uniform_buffers.size()};
+    dp.sampled_textures = {
+        shared->sampled_textures.data(), shared->sampled_textures.size()};
     dp.pipeline = shared->pipeline;
     dp.dynamic = shared->dynamic;
     if (prog->uses_flat_fragment_inputs &&

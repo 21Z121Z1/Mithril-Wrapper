@@ -203,6 +203,9 @@ private:
 };
 
 constexpr size_t kMaxResolvedColorAttachments = 8;
+constexpr size_t kMaxPendingUniformBufferBindings =
+    shader::kMaxUserUniformBlocksPerStage * 2;
+constexpr size_t kMaxPendingTextureBindings = backend::kMaxTextureUnits * 2;
 
 struct ResolvedTarget {
     InlineList<id<MTLTexture>, kMaxResolvedColorAttachments> colors;
@@ -225,8 +228,9 @@ struct PendingDraw {
     id<MTLBuffer> resident_instance = nil;
     id<MTLBuffer> resident_index = nil;
     std::shared_ptr<PackedUniformSnapshot> uniform_snapshot;
-    std::vector<BoundUniformBuffer> uniform_buffers;
-    std::vector<BoundTexture> textures;
+    InlineList<BoundUniformBuffer, kMaxPendingUniformBufferBindings>
+        uniform_buffers;
+    InlineList<BoundTexture, kMaxPendingTextureBindings> textures;
     std::shared_ptr<OcclusionQueryState> occlusion;
 };
 
@@ -2772,6 +2776,10 @@ bool Draw(backend::DrawParams params) {
             static_cast<size_t>(binding.source_update_size),
             binding.source_update_is_partial);
         if (!resident) return false;
+        if (pending.uniform_buffers.size() >= kMaxPendingUniformBufferBindings) {
+            ML_LOG_ERROR("metal: resolved uniform-buffer bindings exceed fixed limit");
+            return false;
+        }
         pending.uniform_buffers.push_back({
             static_cast<NSUInteger>(binding.internal_binding),
             static_cast<NSUInteger>(binding.offset), resident,
@@ -2805,6 +2813,10 @@ bool Draw(backend::DrawParams params) {
                          bind.binding);
             return false;
         }
+        if (pending.textures.size() >= kMaxPendingTextureBindings) {
+            ML_LOG_ERROR("metal: resolved sampled-image bindings exceed fixed limit");
+            return false;
+        }
         pending.textures.push_back({
             slot, texture->second.texture, sampler,
             texture->second.backing_buffer,
@@ -2820,12 +2832,9 @@ bool Draw(backend::DrawParams params) {
     pending.params.instance_stream.source_size = 0;
     pending.params.resident_indices.source_data = nullptr;
     pending.params.resident_indices.source_size = 0;
-    pending.params.loose_uniforms.values = nullptr;
-    pending.params.loose_uniforms.count = 0;
-    for (auto& binding : pending.params.uniform_buffers) {
-        binding.source_data = nullptr;
-        binding.source_size = 0;
-    }
+    pending.params.loose_uniforms = {};
+    pending.params.uniform_buffers = {};
+    pending.params.sampled_textures = {};
     if (pending.occlusion) ++pending.occlusion->pending_draws;
     engine.draws.push_back(std::move(pending));
     engine.frame_dirty = true;

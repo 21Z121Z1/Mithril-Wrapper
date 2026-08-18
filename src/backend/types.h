@@ -198,6 +198,21 @@ struct LooseUniformSource {
     bool HasValues() const { return values != nullptr && count != 0; }
 };
 
+// Non-owning array used by the hot draw contract. The GL frontend owns the
+// backing storage for the duration of the synchronous backend Draw() call.
+// Deferred backends must resolve/retain native state before Draw returns.
+template <typename T>
+struct ArrayView {
+    const T* data = nullptr;
+    size_t count = 0;
+
+    bool empty() const { return count == 0; }
+    size_t size() const { return count; }
+    const T* begin() const { return data; }
+    const T* end() const { return data ? data + count : nullptr; }
+    const T& operator[](size_t index) const { return data[index]; }
+};
+
 // Native shader reflection for one member of the synthetic loose-uniform
 // block. GL setters expose tightly packed scalar sequences, while std140/MSL
 // layouts may add a stride between array elements or matrix rows/columns.
@@ -300,8 +315,8 @@ struct DrawParams {
     // setters own the byte arrays; deferred native backends must snapshot them
     // before Draw returns.
     LooseUniformSource loose_uniforms;
-    std::vector<UniformBufferBinding> uniform_buffers;
-    std::vector<SampledTextureBinding> sampled_textures;
+    ArrayView<UniformBufferBinding> uniform_buffers;
+    ArrayView<SampledTextureBinding> sampled_textures;
     PipelineState pipeline;
     DynamicState dynamic;
 };
