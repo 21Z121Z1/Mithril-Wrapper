@@ -43,6 +43,24 @@ jobs:
           grep -q 'directmetal_uniform_snapshot_smoke' cmake/MithrilSmokeTests.cmake
           grep -q 'DestroyStagedDrawBuffers' src/vk/draw.cpp
 
+      - name: Materialize implementation branch
+        run: |
+          rm .github/workflows/verify-directmetal-uniform-snapshots.yml
+          rm scripts/apply_directmetal_uniform_snapshots_phase6.py
+          rm scripts/apply_directmetal_uniform_snapshots_phase6_v2.py
+          rm scripts/apply_directmetal_uniform_snapshots_phase6_v3.py
+          rm scripts/apply_directmetal_uniform_snapshots_phase6_v4.py
+          rm scripts/apply_directmetal_uniform_snapshots_phase6_v5.py
+          rm scripts/apply_directmetal_uniform_snapshots_phase6_v6.py
+          rm scripts/apply_directmetal_uniform_snapshots_phase6_v7.py
+          rm scripts/apply_directmetal_uniform_snapshots_phase6_v8.py
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git diff --cached --check
+          git commit -m 'perf: cache versioned loose-uniform snapshots'
+          git push origin HEAD:perf/directmetal-uniform-snapshots-20260817
+
       - name: Configure DirectMetal Release build
         run: >-
           cmake -S . -B build-direct -G Ninja
@@ -73,21 +91,3 @@ jobs:
 
       - name: Build Vulkan reference
         run: cmake --build build-vulkan --parallel
-
-      - name: Commit verified implementation
-        run: |
-          rm .github/workflows/verify-directmetal-uniform-snapshots.yml
-          rm scripts/apply_directmetal_uniform_snapshots_phase6.py
-          rm scripts/apply_directmetal_uniform_snapshots_phase6_v2.py
-          rm scripts/apply_directmetal_uniform_snapshots_phase6_v3.py
-          rm scripts/apply_directmetal_uniform_snapshots_phase6_v4.py
-          rm scripts/apply_directmetal_uniform_snapshots_phase6_v5.py
-          rm scripts/apply_directmetal_uniform_snapshots_phase6_v6.py
-          rm scripts/apply_directmetal_uniform_snapshots_phase6_v7.py
-          rm scripts/apply_directmetal_uniform_snapshots_phase6_v8.py
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add -A
-          git diff --cached --check
-          git commit -m 'perf: cache versioned loose-uniform snapshots'
-          git push origin HEAD:perf/directmetal-uniform-snapshots-20260817
