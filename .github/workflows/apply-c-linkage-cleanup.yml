@@ -3,13 +3,14 @@ name: apply-c-linkage-cleanup
 on:
   push:
     branches: [fix/directmetal-incomplete-fbo-20260819]
+  pull_request:
+    branches: [integration/directmetal-next]
 
 permissions:
   contents: write
 
 jobs:
   apply:
-    if: ${{ !contains(github.event.head_commit.message, '[c-linkage-cleaned]') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -32,8 +33,6 @@ jobs:
                   raise SystemExit(f"{path}: expected one anchor, found {count}")
               p.write_text(text.replace(old, new, 1))
 
-          # shader.cpp: the entire anonymous C++ helper namespace was inside
-          # extern "C". Move C linkage to start exactly at the first GL export.
           replace_once(
               "src/gl/shader.cpp",
               '''extern "C" {\n\n// ---- shaders / programs / uniforms (S2) ------------------------------------\n\nnamespace {\n''',
@@ -44,9 +43,6 @@ jobs:
               '''} // namespace\n\nGLuint APIENTRY glCreateShader(GLenum type) {\n''',
               '''} // namespace\n\nextern "C" {\n\nGLuint APIENTRY glCreateShader(GLenum type) {\n''',
           )
-
-          # draw.cpp has the same shape: GL lowering helpers are C++, while the
-          # first ABI export starts only after the anonymous helper namespace.
           replace_once(
               "src/gl/draw.cpp",
               '''extern "C" {\n\n// ---- draw (M3) -------------------------------------------------------------\n\nnamespace {\n''',
@@ -57,9 +53,6 @@ jobs:
               '''} // namespace\n\nvoid APIENTRY glDrawArrays(GLenum mode, GLint first, GLsizei count) {\n''',
               '''} // namespace\n\nextern "C" {\n\nvoid APIENTRY glDrawArrays(GLenum mode, GLint first, GLsizei count) {\n''',
           )
-
-          # The draw smoke resolves glBufferSubData but never uses it. Remove
-          # the dead local rather than suppressing -Wunused-variable.
           p = Path("tests/draw_smoke.c")
           text = p.read_text()
           line = '    fn_glBufferSubData    bufferSubData     = (fn_glBufferSubData)dlsym(h, "glBufferSubData");\n'
