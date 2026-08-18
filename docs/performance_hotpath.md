@@ -35,6 +35,19 @@ vertex layout, render-target formats/sample count, raster state, blending, and
 depth/stencil state; PSO compilation therefore needs its own cache/precompile
 strategy and must not be reported as solved by program prewarm.
 
+DirectMetal starts an asynchronous render-PSO compile only after Draw() has the
+complete numeric pipeline identity. Pending draws with the same identity share
+one future. The completion callback owns no Engine mutation: it publishes only
+to the future under its mutex, while cache insertion, eviction, clocks, and
+diagnostics remain render-thread operations. Encode must recompute the full key
+and may consume the future only when the identity still matches; otherwise the
+existing synchronous creation path remains the correctness fallback.
+
+Asynchronous PSO creation overlaps compilation with frontend/deferred work, but
+it is not persistent compilation caching. `MTLBinaryArchive` is a separate
+cross-run compiled-code mechanism and requires an explicit archive lifetime,
+versioning, invalidation, and storage policy before it should be enabled.
+
 Because the program-creation contract is shared, every prewarm change must also
 pass the Vulkan reference build/regression gate in addition to the DirectMetal
 macOS semantic suite and iPhoneOS arm64 shipping build. Platform-specific
