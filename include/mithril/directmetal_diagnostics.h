@@ -80,6 +80,19 @@ void mithrilResetDirectMetalUniformStats(void);
 int mithrilGetDirectMetalUniformStatsV1(
     MithrilDirectMetalUniformStatsV1* output, size_t output_size);
 
+#define MITHRIL_DIRECT_METAL_PROGRAM_STATS_VERSION 1u
+
+typedef struct MithrilDirectMetalProgramStatsV1 {
+    uint32_t version;
+    uint32_t struct_size;
+    uint64_t program_compiles;
+    uint64_t program_cache_hits;
+} MithrilDirectMetalProgramStatsV1;
+
+void mithrilResetDirectMetalProgramStats(void);
+int mithrilGetDirectMetalProgramStatsV1(
+    MithrilDirectMetalProgramStatsV1* output, size_t output_size);
+
 #ifdef __cplusplus
 }
 #endif

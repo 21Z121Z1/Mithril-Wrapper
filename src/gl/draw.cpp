@@ -181,19 +181,6 @@ int GLModeToTopology(GLenum mode) {
     }
 }
 
-uint64_t CreateBackendProgram(sh::Program* prog) {
-    auto it = g_backend_programs.find(prog->id);
-    if (it != g_backend_programs.end()) return it->second;
-    std::vector<std::string> uniform_names;
-    uniform_names.reserve(prog->uniforms.size());
-    for (const auto& uniform : prog->uniforms)
-        uniform_names.push_back(uniform.name);
-    uint64_t handle = v::CreateProgram(
-        prog->vertex_spirv, prog->fragment_spirv, uniform_names);
-    if (handle) g_backend_programs.emplace(prog->id, handle);
-    return handle;
-}
-
 // Snapshot the current GL context into the backend's pipeline state. The
 // engine bakes these into the pipeline cache key and the Vk*CreateInfo
 // structs; values are forwarded as GL enums (backend maps them once).
@@ -494,7 +481,8 @@ bool ResolveDrawSharedState(SharedDrawState* shared) {
         return false;
     }
     if (!g_dirty_textures.empty()) FlushDirtyTextureUploads();
-    const uint64_t backend_program = CreateBackendProgram(prog);
+    const uint64_t backend_program =
+        EnsureBackendProgram(prog, BackendProgramCreateSite::Draw);
     if (!backend_program) {
         PUSH_ERROR(GL_INVALID_OPERATION);
         shared->failed = true;

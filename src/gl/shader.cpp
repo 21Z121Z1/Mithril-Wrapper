@@ -12,6 +12,50 @@
 #include <unordered_map>
 
 #include <util/log.h>
+#include <mithril/program_diagnostics.h>
+
+namespace {
+
+MithrilProgramPrewarmStatsV1 EmptyProgramPrewarmStats() {
+    MithrilProgramPrewarmStatsV1 stats{};
+    stats.version = MITHRIL_PROGRAM_PREWARM_STATS_VERSION;
+    stats.struct_size = static_cast<uint32_t>(sizeof(stats));
+    return stats;
+}
+
+MithrilProgramPrewarmStatsV1 g_program_prewarm_stats = EmptyProgramPrewarmStats();
+
+} // namespace
+
+uint64_t EnsureBackendProgram(mithril::shader::Program* program,
+                              BackendProgramCreateSite site) {
+    if (!program || !program->linked) return 0;
+    auto cached = g_backend_programs.find(program->id);
+    if (cached != g_backend_programs.end()) return cached->second;
+
+    std::vector<std::string> uniform_names;
+    uniform_names.reserve(program->uniforms.size());
+    for (const auto& uniform : program->uniforms)
+        uniform_names.push_back(uniform.name);
+
+    const uint64_t handle = v::CreateProgram(
+        program->vertex_spirv, program->fragment_spirv, uniform_names);
+    if (!handle) {
+        ++g_program_prewarm_stats.create_failures;
+        return 0;
+    }
+    g_backend_programs[program->id] = handle;
+    ++g_program_prewarm_stats.frontend_program_bindings;
+    switch (site) {
+        case BackendProgramCreateSite::Link:
+            ++g_program_prewarm_stats.link_prewarms; break;
+        case BackendProgramCreateSite::Use:
+            ++g_program_prewarm_stats.use_prewarms; break;
+        case BackendProgramCreateSite::Draw:
+            ++g_program_prewarm_stats.draw_fallbacks; break;
+    }
+    return handle;
+}
 
 extern "C" {
 
@@ -558,6 +602,11 @@ void APIENTRY glLinkProgram(GLuint program) {
         }
     }
     RegisterUniformLocations(*p);
+    if (v::IsInitialized() &&
+        !EnsureBackendProgram(p, BackendProgramCreateSite::Link)) {
+        ML_LOG_WARN("glLinkProgram(%u): native program prewarm failed; "
+                    "draw will retry", program);
+    }
     ML_LOG_DEBUG("glLinkProgram(%u): VS=%zu FS=%zu words, %zu uniforms, "
                  "%zu uniform blocks",
                  program, p->vertex_spirv.size(), p->fragment_spirv.size(),
@@ -620,11 +669,17 @@ void APIENTRY glGetAttachedShaders(GLuint program, GLsizei maxCount, GLsizei* co
 }
 
 void APIENTRY glUseProgram(GLuint program) {
-    if (program != 0 && sh::GetProgram(program) == nullptr) {
+    sh::Program* linked = program ? sh::GetProgram(program) : nullptr;
+    if (program != 0 && linked == nullptr) {
         PUSH_ERROR(GL_INVALID_VALUE);
         return;
     }
     s::GetState().current_program = program;
+    if (linked && linked->linked && v::IsInitialized() &&
+        !EnsureBackendProgram(linked, BackendProgramCreateSite::Use)) {
+        ML_LOG_WARN("glUseProgram(%u): native program prewarm failed; "
+                    "draw will retry", program);
+    }
 }
 
 void APIENTRY glValidateProgram(GLuint program) {
@@ -1220,6 +1275,17 @@ void APIENTRY glUniformMatrix4x3fv(GLint location, GLsizei count, GLboolean tran
                                    const GLfloat* value) {
     StoreUniformMatrix(
         GL_FLOAT_MAT4x3, location, count, transpose, value, 4, 3);
+}
+
+void mithrilResetProgramPrewarmStats(void) {
+    g_program_prewarm_stats = EmptyProgramPrewarmStats();
+}
+
+int mithrilGetProgramPrewarmStatsV1(
+    MithrilProgramPrewarmStatsV1* output, size_t output_size) {
+    if (!output || output_size < sizeof(*output)) return 0;
+    *output = g_program_prewarm_stats;
+    return 1;
 }
 
 } // extern "C"
