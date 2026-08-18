@@ -71,6 +71,8 @@ typedef void      (*genFramebuffers_fn)(GLsizei, GLuint*);
 typedef void      (*bindFramebuffer_fn)(GLenum, GLuint);
 typedef void      (*framebufferTex2D_fn)(GLenum, GLenum, GLenum, GLuint, GLint);
 typedef GLenum    (*checkFBO_fn)(GLenum);
+typedef void      (*drawBuffer_fn)(GLenum);
+typedef void      (*readBuffer_fn)(GLenum);
 typedef void      (*genVertexArrays_fn)(GLsizei, GLuint*);
 typedef void      (*bindVertexArray_fn)(GLuint);
 typedef void      (*genBuffers_fn)(GLsizei, GLuint*);
@@ -167,6 +169,8 @@ int main(int argc, char** argv) {
     bindFramebuffer_fn    bindFramebuffer    = NULL;
     framebufferTex2D_fn framebufferTex2D = NULL;
     checkFBO_fn checkFBO       = NULL;
+    drawBuffer_fn drawBuffer   = NULL;
+    readBuffer_fn readBuffer   = NULL;
     genVertexArrays_fn    genVertexArrays    = NULL;
     bindVertexArray_fn    bindVertexArray    = NULL;
     genBuffers_fn         genBuffers         = NULL;
@@ -220,6 +224,8 @@ int main(int argc, char** argv) {
     RESOLVE(bindFramebuffer, "glBindFramebuffer");
     RESOLVE(framebufferTex2D, "glFramebufferTexture2D");
     RESOLVE(checkFBO, "glCheckFramebufferStatus");
+    RESOLVE(drawBuffer, "glDrawBuffer");
+    RESOLVE(readBuffer, "glReadBuffer");
     RESOLVE(genVertexArrays, "glGenVertexArrays");
     RESOLVE(bindVertexArray, "glBindVertexArray");
     RESOLVE(genBuffers, "glGenBuffers");
@@ -395,6 +401,12 @@ int main(int argc, char** argv) {
         genFramebuffers(1, &depthFbo);
         bindFramebuffer(GL_FRAMEBUFFER, depthFbo);
         framebufferTex2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, depthTex, 0);
+        /* A depth-only framebuffer is complete only when its color draw/read
+         * selectors are GL_NONE. The old harness left the default
+         * GL_COLOR_ATTACHMENT0 selectors active and then kept issuing GPU
+         * commands against a framebuffer it had just proven incomplete. */
+        drawBuffer(GL_NONE);
+        readBuffer(GL_NONE);
         GLenum depthStatus = checkFBO(GL_FRAMEBUFFER);
         CHECK(depthStatus == GL_FRAMEBUFFER_COMPLETE,
     "depth-only FBO complete (status=0x%x)", depthStatus);
