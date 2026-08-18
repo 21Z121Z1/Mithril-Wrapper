@@ -1,3 +1,4 @@
+# Temporary verifier; deleted after the implementation is materialized.
 name: verify-program-prewarm
 
 on:
