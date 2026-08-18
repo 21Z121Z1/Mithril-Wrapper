@@ -69,8 +69,15 @@ struct ShaderStage {
     id<MTLLibrary> library = nil;
     id<MTLFunction> function = nil;
     std::vector<UboMember> members;
+    std::vector<uint32_t> member_value_indices;
     uint32_t ubo_size = 0;
     bool uses_sampled_images = false;
+};
+
+struct PackedUniformSnapshot {
+    uint64_t version = 0;
+    std::vector<uint8_t> vertex;
+    std::vector<uint8_t> fragment;
 };
 
 struct Program {
@@ -78,6 +85,7 @@ struct Program {
     uint32_t references = 1;
     ShaderStage vertex;
     ShaderStage fragment;
+    std::shared_ptr<PackedUniformSnapshot> last_uniform_snapshot;
 };
 
 struct PipelineBundle {
@@ -216,6 +224,7 @@ struct PendingDraw {
     id<MTLBuffer> resident_vertex = nil;
     id<MTLBuffer> resident_instance = nil;
     id<MTLBuffer> resident_index = nil;
+    std::shared_ptr<PackedUniformSnapshot> uniform_snapshot;
     std::vector<BoundUniformBuffer> uniform_buffers;
     std::vector<BoundTexture> textures;
     std::shared_ptr<OcclusionQueryState> occlusion;
@@ -272,6 +281,13 @@ MithrilDirectMetalBufferStatsV1 EmptyBufferStats() {
 MithrilDirectMetalIndexStatsV1 EmptyIndexStats() {
     MithrilDirectMetalIndexStatsV1 stats{};
     stats.version = MITHRIL_DIRECT_METAL_INDEX_STATS_VERSION;
+    stats.struct_size = static_cast<uint32_t>(sizeof(stats));
+    return stats;
+}
+
+MithrilDirectMetalUniformStatsV1 EmptyUniformStats() {
+    MithrilDirectMetalUniformStatsV1 stats{};
+    stats.version = MITHRIL_DIRECT_METAL_UNIFORM_STATS_VERSION;
     stats.struct_size = static_cast<uint32_t>(sizeof(stats));
     return stats;
 }
@@ -350,6 +366,7 @@ struct Engine {
     MithrilDirectMetalBindingStatsV1 binding_stats = EmptyBindingStats();
     MithrilDirectMetalBufferStatsV1 buffer_stats = EmptyBufferStats();
     MithrilDirectMetalIndexStatsV1 index_stats = EmptyIndexStats();
+    MithrilDirectMetalUniformStatsV1 uniform_stats = EmptyUniformStats();
     std::vector<PendingResidentCopy> pending_resident_copies;
     std::vector<id<MTLBuffer>> resident_retire_on_submit;
     std::vector<RetiredResidentBuffer> retired_resident_buffers;
@@ -1555,10 +1572,6 @@ FrameContext& AcquireFrame(NSUInteger upload_bytes, bool needs_readback,
     return frame;
 }
 
-NSUInteger UniformBytes(const ShaderStage& stage) {
-    return stage.ubo_size ? AlignUp(stage.ubo_size, 256) : 0;
-}
-
 NSUInteger RequiredUploadBytes() {
     auto& engine = GetEngine();
     NSUInteger cursor = 0;
@@ -1567,6 +1580,7 @@ NSUInteger RequiredUploadBytes() {
         cursor = AlignUp(cursor, 256);
         cursor += size;
     };
+    std::unordered_set<const PackedUniformSnapshot*> counted_uniform_snapshots;
     for (const auto& pending : engine.draws) {
         const auto& draw = pending.params;
         if (!pending.resident_vertex)
@@ -1586,10 +1600,11 @@ NSUInteger RequiredUploadBytes() {
         } else {
             add(draw.indices.size() * sizeof(uint32_t));
         }
-        auto program = engine.programs.find(draw.program);
-        if (program != engine.programs.end()) {
-            add(UniformBytes(program->second.vertex));
-            add(UniformBytes(program->second.fragment));
+        if (pending.uniform_snapshot &&
+            counted_uniform_snapshots.insert(pending.uniform_snapshot.get()).second) {
+            add(pending.uniform_snapshot->vertex.size());
+            if (pending.uniform_snapshot->fragment != pending.uniform_snapshot->vertex)
+                add(pending.uniform_snapshot->fragment.size());
         }
     }
     return cursor;
@@ -1608,32 +1623,96 @@ NSUInteger AllocateUpload(FrameContext& frame, NSUInteger* cursor,
     return offset;
 }
 
-NSUInteger PackUniforms(FrameContext& frame, NSUInteger* cursor,
-                        const ShaderStage& stage,
-                        const backend::DrawParams& draw,
-                        std::unordered_map<std::string, NSUInteger>* memo) {
-    if (!stage.ubo_size) return NSNotFound;
-    std::vector<uint8_t> packed(AlignUp(stage.ubo_size, 256), 0);
-    for (const auto& member : stage.members) {
-        auto value = draw.uniforms.find(member.name);
-        if (value == draw.uniforms.end() || value->second.empty()) continue;
-        if (!backend::PackUniformValue(
-                member, value->second, packed.data(), stage.ubo_size)) {
-            ML_LOG_ERROR("metal: invalid reflected layout for uniform '%s'",
+bool ResolveUniformMemberSlots(ShaderStage* stage,
+                               const std::vector<std::string>& uniform_names) {
+    stage->member_value_indices.clear();
+    stage->member_value_indices.reserve(stage->members.size());
+    for (const auto& member : stage->members) {
+        auto found = std::find(uniform_names.begin(), uniform_names.end(), member.name);
+        if (found == uniform_names.end()) {
+            ML_LOG_ERROR("metal: reflected loose uniform '%s' has no frontend slot",
                          member.name.c_str());
-            return NSNotFound;
+            return false;
+        }
+        stage->member_value_indices.push_back(
+            static_cast<uint32_t>(found - uniform_names.begin()));
+    }
+    return true;
+}
+
+bool PackUniformStage(const ShaderStage& stage,
+                      const backend::LooseUniformSource& source,
+                      std::vector<uint8_t>* packed) {
+    packed->clear();
+    if (!stage.ubo_size) return true;
+    packed->assign(AlignUp(stage.ubo_size, 256), 0);
+    if (stage.member_value_indices.size() != stage.members.size()) return false;
+    for (size_t i = 0; i < stage.members.size(); ++i) {
+        const uint32_t slot = stage.member_value_indices[i];
+        if (slot >= source.count || !source.values) return false;
+        const auto& value = source.values[slot];
+        if (!value.data || !value.size) continue;
+        if (!backend::PackUniformValue(stage.members[i], value.data, value.size,
+                                       packed->data(), stage.ubo_size)) {
+            ML_LOG_ERROR("metal: invalid reflected layout for uniform '%s'",
+                         stage.members[i].name.c_str());
+            return false;
         }
     }
-    // Exact byte identity is the only reuse criterion. The memo lives for one
-    // frame arena, so offsets can never escape into a recycled frame context.
-    std::string key(reinterpret_cast<const char*>(packed.data()), packed.size());
-    auto existing = memo->find(key);
+    return true;
+}
+
+std::shared_ptr<PackedUniformSnapshot> GetOrCreateUniformSnapshot(
+    Program* program, const backend::LooseUniformSource& source) {
+    if (!program->vertex.ubo_size && !program->fragment.ubo_size) return nullptr;
+    if (program->last_uniform_snapshot &&
+        program->last_uniform_snapshot->version == source.version) {
+        ++GetEngine().uniform_stats.snapshot_reuses;
+        return program->last_uniform_snapshot;
+    }
+    auto snapshot = std::make_shared<PackedUniformSnapshot>();
+    snapshot->version = source.version;
+    if (!PackUniformStage(program->vertex, source, &snapshot->vertex) ||
+        !PackUniformStage(program->fragment, source, &snapshot->fragment))
+        return nullptr;
+    auto& stats = GetEngine().uniform_stats;
+    ++stats.snapshot_packs;
+    stats.packed_bytes += snapshot->vertex.size() + snapshot->fragment.size();
+    program->last_uniform_snapshot = snapshot;
+    return snapshot;
+}
+
+struct UniformFrameOffsets {
+    NSUInteger vertex = NSNotFound;
+    NSUInteger fragment = NSNotFound;
+};
+
+UniformFrameOffsets UploadUniformSnapshot(
+    FrameContext& frame, NSUInteger* cursor,
+    const std::shared_ptr<PackedUniformSnapshot>& snapshot,
+    std::unordered_map<const PackedUniformSnapshot*, UniformFrameOffsets>* memo) {
+    if (!snapshot) return {};
+    auto existing = memo->find(snapshot.get());
     if (existing != memo->end()) return existing->second;
-    const NSUInteger offset = AllocateUpload(frame, cursor, packed.data(),
-                                              packed.size());
-    if (offset == NSNotFound) return NSNotFound;
-    memo->emplace(std::move(key), offset);
-    return offset;
+    UniformFrameOffsets offsets;
+    if (!snapshot->vertex.empty()) {
+        offsets.vertex = AllocateUpload(frame, cursor, snapshot->vertex.data(),
+                                        snapshot->vertex.size());
+        if (offsets.vertex == NSNotFound) return offsets;
+        ++GetEngine().uniform_stats.frame_uniform_uploads;
+    }
+    if (!snapshot->fragment.empty()) {
+        if (snapshot->fragment == snapshot->vertex && offsets.vertex != NSNotFound) {
+            offsets.fragment = offsets.vertex;
+        } else {
+            offsets.fragment = AllocateUpload(frame, cursor, snapshot->fragment.data(),
+                                              snapshot->fragment.size());
+            if (offsets.fragment == NSNotFound) return offsets;
+            ++GetEngine().uniform_stats.frame_uniform_uploads;
+        }
+    }
+    memo->emplace(snapshot.get(), offsets);
+    return offsets;
 }
 
 std::vector<uint32_t> ExpandTriangleFan(const backend::DrawParams& draw) {
@@ -1934,7 +2013,8 @@ bool EncodeDraws(
     ResolvedTarget target;
     if (!ResolveTarget(engine.bound_draw_fbo, &target)) return false;
     NSUInteger cursor = 0;
-    std::unordered_map<std::string, NSUInteger> uniform_memo;
+    std::unordered_map<const PackedUniformSnapshot*, UniformFrameOffsets>
+        uniform_memo;
     // Metal encoder state persists across draw calls in one render pass. Keep
     // a compact shadow per shader stage and only materialize changes. These
     // references are valid for the whole loop because PendingDraw owns the
@@ -2007,10 +2087,14 @@ bool EncodeDraws(
             }
         }
 
-        const NSUInteger vertex_ubo = PackUniforms(
-            frame, &cursor, program->second.vertex, draw, &uniform_memo);
-        const NSUInteger fragment_ubo = PackUniforms(
-            frame, &cursor, program->second.fragment, draw, &uniform_memo);
+        const UniformFrameOffsets uniform_offsets = UploadUniformSnapshot(
+            frame, &cursor, pending.uniform_snapshot, &uniform_memo);
+        if (pending.uniform_snapshot &&
+            ((!pending.uniform_snapshot->vertex.empty() &&
+              uniform_offsets.vertex == NSNotFound) ||
+             (!pending.uniform_snapshot->fragment.empty() &&
+              uniform_offsets.fragment == NSNotFound)))
+            return false;
 
         [encoder setRenderPipelineState:pipeline->pipeline];
         [encoder setDepthStencilState:pipeline->depth_stencil];
@@ -2019,11 +2103,11 @@ bool EncodeDraws(
         [encoder setVertexBuffer:vertex_buffer offset:vertex_offset atIndex:0];
         if (instance_offset != NSNotFound)
             [encoder setVertexBuffer:instance_buffer offset:instance_offset atIndex:1];
-        if (vertex_ubo != NSNotFound)
-            [encoder setVertexBuffer:frame.upload offset:vertex_ubo
+        if (uniform_offsets.vertex != NSNotFound)
+            [encoder setVertexBuffer:frame.upload offset:uniform_offsets.vertex
                              atIndex:kUniformBufferIndex];
-        if (fragment_ubo != NSNotFound)
-            [encoder setFragmentBuffer:frame.upload offset:fragment_ubo
+        if (uniform_offsets.fragment != NSNotFound)
+            [encoder setFragmentBuffer:frame.upload offset:uniform_offsets.fragment
                                atIndex:kUniformBufferIndex];
         for (const auto& binding : pending.uniform_buffers) {
             if (binding.vertex_stage)
@@ -2570,7 +2654,8 @@ bool Clear(const backend::ClearParams& params) {
 }
 
 uint64_t CreateProgram(const std::vector<uint32_t>& vs,
-                       const std::vector<uint32_t>& fs) {
+                       const std::vector<uint32_t>& fs,
+                       const std::vector<std::string>& uniform_names) {
     if (!EnsureInit()) return 0;
     auto& engine = GetEngine();
     const uint64_t handle = HashWords(vs, fs);
@@ -2583,7 +2668,9 @@ uint64_t CreateProgram(const std::vector<uint32_t>& vs,
         Program program;
         program.handle = handle;
         if (!TranslateStage(vs, spv::ExecutionModelVertex, &program.vertex) ||
-            !TranslateStage(fs, spv::ExecutionModelFragment, &program.fragment))
+            !TranslateStage(fs, spv::ExecutionModelFragment, &program.fragment) ||
+            !ResolveUniformMemberSlots(&program.vertex, uniform_names) ||
+            !ResolveUniformMemberSlots(&program.fragment, uniform_names))
             return 0;
         engine.programs.emplace(handle, std::move(program));
         ML_LOG_DEBUG("metal: created native program %llu",
@@ -2630,6 +2717,11 @@ bool Draw(backend::DrawParams params) {
         return false;
     }
     PendingDraw pending;
+    if (program->second.vertex.ubo_size || program->second.fragment.ubo_size) {
+        pending.uniform_snapshot = GetOrCreateUniformSnapshot(
+            &program->second, params.loose_uniforms);
+        if (!pending.uniform_snapshot) return false;
+    }
     if (params.occlusion_query) {
         auto query = engine.occlusion_queries.find(params.occlusion_query);
         if (query == engine.occlusion_queries.end() || query->second->ended) {
@@ -2728,6 +2820,8 @@ bool Draw(backend::DrawParams params) {
     pending.params.instance_stream.source_size = 0;
     pending.params.resident_indices.source_data = nullptr;
     pending.params.resident_indices.source_size = 0;
+    pending.params.loose_uniforms.values = nullptr;
+    pending.params.loose_uniforms.count = 0;
     for (auto& binding : pending.params.uniform_buffers) {
         binding.source_data = nullptr;
         binding.source_size = 0;
@@ -3185,6 +3279,17 @@ extern "C" int mithrilGetDirectMetalIndexStatsV1(
     MithrilDirectMetalIndexStatsV1* output, size_t output_size) {
     if (!output || output_size < sizeof(*output)) return 0;
     *output = GetEngine().index_stats;
+    return 1;
+}
+
+extern "C" void mithrilResetDirectMetalUniformStats(void) {
+    GetEngine().uniform_stats = EmptyUniformStats();
+}
+
+extern "C" int mithrilGetDirectMetalUniformStatsV1(
+    MithrilDirectMetalUniformStatsV1* output, size_t output_size) {
+    if (!output || output_size < sizeof(*output)) return 0;
+    *output = GetEngine().uniform_stats;
     return 1;
 }
 

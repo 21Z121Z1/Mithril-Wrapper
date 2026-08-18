@@ -65,6 +65,21 @@ void mithrilResetDirectMetalIndexStats(void);
 int mithrilGetDirectMetalIndexStatsV1(
     MithrilDirectMetalIndexStatsV1* output, size_t output_size);
 
+#define MITHRIL_DIRECT_METAL_UNIFORM_STATS_VERSION 1u
+
+typedef struct MithrilDirectMetalUniformStatsV1 {
+    uint32_t version;
+    uint32_t struct_size;
+    uint64_t snapshot_packs;
+    uint64_t snapshot_reuses;
+    uint64_t frame_uniform_uploads;
+    uint64_t packed_bytes;
+} MithrilDirectMetalUniformStatsV1;
+
+void mithrilResetDirectMetalUniformStats(void);
+int mithrilGetDirectMetalUniformStatsV1(
+    MithrilDirectMetalUniformStatsV1* output, size_t output_size);
+
 #ifdef __cplusplus
 }
 #endif

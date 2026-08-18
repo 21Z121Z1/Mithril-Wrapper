@@ -532,6 +532,13 @@ void APIENTRY glLinkProgram(GLuint program) {
         v::DestroyProgram(native->second);
         g_backend_programs.erase(native);
     }
+    p->loose_uniform_views.resize(p->uniforms.size());
+    for (size_t i = 0; i < p->uniforms.size(); ++i) {
+        const auto& raw = p->uniforms[i].raw_value;
+        p->loose_uniform_views[i] = {
+            raw.empty() ? nullptr : raw.data(), static_cast<uint32_t>(raw.size())};
+    }
+    p->loose_uniform_version = 1;
     p->linked = true;
     for (auto& block : p->uniform_blocks) {
         const auto declaration = block_declarations.find(block.name);
@@ -907,6 +914,19 @@ sh::Program* CurrentProgramForUniform() {
     return id ? sh::GetProgram(id) : nullptr;
 }
 
+void CommitLooseUniformWrite(sh::Uniform* uniform) {
+    sh::Program* program = CurrentProgramForUniform();
+    if (!program || !uniform || program->uniforms.empty()) return;
+    const ptrdiff_t index = uniform - program->uniforms.data();
+    if (index < 0 || static_cast<size_t>(index) >= program->uniforms.size()) return;
+    if (program->loose_uniform_views.size() != program->uniforms.size())
+        program->loose_uniform_views.resize(program->uniforms.size());
+    const auto& raw = uniform->raw_value;
+    program->loose_uniform_views[static_cast<size_t>(index)] = {
+        raw.empty() ? nullptr : raw.data(), static_cast<uint32_t>(raw.size())};
+    if (!IsSamplerUniformType(uniform->type)) ++program->loose_uniform_version;
+}
+
 bool ResolveUniformWrite(GLenum setter_type, GLint location, GLsizei count,
                          int comps, sh::Uniform** uniform,
                          size_t* scalar_offset, GLsizei* effective_count) {
@@ -982,6 +1002,7 @@ void StoreUniform(GLenum type, GLint location, const GLfloat* v, GLsizei count,
     const size_t scalars = static_cast<size_t>(effective_count) * comps;
     if (IsBooleanUniformType(uniform->type)) {
         StoreBooleanScalars(uniform, scalar_offset, v, scalars, total_scalars);
+        CommitLooseUniformWrite(uniform);
         return;
     }
     if (uniform->value.size() < total_scalars)
@@ -992,6 +1013,7 @@ void StoreUniform(GLenum type, GLint location, const GLfloat* v, GLsizei count,
         uniform->raw_value.resize(total_bytes, 0);
     std::memcpy(uniform->raw_value.data() + scalar_offset * sizeof(*v), v,
                 scalars * sizeof(*v));
+    CommitLooseUniformWrite(uniform);
 }
 
 void StoreUniformInt(GLenum type, GLint location, const GLint* v,
@@ -1007,6 +1029,7 @@ void StoreUniformInt(GLenum type, GLint location, const GLint* v,
     const size_t scalars = static_cast<size_t>(effective_count) * comps;
     if (IsBooleanUniformType(uniform->type)) {
         StoreBooleanScalars(uniform, scalar_offset, v, scalars, total_scalars);
+        CommitLooseUniformWrite(uniform);
         return;
     }
     if (uniform->value.size() < total_scalars)
@@ -1018,6 +1041,7 @@ void StoreUniformInt(GLenum type, GLint location, const GLint* v,
         uniform->raw_value.resize(total_bytes, 0);
     std::memcpy(uniform->raw_value.data() + scalar_offset * sizeof(*v), v,
                 scalars * sizeof(*v));
+    CommitLooseUniformWrite(uniform);
 }
 
 void StoreUniformUInt(GLenum type, GLint location, const GLuint* v,
@@ -1033,6 +1057,7 @@ void StoreUniformUInt(GLenum type, GLint location, const GLuint* v,
     const size_t scalars = static_cast<size_t>(effective_count) * comps;
     if (IsBooleanUniformType(uniform->type)) {
         StoreBooleanScalars(uniform, scalar_offset, v, scalars, total_scalars);
+        CommitLooseUniformWrite(uniform);
         return;
     }
     if (uniform->value.size() < total_scalars)
@@ -1044,6 +1069,7 @@ void StoreUniformUInt(GLenum type, GLint location, const GLuint* v,
         uniform->raw_value.resize(total_bytes, 0);
     std::memcpy(uniform->raw_value.data() + scalar_offset * sizeof(*v), v,
                 scalars * sizeof(*v));
+    CommitLooseUniformWrite(uniform);
 }
 
 void StoreUniformMatrix(GLenum type, GLint location, GLsizei count,

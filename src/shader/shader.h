@@ -9,6 +9,7 @@
 #pragma once
 
 #include <GL/glcorearb.h>
+#include <backend/types.h>
 
 #include <cstdint>
 #include <string>
@@ -113,6 +114,8 @@ struct Program {
     bool linked = false;
     std::string info_log;
     std::vector<Uniform> uniforms;         // active uniforms (index == GL index)
+    std::vector<backend::UniformValueView> loose_uniform_views;
+    uint64_t loose_uniform_version = 1;
     std::unordered_map<std::string, GLint> uniform_by_name;    // name -> location
     std::unordered_map<GLint, size_t> uniform_by_location;     // location -> uniforms idx
     std::unordered_map<std::string, GLuint> active_uniform_by_name;
