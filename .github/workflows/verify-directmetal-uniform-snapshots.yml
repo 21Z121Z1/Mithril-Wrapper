@@ -29,7 +29,7 @@ jobs:
           third_party/glslang
 
       - name: Apply uniform snapshot phase
-        run: python3 scripts/apply_directmetal_uniform_snapshots_phase6_v7.py
+        run: python3 scripts/apply_directmetal_uniform_snapshots_phase6_v8.py
 
       - name: Verify source invariants
         run: |
@@ -41,6 +41,7 @@ jobs:
           grep -q 'GetOrCreateUniformSnapshot' src/metal/engine.mm
           grep -q 'loose_uniform_version' src/shader/shader.h
           grep -q 'directmetal_uniform_snapshot_smoke' cmake/MithrilSmokeTests.cmake
+          grep -q 'DestroyStagedDrawBuffers' src/vk/draw.cpp
 
       - name: Configure DirectMetal Release build
         run: >-
@@ -83,6 +84,7 @@ jobs:
           rm scripts/apply_directmetal_uniform_snapshots_phase6_v5.py
           rm scripts/apply_directmetal_uniform_snapshots_phase6_v6.py
           rm scripts/apply_directmetal_uniform_snapshots_phase6_v7.py
+          rm scripts/apply_directmetal_uniform_snapshots_phase6_v8.py
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add -A
