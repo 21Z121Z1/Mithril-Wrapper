@@ -26,6 +26,7 @@ jobs:
       GRADLE_OPTS: -Dorg.gradle.caching=true
       MTL_DEBUG_LAYER: '1'
       MTL_SHADER_VALIDATION: '0'
+      CPATH: ${{ github.workspace }}/canonical/third_party
 
     steps:
       - name: Checkout E2E harness only
