@@ -137,9 +137,11 @@ void Draw(const DrawParams& params) {
     op.program = params.program;
     op.topology = (uint32_t)params.topology;
     op.v_stride = params.vertex_stream.stride;
-    op.v_attrs = params.vertex_stream.attrs;
+    op.v_attrs.assign(params.vertex_stream.attrs.begin(),
+                      params.vertex_stream.attrs.end());
     op.i_stride = params.instance_stream.stride;
-    op.i_attrs = params.instance_stream.attrs;
+    op.i_attrs.assign(params.instance_stream.attrs.begin(),
+                      params.instance_stream.attrs.end());
     op.instance_count = std::max<uint32_t>(params.instance_count, 1);
     const size_t vertex_bytes = params.vertex_stream.HasResidentSource()
         ? params.vertex_stream.source_size
