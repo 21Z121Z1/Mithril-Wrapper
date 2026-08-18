@@ -20,3 +20,17 @@ command type look simpler.
 A fixed-capacity overflow is a renderer-invariant violation. It must not be
 silently converted into heap spill, because doing so would hide a mismatch
 between the advertised GL limits and the hot-path data model.
+
+## First-use compilation boundaries
+
+Native shader-program creation should happen at an existing compilation or
+program-use boundary once the backend is initialized, rather than being hidden
+inside the first draw. The draw path remains a correctness fallback for
+programs linked before backend initialization.
+
+Program prewarm and render-pipeline compilation are intentionally separate
+problems. DirectMetal program prewarm covers SPIR-V translation, MSL library
+creation, and native shader functions. A render PSO additionally depends on
+vertex layout, render-target formats/sample count, raster state, blending, and
+depth/stencil state; PSO compilation therefore needs its own cache/precompile
+strategy and must not be reported as solved by program prewarm.
