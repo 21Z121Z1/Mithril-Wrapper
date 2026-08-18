@@ -163,8 +163,6 @@ void write_state(const char* stage) {
             if (r && *r) g_identity_renderer = r;
             if (ver && *ver) g_identity_version = ver;
         }
-        /* Keep the last authoritative identity after glfwMakeContextCurrent(NULL)
-         * and glfwDestroyWindow().  The post-process oracle runs after JVM exit. */
         vendor = g_identity_vendor;
         renderer = g_identity_renderer;
         version = g_identity_version;
@@ -293,8 +291,8 @@ GLFWwindow* glfwCreateWindow(int width, int height, const char* title,
         emit_event("bridge_error", "Mithril eglBindAPI(EGL_OPENGL_API) failed");
         return nullptr;
     }
-    EGLSurface surface = m.createWindowSurface(display, config,
-        reinterpret_cast<EGLNativeWindowType>(layer), nullptr);
+    EGLSurface surface = m.createWindowSurface(
+        display, config, (__bridge EGLNativeWindowType)layer, nullptr);
     if (surface == EGL_NO_SURFACE) {
         emit_event("bridge_error", "Mithril eglCreateWindowSurface(CAMetalLayer) failed");
         return nullptr;
