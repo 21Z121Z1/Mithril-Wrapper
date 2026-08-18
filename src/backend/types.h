@@ -378,12 +378,12 @@ struct FboAttach {
 };
 
 struct FboSpec {
-    std::vector<FboAttach> colors;
-    FboAttach depth_stencil;
-    bool has_depth_stencil = false;
-    GLenum depth_stencil_format = GL_DEPTH24_STENCIL8;
+    std::vector<FboAttach> color;
     std::vector<GLenum> draw_bufs;
     GLenum read_buf = GL_COLOR_ATTACHMENT0;
+    bool has_depth = false;
+    FboAttach depth;
+    uint32_t width = 0, height = 0;
 };
 
 } // namespace mithril::backend
