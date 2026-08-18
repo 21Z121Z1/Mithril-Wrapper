@@ -1,0 +1,93 @@
+name: apply-c-linkage-cleanup
+
+on:
+  push:
+    branches: [fix/directmetal-incomplete-fbo-20260819]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: ${{ !contains(github.event.head_commit.message, '[c-linkage-cleaned]') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/directmetal-incomplete-fbo-20260819
+          fetch-depth: 0
+
+      - name: Restrict C linkage to exported entry points
+        shell: python
+        run: |
+          from pathlib import Path
+
+          def replace_once(path, old, new):
+              p = Path(path)
+              text = p.read_text()
+              if new in text and old not in text:
+                  return
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{path}: expected one anchor, found {count}")
+              p.write_text(text.replace(old, new, 1))
+
+          # shader.cpp: the entire anonymous C++ helper namespace was inside
+          # extern "C". Move C linkage to start exactly at the first GL export.
+          replace_once(
+              "src/gl/shader.cpp",
+              '''extern "C" {\n\n// ---- shaders / programs / uniforms (S2) ------------------------------------\n\nnamespace {\n''',
+              '''// ---- shaders / programs / uniforms (S2) ------------------------------------\n\nnamespace {\n''',
+          )
+          replace_once(
+              "src/gl/shader.cpp",
+              '''} // namespace\n\nGLuint APIENTRY glCreateShader(GLenum type) {\n''',
+              '''} // namespace\n\nextern "C" {\n\nGLuint APIENTRY glCreateShader(GLenum type) {\n''',
+          )
+
+          # draw.cpp has the same shape: GL lowering helpers are C++, while the
+          # first ABI export starts only after the anonymous helper namespace.
+          replace_once(
+              "src/gl/draw.cpp",
+              '''extern "C" {\n\n// ---- draw (M3) -------------------------------------------------------------\n\nnamespace {\n''',
+              '''// ---- draw (M3) -------------------------------------------------------------\n\nnamespace {\n''',
+          )
+          replace_once(
+              "src/gl/draw.cpp",
+              '''} // namespace\n\nvoid APIENTRY glDrawArrays(GLenum mode, GLint first, GLsizei count) {\n''',
+              '''} // namespace\n\nextern "C" {\n\nvoid APIENTRY glDrawArrays(GLenum mode, GLint first, GLsizei count) {\n''',
+          )
+
+          # The draw smoke resolves glBufferSubData but never uses it. Remove
+          # the dead local rather than suppressing -Wunused-variable.
+          p = Path("tests/draw_smoke.c")
+          text = p.read_text()
+          line = '    fn_glBufferSubData    bufferSubData     = (fn_glBufferSubData)dlsym(h, "glBufferSubData");\n'
+          if line in text:
+              text = text.replace(line, "", 1)
+          p.write_text(text)
+
+      - name: Mechanical checks
+        run: |
+          git diff --check
+          python3 - <<'PY'
+          from pathlib import Path
+          shader = Path('src/gl/shader.cpp').read_text()
+          draw = Path('src/gl/draw.cpp').read_text()
+          assert shader.index('std::string ObservableUniformName') < shader.index('extern "C" {')
+          assert draw.index('v::PipelineState BuildPipelineState') < draw.index('extern "C" {')
+          assert draw.index('std::vector<uint32_t> LoadIndices') < draw.index('extern "C" {')
+          assert draw.index('extern "C" {') < draw.index('void APIENTRY glDrawArrays')
+          PY
+
+      - name: Commit cleanup
+        run: |
+          if git diff --quiet; then
+            echo "Cleanup already applied"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/gl/shader.cpp src/gl/draw.cpp tests/draw_smoke.c
+          git commit -m "fix: keep C++ helpers outside C linkage [c-linkage-cleaned]"
+          git push origin HEAD:fix/directmetal-incomplete-fbo-20260819
