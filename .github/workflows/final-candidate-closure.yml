@@ -15,7 +15,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  CANDIDATE_SHA: 405428c07aea523e2aad621f2fa902c4ef8709be
+  CANDIDATE_SHA: a09c8227be9ba599bab0747326f199770f8ebd91
 
 jobs:
   directmetal-minecraft:
@@ -39,7 +39,7 @@ jobs:
       - name: Checkout exact final product candidate
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
-          ref: 405428c07aea523e2aad621f2fa902c4ef8709be
+          ref: a09c8227be9ba599bab0747326f199770f8ebd91
           path: candidate
           submodules: recursive
           persist-credentials: false
@@ -119,7 +119,9 @@ jobs:
             2>&1 | tee "$E2E_ROOT/incomplete-fbo-detail.log"
           grep -q 'glClear(zero-mask).*GL_INVALID_FRAMEBUFFER_OPERATION' "$E2E_ROOT/incomplete-fbo-detail.log"
           grep -q 'line-loop zero-count.*GL_INVALID_FRAMEBUFFER_OPERATION' "$E2E_ROOT/incomplete-fbo-detail.log"
+          grep -q 'line-loop one-count.*GL_INVALID_FRAMEBUFFER_OPERATION' "$E2E_ROOT/incomplete-fbo-detail.log"
           grep -q 'glDrawElements(zero-count).*GL_INVALID_FRAMEBUFFER_OPERATION' "$E2E_ROOT/incomplete-fbo-detail.log"
+          grep -q 'glDrawElements(line-loop one-count).*GL_INVALID_FRAMEBUFFER_OPERATION' "$E2E_ROOT/incomplete-fbo-detail.log"
           grep -q 'glMultiDrawArrays(zero-drawcount).*GL_INVALID_FRAMEBUFFER_OPERATION' "$E2E_ROOT/incomplete-fbo-detail.log"
           grep -q 'directmetal_incomplete_fbo_smoke: PASS' "$E2E_ROOT/incomplete-fbo-detail.log"
 
@@ -215,7 +217,7 @@ jobs:
       - name: Checkout exact final product candidate
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
-          ref: 405428c07aea523e2aad621f2fa902c4ef8709be
+          ref: a09c8227be9ba599bab0747326f199770f8ebd91
           submodules: recursive
           persist-credentials: false
 
@@ -270,7 +272,7 @@ jobs:
       - name: Checkout exact final product candidate
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
-          ref: 405428c07aea523e2aad621f2fa902c4ef8709be
+          ref: a09c8227be9ba599bab0747326f199770f8ebd91
           submodules: recursive
           persist-credentials: false
 
