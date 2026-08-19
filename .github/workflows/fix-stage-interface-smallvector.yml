@@ -1,0 +1,49 @@
+name: fix-stage-interface-smallvector-once
+
+on:
+  pull_request:
+    branches: [integration/directmetal-next]
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'fix/minecraft26-directmetal-runtime-closure-20260819'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          fetch-depth: 0
+      - name: Fix SPIRV-Cross SmallVector handling
+        shell: python
+        run: |
+          from pathlib import Path
+          p = Path('src/shader/reflect.cpp')
+          text = p.read_text()
+          old = '''            outputs[resource.name] = {\n                resource.id,\n                vertex.get_decoration(resource.id, spv::DecorationLocation),\n                InterfaceLocationSpan(type),\n                type.basetype, type.vecsize, type.columns, type.array,\n                explicit_vertex.count(resource.name) != 0,\n            };\n'''
+          new = '''            InterfaceOutput output;\n            output.id = resource.id;\n            output.location = vertex.get_decoration(\n                resource.id, spv::DecorationLocation);\n            output.span = InterfaceLocationSpan(type);\n            output.base = type.basetype;\n            output.vecsize = type.vecsize;\n            output.columns = type.columns;\n            output.array.assign(type.array.begin(), type.array.end());\n            output.explicit_location =\n                explicit_vertex.count(resource.name) != 0;\n            outputs[resource.name] = std::move(output);\n'''
+          if text.count(old) != 1:
+              raise SystemExit(f'initializer anchor count={text.count(old)}')
+          text = text.replace(old, new, 1)
+          old = '''                input_type.columns != linked.columns ||\n                input_type.array != linked.array ||\n                InterfaceLocationSpan(input_type) != linked.span) {\n'''
+          new = '''                input_type.columns != linked.columns ||\n                input_type.array.size() != linked.array.size() ||\n                !std::equal(input_type.array.begin(), input_type.array.end(),\n                            linked.array.begin()) ||\n                InterfaceLocationSpan(input_type) != linked.span) {\n'''
+          if text.count(old) != 1:
+              raise SystemExit(f'array compare anchor count={text.count(old)}')
+          text = text.replace(old, new, 1)
+          p.write_text(text)
+          Path('.github/workflows/fix-stage-interface-smallvector.yml').unlink()
+      - name: Validate patch
+        run: |
+          git diff --check
+          test ! -e .github/workflows/fix-stage-interface-smallvector.yml
+          grep -q 'output.array.assign(type.array.begin(), type.array.end())' src/shader/reflect.cpp
+          grep -q 'std::equal(input_type.array.begin(), input_type.array.end()' src/shader/reflect.cpp
+      - name: Commit fix
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'fix: normalize SPIRV-Cross interface array shapes'
+          git push origin HEAD:${{ github.head_ref }}
