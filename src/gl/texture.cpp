@@ -1655,9 +1655,9 @@ void APIENTRY glTexParameteri(GLenum target, GLenum pname, GLint param) {
     if (id == 0) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
     TexState& st = g_textures[id];
     if (pname == GL_TEXTURE_BASE_LEVEL) {
-        // Non-zero BASE_LEVEL needs a rebased native texture view for explicit
-        // LOD operations; retain the existing level-zero-only contract here.
-        if (param != 0) PUSH_ERROR(GL_INVALID_VALUE);
+        // Preserve the pre-existing level-zero-only frontend behavior here.
+        // Correct non-zero BASE_LEVEL lowering needs a rebased native texture
+        // view and is intentionally outside this Minecraft MAX_LEVEL fix.
         return;
     }
     if (pname == GL_TEXTURE_MAX_LEVEL) {
