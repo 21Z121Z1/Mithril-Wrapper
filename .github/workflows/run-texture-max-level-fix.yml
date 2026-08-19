@@ -1,0 +1,53 @@
+name: run-texture-max-level-fix-once
+
+on:
+  push:
+    branches: [fix/minecraft26-directmetal-runtime-closure-20260819]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/minecraft26-directmetal-runtime-closure-20260819
+          fetch-depth: 0
+      - name: Execute reviewed max-level implementation
+        shell: python
+        run: |
+          from pathlib import Path
+          import textwrap
+          helper = Path('.github/workflows/fix-texture-max-level.yml')
+          source = helper.read_text()
+          start_marker = '      - name: Implement GL_TEXTURE_MAX_LEVEL end to end\n        shell: python\n        run: |\n'
+          end_marker = '      - name: Validate source shape\n'
+          start = source.index(start_marker) + len(start_marker)
+          end = source.index(end_marker, start)
+          body = textwrap.dedent(source[start:end])
+          exec(compile(body, str(helper), 'exec'), {'__name__': '__main__'})
+          for path in [
+              '.github/workflows/fix-texture-max-level.yml',
+              '.github/workflows/run-texture-max-level-fix.yml',
+          ]:
+              p = Path(path)
+              if p.exists(): p.unlink()
+      - name: Validate final product tree
+        run: |
+          git diff --check
+          test ! -e .github/workflows/fix-texture-max-level.yml
+          test ! -e .github/workflows/run-texture-max-level-fix.yml
+          grep -q 'GLint max_level = 1000' src/gl/internal.h
+          grep -q 'AccessibleMipLevels' src/metal/engine.mm
+          ! grep -q 'using resident base-level sampler' src/metal/engine.mm
+          grep -q 'texture_level_window_smoke' cmake/MithrilSmokeTests.cmake
+          cc -std=c11 -Wall -Wextra -Werror -fsyntax-only tests/texture_level_window_smoke.c
+      - name: Commit root-cause product fix
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'fix: honor texture max level in DirectMetal completeness'
+          git push origin HEAD:fix/minecraft26-directmetal-runtime-closure-20260819
