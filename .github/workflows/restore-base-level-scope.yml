@@ -1,0 +1,49 @@
+name: restore-base-level-scope-once
+
+on:
+  pull_request:
+    branches: [integration/directmetal-next]
+
+permissions:
+  contents: write
+
+jobs:
+  restore:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'fix/minecraft26-directmetal-runtime-closure-20260819'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          fetch-depth: 0
+      - name: Keep BASE_LEVEL outside this MAX_LEVEL closure
+        shell: python
+        run: |
+          from pathlib import Path
+          p = Path('src/gl/texture.cpp')
+          text = p.read_text()
+          old = '''    if (pname == GL_TEXTURE_BASE_LEVEL) {\n        // Non-zero BASE_LEVEL needs a rebased native texture view for explicit\n        // LOD operations; retain the existing level-zero-only contract here.\n        if (param != 0) PUSH_ERROR(GL_INVALID_VALUE);\n        return;\n    }\n'''
+          new = '''    if (pname == GL_TEXTURE_BASE_LEVEL) {\n        // Preserve the pre-existing level-zero-only frontend behavior here.\n        // Correct non-zero BASE_LEVEL lowering needs a rebased native texture\n        // view and is intentionally outside this Minecraft MAX_LEVEL fix.\n        return;\n    }\n'''
+          if text.count(old) != 1:
+              raise SystemExit(f'integer BASE_LEVEL anchor count={text.count(old)}')
+          text = text.replace(old, new, 1)
+          old = '''    if (pname == GL_TEXTURE_BASE_LEVEL || pname == GL_TEXTURE_MAX_LEVEL) {\n        if (param < 0.0f || param > static_cast<GLfloat>(INT32_MAX)) {\n            PUSH_ERROR(GL_INVALID_VALUE);\n            return;\n        }\n        const GLint level = static_cast<GLint>(param);\n        if (static_cast<GLfloat>(level) != param) {\n            PUSH_ERROR(GL_INVALID_VALUE);\n            return;\n        }\n        glTexParameteri(target, pname, level);\n        return;\n    }\n'''
+          new = '''    if (pname == GL_TEXTURE_BASE_LEVEL) {\n        // Preserve the pre-existing level-zero-only frontend behavior; see the\n        // integer entry point above.\n        return;\n    }\n    if (pname == GL_TEXTURE_MAX_LEVEL) {\n        if (param < 0.0f || param > static_cast<GLfloat>(INT32_MAX)) {\n            PUSH_ERROR(GL_INVALID_VALUE);\n            return;\n        }\n        const GLint level = static_cast<GLint>(param);\n        if (static_cast<GLfloat>(level) != param) {\n            PUSH_ERROR(GL_INVALID_VALUE);\n            return;\n        }\n        glTexParameteri(target, pname, level);\n        return;\n    }\n'''
+          if text.count(old) != 1:
+              raise SystemExit(f'float BASE/MAX anchor count={text.count(old)}')
+          p.write_text(text)
+          Path('.github/workflows/restore-base-level-scope.yml').unlink()
+      - name: Validate product-only diff
+        run: |
+          git diff --check
+          test ! -e .github/workflows/restore-base-level-scope.yml
+          grep -q 'intentionally outside this Minecraft MAX_LEVEL fix' src/gl/texture.cpp
+          grep -q 'st.max_level = param' src/gl/texture.cpp
+          cc -std=c11 -Wall -Wextra -Werror -fsyntax-only tests/texture_level_window_smoke.c
+      - name: Commit scope correction
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'fix: keep texture base level outside max-level closure'
+          git push origin HEAD:${{ github.head_ref }}
