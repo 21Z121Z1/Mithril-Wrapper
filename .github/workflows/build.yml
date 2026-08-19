@@ -30,14 +30,16 @@ jobs:
         shell: python
         run: |
           from pathlib import Path
-          import textwrap
           helper = Path('.github/workflows/fix-texture-max-level.yml')
           source = helper.read_text()
           start_marker = '      - name: Implement GL_TEXTURE_MAX_LEVEL end to end\n        shell: python\n        run: |\n'
           end_marker = '      - name: Validate source shape\n'
           start = source.index(start_marker) + len(start_marker)
           end = source.index(end_marker, start)
-          body = textwrap.dedent(source[start:end])
+          block = source[start:end]
+          lines = block.splitlines()
+          body = '\n'.join(line[10:] if line.startswith('          ') else line
+                           for line in lines)
           exec(compile(body, str(helper), 'exec'), {'__name__': '__main__'})
           for path in [
               '.github/workflows/fix-texture-max-level.yml',
