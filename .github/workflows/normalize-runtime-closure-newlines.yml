@@ -1,0 +1,88 @@
+name: normalize-runtime-closure-newlines-once
+
+on:
+  pull_request:
+    branches: [integration/directmetal-next]
+
+permissions:
+  contents: write
+
+jobs:
+  normalize:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'fix/minecraft26-directmetal-runtime-closure-20260819'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          fetch-depth: 0
+      - name: Normalize generated source blocks
+        shell: python
+        run: |
+          from pathlib import Path
+
+          SENTINEL = '__MITHRIL_LITERAL_BACKSLASH_N__'
+
+          def normalize_fragment(fragment):
+              # Materializer raw strings encoded intended source newlines as \n.
+              # Preserve doubled \\n sequences that were intended to become C/C++
+              # string-literal escapes, normalize structural \n to real newlines,
+              # then restore the string-literal escape as a single backslash-n.
+              fragment = fragment.replace('\\\\n', SENTINEL)
+              fragment = fragment.replace('\\n', '\n')
+              return fragment.replace(SENTINEL, '\\n')
+
+          def normalize_span(path, start_marker, end_marker):
+              p = Path(path)
+              text = p.read_text()
+              start = text.index(start_marker)
+              end = text.index(end_marker, start)
+              fixed = normalize_fragment(text[start:end])
+              p.write_text(text[:start] + fixed + text[end:])
+
+          normalize_span(
+              'src/shader/glsl.cpp',
+              r'\n\n#if defined(MITHRIL_IOS)\n',
+              '\n bool is_opaque_glsl_type')
+          normalize_span(
+              'src/shader/reflect.cpp',
+              r'\n\nbool AlignStageInterfaceLocations(\n',
+              '\nbool ReflectProgram')
+
+          p = Path('tests/minecraft26_link_smoke.c')
+          p.write_text(normalize_fragment(p.read_text()))
+
+          normalize_span(
+              'tests/amethyst_egl_smoke.mm',
+              "        /* Minecraft's first real frame is composed into an application FBO",
+              '        layer.drawableSize = CGSizeMake(56, 96);')
+
+          Path('.github/workflows/normalize-runtime-closure-newlines.yml').unlink()
+
+      - name: Validate normalized source
+        run: |
+          git diff --check
+          test ! -e .github/workflows/normalize-runtime-closure-newlines.yml
+          python3 - <<'PY'
+          from pathlib import Path
+          checks = {
+              'src/shader/glsl.cpp': [r'\n\n#if defined(MITHRIL_IOS)\n'],
+              'src/shader/reflect.cpp': [r'\n\nbool AlignStageInterfaceLocations(\n'],
+              'tests/amethyst_egl_smoke.mm': [r'FBO\n         * whose extent'],
+          }
+          for path, needles in checks.items():
+              text = Path(path).read_text()
+              for needle in needles:
+                  if needle in text:
+                      raise SystemExit(f'malformed literal newline remains in {path}: {needle}')
+          test = Path('tests/minecraft26_link_smoke.c').read_text()
+          if test.count('\n') < 80:
+              raise SystemExit('minecraft26_link_smoke.c was not expanded into source lines')
+          PY
+      - name: Commit normalization
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'fix: normalize generated runtime closure source'
+          git push origin HEAD:${{ github.head_ref }}
