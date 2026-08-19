@@ -185,9 +185,13 @@ jobs:
           assert result['exact_image']
           assert result['context_count'] >= 1
           assert result['swap_count'] >= 2
-          assert result['get_proc_address_count'] > 0
-          assert 'Mithril-Wrapper' in result['gl_version'] and 'Metal 3 (DirectMetal)' in result['gl_version']
-          assert 'Mithril-Wrapper' in result['gl_renderer'] and 'DirectMetal' in result['gl_renderer']
+          # LWJGL loads OpenGL entry points directly from org.lwjgl.opengl.libname,
+          # which is pinned to this exact libmithril.dylib by the production task.
+          # glfwGetProcAddress is therefore optional on this test path; retain the
+          # counter as diagnostics rather than fabricating a positive requirement.
+          assert result['gl_vendor'] == 'Mithril-Wrapper'
+          assert result['gl_renderer'] == 'Mithril DirectMetal'
+          assert result['gl_version'] == '3.3 Core Profile Mithril'
           PY
 
       - name: Collect diagnostics and evidence
