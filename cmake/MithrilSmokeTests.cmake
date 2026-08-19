@@ -59,6 +59,7 @@ set(_mithril_directmetal_smokes
     directmetal_multidraw_lowering_smoke
     directmetal_program_prewarm_smoke
     directmetal_async_pso_smoke
+    minecraft26_link_smoke
     lazy_buffer_storage_smoke)
 
 if(APPLE AND TARGET mithril_direct)

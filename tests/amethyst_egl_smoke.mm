@@ -41,6 +41,16 @@
 #define GL_COLOR_BUFFER_BIT 0x00004000
 #define GL_SCISSOR_TEST 0x0C11
 #define GL_NO_ERROR 0
+#define GL_TEXTURE_2D 0x0DE1
+#define GL_RGBA 0x1908
+#define GL_RGBA8 0x8058
+#define GL_UNSIGNED_BYTE 0x1401
+#define GL_FRAMEBUFFER 0x8D40
+#define GL_READ_FRAMEBUFFER 0x8CA8
+#define GL_DRAW_FRAMEBUFFER 0x8CA9
+#define GL_FRAMEBUFFER_COMPLETE 0x8CD5
+#define GL_COLOR_ATTACHMENT0 0x8CE0
+#define GL_NEAREST 0x2600
 
 typedef void* (*fn_eglGetDisplay)(intptr_t);
 typedef int (*fn_eglInitialize)(void*, int*, int*);
@@ -68,6 +78,14 @@ typedef void (*fn_glDisable)(unsigned int);
 typedef void (*fn_glScissor)(int, int, int, int);
 typedef void (*fn_glFinish)(void);
 typedef unsigned int (*fn_glGetError)(void);
+typedef void (*fn_glGenTextures)(int, unsigned int*);
+typedef void (*fn_glBindTexture)(unsigned int, unsigned int);
+typedef void (*fn_glTexImage2D)(unsigned int, int, int, int, int, int, unsigned int, unsigned int, const void*);
+typedef void (*fn_glGenFramebuffers)(int, unsigned int*);
+typedef void (*fn_glBindFramebuffer)(unsigned int, unsigned int);
+typedef void (*fn_glFramebufferTexture2D)(unsigned int, unsigned int, unsigned int, unsigned int, int);
+typedef unsigned int (*fn_glCheckFramebufferStatus)(unsigned int);
+typedef void (*fn_glBlitFramebuffer)(int, int, int, int, int, int, int, int, unsigned int, unsigned int);
 typedef bool (*fn_mithrilTestArmNextPresentedPixel)(uint32_t, uint32_t);
 typedef bool (*fn_mithrilTestReadPresentedPixels)(unsigned char[4],
                                                    unsigned char[4],
@@ -153,6 +171,14 @@ int main(void) {
         LOAD(fn_glScissor, glScissor);
         LOAD(fn_glFinish, glFinish);
         LOAD(fn_glGetError, glGetError);
+        LOAD(fn_glGenTextures, glGenTextures);
+        LOAD(fn_glBindTexture, glBindTexture);
+        LOAD(fn_glTexImage2D, glTexImage2D);
+        LOAD(fn_glGenFramebuffers, glGenFramebuffers);
+        LOAD(fn_glBindFramebuffer, glBindFramebuffer);
+        LOAD(fn_glFramebufferTexture2D, glFramebufferTexture2D);
+        LOAD(fn_glCheckFramebufferStatus, glCheckFramebufferStatus);
+        LOAD(fn_glBlitFramebuffer, glBlitFramebuffer);
         LOAD(fn_mithrilTestArmNextPresentedPixel,
              mithrilTestArmNextPresentedPixel);
         LOAD(fn_mithrilTestReadPresentedPixels,
@@ -167,7 +193,10 @@ int main(void) {
                   eglDestroyContext && eglReleaseThread && eglTerminate &&
                   eglGetError && glClearColor && glClear && glEnable &&
                   glDisable && glScissor && glFinish &&
-                  glGetError && mithrilTestArmNextPresentedPixel &&
+                  glGetError && glGenTextures && glBindTexture &&
+                  glTexImage2D && glGenFramebuffers && glBindFramebuffer &&
+                  glFramebufferTexture2D && glCheckFramebufferStatus &&
+                  glBlitFramebuffer && mithrilTestArmNextPresentedPixel &&
                   mithrilTestReadPresentedPixels,
               "Amethyst EGL/GL symbol contract resolves");
         if (failures) return failures;
@@ -301,7 +330,7 @@ int main(void) {
         CHECK(glGetError() == GL_NO_ERROR && eglGetError() == EGL_SUCCESS,
               "first present completes without GL/EGL errors");
 
-        layer.drawableSize = CGSizeMake(56, 96);
+        /* Minecraft's first real frame is composed into an application FBO\n         * whose extent can exceed the EGL bootstrap target. Blitting that FBO\n         * to framebuffer 0 must resize the CAMetalLayer/default Metal target\n         * before the destination is resolved. */\n        unsigned int blitTexture = 0;\n        unsigned int blitFbo = 0;\n        glGenTextures(1, &blitTexture);\n        glBindTexture(GL_TEXTURE_2D, blitTexture);\n        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 96, 64, 0, GL_RGBA,\n                     GL_UNSIGNED_BYTE, nullptr);\n        glGenFramebuffers(1, &blitFbo);\n        glBindFramebuffer(GL_FRAMEBUFFER, blitFbo);\n        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,\n                               GL_TEXTURE_2D, blitTexture, 0);\n        CHECK(glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE,\n              "window-sized source FBO is complete");\n        glClearColor(0.2f, 0.4f, 0.6f, 1.0f);\n        glClear(GL_COLOR_BUFFER_BIT);\n        glBindFramebuffer(GL_READ_FRAMEBUFFER, blitFbo);\n        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);\n        glBlitFramebuffer(0, 0, 96, 64, 0, 0, 96, 64,\n                          GL_COLOR_BUFFER_BIT, GL_NEAREST);\n        CHECK((int)layer.drawableSize.width == 96 &&\n                  (int)layer.drawableSize.height == 64,\n              "window-sized FBO blit resizes CAMetalLayer default target");\n        CHECK(mithrilTestArmNextPresentedPixel(48, 32),\n              "post-blit resized drawable capture is armed");\n        CHECK(eglSwapBuffers(display, surface) == EGL_TRUE,\n              "resized default target presents after application-FBO blit");\n        glFinish();\n        CHECK(layer.capturedDrawable.texture.width == 96 &&\n                  layer.capturedDrawable.texture.height == 64,\n              "post-blit presented drawable adopts 96x64 source extent");\n        CHECK(glGetError() == GL_NO_ERROR && eglGetError() == EGL_SUCCESS,\n              "window-sized FBO blit/present leaves GL/EGL errors clean");\n\n        layer.drawableSize = CGSizeMake(56, 96);
         glClearColor(0.5f, 0.25f, 0.125f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
         CHECK(mithrilTestArmNextPresentedPixel(28, 48),

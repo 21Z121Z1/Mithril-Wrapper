@@ -566,6 +566,13 @@ void APIENTRY glLinkProgram(GLuint program) {
         ML_LOG_WARN("glLinkProgram(%u): %s", program, p->info_log.c_str());
         return;
     }
+    if (!sh::AlignStageInterfaceLocations(
+            p->vertex_spirv, p->fragment_spirv,
+            vertex_source, fragment_source, reflection_error)) {
+        p->info_log = "link failed: " + reflection_error;
+        ML_LOG_WARN("glLinkProgram(%u): %s", program, p->info_log.c_str());
+        return;
+    }
     if (!sh::ReflectProgram(*p, reflection_error)) {
         p->info_log = "link failed: " + reflection_error;
         ML_LOG_WARN("glLinkProgram(%u): %s", program, p->info_log.c_str());

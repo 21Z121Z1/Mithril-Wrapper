@@ -2952,13 +2952,24 @@ bool Draw(backend::DrawParams params) {
                          (unsigned long long)bind.texture, bind.binding);
             return false;
         }
-        if (!HasCompleteMipChain(texture->second, bind.sampler)) {
-            ML_LOG_ERROR("metal: incomplete mip chain for sampled texture %llu",
-                         (unsigned long long)bind.texture);
-            return false;
+        backend::TexSamplerInfo sampler_info = bind.sampler;
+        if (!HasCompleteMipChain(texture->second, sampler_info)) {
+            // Minecraft can bind a level-0 image while its resident mip chain
+            // is still being populated during resource reload. Keep the
+            // persistent GL sampler state untouched and narrow only this
+            // native draw snapshot to the resident base level.
+            static bool logged_mip_fallback = false;
+            if (!logged_mip_fallback) {
+                ML_LOG_WARN("metal: incomplete mip chain; using resident base-level sampler");
+                logged_mip_fallback = true;
+            }
+            sampler_info.mip = backend::TexMipFilter::None;
+            sampler_info.min_lod = 0.0f;
+            sampler_info.max_lod = 0.0f;
+            sampler_info.lod_bias = 0.0f;
         }
         id<MTLSamplerState> sampler = GetOrCreateSampler(
-            bind.sampler, texture->second.levels);
+            sampler_info, texture->second.levels);
         if (!sampler) {
             ML_LOG_ERROR("metal: sampler state is not representable for binding %u",
                          bind.binding);
@@ -3361,9 +3372,22 @@ void BlitFramebuffer(uint64_t src_id, uint64_t dst_id,
     if (engine.frame_dirty && !SubmitInternal(false, false, nullptr)) return;
 
     ResolvedTarget source;
+    if (!ResolveTarget(src_id, &source)) return;
+
+    // Minecraft renders into an application FBO before blitting to the EGL
+    // default framebuffer. The CAMetalLayer may still carry its bootstrap
+    // extent at the first real window-sized blit, so synchronize the default
+    // target before resolving the destination texture.
+    if (!dst_id && source.width > 0 && source.height > 0 &&
+        (source.width != engine.width || source.height != engine.height)) {
+        if (engine.layer)
+            engine.layer.drawableSize = CGSizeMake(source.width, source.height);
+        if (!SetTargetSize((uint32_t)source.width, (uint32_t)source.height))
+            return;
+    }
+
     ResolvedTarget destination;
-    if (!ResolveTarget(src_id, &source) || !ResolveTarget(dst_id, &destination))
-        return;
+    if (!ResolveTarget(dst_id, &destination)) return;
     if (source.samples != 1 || destination.samples != 1) {
         WarnUnsupported("multisample framebuffer blit");
         return;
