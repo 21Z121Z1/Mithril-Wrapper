@@ -41,6 +41,15 @@ jobs:
           body = '\n'.join(line[10:] if line.startswith('          ') else line
                            for line in lines)
           exec(compile(body, str(helper), 'exec'), {'__name__': '__main__'})
+
+          engine = Path('src/metal/engine.mm')
+          text = engine.read_text()
+          old = '''    if (!dst_id && source.width > 0 && source.height > 0 &&\n        (source.width != engine.width || source.height != engine.height)) {\n'''
+          new = '''    if (!dst_id && source.width > 0 && source.height > 0 &&\n        (source.width > engine.width || source.height > engine.height)) {\n'''
+          if text.count(old) != 1:
+              raise SystemExit(f'default-target growth anchor count={text.count(old)}')
+          engine.write_text(text.replace(old, new, 1))
+
           for path in [
               '.github/workflows/fix-texture-max-level.yml',
               '.github/workflows/run-texture-max-level-fix.yml',
@@ -57,6 +66,7 @@ jobs:
           grep -q 'GLint max_level = 1000' src/gl/internal.h
           grep -q 'AccessibleMipLevels' src/metal/engine.mm
           ! grep -q 'using resident base-level sampler' src/metal/engine.mm
+          grep -q 'source.width > engine.width || source.height > engine.height' src/metal/engine.mm
           grep -q 'texture_level_window_smoke' cmake/MithrilSmokeTests.cmake
           cc -std=c11 -Wall -Wextra -Werror -fsyntax-only tests/texture_level_window_smoke.c
       - name: Commit only durable product changes
@@ -64,7 +74,7 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add -A
-          git commit -m 'fix: honor texture max level in DirectMetal completeness'
+          git commit -m 'fix: honor texture level window and default target growth'
           git push origin HEAD:${{ github.head_ref }}
 
   directmetal-macos:
