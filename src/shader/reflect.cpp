@@ -460,13 +460,18 @@ bool AlignStageInterfaceLocations(
                 !vertex.has_decoration(resource.id, spv::DecorationLocation))
                 continue;
             const auto& type = vertex.get_type(resource.type_id);
-            outputs[resource.name] = {
-                resource.id,
-                vertex.get_decoration(resource.id, spv::DecorationLocation),
-                InterfaceLocationSpan(type),
-                type.basetype, type.vecsize, type.columns, type.array,
-                explicit_vertex.count(resource.name) != 0,
-            };
+            InterfaceOutput output;
+            output.id = resource.id;
+            output.location = vertex.get_decoration(
+                resource.id, spv::DecorationLocation);
+            output.span = InterfaceLocationSpan(type);
+            output.base = type.basetype;
+            output.vecsize = type.vecsize;
+            output.columns = type.columns;
+            output.array.assign(type.array.begin(), type.array.end());
+            output.explicit_location =
+                explicit_vertex.count(resource.name) != 0;
+            outputs[resource.name] = std::move(output);
         }
 
         for (const auto& resource : fragment_resources.stage_inputs) {
@@ -481,7 +486,9 @@ bool AlignStageInterfaceLocations(
             if (input_type.basetype != linked.base ||
                 input_type.vecsize != linked.vecsize ||
                 input_type.columns != linked.columns ||
-                input_type.array != linked.array ||
+                input_type.array.size() != linked.array.size() ||
+                !std::equal(input_type.array.begin(), input_type.array.end(),
+                            linked.array.begin()) ||
                 InterfaceLocationSpan(input_type) != linked.span) {
                 error = "cross-stage interface type mismatch for " +
                         resource.name;
