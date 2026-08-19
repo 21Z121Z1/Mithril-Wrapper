@@ -169,6 +169,7 @@ struct TexState {
     GLenum mag_filter = GL_LINEAR;
     GLenum wrap_s = GL_REPEAT, wrap_t = GL_REPEAT, wrap_r = GL_REPEAT;
     GLfloat min_lod = -1000.0f, max_lod = 1000.0f, lod_bias = 0.0f;
+    GLint max_level = 1000;               // GL_TEXTURE_MAX_LEVEL
     std::array<GLfloat, 4> border_color{0.f, 0.f, 0.f, 0.f};
     GLenum compare_mode = GL_NONE;
     GLenum compare_func = GL_LEQUAL;

@@ -35,6 +35,7 @@ set(_mithril_directmetal_smokes
     draw_smoke
     texture_smoke
     sampler_smoke
+    texture_level_window_smoke
     sampler_array_smoke
     matrix_uniform_smoke
     uniform_array_smoke

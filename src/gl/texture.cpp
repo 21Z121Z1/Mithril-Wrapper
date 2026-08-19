@@ -1654,9 +1654,15 @@ void APIENTRY glTexParameteri(GLenum target, GLenum pname, GLint param) {
     GLuint id = ActiveBound(target);
     if (id == 0) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
     TexState& st = g_textures[id];
-    if (pname == GL_TEXTURE_BASE_LEVEL || pname == GL_TEXTURE_MAX_LEVEL) {
-        // Image-level selection remains texture state. The CPU mirror already
-        // owns the complete explicit chain; level-window lowering is future.
+    if (pname == GL_TEXTURE_BASE_LEVEL) {
+        // Non-zero BASE_LEVEL needs a rebased native texture view for explicit
+        // LOD operations; retain the existing level-zero-only contract here.
+        if (param != 0) PUSH_ERROR(GL_INVALID_VALUE);
+        return;
+    }
+    if (pname == GL_TEXTURE_MAX_LEVEL) {
+        if (param < 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+        st.max_level = param;
         return;
     }
     GLenum error = GL_NO_ERROR;
@@ -1678,8 +1684,19 @@ void APIENTRY glTexParameterf(GLenum target, GLenum pname, GLfloat param) {
     GLuint id = ActiveBound(target);
     if (!id) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
     TexState& state = g_textures[id];
-    if (pname == GL_TEXTURE_BASE_LEVEL || pname == GL_TEXTURE_MAX_LEVEL)
+    if (pname == GL_TEXTURE_BASE_LEVEL || pname == GL_TEXTURE_MAX_LEVEL) {
+        if (param < 0.0f || param > static_cast<GLfloat>(INT32_MAX)) {
+            PUSH_ERROR(GL_INVALID_VALUE);
+            return;
+        }
+        const GLint level = static_cast<GLint>(param);
+        if (static_cast<GLfloat>(level) != param) {
+            PUSH_ERROR(GL_INVALID_VALUE);
+            return;
+        }
+        glTexParameteri(target, pname, level);
         return;
+    }
     GLenum error = GL_NO_ERROR;
     const bool changed = SetSamplerScalar(state, pname, param, &error);
     if (error != GL_NO_ERROR) { PUSH_ERROR(error); return; }
@@ -1751,7 +1768,10 @@ void APIENTRY glGetTexParameterfv(GLenum target, GLenum pname, GLfloat* params) 
         return;
     }
     if (pname == GL_TEXTURE_BASE_LEVEL) { *params = 0.0f; return; }
-    if (pname == GL_TEXTURE_MAX_LEVEL) { *params = 1000.0f; return; }
+    if (pname == GL_TEXTURE_MAX_LEVEL) {
+        *params = static_cast<GLfloat>(state.max_level);
+        return;
+    }
     GLenum error = GL_NO_ERROR;
     *params = GetSamplerScalar(state, pname, &error);
     if (error != GL_NO_ERROR) PUSH_ERROR(error);

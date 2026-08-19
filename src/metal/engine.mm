@@ -706,18 +706,25 @@ bool TextureShapeMatches(const ResidentTexture& resident,
            resident.is_buffer == image.is_buffer && resident.format == image.format;
 }
 
-bool HasCompleteMipChain(const ResidentTexture& texture,
-                         const backend::TexSamplerInfo& sampler) {
-    if (texture.is_buffer || texture.is_multisample) return true;
-    if (sampler.mip == backend::TexMipFilter::None) return true;
+uint32_t AccessibleMipLevels(const ResidentTexture& texture,
+                             uint32_t max_level) {
+    if (texture.is_buffer || texture.is_multisample) return 1;
     uint32_t largest = std::max(texture.width, texture.height);
     if (texture.is_3d) largest = std::max(largest, texture.depth);
-    uint32_t expected = 1;
-    while (largest > 1) {
+    uint32_t levels = 1;
+    while (largest > 1 && levels <= max_level) {
         largest >>= 1;
-        ++expected;
+        ++levels;
     }
-    return texture.levels >= expected;
+    return levels;
+}
+
+bool HasCompleteMipChain(const ResidentTexture& texture,
+                         const backend::TexSamplerInfo& sampler,
+                         uint32_t max_level) {
+    if (texture.is_buffer || texture.is_multisample) return true;
+    if (sampler.mip == backend::TexMipFilter::None) return true;
+    return texture.levels >= AccessibleMipLevels(texture, max_level);
 }
 
 id<MTLTexture> CreateTexture(const backend::TexUpload& image,
@@ -2952,24 +2959,18 @@ bool Draw(backend::DrawParams params) {
                          (unsigned long long)bind.texture, bind.binding);
             return false;
         }
-        backend::TexSamplerInfo sampler_info = bind.sampler;
-        if (!HasCompleteMipChain(texture->second, sampler_info)) {
-            // Minecraft can bind a level-0 image while its resident mip chain
-            // is still being populated during resource reload. Keep the
-            // persistent GL sampler state untouched and narrow only this
-            // native draw snapshot to the resident base level.
-            static bool logged_mip_fallback = false;
-            if (!logged_mip_fallback) {
-                ML_LOG_WARN("metal: incomplete mip chain; using resident base-level sampler");
-                logged_mip_fallback = true;
-            }
-            sampler_info.mip = backend::TexMipFilter::None;
-            sampler_info.min_lod = 0.0f;
-            sampler_info.max_lod = 0.0f;
-            sampler_info.lod_bias = 0.0f;
+        const backend::TexSamplerInfo& sampler_info = bind.sampler;
+        if (!HasCompleteMipChain(texture->second, sampler_info,
+                                 bind.max_level)) {
+            ML_LOG_ERROR("metal: incomplete mip chain for sampled texture %llu",
+                         (unsigned long long)bind.texture);
+            return false;
         }
+        const NSUInteger accessible_levels = std::min<NSUInteger>(
+            texture->second.levels, AccessibleMipLevels(texture->second,
+                                                        bind.max_level));
         id<MTLSamplerState> sampler = GetOrCreateSampler(
-            sampler_info, texture->second.levels);
+            sampler_info, accessible_levels);
         if (!sampler) {
             ML_LOG_ERROR("metal: sampler state is not representable for binding %u",
                          bind.binding);
@@ -3379,7 +3380,7 @@ void BlitFramebuffer(uint64_t src_id, uint64_t dst_id,
     // extent at the first real window-sized blit, so synchronize the default
     // target before resolving the destination texture.
     if (!dst_id && source.width > 0 && source.height > 0 &&
-        (source.width != engine.width || source.height != engine.height)) {
+        (source.width > engine.width || source.height > engine.height)) {
         if (engine.layer)
             engine.layer.drawableSize = CGSizeMake(source.width, source.height);
         if (!SetTargetSize((uint32_t)source.width, (uint32_t)source.height))
