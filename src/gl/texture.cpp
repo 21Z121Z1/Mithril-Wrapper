@@ -1684,7 +1684,12 @@ void APIENTRY glTexParameterf(GLenum target, GLenum pname, GLfloat param) {
     GLuint id = ActiveBound(target);
     if (!id) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
     TexState& state = g_textures[id];
-    if (pname == GL_TEXTURE_BASE_LEVEL || pname == GL_TEXTURE_MAX_LEVEL) {
+    if (pname == GL_TEXTURE_BASE_LEVEL) {
+        // Preserve the pre-existing level-zero-only frontend behavior; correct
+        // non-zero BASE_LEVEL lowering remains outside this Minecraft fix.
+        return;
+    }
+    if (pname == GL_TEXTURE_MAX_LEVEL) {
         if (param < 0.0f || param > static_cast<GLfloat>(INT32_MAX)) {
             PUSH_ERROR(GL_INVALID_VALUE);
             return;
