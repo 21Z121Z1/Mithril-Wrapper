@@ -1,0 +1,50 @@
+name: materialize-minecraft26-runtime-closure-pr
+
+on:
+  pull_request:
+    branches: [integration/directmetal-next]
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'fix/minecraft26-directmetal-runtime-closure-20260819'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          fetch-depth: 0
+      - name: Execute reviewed materializer body
+        shell: python
+        run: |
+          from pathlib import Path
+          import textwrap
+          helper = Path('.github/workflows/materialize-minecraft26-runtime-closure.yml')
+          source = helper.read_text()
+          start_marker = '      - name: Apply reviewed runtime closure\n        shell: python\n        run: |\n'
+          end_marker = '      - name: Validate patch shape\n'
+          start = source.index(start_marker) + len(start_marker)
+          end = source.index(end_marker, start)
+          body = source[start:end]
+          # YAML block content is indented by ten spaces.
+          body = textwrap.dedent(body)
+          exec(compile(body, str(helper), 'exec'), {'__name__': '__main__'})
+          Path('.github/workflows/materialize-minecraft26-runtime-closure-pr.yml').unlink()
+      - name: Validate final tree
+        run: |
+          git diff --check
+          test ! -e .github/workflows/materialize-minecraft26-runtime-closure.yml
+          test ! -e .github/workflows/materialize-minecraft26-runtime-closure-pr.yml
+          grep -q 'AlignStageInterfaceLocations' src/shader/reflect.cpp
+          grep -q 'using resident base-level sampler' src/metal/engine.mm
+          grep -q 'minecraft26_link_smoke' cmake/MithrilSmokeTests.cmake
+          grep -q 'window-sized FBO blit resizes CAMetalLayer default target' tests/amethyst_egl_smoke.mm
+      - name: Commit product changes
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'fix: close Minecraft 26.2 DirectMetal runtime gaps'
+          git push origin HEAD:${{ github.head_ref }}
