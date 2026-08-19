@@ -24,10 +24,13 @@
 extern "C" void mithril_e2e_capture_before_present(int width, int height, void* mithril_handle);
 
 namespace {
+constexpr int kGlfwImeInputMode = 0x00033007;
+
 struct ContextState {
     EGLDisplay display = EGL_NO_DISPLAY;
     EGLContext context = EGL_NO_CONTEXT;
     EGLSurface surface = EGL_NO_SURFACE;
+    int ime_mode = GLFW_FALSE;
 };
 
 struct MithrilApi {
@@ -94,6 +97,36 @@ template <typename T>
 T real_glfw(const char* name) {
     void* h = delegate_handle();
     return h ? reinterpret_cast<T>(dlsym(h, name)) : nullptr;
+}
+
+bool sync_layer_drawable_size(GLFWwindow* window, CAMetalLayer* known_layer,
+                              int* width_out = nullptr, int* height_out = nullptr) {
+    using FbSizeFn = void (*)(GLFWwindow*, int*, int*);
+    using CocoaFn = id (*)(GLFWwindow*);
+    FbSizeFn fbsize = real_glfw<FbSizeFn>("glfwGetFramebufferSize");
+    CocoaFn getCocoa = real_glfw<CocoaFn>("glfwGetCocoaWindow");
+    if (!window || !fbsize || !getCocoa) return false;
+
+    int width = 0;
+    int height = 0;
+    fbsize(window, &width, &height);
+    if (width <= 0 || height <= 0) return false;
+
+    NSWindow* cocoa = (NSWindow*)getCocoa(window);
+    NSView* view = cocoa.contentView;
+    if (!cocoa || !view) return false;
+    CAMetalLayer* layer = known_layer;
+    if (!layer) {
+        if (![view.layer isKindOfClass:CAMetalLayer.class]) return false;
+        layer = (CAMetalLayer*)view.layer;
+    }
+
+    layer.frame = view.bounds;
+    layer.contentsScale = cocoa.backingScaleFactor;
+    layer.drawableSize = CGSizeMake(width, height);
+    if (width_out) *width_out = width;
+    if (height_out) *height_out = height;
+    return true;
 }
 
 MithrilApi& mithril() {
@@ -267,6 +300,15 @@ GLFWwindow* glfwCreateWindow(int width, int height, const char* title,
     CAMetalLayer* layer = [CAMetalLayer layer];
     layer.frame = view.bounds;
     view.layer = layer;
+    int framebuffer_width = 0;
+    int framebuffer_height = 0;
+    if (!sync_layer_drawable_size(window, layer, &framebuffer_width,
+                                  &framebuffer_height)) {
+        auto destroy = real_glfw<void (*)(GLFWwindow*)>("glfwDestroyWindow");
+        if (destroy) destroy(window);
+        emit_event("bridge_error", "could not synchronize CAMetalLayer drawableSize");
+        return nullptr;
+    }
 
     auto& m = mithril();
     EGLDisplay display = m.getDisplay(EGL_DEFAULT_DISPLAY);
@@ -304,10 +346,14 @@ GLFWwindow* glfwCreateWindow(int width, int height, const char* title,
     }
     {
         std::lock_guard<std::mutex> lock(g_mutex);
-        g_contexts[window] = ContextState{display, context, surface};
+        g_contexts[window] = ContextState{display, context, surface, GLFW_FALSE};
     }
     g_context_count.fetch_add(1);
-    emit_event("bridge_context_created", "Cocoa CAMetalLayer -> Mithril EGL context ready");
+    char size_message[96];
+    std::snprintf(size_message, sizeof(size_message),
+                  "Cocoa CAMetalLayer -> Mithril EGL context ready at %dx%d",
+                  framebuffer_width, framebuffer_height);
+    emit_event("bridge_context_created", size_message);
     write_state("context_created");
     (void)share;
     return window;
@@ -349,6 +395,36 @@ GLFWwindow* glfwGetCurrentContext(void) {
     return g_current;
 }
 
+int glfwGetInputMode(GLFWwindow* window, int mode) {
+    if (mode == kGlfwImeInputMode) {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        auto it = g_contexts.find(window);
+        return it == g_contexts.end() ? GLFW_FALSE : it->second.ime_mode;
+    }
+    using Fn = int (*)(GLFWwindow*, int);
+    Fn fn = real_glfw<Fn>("glfwGetInputMode");
+    return fn ? fn(window, mode) : 0;
+}
+
+void glfwSetInputMode(GLFWwindow* window, int mode, int value) {
+    if (mode == kGlfwImeInputMode) {
+        {
+            std::lock_guard<std::mutex> lock(g_mutex);
+            auto it = g_contexts.find(window);
+            if (it != g_contexts.end()) {
+                it->second.ime_mode = value == GLFW_FALSE ? GLFW_FALSE : GLFW_TRUE;
+            }
+        }
+        emit_event("bridge_glfw_ime_mode",
+                   value == GLFW_FALSE ? "GLFW_IME disabled by compatibility shim"
+                                       : "GLFW_IME enabled by compatibility shim");
+        return;
+    }
+    using Fn = void (*)(GLFWwindow*, int, int);
+    Fn fn = real_glfw<Fn>("glfwSetInputMode");
+    if (fn) fn(window, mode, value);
+}
+
 void glfwSwapInterval(int interval) {
     if (!g_current) return;
     ContextState state{};
@@ -369,10 +445,12 @@ void glfwSwapBuffers(GLFWwindow* window) {
         if (it == g_contexts.end()) return;
         state = it->second;
     }
-    auto [width, height] = std::pair<int, int>{0, 0};
-    using FbSizeFn = void (*)(GLFWwindow*, int*, int*);
-    FbSizeFn fbsize = real_glfw<FbSizeFn>("glfwGetFramebufferSize");
-    if (fbsize) fbsize(window, &width, &height);
+    int width = 0;
+    int height = 0;
+    if (!sync_layer_drawable_size(window, nil, &width, &height)) {
+        emit_event("bridge_error", "could not synchronize CAMetalLayer before swap");
+        return;
+    }
     mithril_e2e_capture_before_present(width, height, mithril().handle);
     if (!mithril().swapBuffers(state.display, state.surface)) {
         emit_event("bridge_error", "Mithril eglSwapBuffers failed");
