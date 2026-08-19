@@ -308,6 +308,10 @@ struct SampledTextureBinding {
     uint32_t binding = 0;
     uint64_t texture = 0;
     TexSamplerInfo sampler;
+    // Texture image-level accessibility is texture state, not sampler-object
+    // state. Carry MAX_LEVEL beside the resolved sampler snapshot so native
+    // backends can evaluate completeness and clamp accessible mip levels.
+    uint32_t max_level = 1000;
     bool vertex_stage = false;
     bool fragment_stage = false;
 };

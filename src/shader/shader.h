@@ -152,6 +152,16 @@ bool ApplyStageLocationBindings(
     const std::unordered_map<std::string, GLuint>& requested,
     uint32_t max_locations, std::string& error);
 
+// Reconcile the linked vertex-output / fragment-input interface after the two
+// stages have been compiled independently. Automatic locations match by GLSL
+// name; explicit layout(location=) declarations remain authoritative.
+bool AlignStageInterfaceLocations(
+    std::vector<uint32_t>& vertex_spirv,
+    std::vector<uint32_t>& fragment_spirv,
+    const std::string& vertex_source,
+    const std::string& fragment_source,
+    std::string& error);
+
 // Parse only source-level uniform-block names and optional layout(binding=N)
 // values. GLSL compilation uses a separate backend-neutral internal namespace.
 std::vector<UniformBlockDeclaration> DiscoverUniformBlocks(

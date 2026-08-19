@@ -633,14 +633,20 @@ bool ResolveDrawSharedState(SharedDrawState* shared) {
             if (vertex_binding != UINT32_MAX &&
                 vertex_binding == fragment_binding) {
                 shared->sampled_textures.push_back({
-                    vertex_binding, tex, sampler, true, true});
+                    vertex_binding, tex, sampler,
+                    static_cast<uint32_t>(texture_state.max_level),
+                    true, true});
             } else {
                 if (vertex_binding != UINT32_MAX)
                     shared->sampled_textures.push_back({
-                        vertex_binding, tex, sampler, true, false});
+                        vertex_binding, tex, sampler,
+                        static_cast<uint32_t>(texture_state.max_level),
+                        true, false});
                 if (fragment_binding != UINT32_MAX)
                     shared->sampled_textures.push_back({
-                        fragment_binding, tex, sampler, false, true});
+                        fragment_binding, tex, sampler,
+                        static_cast<uint32_t>(texture_state.max_level),
+                        false, true});
             }
         }
     }

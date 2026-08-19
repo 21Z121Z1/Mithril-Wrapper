@@ -706,18 +706,25 @@ bool TextureShapeMatches(const ResidentTexture& resident,
            resident.is_buffer == image.is_buffer && resident.format == image.format;
 }
 
-bool HasCompleteMipChain(const ResidentTexture& texture,
-                         const backend::TexSamplerInfo& sampler) {
-    if (texture.is_buffer || texture.is_multisample) return true;
-    if (sampler.mip == backend::TexMipFilter::None) return true;
+uint32_t AccessibleMipLevels(const ResidentTexture& texture,
+                             uint32_t max_level) {
+    if (texture.is_buffer || texture.is_multisample) return 1;
     uint32_t largest = std::max(texture.width, texture.height);
     if (texture.is_3d) largest = std::max(largest, texture.depth);
-    uint32_t expected = 1;
-    while (largest > 1) {
+    uint32_t levels = 1;
+    while (largest > 1 && levels <= max_level) {
         largest >>= 1;
-        ++expected;
+        ++levels;
     }
-    return texture.levels >= expected;
+    return levels;
+}
+
+bool HasCompleteMipChain(const ResidentTexture& texture,
+                         const backend::TexSamplerInfo& sampler,
+                         uint32_t max_level) {
+    if (texture.is_buffer || texture.is_multisample) return true;
+    if (sampler.mip == backend::TexMipFilter::None) return true;
+    return texture.levels >= AccessibleMipLevels(texture, max_level);
 }
 
 id<MTLTexture> CreateTexture(const backend::TexUpload& image,
@@ -2952,13 +2959,18 @@ bool Draw(backend::DrawParams params) {
                          (unsigned long long)bind.texture, bind.binding);
             return false;
         }
-        if (!HasCompleteMipChain(texture->second, bind.sampler)) {
+        const backend::TexSamplerInfo& sampler_info = bind.sampler;
+        if (!HasCompleteMipChain(texture->second, sampler_info,
+                                 bind.max_level)) {
             ML_LOG_ERROR("metal: incomplete mip chain for sampled texture %llu",
                          (unsigned long long)bind.texture);
             return false;
         }
+        const NSUInteger accessible_levels = std::min<NSUInteger>(
+            texture->second.levels, AccessibleMipLevels(texture->second,
+                                                        bind.max_level));
         id<MTLSamplerState> sampler = GetOrCreateSampler(
-            bind.sampler, texture->second.levels);
+            sampler_info, accessible_levels);
         if (!sampler) {
             ML_LOG_ERROR("metal: sampler state is not representable for binding %u",
                          bind.binding);
@@ -3361,9 +3373,22 @@ void BlitFramebuffer(uint64_t src_id, uint64_t dst_id,
     if (engine.frame_dirty && !SubmitInternal(false, false, nullptr)) return;
 
     ResolvedTarget source;
+    if (!ResolveTarget(src_id, &source)) return;
+
+    // Minecraft renders into an application FBO before blitting to the EGL
+    // default framebuffer. The CAMetalLayer may still carry its bootstrap
+    // extent at the first real window-sized blit, so synchronize the default
+    // target before resolving the destination texture.
+    if (!dst_id && source.width > 0 && source.height > 0 &&
+        (source.width > engine.width || source.height > engine.height)) {
+        if (engine.layer)
+            engine.layer.drawableSize = CGSizeMake(source.width, source.height);
+        if (!SetTargetSize((uint32_t)source.width, (uint32_t)source.height))
+            return;
+    }
+
     ResolvedTarget destination;
-    if (!ResolveTarget(src_id, &source) || !ResolveTarget(dst_id, &destination))
-        return;
+    if (!ResolveTarget(dst_id, &destination)) return;
     if (source.samples != 1 || destination.samples != 1) {
         WarnUnsupported("multisample framebuffer blit");
         return;

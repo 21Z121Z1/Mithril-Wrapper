@@ -35,6 +35,7 @@ set(_mithril_directmetal_smokes
     draw_smoke
     texture_smoke
     sampler_smoke
+    texture_level_window_smoke
     sampler_array_smoke
     matrix_uniform_smoke
     uniform_array_smoke
@@ -59,6 +60,7 @@ set(_mithril_directmetal_smokes
     directmetal_multidraw_lowering_smoke
     directmetal_program_prewarm_smoke
     directmetal_async_pso_smoke
+    minecraft26_link_smoke
     lazy_buffer_storage_smoke)
 
 if(APPLE AND TARGET mithril_direct)
