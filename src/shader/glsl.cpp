@@ -115,7 +115,90 @@ void rewrite_desktop_builtins(std::string& src) {
     out.append(it, src.cend());
     src.swap(out);
 }
-\n\n#if defined(MITHRIL_IOS)\n// Minecraft 26.2's projection helper writes two disjoint swizzles. The\n// iPhoneOS arm64 build of the currently pinned glslang can lose this l-value\n// shape; lower only the exact helper sequence observed on device.\nvoid rewrite_minecraft_projection_swizzles(std::string& src) {\n    static const std::string xy =\n        "projection.xy = vec2(projection.x + projection.w, projection.y + projection.w);";\n    static const std::string zw = "projection.zw = position.zw;";\n    const size_t first = src.find(xy);\n    const size_t second = src.find(\n        zw, first == std::string::npos ? 0 : first + xy.size());\n    if (first == std::string::npos || second == std::string::npos) return;\n    const size_t end = second + zw.size();\n    src.replace(\n        first, end - first,\n        "projection = vec4((position.x + position.w) * 0.5, "\n        "(position.y + position.w) * 0.5, position.z, position.w);");\n}\n\nvoid rewrite_minecraft_ios_vector_compatibility(std::string& src) {\n    auto replace_all = [&](const std::string& from, const std::string& to) {\n        size_t offset = 0;\n        while ((offset = src.find(from, offset)) != std::string::npos) {\n            src.replace(offset, from.size(), to);\n            offset += to.size();\n        }\n    };\n\n    replace_all("float distXZ = length(pos.xz);",\n                "float distXZ = length(vec2(pos.x, pos.z));");\n    replace_all(\n        "return texture(lightMap, clamp((uv / 256.0) + 0.5 / 16.0, "\n        "vec2(0.5 / 16.0), vec2(15.5 / 16.0)));",\n        "vec2 uvf = vec2(uv);\\n"\n        "    return texture(lightMap, clamp((uvf / 256.0) + 0.5 / 16.0, "\n        "vec2(0.5 / 16.0), vec2(15.5 / 16.0))); ");\n    replace_all(\n        "return vec4(mix(inColor.rgb, fogColor.rgb, fogValue * fogColor.a), inColor.a);",\n        "return vec4(mix(vec3(inColor.x, inColor.y, inColor.z), "\n        "vec3(fogColor.x, fogColor.y, fogColor.z), fogValue * fogColor.a), inColor.a);");\n    replace_all(\n        "return vec4(color.rgb * lightAccum, color.a);",\n        "return vec4(vec3(color.x, color.y, color.z) * lightAccum, color.a);");\n    replace_all(\n        "color.rgb = mix(overlayColor.rgb, color.rgb, overlayColor.a);",\n        "color = vec4(mix(vec3(overlayColor.x, overlayColor.y, overlayColor.z), "\n        "vec3(color.x, color.y, color.z), overlayColor.a), color.a);");\n    replace_all(\n        "fragColor = vec4(color.rgb * fade, color.a);",\n        "fragColor = vec4(vec3(color.x, color.y, color.z) * fade, color.a);");\n    replace_all(\n        "fragColor = vec4(ColorModulator.rgb * vertexColor.rgb, ColorModulator.a);",\n        "fragColor = vec4(vec3(ColorModulator.x, ColorModulator.y, ColorModulator.z) * "\n        "vec3(vertexColor.x, vertexColor.y, vertexColor.z), ColorModulator.a);");\n    replace_all(\n        "vec4 texColor = texture(Sampler0, texCoord0).rrrr;",\n        "vec4 texColor = vec4(texture(Sampler0, texCoord0).r);");\n    replace_all(\n        "vec3 ndc1 = linePosStart.xyz / linePosStart.w;",\n        "vec3 ndc1 = vec3(linePosStart.x, linePosStart.y, linePosStart.z) / linePosStart.w;");\n    replace_all(\n        "vec3 ndc2 = linePosEnd.xyz / linePosEnd.w;",\n        "vec3 ndc2 = vec3(linePosEnd.x, linePosEnd.y, linePosEnd.z) / linePosEnd.w;");\n    replace_all(\n        "vec2 lineScreenDirection = normalize((ndc2.xy - ndc1.xy) * ScreenSize);",\n        "vec2 lineScreenDirection = normalize((vec2(ndc2.x, ndc2.y) - "\n        "vec2(ndc1.x, ndc1.y)) * ScreenSize);");\n    replace_all(\n        "texCoord0 = (TextureMat * vec4(UV0, 0.0, 1.0)).xy;",\n        "vec4 texCoord0Transformed = TextureMat * vec4(UV0, 0.0, 1.0);\\n"\n        "    texCoord0 = vec2(texCoord0Transformed.x, texCoord0Transformed.y);");\n    replace_all(\n        "vec3 color = textureProj(Sampler0, texProj0).rgb * COLORS[0];",\n        "vec4 portalBase = textureProj(Sampler0, texProj0);\\n"\n        "    vec3 color = vec3(portalBase.x, portalBase.y, portalBase.z) * COLORS[0];");\n    replace_all(\n        "color += textureProj(Sampler1, texProj0 * end_portal_layer(float(i + 1))).rgb * COLORS[i];",\n        "vec4 portalLayer = textureProj(Sampler1, texProj0 * end_portal_layer(float(i + 1)));\\n"\n        "        color += vec3(portalLayer.x, portalLayer.y, portalLayer.z) * COLORS[i];");\n}\n#endif\n
+
+
+#if defined(MITHRIL_IOS)
+// Minecraft 26.2's projection helper writes two disjoint swizzles. The
+// iPhoneOS arm64 build of the currently pinned glslang can lose this l-value
+// shape; lower only the exact helper sequence observed on device.
+void rewrite_minecraft_projection_swizzles(std::string& src) {
+    static const std::string xy =
+        "projection.xy = vec2(projection.x + projection.w, projection.y + projection.w);";
+    static const std::string zw = "projection.zw = position.zw;";
+    const size_t first = src.find(xy);
+    const size_t second = src.find(
+        zw, first == std::string::npos ? 0 : first + xy.size());
+    if (first == std::string::npos || second == std::string::npos) return;
+    const size_t end = second + zw.size();
+    src.replace(
+        first, end - first,
+        "projection = vec4((position.x + position.w) * 0.5, "
+        "(position.y + position.w) * 0.5, position.z, position.w);");
+}
+
+void rewrite_minecraft_ios_vector_compatibility(std::string& src) {
+    auto replace_all = [&](const std::string& from, const std::string& to) {
+        size_t offset = 0;
+        while ((offset = src.find(from, offset)) != std::string::npos) {
+            src.replace(offset, from.size(), to);
+            offset += to.size();
+        }
+    };
+
+    replace_all("float distXZ = length(pos.xz);",
+                "float distXZ = length(vec2(pos.x, pos.z));");
+    replace_all(
+        "return texture(lightMap, clamp((uv / 256.0) + 0.5 / 16.0, "
+        "vec2(0.5 / 16.0), vec2(15.5 / 16.0)));",
+        "vec2 uvf = vec2(uv);\n"
+        "    return texture(lightMap, clamp((uvf / 256.0) + 0.5 / 16.0, "
+        "vec2(0.5 / 16.0), vec2(15.5 / 16.0))); ");
+    replace_all(
+        "return vec4(mix(inColor.rgb, fogColor.rgb, fogValue * fogColor.a), inColor.a);",
+        "return vec4(mix(vec3(inColor.x, inColor.y, inColor.z), "
+        "vec3(fogColor.x, fogColor.y, fogColor.z), fogValue * fogColor.a), inColor.a);");
+    replace_all(
+        "return vec4(color.rgb * lightAccum, color.a);",
+        "return vec4(vec3(color.x, color.y, color.z) * lightAccum, color.a);");
+    replace_all(
+        "color.rgb = mix(overlayColor.rgb, color.rgb, overlayColor.a);",
+        "color = vec4(mix(vec3(overlayColor.x, overlayColor.y, overlayColor.z), "
+        "vec3(color.x, color.y, color.z), overlayColor.a), color.a);");
+    replace_all(
+        "fragColor = vec4(color.rgb * fade, color.a);",
+        "fragColor = vec4(vec3(color.x, color.y, color.z) * fade, color.a);");
+    replace_all(
+        "fragColor = vec4(ColorModulator.rgb * vertexColor.rgb, ColorModulator.a);",
+        "fragColor = vec4(vec3(ColorModulator.x, ColorModulator.y, ColorModulator.z) * "
+        "vec3(vertexColor.x, vertexColor.y, vertexColor.z), ColorModulator.a);");
+    replace_all(
+        "vec4 texColor = texture(Sampler0, texCoord0).rrrr;",
+        "vec4 texColor = vec4(texture(Sampler0, texCoord0).r);");
+    replace_all(
+        "vec3 ndc1 = linePosStart.xyz / linePosStart.w;",
+        "vec3 ndc1 = vec3(linePosStart.x, linePosStart.y, linePosStart.z) / linePosStart.w;");
+    replace_all(
+        "vec3 ndc2 = linePosEnd.xyz / linePosEnd.w;",
+        "vec3 ndc2 = vec3(linePosEnd.x, linePosEnd.y, linePosEnd.z) / linePosEnd.w;");
+    replace_all(
+        "vec2 lineScreenDirection = normalize((ndc2.xy - ndc1.xy) * ScreenSize);",
+        "vec2 lineScreenDirection = normalize((vec2(ndc2.x, ndc2.y) - "
+        "vec2(ndc1.x, ndc1.y)) * ScreenSize);");
+    replace_all(
+        "texCoord0 = (TextureMat * vec4(UV0, 0.0, 1.0)).xy;",
+        "vec4 texCoord0Transformed = TextureMat * vec4(UV0, 0.0, 1.0);\n"
+        "    texCoord0 = vec2(texCoord0Transformed.x, texCoord0Transformed.y);");
+    replace_all(
+        "vec3 color = textureProj(Sampler0, texProj0).rgb * COLORS[0];",
+        "vec4 portalBase = textureProj(Sampler0, texProj0);\n"
+        "    vec3 color = vec3(portalBase.x, portalBase.y, portalBase.z) * COLORS[0];");
+    replace_all(
+        "color += textureProj(Sampler1, texProj0 * end_portal_layer(float(i + 1))).rgb * COLORS[i];",
+        "vec4 portalLayer = textureProj(Sampler1, texProj0 * end_portal_layer(float(i + 1)));\n"
+        "        color += vec3(portalLayer.x, portalLayer.y, portalLayer.z) * COLORS[i];");
+}
+#endif
+
 bool is_opaque_glsl_type(const std::string& name) {
     if (name.find("sampler") != std::string::npos) return true;
     if (name.find("image") != std::string::npos) return true;

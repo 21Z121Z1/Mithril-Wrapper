@@ -330,7 +330,43 @@ int main(void) {
         CHECK(glGetError() == GL_NO_ERROR && eglGetError() == EGL_SUCCESS,
               "first present completes without GL/EGL errors");
 
-        /* Minecraft's first real frame is composed into an application FBO\n         * whose extent can exceed the EGL bootstrap target. Blitting that FBO\n         * to framebuffer 0 must resize the CAMetalLayer/default Metal target\n         * before the destination is resolved. */\n        unsigned int blitTexture = 0;\n        unsigned int blitFbo = 0;\n        glGenTextures(1, &blitTexture);\n        glBindTexture(GL_TEXTURE_2D, blitTexture);\n        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 96, 64, 0, GL_RGBA,\n                     GL_UNSIGNED_BYTE, nullptr);\n        glGenFramebuffers(1, &blitFbo);\n        glBindFramebuffer(GL_FRAMEBUFFER, blitFbo);\n        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,\n                               GL_TEXTURE_2D, blitTexture, 0);\n        CHECK(glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE,\n              "window-sized source FBO is complete");\n        glClearColor(0.2f, 0.4f, 0.6f, 1.0f);\n        glClear(GL_COLOR_BUFFER_BIT);\n        glBindFramebuffer(GL_READ_FRAMEBUFFER, blitFbo);\n        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);\n        glBlitFramebuffer(0, 0, 96, 64, 0, 0, 96, 64,\n                          GL_COLOR_BUFFER_BIT, GL_NEAREST);\n        CHECK((int)layer.drawableSize.width == 96 &&\n                  (int)layer.drawableSize.height == 64,\n              "window-sized FBO blit resizes CAMetalLayer default target");\n        CHECK(mithrilTestArmNextPresentedPixel(48, 32),\n              "post-blit resized drawable capture is armed");\n        CHECK(eglSwapBuffers(display, surface) == EGL_TRUE,\n              "resized default target presents after application-FBO blit");\n        glFinish();\n        CHECK(layer.capturedDrawable.texture.width == 96 &&\n                  layer.capturedDrawable.texture.height == 64,\n              "post-blit presented drawable adopts 96x64 source extent");\n        CHECK(glGetError() == GL_NO_ERROR && eglGetError() == EGL_SUCCESS,\n              "window-sized FBO blit/present leaves GL/EGL errors clean");\n\n        layer.drawableSize = CGSizeMake(56, 96);
+        /* Minecraft's first real frame is composed into an application FBO
+         * whose extent can exceed the EGL bootstrap target. Blitting that FBO
+         * to framebuffer 0 must resize the CAMetalLayer/default Metal target
+         * before the destination is resolved. */
+        unsigned int blitTexture = 0;
+        unsigned int blitFbo = 0;
+        glGenTextures(1, &blitTexture);
+        glBindTexture(GL_TEXTURE_2D, blitTexture);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 96, 64, 0, GL_RGBA,
+                     GL_UNSIGNED_BYTE, nullptr);
+        glGenFramebuffers(1, &blitFbo);
+        glBindFramebuffer(GL_FRAMEBUFFER, blitFbo);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                               GL_TEXTURE_2D, blitTexture, 0);
+        CHECK(glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE,
+              "window-sized source FBO is complete");
+        glClearColor(0.2f, 0.4f, 0.6f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, blitFbo);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+        glBlitFramebuffer(0, 0, 96, 64, 0, 0, 96, 64,
+                          GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        CHECK((int)layer.drawableSize.width == 96 &&
+                  (int)layer.drawableSize.height == 64,
+              "window-sized FBO blit resizes CAMetalLayer default target");
+        CHECK(mithrilTestArmNextPresentedPixel(48, 32),
+              "post-blit resized drawable capture is armed");
+        CHECK(eglSwapBuffers(display, surface) == EGL_TRUE,
+              "resized default target presents after application-FBO blit");
+        glFinish();
+        CHECK(layer.capturedDrawable.texture.width == 96 &&
+                  layer.capturedDrawable.texture.height == 64,
+              "post-blit presented drawable adopts 96x64 source extent");
+        CHECK(glGetError() == GL_NO_ERROR && eglGetError() == EGL_SUCCESS,
+              "window-sized FBO blit/present leaves GL/EGL errors clean");
+
+        layer.drawableSize = CGSizeMake(56, 96);
         glClearColor(0.5f, 0.25f, 0.125f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
         CHECK(mithrilTestArmNextPresentedPixel(28, 48),

@@ -419,7 +419,110 @@ bool ApplyStageLocationBindings(
         return false;
     }
 }
-\n\nbool AlignStageInterfaceLocations(\n    std::vector<uint32_t>& vertex_spirv,\n    std::vector<uint32_t>& fragment_spirv,\n    const std::string& vertex_source,\n    const std::string& fragment_source,\n    std::string& error) {\n    if (vertex_spirv.empty() || fragment_spirv.empty()) {\n        error = "missing stage SPIR-V for interface matching";\n        return false;\n    }\n\n    try {\n        spirv_cross::Compiler vertex(vertex_spirv);\n        spirv_cross::Compiler fragment(fragment_spirv);\n        const auto vertex_resources = vertex.get_shader_resources();\n        const auto fragment_resources = fragment.get_shader_resources();\n        const auto explicit_vertex =\n            ExplicitLocationNames(vertex_source, "out");\n        const auto explicit_fragment =\n            ExplicitLocationNames(fragment_source, "in");\n\n        struct InterfaceOutput {\n            uint32_t id = 0;\n            uint32_t location = 0;\n            uint32_t span = 1;\n            spirv_cross::SPIRType::BaseType base =\n                spirv_cross::SPIRType::Unknown;\n            uint32_t vecsize = 1;\n            uint32_t columns = 1;\n            std::vector<uint32_t> array;\n            bool explicit_location = false;\n        };\n\n        std::unordered_map<std::string, InterfaceOutput> outputs;\n        for (const auto& resource : vertex_resources.stage_outputs) {\n            if (resource.name.empty() ||\n                !vertex.has_decoration(resource.id, spv::DecorationLocation))\n                continue;\n            const auto& type = vertex.get_type(resource.type_id);\n            outputs[resource.name] = {\n                resource.id,\n                vertex.get_decoration(resource.id, spv::DecorationLocation),\n                InterfaceLocationSpan(type),\n                type.basetype, type.vecsize, type.columns, type.array,\n                explicit_vertex.count(resource.name) != 0,\n            };\n        }\n\n        for (const auto& resource : fragment_resources.stage_inputs) {\n            if (resource.name.empty() ||\n                !fragment.has_decoration(resource.id, spv::DecorationLocation))\n                continue;\n            auto output = outputs.find(resource.name);\n            if (output == outputs.end()) continue;\n\n            const auto& input_type = fragment.get_type(resource.type_id);\n            const auto& linked = output->second;\n            if (input_type.basetype != linked.base ||\n                input_type.vecsize != linked.vecsize ||\n                input_type.columns != linked.columns ||\n                input_type.array != linked.array ||\n                InterfaceLocationSpan(input_type) != linked.span) {\n                error = "cross-stage interface type mismatch for " +\n                        resource.name;\n                return false;\n            }\n\n            const uint32_t input_location = fragment.get_decoration(\n                resource.id, spv::DecorationLocation);\n            const bool input_explicit =\n                explicit_fragment.count(resource.name) != 0;\n\n            // If both sides explicitly selected locations, location matching is\n            // authoritative; do not rewrite either stage merely because names\n            // happen to match. Otherwise make the automatic side follow the\n            // explicit side, or (when both are automatic) make FS follow VS.\n            if (linked.explicit_location && input_explicit) continue;\n            if (input_location == linked.location) continue;\n\n            if (input_explicit && !linked.explicit_location) {\n                if (!RewriteLocation(vertex_spirv, linked.id, input_location)) {\n                    error = "vertex interface has no mutable Location decoration: " +\n                            resource.name;\n                    return false;\n                }\n            } else {\n                if (!RewriteLocation(fragment_spirv, resource.id,\n                                     linked.location)) {\n                    error = "fragment interface has no mutable Location decoration: " +\n                            resource.name;\n                    return false;\n                }\n            }\n        }\n        return true;\n    } catch (const std::exception& exception) {\n        error = std::string("cross-stage interface remap failed: ") +\n                exception.what();\n        return false;\n    }\n}\n
+
+
+bool AlignStageInterfaceLocations(
+    std::vector<uint32_t>& vertex_spirv,
+    std::vector<uint32_t>& fragment_spirv,
+    const std::string& vertex_source,
+    const std::string& fragment_source,
+    std::string& error) {
+    if (vertex_spirv.empty() || fragment_spirv.empty()) {
+        error = "missing stage SPIR-V for interface matching";
+        return false;
+    }
+
+    try {
+        spirv_cross::Compiler vertex(vertex_spirv);
+        spirv_cross::Compiler fragment(fragment_spirv);
+        const auto vertex_resources = vertex.get_shader_resources();
+        const auto fragment_resources = fragment.get_shader_resources();
+        const auto explicit_vertex =
+            ExplicitLocationNames(vertex_source, "out");
+        const auto explicit_fragment =
+            ExplicitLocationNames(fragment_source, "in");
+
+        struct InterfaceOutput {
+            uint32_t id = 0;
+            uint32_t location = 0;
+            uint32_t span = 1;
+            spirv_cross::SPIRType::BaseType base =
+                spirv_cross::SPIRType::Unknown;
+            uint32_t vecsize = 1;
+            uint32_t columns = 1;
+            std::vector<uint32_t> array;
+            bool explicit_location = false;
+        };
+
+        std::unordered_map<std::string, InterfaceOutput> outputs;
+        for (const auto& resource : vertex_resources.stage_outputs) {
+            if (resource.name.empty() ||
+                !vertex.has_decoration(resource.id, spv::DecorationLocation))
+                continue;
+            const auto& type = vertex.get_type(resource.type_id);
+            outputs[resource.name] = {
+                resource.id,
+                vertex.get_decoration(resource.id, spv::DecorationLocation),
+                InterfaceLocationSpan(type),
+                type.basetype, type.vecsize, type.columns, type.array,
+                explicit_vertex.count(resource.name) != 0,
+            };
+        }
+
+        for (const auto& resource : fragment_resources.stage_inputs) {
+            if (resource.name.empty() ||
+                !fragment.has_decoration(resource.id, spv::DecorationLocation))
+                continue;
+            auto output = outputs.find(resource.name);
+            if (output == outputs.end()) continue;
+
+            const auto& input_type = fragment.get_type(resource.type_id);
+            const auto& linked = output->second;
+            if (input_type.basetype != linked.base ||
+                input_type.vecsize != linked.vecsize ||
+                input_type.columns != linked.columns ||
+                input_type.array != linked.array ||
+                InterfaceLocationSpan(input_type) != linked.span) {
+                error = "cross-stage interface type mismatch for " +
+                        resource.name;
+                return false;
+            }
+
+            const uint32_t input_location = fragment.get_decoration(
+                resource.id, spv::DecorationLocation);
+            const bool input_explicit =
+                explicit_fragment.count(resource.name) != 0;
+
+            // If both sides explicitly selected locations, location matching is
+            // authoritative; do not rewrite either stage merely because names
+            // happen to match. Otherwise make the automatic side follow the
+            // explicit side, or (when both are automatic) make FS follow VS.
+            if (linked.explicit_location && input_explicit) continue;
+            if (input_location == linked.location) continue;
+
+            if (input_explicit && !linked.explicit_location) {
+                if (!RewriteLocation(vertex_spirv, linked.id, input_location)) {
+                    error = "vertex interface has no mutable Location decoration: " +
+                            resource.name;
+                    return false;
+                }
+            } else {
+                if (!RewriteLocation(fragment_spirv, resource.id,
+                                     linked.location)) {
+                    error = "fragment interface has no mutable Location decoration: " +
+                            resource.name;
+                    return false;
+                }
+            }
+        }
+        return true;
+    } catch (const std::exception& exception) {
+        error = std::string("cross-stage interface remap failed: ") +
+                exception.what();
+        return false;
+    }
+}
+
 bool ReflectProgram(Program& prog, std::string& error) {
     prog.uniforms.clear();
     prog.uniform_by_name.clear();
