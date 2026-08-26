@@ -22,13 +22,13 @@ jobs:
         include:
           - variant: metal
             backend: metal
-            null_storage_layout: false
+            clear_fbo_registration: false
           - variant: vulkan
             backend: vulkan
-            null_storage_layout: false
-          - variant: vulkan-null-storage-layout
+            clear_fbo_registration: false
+          - variant: vulkan-clear-fbo-registration
             backend: vulkan
-            null_storage_layout: true
+            clear_fbo_registration: true
     runs-on: macos-26
     timeout-minutes: 30
     env:
@@ -66,29 +66,22 @@ jobs:
           PY
           git diff --check
 
-      - name: Put null-data glTexImage storage into a legal sampled layout
-        if: ${{ matrix.null_storage_layout }}
+      - name: Infer user-FBO texture IDs for direct clear render passes
+        if: ${{ matrix.clear_fbo_registration }}
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
-          p = Path('Mithril-Wrapper-cpp/MG_Impl/Texture.cpp')
+          p = Path('Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/CommandStream.cpp')
           s = p.read_text()
-
-          old2d = '''        backend_texture_upload(t->id, level, 0, 0, uploadZ, width, height, 1,\n                               format, type, uploadPixels, &unpack,\n                               /*is_full_upload=*/1);\n    }\n}\n\nvoid glTexImage3D'''
-          new2d = '''        backend_texture_upload(t->id, level, 0, 0, uploadZ, width, height, 1,\n                               format, type, uploadPixels, &unpack,\n                               /*is_full_upload=*/1);\n    } else {\n        const VkFormat sampledFormat = backend_vk_format_for_gl((GLenum)internalFormat);\n        backend_transition_texture_layout(\n            t->id, mithril::vk::sampled_layout_for_format(sampledFormat));\n    }\n}\n\nvoid glTexImage3D'''
-          assert s.count(old2d) == 1, s.count(old2d)
-          s = s.replace(old2d, new2d, 1)
-
-          old3d = '''        backend_texture_upload(t->id, level, 0, 0, 0, width, height, depth,\n                               format, type, uploadPixels, &unpack,\n                               /*is_full_upload=*/1);\n    }\n}\n\n/*\n * glTexStorage2D'''
-          new3d = '''        backend_texture_upload(t->id, level, 0, 0, 0, width, height, depth,\n                               format, type, uploadPixels, &unpack,\n                               /*is_full_upload=*/1);\n    } else {\n        const VkFormat sampledFormat = backend_vk_format_for_gl((GLenum)internalFormat);\n        backend_transition_texture_layout(\n            t->id, mithril::vk::sampled_layout_for_format(sampledFormat));\n    }\n}\n\n/*\n * glTexStorage2D'''
-          assert s.count(old3d) == 1, s.count(old3d)
-          s = s.replace(old3d, new3d, 1)
-          p.write_text(s)
+          old = '''    // Record per-frame attachments and their formats (the render-pass cache\n    // key). Swapchain-backed color uses the swapchain format; user-FBO color\n    // attachments resolve via the registered tex_ids -> TextureEntry.format.\n'''
+          new = '''    // Direct clear paths (glClear / glClearBuffer*) call begin_render_pass\n    // without first calling set_fbo_attachment_tex_ids(). Infer the live\n    // user-FBO texture names here so the SAME layout-barrier and post-pass\n    // bookkeeping path used by draw calls also applies to clear-only passes.\n    // Without this, a texture can be cleared while currentLayout remains\n    // UNDEFINED, then be sampled with a read-only descriptor in the next pass.\n    if (e.fboColorTexCount == 0 && e.fboDepthTexId == 0 &&\n        mithril::g_state && mithril::g_state->currentDrawFBO != 0) {\n        mithril::Framebuffer* liveFbo =\n            mithril::state_get_framebuffer(mithril::g_state->currentDrawFBO);\n        if (liveFbo) {\n            const int inferred = e.colorCount > 8 ? 8 : e.colorCount;\n            for (int i = 0; i < inferred; ++i) {\n                e.fboColorTexIds[i] = liveFbo->colors[i].texture;\n            }\n            e.fboColorTexCount = inferred;\n            e.fboDepthTexId = liveFbo->depth.texture;\n            static unsigned clearInferLog = 0;\n            if (clearInferLog < 16) {\n                MITHRIL_LOG_WARN("vk",\n                    "CLEAR_FBO_INFER fbo=%u colors=%d c0=%u depth=%u",\n                    mithril::g_state->currentDrawFBO, inferred,\n                    inferred > 0 ? e.fboColorTexIds[0] : 0, e.fboDepthTexId);\n                ++clearInferLog;\n            }\n        }\n    }\n\n    // Record per-frame attachments and their formats (the render-pass cache\n    // key). Swapchain-backed color uses the swapchain format; user-FBO color\n    // attachments resolve via the registered tex_ids -> TextureEntry.format.\n'''
+          assert s.count(old) == 1, s.count(old)
+          p.write_text(s.replace(old, new, 1))
           PY
           git diff --check
-          git diff -- Mithril-Wrapper-cpp/MG_Impl/Texture.cpp
+          git diff -- Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/CommandStream.cpp
 
       - name: Initialize evidence
         shell: bash
@@ -179,9 +172,9 @@ jobs:
           {
             echo "variant=${{ matrix.variant }}"
             echo "backend=${{ matrix.backend }}"
-            echo "null_storage_layout=${{ matrix.null_storage_layout }}"
+            echo "clear_fbo_registration=${{ matrix.clear_fbo_registration }}"
             echo '=== render/backend warnings ==='
-            grep -E 'GL_ERROR_ORIGIN|sampler layout/resource check|primitive restart|VK_ERROR|MTL|pipeline|descriptor|ubo arena|FALLBACK shaders|Link failed|GL ERROR' \
+            grep -E 'CLEAR_FBO_INFER|GL_ERROR_ORIGIN|sampler layout/resource check|primitive restart|VK_ERROR|MTL|pipeline|descriptor|ubo arena|FALLBACK shaders|Link failed|GL ERROR' \
               "$E2E_ROOT/gradle-minecraft.log" | tail -n 2500 || true
           } | tee "$E2E_ROOT/backend-warning-summary.log"
 
