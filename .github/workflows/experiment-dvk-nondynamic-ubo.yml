@@ -1,3 +1,4 @@
+# Visual A/B: keep std140 packing + arena bytes identical; vary only dynamic descriptor offsets.
 name: DirectVulkan non-dynamic UBO A/B
 
 on:
