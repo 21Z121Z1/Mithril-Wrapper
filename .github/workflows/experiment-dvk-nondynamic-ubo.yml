@@ -1,0 +1,142 @@
+name: DirectVulkan non-dynamic UBO A/B
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'experiment/dvk-nondynamic-ubo-20260826'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dvk-nondynamic-ubo-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  minecraft:
+    name: Real Minecraft / DirectVulkan / non-dynamic UBO
+    runs-on: macos-26
+    timeout-minutes: 30
+    env:
+      E2E_ROOT: ${{ github.workspace }}/build/minecraft-vulkan-nondynamic-ubo-artifacts
+      GRADLE_OPTS: -Dorg.gradle.caching=true
+      MITHRIL_BACKEND: vulkan
+      MITHRIL_DEBUG: '1'
+      MTL_DEBUG_LAYER: '1'
+      MTL_SHADER_VALIDATION: '0'
+
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Force arena-backed UBOs to non-dynamic descriptors
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/DescriptorSet.cpp')
+          s = p.read_text()
+          old = 'if (!wantDynamic.empty() && wantDynamicDescriptors <= dynamicCap) {'
+          new = 'if (false && !wantDynamic.empty() && wantDynamicDescriptors <= dynamicCap) {'
+          assert s.count(old) == 1, s.count(old)
+          s = s.replace(old, new, 1)
+          p.write_text(s)
+          PY
+          git diff --check
+          grep -n -A12 -B4 'false && !wantDynamic.empty' Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/DescriptorSet.cpp
+
+      - name: Initialize evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 ci/minecraft-e2e/evidence.py --root "$E2E_ROOT" init
+
+      - name: Setup Java 25
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - name: Setup Gradle 9.4.1
+        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb
+        with:
+          gradle-version: '9.4.1'
+          cache-read-only: true
+
+      - name: Install native dependencies
+        shell: bash
+        run: brew install glfw vulkan-loader molten-vk ninja
+
+      - name: Build patched Mithril dylib
+        id: mithril
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-minecraft-vulkan-nondynamic-native -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_FLAGS="-Wno-error" \
+            -DCMAKE_CXX_FLAGS="-Wno-error"
+          cmake --build build-minecraft-vulkan-nondynamic-native --target mithril --parallel
+          dylib=$(find build-minecraft-vulkan-nondynamic-native -type f -name libmithril.dylib -print | head -1)
+          test -s "$dylib"
+          dylib="$(cd "$(dirname "$dylib")" && pwd)/$(basename "$dylib")"
+          echo "dylib=$dylib" >> "$GITHUB_OUTPUT"
+          shasum -a 256 "$dylib" | tee "$E2E_ROOT/built-mithril.sha256"
+
+      - name: Build GLFW bridge
+        id: bridge
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build-minecraft-vulkan-nondynamic-native/bridge
+          GLFW_PREFIX=$(brew --prefix glfw)
+          GLFW_REAL="$GLFW_PREFIX/lib/libglfw.3.dylib"
+          test -f "$GLFW_REAL" || GLFW_REAL="$GLFW_PREFIX/lib/libglfw.dylib"
+          BRIDGE="$PWD/build-minecraft-vulkan-nondynamic-native/bridge/libglfw_mithril.dylib"
+          clang++ -std=c++20 -fobjc-arc -dynamiclib -Wall -Wextra -Werror \
+            ci/minecraft-e2e/native/glfw_mithril_bridge.mm \
+            ci/minecraft-e2e/native/prepresent_capture.mm \
+            -I"$GLFW_PREFIX/include" -IMithril-Wrapper-cpp/include \
+            -framework AppKit -framework QuartzCore -framework Foundation \
+            -Wl,-reexport_library,"$GLFW_REAL" \
+            -o "$BRIDGE"
+          echo "bridge=$BRIDGE" >> "$GITHUB_OUTPUT"
+          echo "glfw_real=$GLFW_REAL" >> "$GITHUB_OUTPUT"
+
+      - name: Run real Minecraft 26.2
+        shell: bash
+        run: |
+          set -o pipefail
+          cp "$E2E_ROOT/failure.json" "$E2E_ROOT/failure-pre-minecraft.json" 2>/dev/null || true
+          rm -f "$E2E_ROOT/failure.json"
+          gradle -p .github/ci/minecraft-e2e --build-cache --stacktrace \
+            -PmithrilBackend=vulkan \
+            -PmithrilDylib="${{ steps.mithril.outputs.dylib }}" \
+            -PglfwBridge="${{ steps.bridge.outputs.bridge }}" \
+            -PglfwDelegate="${{ steps.bridge.outputs.glfw_real }}" \
+            -PevidenceRoot="$E2E_ROOT" \
+            runProductionClientGameTest 2>&1 | tee "$E2E_ROOT/gradle-minecraft.log"
+
+      - name: Collect diagnostics
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: |
+          ci/minecraft-e2e/collect-diagnostics.sh \
+            "$E2E_ROOT" \
+            "$PWD/.github/ci/minecraft-e2e/build/run/clientGameTest"
+
+      - name: Upload visual A/B artifact
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: mithril-vulkan-nondynamic-ubo-${{ github.sha }}-${{ github.run_attempt }}
+          retention-days: 7
+          compression-level: 6
+          if-no-files-found: warn
+          path: build/minecraft-vulkan-nondynamic-ubo-artifacts/**
