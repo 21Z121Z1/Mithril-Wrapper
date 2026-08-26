@@ -1,4 +1,4 @@
-name: Minecraft DirectVulkan render repair probe
+name: Minecraft backend visual differential
 
 on:
   workflow_dispatch:
@@ -10,18 +10,22 @@ permissions:
   contents: read
 
 concurrency:
-  group: mithril-dvk-render-repair-${{ github.ref }}
+  group: mithril-backend-visual-diff-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  repair-probe:
-    name: Real Minecraft / sampler parity / visual artifact
+  backend-visual:
+    name: Real Minecraft / ${{ matrix.backend }} / visual artifact
+    strategy:
+      fail-fast: false
+      matrix:
+        backend: [metal, vulkan]
     runs-on: macos-26
     timeout-minutes: 30
     env:
-      E2E_ROOT: ${{ github.workspace }}/build/minecraft-vulkan-repair-artifacts
+      E2E_ROOT: ${{ github.workspace }}/build/minecraft-${{ matrix.backend }}-visual-artifacts
       GRADLE_OPTS: -Dorg.gradle.caching=true
-      MITHRIL_BACKEND: vulkan
+      MITHRIL_BACKEND: ${{ matrix.backend }}
       MITHRIL_DEBUG: '1'
       MTL_DEBUG_LAYER: '1'
       MTL_SHADER_VALIDATION: '0'
@@ -39,38 +43,6 @@ jobs:
           set -euo pipefail
           python3 ci/minecraft-e2e/evidence.py --root "$E2E_ROOT" init
 
-      - name: Apply DirectVulkan sampler-unit parity probe
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path('Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/DescriptorSet.cpp')
-          s = p.read_text()
-          replacements = [
-              (
-                  "if (uit_tb != prog->samplerUnitForBinding.end()) {\n                unit = uit_tb->second;\n            } else {",
-                  "if (uit_tb != prog->samplerUnitForBinding.end() && uit_tb->second >= 0) {\n                unit = uit_tb->second;\n            } else {",
-              ),
-              (
-                  "if (uit_s != prog->samplerUnitForBinding.end()) {\n                unit = uit_s->second;\n            } else {",
-                  "if (uit_s != prog->samplerUnitForBinding.end() && uit_s->second >= 0) {\n                unit = uit_s->second;\n            } else {",
-              ),
-              (
-                  "if (uit_i != prog->samplerUnitForBinding.end()) unit = uit_i->second;\n            else                                            unit = (GLint)db.binding;",
-                  "if (uit_i != prog->samplerUnitForBinding.end() && uit_i->second >= 0)\n                unit = uit_i->second;\n            else\n                unit = (GLint)db.binding;",
-              ),
-          ]
-          for old, new in replacements:
-              n = s.count(old)
-              if n != 1:
-                  raise SystemExit(f'expected exactly one sampler parity site, found {n}: {old[:48]!r}')
-              s = s.replace(old, new, 1)
-          p.write_text(s)
-          PY
-          git diff --check
-          git diff -- Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/DescriptorSet.cpp | tee "$E2E_ROOT/sampler-parity.patch"
-
       - name: Setup Java 25
         uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961
         with:
@@ -83,21 +55,21 @@ jobs:
           gradle-version: '9.4.1'
           cache-read-only: true
 
-      - name: Install Vulkan / MoltenVK / GLFW / Ninja
+      - name: Install native dependencies
         shell: bash
         run: brew install glfw vulkan-loader molten-vk ninja
 
-      - name: Build patched production Mithril dylib
+      - name: Build exact production Mithril dylib
         id: mithril
         shell: bash
         run: |
           set -euo pipefail
-          cmake -S . -B build-minecraft-vulkan-repair-native -G Ninja \
+          cmake -S . -B build-minecraft-${{ matrix.backend }}-visual-native -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_FLAGS="-Wno-error" \
             -DCMAKE_CXX_FLAGS="-Wno-error"
-          cmake --build build-minecraft-vulkan-repair-native --target mithril --parallel
-          dylib=$(find build-minecraft-vulkan-repair-native -type f -name libmithril.dylib -print | head -1)
+          cmake --build build-minecraft-${{ matrix.backend }}-visual-native --target mithril --parallel
+          dylib=$(find build-minecraft-${{ matrix.backend }}-visual-native -type f -name libmithril.dylib -print | head -1)
           test -s "$dylib"
           dylib="$(cd "$(dirname "$dylib")" && pwd)/$(basename "$dylib")"
           echo "dylib=$dylib" >> "$GITHUB_OUTPUT"
@@ -108,11 +80,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p build-minecraft-vulkan-repair-native/bridge
+          mkdir -p build-minecraft-${{ matrix.backend }}-visual-native/bridge
           GLFW_PREFIX=$(brew --prefix glfw)
           GLFW_REAL="$GLFW_PREFIX/lib/libglfw.3.dylib"
           test -f "$GLFW_REAL" || GLFW_REAL="$GLFW_PREFIX/lib/libglfw.dylib"
-          BRIDGE="$PWD/build-minecraft-vulkan-repair-native/bridge/libglfw_mithril.dylib"
+          BRIDGE="$PWD/build-minecraft-${{ matrix.backend }}-visual-native/bridge/libglfw_mithril.dylib"
           clang++ -std=c++20 -fobjc-arc -dynamiclib -Wall -Wextra -Werror \
             ci/minecraft-e2e/native/glfw_mithril_bridge.mm \
             ci/minecraft-e2e/native/prepresent_capture.mm \
@@ -123,14 +95,14 @@ jobs:
           echo "bridge=$BRIDGE" >> "$GITHUB_OUTPUT"
           echo "glfw_real=$GLFW_REAL" >> "$GITHUB_OUTPUT"
 
-      - name: Run real Minecraft 26.2 with patched DirectVulkan
+      - name: Run real Minecraft 26.2
         shell: bash
         run: |
           set -o pipefail
           cp "$E2E_ROOT/failure.json" "$E2E_ROOT/failure-pre-minecraft.json" 2>/dev/null || true
           rm -f "$E2E_ROOT/failure.json"
           gradle -p .github/ci/minecraft-e2e --build-cache --stacktrace \
-            -PmithrilBackend=vulkan \
+            -PmithrilBackend=${{ matrix.backend }} \
             -PmithrilDylib="${{ steps.mithril.outputs.dylib }}" \
             -PglfwBridge="${{ steps.bridge.outputs.bridge }}" \
             -PglfwDelegate="${{ steps.bridge.outputs.glfw_real }}" \
@@ -146,23 +118,24 @@ jobs:
             "$E2E_ROOT" \
             "$PWD/.github/ci/minecraft-e2e/build/run/clientGameTest"
 
-      - name: Summarize sampler resolution
+      - name: Summarize backend warnings
         if: always()
         continue-on-error: true
         shell: bash
         run: |
           {
-            echo '=== sampler binds ==='
-            grep -E 'sampler bind|resolves to texture unit|FALLBACK-to-default|descriptor set incomplete|prepare_draw DROPPED' \
-              "$E2E_ROOT/gradle-minecraft.log" | tail -n 1000 || true
-          } | tee "$E2E_ROOT/sampler-resolution-summary.log"
+            echo "backend=${{ matrix.backend }}"
+            echo '=== render/backend warnings ==='
+            grep -E 'sampler layout/resource check|primitive restart|VK_ERROR|MTL|pipeline|descriptor|ubo arena|FALLBACK shaders|Link failed|GL ERROR' \
+              "$E2E_ROOT/gradle-minecraft.log" | tail -n 2000 || true
+          } | tee "$E2E_ROOT/backend-warning-summary.log"
 
-      - name: Upload visual repair artifact
+      - name: Upload backend visual artifact
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: mithril-directvulkan-render-repair-${{ github.sha }}-${{ github.run_attempt }}
+          name: mithril-${{ matrix.backend }}-visual-${{ github.sha }}-${{ github.run_attempt }}
           retention-days: 7
           compression-level: 6
           if-no-files-found: warn
-          path: build/minecraft-vulkan-repair-artifacts/**
+          path: build/minecraft-${{ matrix.backend }}-visual-artifacts/**
