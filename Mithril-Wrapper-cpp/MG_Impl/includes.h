@@ -112,10 +112,95 @@ static inline void mithril_frontend_begin_render_pass(
                               width, height, samples);
 }
 
-// Frontend translation units include this header after Backend.h, so this
-// macro only wraps call sites; the real backend_begin_render_pass declaration
-// and dispatcher symbol remain unchanged.
+/*
+ * Default-framebuffer pipeline format invariant.
+ *
+ * GLState deliberately owns an immortal Framebuffer object with name 0 so
+ * draw/read-buffer query state has somewhere to live. Therefore
+ * state_get_framebuffer(0) is non-null and MUST NOT be used to distinguish a
+ * user FBO from the EGL default framebuffer. A regressed prepare_draw path did
+ * exactly that: FBO 0 entered the user-FBO branch, its synthetic color
+ * attachment had texture name 0, and color_formats[0] reached MoltenVK as
+ * VK_FORMAT_UNDEFINED. MoltenVK can create such a pipeline while effectively
+ * producing no color writes, leaving only clear/background colors visible.
+ *
+ * Make the invariant structural at the frontend/backend boundary. For a
+ * DirectVulkan FBO-0 pipeline, every live color attachment must use the actual
+ * EGL swapchain format. Only undefined entries are repaired, so correctly
+ * supplied formats remain untouched. DirectMetal and user FBOs are unchanged.
+ */
+static inline VkPipeline mithril_frontend_get_or_create_pipeline(
+        GLuint program,
+        const uint32_t* vertex_spirv, int vertex_word_count,
+        const uint32_t* fragment_spirv, int fragment_word_count,
+        const struct MGVertexAttrib* attribs, int attrib_count,
+        const VkFormat* color_formats, int color_count,
+        VkFormat depth_format,
+        int blend_enabled, GLenum blend_src, GLenum blend_dst,
+        GLenum blend_src_alpha, GLenum blend_dst_alpha,
+        int color_write_mask,
+        GLenum gl_primitive_mode,
+        int is_default_fbo) {
+    if (backend_active_kind() == MITHRIL_BACKEND_KIND_VULKAN &&
+        is_default_fbo && color_formats && color_count > 0) {
+        VkFormat fixed_formats[8] = {VK_FORMAT_UNDEFINED};
+        int n = color_count;
+        if (n > 8) n = 8;
+        VkFormat swapchain_format = VK_FORMAT_B8G8R8A8_UNORM;
+        if (::mithril::g_state &&
+            ::mithril::g_state->eglDefaultColorFormat != VK_FORMAT_UNDEFINED) {
+            swapchain_format = ::mithril::g_state->eglDefaultColorFormat;
+        }
+        bool repaired = false;
+        for (int i = 0; i < n; ++i) {
+            fixed_formats[i] = color_formats[i];
+            if (fixed_formats[i] == VK_FORMAT_UNDEFINED) {
+                fixed_formats[i] = swapchain_format;
+                repaired = true;
+            }
+        }
+        if (repaired) {
+            static unsigned repair_log_count = 0;
+            if (repair_log_count < 8) {
+                MITHRIL_LOG_WARN("vk",
+                    "DEFAULT_FBO_PIPELINE_FORMAT_FIX program=%u count=%d format=0x%x",
+                    (unsigned)program, n, (unsigned)swapchain_format);
+                ++repair_log_count;
+            }
+        }
+        return backend_get_or_create_pipeline(
+            program,
+            vertex_spirv, vertex_word_count,
+            fragment_spirv, fragment_word_count,
+            attribs, attrib_count,
+            fixed_formats, n,
+            depth_format,
+            blend_enabled, blend_src, blend_dst,
+            blend_src_alpha, blend_dst_alpha,
+            color_write_mask,
+            gl_primitive_mode,
+            is_default_fbo);
+    }
+
+    return backend_get_or_create_pipeline(
+        program,
+        vertex_spirv, vertex_word_count,
+        fragment_spirv, fragment_word_count,
+        attribs, attrib_count,
+        color_formats, color_count,
+        depth_format,
+        blend_enabled, blend_src, blend_dst,
+        blend_src_alpha, blend_dst_alpha,
+        color_write_mask,
+        gl_primitive_mode,
+        is_default_fbo);
+}
+
+// Frontend translation units include this header after Backend.h, so these
+// macros only wrap call sites; the real backend declarations and dispatcher
+// symbols remain unchanged.
 #define backend_begin_render_pass mithril_frontend_begin_render_pass
+#define backend_get_or_create_pipeline mithril_frontend_get_or_create_pipeline
 #endif
 
 #endif // MITHRIL_INCLUDES_H
