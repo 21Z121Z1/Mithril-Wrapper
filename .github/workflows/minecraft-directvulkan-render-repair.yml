@@ -27,6 +27,7 @@ jobs:
       GRADLE_OPTS: -Dorg.gradle.caching=true
       MITHRIL_BACKEND: ${{ matrix.backend }}
       MITHRIL_DEBUG: '1'
+      MITHRIL_TRACE_GL_ERRORS: '1'
       MTL_DEBUG_LAYER: '1'
       MTL_SHADER_VALIDATION: '0'
 
@@ -36,6 +37,27 @@ jobs:
         with:
           submodules: recursive
           persist-credentials: false
+
+      - name: Add bounded GL error-origin instrumentation
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('Mithril-Wrapper-cpp/MG_State/State.cpp')
+          s = p.read_text()
+          old_include = '#include "State.h"\n'
+          new_include = '''#include "State.h"\n\n#include <atomic>\n#include <cstdlib>\n#include <dlfcn.h>\n'''
+          assert s.count(old_include) == 1
+          s = s.replace(old_include, new_include, 1)
+          old = '''void state_set_error(GLenum err) {\n    if (!g_state) return;\n    g_state->errors.recordGL(err);\n}\n'''
+          new = '''void state_set_error(GLenum err) {\n    if (!g_state) return;\n    // CI-only diagnostic seam: when explicitly enabled, identify the direct\n    // exported GL entry point that is flooding ErrorState. No GL state or\n    // error semantics are changed; logging is globally bounded.\n    static const bool trace = std::getenv("MITHRIL_TRACE_GL_ERRORS") != nullptr;\n    static std::atomic<unsigned> trace_count{0};\n    if (trace && err != GL_NO_ERROR) {\n        const unsigned n = trace_count.fetch_add(1, std::memory_order_relaxed);\n        if (n < 128) {\n            Dl_info info{};\n            void* return_address = __builtin_return_address(0);\n            const char* caller = "<unknown>";\n            if (dladdr(return_address, &info) != 0 && info.dli_sname) caller = info.dli_sname;\n            MITHRIL_LOG_WARN("gl", "GL_ERROR_ORIGIN err=0x%04x caller=%s addr=%p seq=%u",\n                             (unsigned)err, caller, return_address, n + 1);\n        }\n    }\n    g_state->errors.recordGL(err);\n}\n'''
+          assert s.count(old) == 1
+          s = s.replace(old, new, 1)
+          p.write_text(s)
+          PY
+          git diff --check
+          git diff -- Mithril-Wrapper-cpp/MG_State/State.cpp
 
       - name: Initialize evidence
         shell: bash
@@ -126,8 +148,8 @@ jobs:
           {
             echo "backend=${{ matrix.backend }}"
             echo '=== render/backend warnings ==='
-            grep -E 'sampler layout/resource check|primitive restart|VK_ERROR|MTL|pipeline|descriptor|ubo arena|FALLBACK shaders|Link failed|GL ERROR' \
-              "$E2E_ROOT/gradle-minecraft.log" | tail -n 2000 || true
+            grep -E 'GL_ERROR_ORIGIN|sampler layout/resource check|primitive restart|VK_ERROR|MTL|pipeline|descriptor|ubo arena|FALLBACK shaders|Link failed|GL ERROR' \
+              "$E2E_ROOT/gradle-minecraft.log" | tail -n 2500 || true
           } | tee "$E2E_ROOT/backend-warning-summary.log"
 
       - name: Upload backend visual artifact
