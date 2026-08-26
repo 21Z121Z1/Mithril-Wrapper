@@ -38,7 +38,11 @@ abstract class MithrilClientProductionRunTask extends net.fabricmc.loom.task.pro
     protected void configureCommand(ExecSpec exec) {
         super.configureCommand(exec)
         def project = getProject()
-        exec.environment('MITHRIL_BACKEND', 'metal')
+        def backend = (project.findProperty('mithrilBackend') ?: 'metal').toString()
+        if (backend != 'metal' && backend != 'vulkan') {
+            throw new GradleException("mithrilBackend must be metal or vulkan, got ${backend}")
+        }
+        exec.environment('MITHRIL_BACKEND', backend)
         exec.environment('MITHRIL_E2E_ROOT', project.file(project.property('evidenceRoot')).absolutePath)
         exec.environment('MITHRIL_E2E_MITHRIL_DYLIB', project.file(project.property('mithrilDylib')).absolutePath)
         exec.environment('MITHRIL_E2E_GLFW_DELEGATE', project.file(project.property('glfwDelegate')).absolutePath)
