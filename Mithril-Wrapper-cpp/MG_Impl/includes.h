@@ -63,4 +63,59 @@ bool mg_conditional_render_allows(void);
         } \
     } while (0)
 
+#ifdef __cplusplus
+/*
+ * DirectVulkan user-FBO attachment tracking.
+ *
+ * The Vulkan backend cannot recover a GL texture name from a VkImageView, but
+ * it needs the texture name to find TextureEntry::currentLayout and emit the
+ * explicit attachment <-> sampled-image layout barriers around every render
+ * pass. The ordinary draw path historically registered these ids manually,
+ * while glClear/glClearBuffer* called backend_begin_render_pass() directly.
+ * A clear-only FBO pass could therefore execute against a texture whose
+ * tracked layout stayed UNDEFINED; sampling that texture in the next pass then
+ * bound a SHADER_READ_ONLY descriptor for an image that had never been
+ * transitioned/bookkept as such. On MoltenVK this manifests as missing or
+ * constant-colour composited passes in Minecraft.
+ *
+ * Make registration structural instead of call-site dependent: every GL
+ * frontend render-pass begin first describes the current user FBO to the
+ * DirectVulkan backend. For FBO 0 we explicitly clear any stale registration.
+ * DirectMetal is untouched.
+ */
+static inline void mithril_frontend_begin_render_pass(
+        VkImageView* color_views, int color_count, VkImageView depth_view,
+        int width, int height, int samples) {
+    if (backend_active_kind() == MITHRIL_BACKEND_KIND_VULKAN) {
+        if (::mithril::g_state && ::mithril::g_state->currentDrawFBO != 0) {
+            ::mithril::Framebuffer* fbo = ::mithril::state_get_framebuffer(
+                ::mithril::g_state->currentDrawFBO);
+            if (fbo) {
+                GLuint color_tex_ids[8] = {0};
+                int n = color_count;
+                if (n < 0) n = 0;
+                if (n > 8) n = 8;
+                for (int i = 0; i < n; ++i) {
+                    color_tex_ids[i] = ::mithril::fbo_attachment_texture(fbo->colors[i]);
+                }
+                const GLuint depth_tex_id = ::mithril::fbo_attachment_texture(fbo->depth);
+                backend_set_fbo_attachment_tex_ids(color_tex_ids, n, depth_tex_id);
+            } else {
+                backend_set_fbo_attachment_tex_ids(nullptr, 0, 0);
+            }
+        } else {
+            backend_set_fbo_attachment_tex_ids(nullptr, 0, 0);
+        }
+    }
+
+    backend_begin_render_pass(color_views, color_count, depth_view,
+                              width, height, samples);
+}
+
+// Frontend translation units include this header after Backend.h, so this
+// macro only wraps call sites; the real backend_begin_render_pass declaration
+// and dispatcher symbol remain unchanged.
+#define backend_begin_render_pass mithril_frontend_begin_render_pass
+#endif
+
 #endif // MITHRIL_INCLUDES_H
