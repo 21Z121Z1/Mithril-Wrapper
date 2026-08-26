@@ -1,0 +1,94 @@
+name: PR36 DirectVulkan FBO clear regression
+
+on:
+  pull_request:
+    branches:
+      - ci/minecraft-on-mithril-e2e-20260815
+
+permissions:
+  contents: read
+
+jobs:
+  fbo-clear-sample:
+    if: ${{ github.head_ref == 'ci/minecraft-on-mithril-e2e-vulkan-20260826' }}
+    name: ${{ matrix.variant }} / clear-only FBO -> sample
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: baseline
+            fix_clear_fbo_registration: false
+          - variant: fixed
+            fix_clear_fbo_registration: true
+    runs-on: macos-26
+    timeout-minutes: 15
+    env:
+      MITHRIL_BACKEND: vulkan
+      MITHRIL_DEBUG: '1'
+      MTL_DEBUG_LAYER: '1'
+      MTL_SHADER_VALIDATION: '0'
+
+    steps:
+      - name: Checkout PR merge source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Apply clear-only user-FBO registration fix
+        if: ${{ matrix.fix_clear_fbo_registration }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/CommandStream.cpp')
+          s = p.read_text()
+          old = '''    // Record per-frame attachments and their formats (the render-pass cache\n    // key). Swapchain-backed color uses the swapchain format; user-FBO color\n    // attachments resolve via the registered tex_ids -> TextureEntry.format.\n'''
+          new = '''    // Direct clear paths (glClear / glClearBuffer*) call begin_render_pass\n    // without first calling set_fbo_attachment_tex_ids(). Infer the live\n    // user-FBO texture names here so the normal attachment layout/barrier\n    // bookkeeping applies to clear-only passes as well.\n    if (e.fboColorTexCount == 0 && e.fboDepthTexId == 0 &&\n        mithril::g_state && mithril::g_state->currentDrawFBO != 0) {\n        mithril::Framebuffer* liveFbo =\n            mithril::state_get_framebuffer(mithril::g_state->currentDrawFBO);\n        if (liveFbo) {\n            const int inferred = e.colorCount > 8 ? 8 : e.colorCount;\n            for (int i = 0; i < inferred; ++i) {\n                e.fboColorTexIds[i] = liveFbo->colors[i].texture;\n            }\n            e.fboColorTexCount = inferred;\n            e.fboDepthTexId = liveFbo->depth.texture;\n            MITHRIL_LOG_WARN("vk",\n                "CLEAR_FBO_INFER fbo=%u colors=%d c0=%u depth=%u",\n                mithril::g_state->currentDrawFBO, inferred,\n                inferred > 0 ? e.fboColorTexIds[0] : 0, e.fboDepthTexId);\n        }\n    }\n\n    // Record per-frame attachments and their formats (the render-pass cache\n    // key). Swapchain-backed color uses the swapchain format; user-FBO color\n    // attachments resolve via the registered tex_ids -> TextureEntry.format.\n'''
+          assert s.count(old) == 1, s.count(old)
+          p.write_text(s.replace(old, new, 1))
+          PY
+          git diff --check
+
+      - name: Install native dependencies
+        shell: bash
+        run: brew install vulkan-loader molten-vk ninja
+
+      - name: Build Mithril
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-fbo-clear-${{ matrix.variant }} -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_FLAGS="-Wno-error" \
+            -DCMAKE_CXX_FLAGS="-Wno-error"
+          cmake --build build-fbo-clear-${{ matrix.variant }} --target mithril --parallel
+          dylib=$(find build-fbo-clear-${{ matrix.variant }} -type f -name libmithril.dylib -print | head -1)
+          test -s "$dylib"
+          echo "MITHRIL_DYLIB=$PWD/$dylib" >> "$GITHUB_ENV"
+
+      - name: Build regression executable
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang -std=c11 -O0 -Wall -Wextra \
+            -I Mithril-Wrapper-cpp/include \
+            tests/fbo_clear_sample_smoke.c \
+            -o build-fbo-clear-${{ matrix.variant }}/fbo_clear_sample_smoke
+
+      - name: Run regression on real MoltenVK device
+        shell: bash
+        run: |
+          set -o pipefail
+          build-fbo-clear-${{ matrix.variant }}/fbo_clear_sample_smoke "$MITHRIL_DYLIB" \
+            2>&1 | tee build-fbo-clear-${{ matrix.variant }}/fbo-clear-sample.log
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: pr36-directvulkan-fbo-clear-${{ matrix.variant }}-${{ github.sha }}
+          retention-days: 7
+          if-no-files-found: warn
+          path: build-fbo-clear-${{ matrix.variant }}/fbo-clear-sample.log
