@@ -1,0 +1,141 @@
+name: DirectVulkan native 3-component Minecraft visual
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'ci/minecraft-on-mithril-e2e-vulkan-*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dvk-native3-minecraft-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  minecraft-native3:
+    runs-on: macos-26
+    timeout-minutes: 30
+    env:
+      E2E_ROOT: ${{ github.workspace }}/build/minecraft-vulkan-native3-artifacts
+      MITHRIL_BACKEND: vulkan
+      MITHRIL_DEBUG: '1'
+      MTL_DEBUG_LAYER: '1'
+      MTL_SHADER_VALIDATION: '0'
+      GRADLE_OPTS: -Dorg.gradle.caching=true
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Restore native 3-component Vulkan vertex formats
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Pipeline.cpp')
+          s=p.read_text()
+          replacements={
+            'case 3: return VK_FORMAT_R8G8B8A8_UINT;   case 4: return VK_FORMAT_R8G8B8A8_UINT;':'case 3: return VK_FORMAT_R8G8B8_UINT;     case 4: return VK_FORMAT_R8G8B8A8_UINT;',
+            'case 3: return VK_FORMAT_R16G16B16A16_SINT; case 4: return VK_FORMAT_R16G16B16A16_SINT;':'case 3: return VK_FORMAT_R16G16B16_SINT; case 4: return VK_FORMAT_R16G16B16A16_SINT;',
+            'case 3: return VK_FORMAT_R16G16B16A16_UINT; case 4: return VK_FORMAT_R16G16B16A16_UINT;':'case 3: return VK_FORMAT_R16G16B16_UINT; case 4: return VK_FORMAT_R16G16B16A16_UINT;',
+            'case 3: return VK_FORMAT_R16G16B16A16_SFLOAT;   case 4: return VK_FORMAT_R16G16B16A16_SFLOAT;':'case 3: return VK_FORMAT_R16G16B16_SFLOAT;      case 4: return VK_FORMAT_R16G16B16A16_SFLOAT;',
+            'case 3: return VK_FORMAT_R8G8B8A8_UNORM;  case 4: return VK_FORMAT_R8G8B8A8_UNORM;':'case 3: return VK_FORMAT_R8G8B8_UNORM;    case 4: return VK_FORMAT_R8G8B8A8_UNORM;',
+            'case 3: return VK_FORMAT_R8G8B8A8_SINT;   case 4: return VK_FORMAT_R8G8B8A8_SINT;':'case 3: return VK_FORMAT_R8G8B8_SINT;     case 4: return VK_FORMAT_R8G8B8A8_SINT;',
+            'case 3: return VK_FORMAT_R8G8B8A8_SNORM;  case 4: return VK_FORMAT_R8G8B8A8_SNORM;':'case 3: return VK_FORMAT_R8G8B8_SNORM;    case 4: return VK_FORMAT_R8G8B8A8_SNORM;',
+            'case 3: return VK_FORMAT_R16G16B16A16_UNORM; case 4: return VK_FORMAT_R16G16B16A16_UNORM;':'case 3: return VK_FORMAT_R16G16B16_UNORM; case 4: return VK_FORMAT_R16G16B16A16_UNORM;',
+            'case 3: return VK_FORMAT_R16G16B16A16_SNORM; case 4: return VK_FORMAT_R16G16B16A16_SNORM;':'case 3: return VK_FORMAT_R16G16B16_SNORM; case 4: return VK_FORMAT_R16G16B16A16_SNORM;'
+          }
+          total=0
+          for old,new in replacements.items():
+              n=s.count(old)
+              assert n>=1, (old,n)
+              s=s.replace(old,new)
+              total+=n
+          # Unnormalized byte/ushort/short branches share strings with integer branch;
+          # replacements above intentionally update every exact occurrence.
+          p.write_text(s)
+          print('native3 replacements:', total)
+          PY
+          git diff --check
+          git diff -- Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Pipeline.cpp
+
+      - name: Initialize evidence
+        run: python3 ci/minecraft-e2e/evidence.py --root "$E2E_ROOT" init
+
+      - name: Setup Java 25
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - name: Setup Gradle 9.4.1
+        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb
+        with:
+          gradle-version: '9.4.1'
+          cache-read-only: true
+
+      - name: Install dependencies
+        run: brew install glfw vulkan-loader molten-vk ninja
+
+      - name: Build patched production dylib
+        id: mithril
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-native3 -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS="-Wno-error" -DCMAKE_CXX_FLAGS="-Wno-error"
+          cmake --build build-native3 --target mithril --parallel
+          dylib=$(find build-native3 -type f -name libmithril.dylib -print | head -1)
+          test -s "$dylib"
+          dylib="$(cd "$(dirname "$dylib")" && pwd)/$(basename "$dylib")"
+          echo "dylib=$dylib" >> "$GITHUB_OUTPUT"
+          shasum -a 256 "$dylib" | tee "$E2E_ROOT/built-mithril.sha256"
+
+      - name: Build GLFW bridge
+        id: bridge
+        shell: bash
+        run: |
+          set -euo pipefail
+          GLFW_PREFIX=$(brew --prefix glfw)
+          GLFW_REAL="$GLFW_PREFIX/lib/libglfw.3.dylib"
+          test -f "$GLFW_REAL" || GLFW_REAL="$GLFW_PREFIX/lib/libglfw.dylib"
+          mkdir -p build-native3/bridge
+          BRIDGE="$PWD/build-native3/bridge/libglfw_mithril.dylib"
+          clang++ -std=c++20 -fobjc-arc -dynamiclib -Wall -Wextra -Werror \
+            ci/minecraft-e2e/native/glfw_mithril_bridge.mm ci/minecraft-e2e/native/prepresent_capture.mm \
+            -I"$GLFW_PREFIX/include" -IMithril-Wrapper-cpp/include \
+            -framework AppKit -framework QuartzCore -framework Foundation \
+            -Wl,-reexport_library,"$GLFW_REAL" -o "$BRIDGE"
+          echo "bridge=$BRIDGE" >> "$GITHUB_OUTPUT"
+          echo "glfw_real=$GLFW_REAL" >> "$GITHUB_OUTPUT"
+
+      - name: Run real Minecraft 26.2 on patched DirectVulkan
+        shell: bash
+        run: |
+          set -o pipefail
+          rm -f "$E2E_ROOT/failure.json"
+          gradle -p .github/ci/minecraft-e2e --build-cache --stacktrace \
+            -PmithrilBackend=vulkan \
+            -PmithrilDylib="${{ steps.mithril.outputs.dylib }}" \
+            -PglfwBridge="${{ steps.bridge.outputs.bridge }}" \
+            -PglfwDelegate="${{ steps.bridge.outputs.glfw_real }}" \
+            -PevidenceRoot="$E2E_ROOT" runProductionClientGameTest \
+            2>&1 | tee "$E2E_ROOT/gradle-minecraft.log"
+
+      - name: Collect diagnostics
+        if: always()
+        continue-on-error: true
+        run: ci/minecraft-e2e/collect-diagnostics.sh "$E2E_ROOT" "$PWD/.github/ci/minecraft-e2e/build/run/clientGameTest"
+
+      - name: Upload native3 visual evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: mithril-vulkan-native3-visual-${{ github.sha }}-${{ github.run_attempt }}
+          retention-days: 7
+          compression-level: 6
+          path: build/minecraft-vulkan-native3-artifacts/**
