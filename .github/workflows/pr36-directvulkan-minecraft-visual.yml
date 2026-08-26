@@ -1,0 +1,136 @@
+name: PR36 DirectVulkan real Minecraft visual
+
+on:
+  pull_request:
+    branches:
+      - ci/minecraft-on-mithril-e2e-20260815
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr36-directvulkan-minecraft-visual-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  minecraft-visual:
+    if: github.event.pull_request.number == 36
+    name: Minecraft 26.2 / DirectVulkan / 8 pre-present frames
+    runs-on: macos-26
+    timeout-minutes: 30
+    env:
+      E2E_ROOT: ${{ github.workspace }}/build/pr36-minecraft-vulkan-visual
+      GRADLE_OPTS: -Dorg.gradle.caching=true
+      MITHRIL_BACKEND: vulkan
+      MITHRIL_DEBUG: '1'
+      MTL_DEBUG_LAYER: '1'
+      MTL_SHADER_VALIDATION: '0'
+
+    steps:
+      - name: Checkout PR merge
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Initialize evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$E2E_ROOT"
+          python3 ci/minecraft-e2e/evidence.py --root "$E2E_ROOT" init
+          git rev-parse HEAD | tee "$E2E_ROOT/checkout-sha.txt"
+
+      - name: Setup Java 25
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - name: Setup Gradle 9.4.1
+        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb
+        with:
+          gradle-version: '9.4.1'
+          cache-read-only: true
+
+      - name: Install native dependencies
+        shell: bash
+        run: brew install glfw vulkan-loader molten-vk ninja
+
+      - name: Build production Mithril
+        id: mithril
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-pr36-minecraft-vulkan -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_FLAGS='-Wno-error' \
+            -DCMAKE_CXX_FLAGS='-Wno-error'
+          cmake --build build-pr36-minecraft-vulkan --target mithril --parallel
+          dylib=$(find build-pr36-minecraft-vulkan -type f -name libmithril.dylib -print -quit)
+          test -s "$dylib"
+          dylib="$(cd "$(dirname "$dylib")" && pwd)/$(basename "$dylib")"
+          echo "dylib=$dylib" >> "$GITHUB_OUTPUT"
+          shasum -a 256 "$dylib" | tee "$E2E_ROOT/built-mithril.sha256"
+          file "$dylib" | tee "$E2E_ROOT/built-mithril.file.txt"
+
+      - name: Build GLFW to Mithril EGL/CAMetalLayer bridge
+        id: bridge
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build-pr36-minecraft-vulkan/bridge
+          GLFW_PREFIX=$(brew --prefix glfw)
+          GLFW_REAL="$GLFW_PREFIX/lib/libglfw.3.dylib"
+          test -f "$GLFW_REAL" || GLFW_REAL="$GLFW_PREFIX/lib/libglfw.dylib"
+          BRIDGE="$PWD/build-pr36-minecraft-vulkan/bridge/libglfw_mithril.dylib"
+          clang++ -std=c++20 -fobjc-arc -dynamiclib -Wall -Wextra -Werror \
+            ci/minecraft-e2e/native/glfw_mithril_bridge.mm \
+            ci/minecraft-e2e/native/prepresent_capture.mm \
+            -I"$GLFW_PREFIX/include" -IMithril-Wrapper-cpp/include \
+            -framework AppKit -framework QuartzCore -framework Foundation \
+            -Wl,-reexport_library,"$GLFW_REAL" \
+            -o "$BRIDGE"
+          echo "bridge=$BRIDGE" >> "$GITHUB_OUTPUT"
+          echo "glfw_real=$GLFW_REAL" >> "$GITHUB_OUTPUT"
+
+      - name: Run real Minecraft 26.2 and capture 8 frames
+        shell: bash
+        env:
+          MITHRIL_BACKEND: vulkan
+        run: |
+          set -o pipefail
+          rm -f "$E2E_ROOT/failure.json"
+          gradle -p .github/ci/minecraft-e2e --build-cache --stacktrace \
+            -PmithrilBackend=vulkan \
+            -PmithrilDylib='${{ steps.mithril.outputs.dylib }}' \
+            -PglfwBridge='${{ steps.bridge.outputs.bridge }}' \
+            -PglfwDelegate='${{ steps.bridge.outputs.glfw_real }}' \
+            -PevidenceRoot="$E2E_ROOT" \
+            runProductionClientGameTest 2>&1 | tee "$E2E_ROOT/gradle-minecraft.log"
+
+      - name: Collect diagnostics
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: |
+          ci/minecraft-e2e/collect-diagnostics.sh \
+            "$E2E_ROOT" \
+            "$PWD/.github/ci/minecraft-e2e/build/run/clientGameTest"
+          python3 ci/minecraft-e2e/evidence.py --root "$E2E_ROOT" finalize || true
+          {
+            echo '=== default-FBO repair evidence ==='
+            grep -E 'DEFAULT_FBO_PIPELINE_FORMAT_FIX|sampler layout/resource check|prepare_draw DROPPED|VK_ERROR|GL ERROR' \
+              "$E2E_ROOT/gradle-minecraft.log" | tail -n 1000 || true
+          } | tee "$E2E_ROOT/render-repair-summary.log"
+          find "$E2E_ROOT/render" -maxdepth 1 -type f -print 2>/dev/null | sort | tee "$E2E_ROOT/render-files.txt" || true
+
+      - name: Upload full visual evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: pr36-directvulkan-minecraft-visual-${{ github.sha }}-${{ github.run_attempt }}
+          retention-days: 7
+          compression-level: 6
+          if-no-files-found: error
+          path: build/pr36-minecraft-vulkan-visual/**
