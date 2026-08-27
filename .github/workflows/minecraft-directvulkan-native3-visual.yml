@@ -1,4 +1,4 @@
-name: DirectVulkan native 3-component Minecraft visual
+name: DirectVulkan primitive-restart Minecraft visual
 
 on:
   workflow_dispatch:
@@ -10,20 +10,32 @@ permissions:
   contents: read
 
 concurrency:
-  group: dvk-native3-minecraft-${{ github.ref }}
+  group: dvk-restart-minecraft-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  minecraft-native3:
+  minecraft-restart-ab:
+    name: Minecraft 26.2 / ${{ matrix.variant }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: baseline
+            restart_mode: baseline
+          - variant: strip-force-on
+            restart_mode: strip_on
+          - variant: restart-force-off
+            restart_mode: force_off
     runs-on: macos-26
     timeout-minutes: 30
     env:
-      E2E_ROOT: ${{ github.workspace }}/build/minecraft-vulkan-native3-artifacts
+      E2E_ROOT: ${{ github.workspace }}/build/minecraft-restart-${{ matrix.variant }}-artifacts
       MITHRIL_BACKEND: vulkan
       MITHRIL_DEBUG: '1'
       MTL_DEBUG_LAYER: '1'
       MTL_SHADER_VALIDATION: '0'
       GRADLE_OPTS: -Dorg.gradle.caching=true
+
     steps:
       - name: Checkout exact source
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
@@ -31,40 +43,39 @@ jobs:
           submodules: recursive
           persist-credentials: false
 
-      - name: Restore native 3-component Vulkan vertex formats
+      - name: Instrument and apply primitive-restart A/B
         shell: bash
+        env:
+          RESTART_MODE: ${{ matrix.restart_mode }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
-          p=Path('Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Pipeline.cpp')
-          s=p.read_text()
-          replacements={
-            'case 3: return VK_FORMAT_R8G8B8A8_UINT;   case 4: return VK_FORMAT_R8G8B8A8_UINT;':'case 3: return VK_FORMAT_R8G8B8_UINT;     case 4: return VK_FORMAT_R8G8B8A8_UINT;',
-            'case 3: return VK_FORMAT_R16G16B16A16_SINT; case 4: return VK_FORMAT_R16G16B16A16_SINT;':'case 3: return VK_FORMAT_R16G16B16_SINT; case 4: return VK_FORMAT_R16G16B16A16_SINT;',
-            'case 3: return VK_FORMAT_R16G16B16A16_UINT; case 4: return VK_FORMAT_R16G16B16A16_UINT;':'case 3: return VK_FORMAT_R16G16B16_UINT; case 4: return VK_FORMAT_R16G16B16A16_UINT;',
-            'case 3: return VK_FORMAT_R16G16B16A16_SFLOAT;   case 4: return VK_FORMAT_R16G16B16A16_SFLOAT;':'case 3: return VK_FORMAT_R16G16B16_SFLOAT;      case 4: return VK_FORMAT_R16G16B16A16_SFLOAT;',
-            'case 3: return VK_FORMAT_R8G8B8A8_UNORM;  case 4: return VK_FORMAT_R8G8B8A8_UNORM;':'case 3: return VK_FORMAT_R8G8B8_UNORM;    case 4: return VK_FORMAT_R8G8B8A8_UNORM;',
-            'case 3: return VK_FORMAT_R8G8B8A8_SINT;   case 4: return VK_FORMAT_R8G8B8A8_SINT;':'case 3: return VK_FORMAT_R8G8B8_SINT;     case 4: return VK_FORMAT_R8G8B8A8_SINT;',
-            'case 3: return VK_FORMAT_R8G8B8A8_SNORM;  case 4: return VK_FORMAT_R8G8B8A8_SNORM;':'case 3: return VK_FORMAT_R8G8B8_SNORM;    case 4: return VK_FORMAT_R8G8B8A8_SNORM;',
-            'case 3: return VK_FORMAT_R16G16B16A16_UNORM; case 4: return VK_FORMAT_R16G16B16A16_UNORM;':'case 3: return VK_FORMAT_R16G16B16_UNORM; case 4: return VK_FORMAT_R16G16B16A16_UNORM;',
-            'case 3: return VK_FORMAT_R16G16B16A16_SNORM; case 4: return VK_FORMAT_R16G16B16A16_SNORM;':'case 3: return VK_FORMAT_R16G16B16_SNORM; case 4: return VK_FORMAT_R16G16B16A16_SNORM;'
-          }
-          total=0
-          for old,new in replacements.items():
-              n=s.count(old)
-              assert n>=1, (old,n)
-              s=s.replace(old,new)
-              total+=n
-          # Unnormalized byte/ushort/short branches share strings with integer branch;
-          # replacements above intentionally update every exact occurrence.
+          import os
+          p = Path('Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Pipeline.cpp')
+          s = p.read_text()
+          old = '''    ia.primitiveRestartEnable =\n        (mithril::g_state && (mithril::g_state->primitiveRestart ||\n                              mithril::g_state->primitiveRestartFixedIndex))\n            ? VK_TRUE : VK_FALSE;\n'''
+          assert s.count(old) == 1, s.count(old)
+          mode = os.environ['RESTART_MODE']
+          if mode == 'strip_on':
+              assignment = '''    ia.primitiveRestartEnable =\n        (mithril::g_state && (mithril::g_state->primitiveRestart ||\n                              mithril::g_state->primitiveRestartFixedIndex))\n            ? VK_TRUE : VK_FALSE;\n    const bool mithril_restart_strip_like =\n        ia.topology == VK_PRIMITIVE_TOPOLOGY_LINE_STRIP ||\n        ia.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP ||\n        ia.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN;\n    if (mithril_restart_strip_like) ia.primitiveRestartEnable = VK_TRUE;\n'''
+          elif mode == 'force_off':
+              assignment = '''    ia.primitiveRestartEnable = VK_FALSE;\n'''
+          else:
+              assignment = old
+          s = s.replace(old, assignment, 1)
+
+          marker = '''    // ---- Viewport / scissor (dynamic) ----\n'''
+          probe = '''    static unsigned mithril_restart_probe_count = 0;\n    if (mithril_restart_probe_count < 256) {\n        MITHRIL_LOG_WARN("vk",\n            "IA_PROBE program=%u glmode=0x%x topology=%d gl_restart=%d fixed_restart=%d restart_index=%u final_vk_restart=%d list_restart_supported=%d",\n            (unsigned)program, (unsigned)gl_primitive_mode, (int)ia.topology,\n            mithril::g_state && mithril::g_state->primitiveRestart ? 1 : 0,\n            mithril::g_state && mithril::g_state->primitiveRestartFixedIndex ? 1 : 0,\n            mithril::g_state ? (unsigned)mithril::g_state->primitiveRestartIndex : 0u,\n            ia.primitiveRestartEnable == VK_TRUE ? 1 : 0,\n            b->listRestartSupported ? 1 : 0);\n        ++mithril_restart_probe_count;\n    }\n\n'''
+          assert s.count(marker) == 1
+          s = s.replace(marker, probe + marker, 1)
           p.write_text(s)
-          print('native3 replacements:', total)
           PY
           git diff --check
           git diff -- Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Pipeline.cpp
 
       - name: Initialize evidence
+        shell: bash
         run: python3 ci/minecraft-e2e/evidence.py --root "$E2E_ROOT" init
 
       - name: Setup Java 25
@@ -82,14 +93,15 @@ jobs:
       - name: Install dependencies
         run: brew install glfw vulkan-loader molten-vk ninja
 
-      - name: Build patched production dylib
+      - name: Build A/B dylib
         id: mithril
         shell: bash
         run: |
           set -euo pipefail
-          cmake -S . -B build-native3 -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS="-Wno-error" -DCMAKE_CXX_FLAGS="-Wno-error"
-          cmake --build build-native3 --target mithril --parallel
-          dylib=$(find build-native3 -type f -name libmithril.dylib -print | head -1)
+          cmake -S . -B build-restart-${{ matrix.variant }} -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS='-Wno-error' -DCMAKE_CXX_FLAGS='-Wno-error'
+          cmake --build build-restart-${{ matrix.variant }} --target mithril --parallel
+          dylib=$(find build-restart-${{ matrix.variant }} -type f -name libmithril.dylib -print -quit)
           test -s "$dylib"
           dylib="$(cd "$(dirname "$dylib")" && pwd)/$(basename "$dylib")"
           echo "dylib=$dylib" >> "$GITHUB_OUTPUT"
@@ -103,8 +115,8 @@ jobs:
           GLFW_PREFIX=$(brew --prefix glfw)
           GLFW_REAL="$GLFW_PREFIX/lib/libglfw.3.dylib"
           test -f "$GLFW_REAL" || GLFW_REAL="$GLFW_PREFIX/lib/libglfw.dylib"
-          mkdir -p build-native3/bridge
-          BRIDGE="$PWD/build-native3/bridge/libglfw_mithril.dylib"
+          mkdir -p build-restart-${{ matrix.variant }}/bridge
+          BRIDGE="$PWD/build-restart-${{ matrix.variant }}/bridge/libglfw_mithril.dylib"
           clang++ -std=c++20 -fobjc-arc -dynamiclib -Wall -Wextra -Werror \
             ci/minecraft-e2e/native/glfw_mithril_bridge.mm ci/minecraft-e2e/native/prepresent_capture.mm \
             -I"$GLFW_PREFIX/include" -IMithril-Wrapper-cpp/include \
@@ -113,7 +125,7 @@ jobs:
           echo "bridge=$BRIDGE" >> "$GITHUB_OUTPUT"
           echo "glfw_real=$GLFW_REAL" >> "$GITHUB_OUTPUT"
 
-      - name: Run real Minecraft 26.2 on patched DirectVulkan
+      - name: Run real Minecraft 26.2
         shell: bash
         run: |
           set -o pipefail
@@ -129,13 +141,17 @@ jobs:
       - name: Collect diagnostics
         if: always()
         continue-on-error: true
-        run: ci/minecraft-e2e/collect-diagnostics.sh "$E2E_ROOT" "$PWD/.github/ci/minecraft-e2e/build/run/clientGameTest"
+        shell: bash
+        run: |
+          ci/minecraft-e2e/collect-diagnostics.sh "$E2E_ROOT" "$PWD/.github/ci/minecraft-e2e/build/run/clientGameTest"
+          grep -E 'IA_PROBE|primitive restart|VK_ERROR_FEATURE_NOT_PRESENT|prepare_draw DROPPED|DRAW-OVERRUN' \
+            "$E2E_ROOT/gradle-minecraft.log" > "$E2E_ROOT/restart-summary.log" || true
 
-      - name: Upload native3 visual evidence
+      - name: Upload visual evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: mithril-vulkan-native3-visual-${{ github.sha }}-${{ github.run_attempt }}
+          name: mithril-vulkan-restart-${{ matrix.variant }}-${{ github.sha }}-${{ github.run_attempt }}
           retention-days: 7
           compression-level: 6
-          path: build/minecraft-vulkan-native3-artifacts/**
+          path: build/minecraft-restart-${{ matrix.variant }}-artifacts/**
