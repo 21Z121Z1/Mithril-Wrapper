@@ -1,4 +1,4 @@
-name: DirectVulkan primitive-restart Minecraft visual
+name: DirectVulkan native-3 vertex-format Minecraft visual
 
 on:
   workflow_dispatch:
@@ -10,26 +10,24 @@ permissions:
   contents: read
 
 concurrency:
-  group: dvk-restart-minecraft-${{ github.ref }}
+  group: dvk-native3-minecraft-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  minecraft-restart-ab:
+  minecraft-native3-ab:
     name: Minecraft 26.2 / ${{ matrix.variant }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - variant: baseline
-            restart_mode: baseline
-          - variant: strip-force-on
-            restart_mode: strip_on
-          - variant: restart-force-off
-            restart_mode: force_off
+            native3: '0'
+          - variant: native3
+            native3: '1'
     runs-on: macos-26
     timeout-minutes: 30
     env:
-      E2E_ROOT: ${{ github.workspace }}/build/minecraft-restart-${{ matrix.variant }}-artifacts
+      E2E_ROOT: ${{ github.workspace }}/build/minecraft-native3-${{ matrix.variant }}-artifacts
       MITHRIL_BACKEND: vulkan
       MITHRIL_DEBUG: '1'
       MTL_DEBUG_LAYER: '1'
@@ -43,32 +41,39 @@ jobs:
           submodules: recursive
           persist-credentials: false
 
-      - name: Instrument and apply primitive-restart A/B
+      - name: Apply native 3-component vertex-format A/B
+        if: matrix.native3 == '1'
         shell: bash
-        env:
-          RESTART_MODE: ${{ matrix.restart_mode }}
         run: |
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
-          import os
           p = Path('Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Pipeline.cpp')
           s = p.read_text()
-          old = '''    ia.primitiveRestartEnable =\n        (mithril::g_state && (mithril::g_state->primitiveRestart ||\n                              mithril::g_state->primitiveRestartFixedIndex))\n            ? VK_TRUE : VK_FALSE;\n'''
-          assert s.count(old) == 1, s.count(old)
-          mode = os.environ['RESTART_MODE']
-          if mode == 'strip_on':
-              assignment = '''    ia.primitiveRestartEnable =\n        (mithril::g_state && (mithril::g_state->primitiveRestart ||\n                              mithril::g_state->primitiveRestartFixedIndex))\n            ? VK_TRUE : VK_FALSE;\n    const bool mithril_restart_strip_like =\n        ia.topology == VK_PRIMITIVE_TOPOLOGY_LINE_STRIP ||\n        ia.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP ||\n        ia.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_FAN;\n    if (mithril_restart_strip_like) ia.primitiveRestartEnable = VK_TRUE;\n'''
-          elif mode == 'force_off':
-              assignment = '''    ia.primitiveRestartEnable = VK_FALSE;\n'''
-          else:
-              assignment = old
-          s = s.replace(old, assignment, 1)
-
-          marker = '''    // ---- Viewport / scissor (dynamic) ----\n'''
-          probe = '''    static unsigned mithril_restart_probe_count = 0;\n    if (mithril_restart_probe_count < 256) {\n        MITHRIL_LOG_WARN("vk",\n            "IA_PROBE program=%u glmode=0x%x topology=%d gl_restart=%d fixed_restart=%d restart_index=%u final_vk_restart=%d list_restart_supported=%d",\n            (unsigned)program, (unsigned)gl_primitive_mode, (int)ia.topology,\n            mithril::g_state && mithril::g_state->primitiveRestart ? 1 : 0,\n            mithril::g_state && mithril::g_state->primitiveRestartFixedIndex ? 1 : 0,\n            mithril::g_state ? (unsigned)mithril::g_state->primitiveRestartIndex : 0u,\n            ia.primitiveRestartEnable == VK_TRUE ? 1 : 0,\n            b->listRestartSupported ? 1 : 0);\n        ++mithril_restart_probe_count;\n    }\n\n'''
+          replacements = {
+              'case 3: return VK_FORMAT_R8G8B8A8_UINT;': 'case 3: return VK_FORMAT_R8G8B8_UINT;',
+              'case 3: return VK_FORMAT_R8G8B8A8_SINT;': 'case 3: return VK_FORMAT_R8G8B8_SINT;',
+              'case 3: return VK_FORMAT_R8G8B8A8_UNORM;': 'case 3: return VK_FORMAT_R8G8B8_UNORM;',
+              'case 3: return VK_FORMAT_R8G8B8A8_SNORM;': 'case 3: return VK_FORMAT_R8G8B8_SNORM;',
+              'case 3: return VK_FORMAT_R16G16B16A16_UINT;': 'case 3: return VK_FORMAT_R16G16B16_UINT;',
+              'case 3: return VK_FORMAT_R16G16B16A16_SINT;': 'case 3: return VK_FORMAT_R16G16B16_SINT;',
+              'case 3: return VK_FORMAT_R16G16B16A16_UNORM;': 'case 3: return VK_FORMAT_R16G16B16_UNORM;',
+              'case 3: return VK_FORMAT_R16G16B16A16_SNORM;': 'case 3: return VK_FORMAT_R16G16B16_SNORM;',
+              'case 3: return VK_FORMAT_R16G16B16A16_SFLOAT;': 'case 3: return VK_FORMAT_R16G16B16_SFLOAT;',
+          }
+          changed = 0
+          for old, new in replacements.items():
+              n = s.count(old)
+              if n:
+                  s = s.replace(old, new)
+                  changed += n
+                  print(f'native3 replace {old} -> {new}: {n}')
+          if changed < 9:
+              raise SystemExit(f'expected at least 9 native3 replacements, got {changed}')
+          marker = 'VkFormat attrib_type_to_vk_format(GLenum type, int size, bool normalized, bool integer) {\n'
           assert s.count(marker) == 1
-          s = s.replace(marker, probe + marker, 1)
+          probe = marker + '''    static unsigned mithril_attr3_probe_count = 0;\n    if (size == 3 && mithril_attr3_probe_count < 256) {\n        MITHRIL_LOG_WARN("vk", "ATTR3_PROBE type=0x%x normalized=%d integer=%d",\n                         (unsigned)type, normalized ? 1 : 0, integer ? 1 : 0);\n        ++mithril_attr3_probe_count;\n    }\n'''
+          s = s.replace(marker, probe, 1)
           p.write_text(s)
           PY
           git diff --check
@@ -98,10 +103,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cmake -S . -B build-restart-${{ matrix.variant }} -G Ninja \
+          cmake -S . -B build-native3-${{ matrix.variant }} -G Ninja \
             -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS='-Wno-error' -DCMAKE_CXX_FLAGS='-Wno-error'
-          cmake --build build-restart-${{ matrix.variant }} --target mithril --parallel
-          dylib=$(find build-restart-${{ matrix.variant }} -type f -name libmithril.dylib -print -quit)
+          cmake --build build-native3-${{ matrix.variant }} --target mithril --parallel
+          dylib=$(find build-native3-${{ matrix.variant }} -type f -name libmithril.dylib -print -quit)
           test -s "$dylib"
           dylib="$(cd "$(dirname "$dylib")" && pwd)/$(basename "$dylib")"
           echo "dylib=$dylib" >> "$GITHUB_OUTPUT"
@@ -115,8 +120,8 @@ jobs:
           GLFW_PREFIX=$(brew --prefix glfw)
           GLFW_REAL="$GLFW_PREFIX/lib/libglfw.3.dylib"
           test -f "$GLFW_REAL" || GLFW_REAL="$GLFW_PREFIX/lib/libglfw.dylib"
-          mkdir -p build-restart-${{ matrix.variant }}/bridge
-          BRIDGE="$PWD/build-restart-${{ matrix.variant }}/bridge/libglfw_mithril.dylib"
+          mkdir -p build-native3-${{ matrix.variant }}/bridge
+          BRIDGE="$PWD/build-native3-${{ matrix.variant }}/bridge/libglfw_mithril.dylib"
           clang++ -std=c++20 -fobjc-arc -dynamiclib -Wall -Wextra -Werror \
             ci/minecraft-e2e/native/glfw_mithril_bridge.mm ci/minecraft-e2e/native/prepresent_capture.mm \
             -I"$GLFW_PREFIX/include" -IMithril-Wrapper-cpp/include \
@@ -144,14 +149,14 @@ jobs:
         shell: bash
         run: |
           ci/minecraft-e2e/collect-diagnostics.sh "$E2E_ROOT" "$PWD/.github/ci/minecraft-e2e/build/run/clientGameTest"
-          grep -E 'IA_PROBE|primitive restart|VK_ERROR_FEATURE_NOT_PRESENT|prepare_draw DROPPED|DRAW-OVERRUN' \
-            "$E2E_ROOT/gradle-minecraft.log" > "$E2E_ROOT/restart-summary.log" || true
+          grep -E 'ATTR3_PROBE|prepare_draw DROPPED|vkCreateGraphicsPipelines|VK_ERROR_FORMAT_NOT_SUPPORTED' \
+            "$E2E_ROOT/gradle-minecraft.log" > "$E2E_ROOT/native3-summary.log" || true
 
       - name: Upload visual evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: mithril-vulkan-restart-${{ matrix.variant }}-${{ github.sha }}-${{ github.run_attempt }}
+          name: mithril-vulkan-native3-${{ matrix.variant }}-${{ github.sha }}-${{ github.run_attempt }}
           retention-days: 7
           compression-level: 6
-          path: build/minecraft-restart-${{ matrix.variant }}-artifacts/**
+          path: build/minecraft-native3-${{ matrix.variant }}-artifacts/**
