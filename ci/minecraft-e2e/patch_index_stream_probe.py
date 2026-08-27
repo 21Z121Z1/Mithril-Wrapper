@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 from pathlib import Path
+
 p = Path('Mithril-Wrapper-cpp/MG_Impl/Drawing.cpp')
 s = p.read_text()
-anchor = '''void glDrawElements(GLenum mode, GLsizei count, GLenum type, const void* indices) {
-'''
+anchor = '''void glDrawElements(GLenum mode, GLsizei count, GLenum type, const void* indices) {\n'''
 helper = r'''static void mithril_probe_index_stream(GLsizei count, GLenum type, const void* indices) {
     static unsigned seq = 0;
-    if (seq >= 240 || count <= 0) return;
+    if (seq >= 320 || count <= 0) return;
     mithril::VertexArray* vao = mithril::state_get_vao(g_state->currentVAO);
     if (!vao || vao->elementArrayBuffer == 0) return;
     mithril::Buffer* ib = mithril::state_get_buffer(vao->elementArrayBuffer);
@@ -53,14 +53,20 @@ helper = r'''static void mithril_probe_index_stream(GLsizei count, GLenum type, 
 '''
 assert s.count(anchor) == 1
 s = s.replace(anchor, helper + anchor, 1)
-old = '''    GLuint ib_name = vao ? vao->elementArrayBuffer : 0;
-    VkBuffer ib = backend_get_buffer(ib_name);
-'''
-new = '''    GLuint ib_name = vao ? vao->elementArrayBuffer : 0;
-    mithril_probe_index_stream(count, type, indices);
-    VkBuffer ib = backend_get_buffer(ib_name);
-'''
-# Occurs in direct and instanced paths; instrument both.
-assert s.count(old) >= 2, s.count(old)
-s = s.replace(old, new)
+
+# Insert only in scalar-count draw-elements APIs. Do not touch MultiDraw* APIs,
+# whose `count`/`indices` parameters are arrays, or indirect APIs which have no
+# client `indices` parameter.
+def insert_after_signature(text: str, signature: str) -> str:
+    start = text.index(signature)
+    body = start + len(signature)
+    needle = '    mithril::VertexArray* vao = mithril::state_get_vao(g_state->currentVAO);\n    GLuint ib_name = vao ? vao->elementArrayBuffer : 0;\n'
+    at = text.index(needle, body)
+    assert at < text.find('\n}\n', body) + 3
+    replacement = needle + '    mithril_probe_index_stream(count, type, indices);\n'
+    return text[:at] + text[at:].replace(needle, replacement, 1)
+
+s = insert_after_signature(s, 'void glDrawElements(GLenum mode, GLsizei count, GLenum type, const void* indices) {\n')
+s = insert_after_signature(s, 'void glDrawElementsInstanced(GLenum mode, GLsizei count, GLenum type,\n                             const void* indices, GLsizei primcount) {\n')
+
 p.write_text(s)
