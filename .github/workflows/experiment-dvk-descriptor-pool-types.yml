@@ -1,0 +1,173 @@
+name: DirectVulkan descriptor-pool type A/B
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'experiment/dvk-descriptor-pool-types-20260827'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dvk-descriptor-pool-types-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  minecraft:
+    name: Real Minecraft / DirectVulkan / descriptor pool types
+    runs-on: macos-26
+    timeout-minutes: 30
+    env:
+      E2E_ROOT: ${{ github.workspace }}/build/minecraft-vulkan-pool-types-artifacts
+      GRADLE_OPTS: -Dorg.gradle.caching=true
+      MITHRIL_BACKEND: vulkan
+      MITHRIL_DEBUG: '1'
+      MTL_DEBUG_LAYER: '1'
+      MTL_SHADER_VALIDATION: '0'
+
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Fix descriptor pool type accounting
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/DescriptorSet.cpp')
+          s = p.read_text()
+          old = '''    uint32_t uboPerSet = 0, imgPerSet = 0, ssboPerSet = 0, stImgPerSet = 0;
+    uint32_t texelPerSet = 0;
+    for (const auto& db : pr.bindings) {
+        const uint32_t n = db.descriptorCount ? db.descriptorCount : 1u;
+        if (db.type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER)              uboPerSet += n;
+        else if (db.type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) imgPerSet += n;
+        else if (db.type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER)         ssboPerSet += n;
+        else if (db.type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)          stImgPerSet += n;
+        else if (db.type == VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER)   texelPerSet += n;
+    }
+'''
+          new = '''    uint32_t uboPerSet = 0, dynUboPerSet = 0, imgPerSet = 0, ssboPerSet = 0, stImgPerSet = 0;
+    uint32_t texelPerSet = 0;
+    for (const auto& db : pr.bindings) {
+        const uint32_t n = db.descriptorCount ? db.descriptorCount : 1u;
+        const VkDescriptorType type = descriptor_type_for(pr, db);
+        if (type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER)                       uboPerSet += n;
+        else if (type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC)          dynUboPerSet += n;
+        else if (type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)          imgPerSet += n;
+        else if (type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER)                  ssboPerSet += n;
+        else if (type == VK_DESCRIPTOR_TYPE_STORAGE_IMAGE)                   stImgPerSet += n;
+        else if (type == VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER)            texelPerSet += n;
+    }
+'''
+          assert s.count(old) == 1, s.count(old)
+          s = s.replace(old, new, 1)
+          anchor = '''    if (uboPerSet) {
+        VkDescriptorPoolSize ps{};
+        ps.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        ps.descriptorCount = maxSets * uboPerSet;
+        poolSizes.push_back(ps);
+    }
+'''
+          replacement = anchor + '''    if (dynUboPerSet) {
+        VkDescriptorPoolSize ps{};
+        ps.type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+        ps.descriptorCount = maxSets * dynUboPerSet;
+        poolSizes.push_back(ps);
+    }
+'''
+          assert s.count(anchor) == 1, s.count(anchor)
+          s = s.replace(anchor, replacement, 1)
+          p.write_text(s)
+          PY
+          git diff --check
+          git diff -- Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/DescriptorSet.cpp
+
+      - name: Initialize evidence
+        shell: bash
+        run: python3 ci/minecraft-e2e/evidence.py --root "$E2E_ROOT" init
+
+      - name: Setup Java 25
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - name: Setup Gradle 9.4.1
+        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb
+        with:
+          gradle-version: '9.4.1'
+          cache-read-only: true
+
+      - name: Install native dependencies
+        run: brew install glfw vulkan-loader molten-vk ninja
+
+      - name: Build patched Mithril dylib
+        id: mithril
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-minecraft-vulkan-pool-types -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_FLAGS='-Wno-error' \
+            -DCMAKE_CXX_FLAGS='-Wno-error'
+          cmake --build build-minecraft-vulkan-pool-types --target mithril --parallel
+          dylib=$(find build-minecraft-vulkan-pool-types -type f -name libmithril.dylib -print -quit)
+          test -s "$dylib"
+          dylib="$(cd "$(dirname "$dylib")" && pwd)/$(basename "$dylib")"
+          echo "dylib=$dylib" >> "$GITHUB_OUTPUT"
+          shasum -a 256 "$dylib" | tee "$E2E_ROOT/built-mithril.sha256"
+
+      - name: Build GLFW bridge
+        id: bridge
+        shell: bash
+        run: |
+          set -euo pipefail
+          GLFW_PREFIX=$(brew --prefix glfw)
+          GLFW_REAL="$GLFW_PREFIX/lib/libglfw.3.dylib"
+          test -f "$GLFW_REAL" || GLFW_REAL="$GLFW_PREFIX/lib/libglfw.dylib"
+          mkdir -p build-minecraft-vulkan-pool-types/bridge
+          BRIDGE="$PWD/build-minecraft-vulkan-pool-types/bridge/libglfw_mithril.dylib"
+          clang++ -std=c++20 -fobjc-arc -dynamiclib -Wall -Wextra -Werror \
+            ci/minecraft-e2e/native/glfw_mithril_bridge.mm ci/minecraft-e2e/native/prepresent_capture.mm \
+            -I"$GLFW_PREFIX/include" -IMithril-Wrapper-cpp/include \
+            -framework AppKit -framework QuartzCore -framework Foundation \
+            -Wl,-reexport_library,"$GLFW_REAL" -o "$BRIDGE"
+          echo "bridge=$BRIDGE" >> "$GITHUB_OUTPUT"
+          echo "glfw_real=$GLFW_REAL" >> "$GITHUB_OUTPUT"
+
+      - name: Run real Minecraft 26.2
+        shell: bash
+        run: |
+          set -o pipefail
+          rm -f "$E2E_ROOT/failure.json"
+          gradle -p .github/ci/minecraft-e2e --build-cache --stacktrace \
+            -PmithrilBackend=vulkan \
+            -PmithrilDylib="${{ steps.mithril.outputs.dylib }}" \
+            -PglfwBridge="${{ steps.bridge.outputs.bridge }}" \
+            -PglfwDelegate="${{ steps.bridge.outputs.glfw_real }}" \
+            -PevidenceRoot="$E2E_ROOT" runProductionClientGameTest \
+            2>&1 | tee "$E2E_ROOT/gradle-minecraft.log"
+
+      - name: Collect diagnostics
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: |
+          ci/minecraft-e2e/collect-diagnostics.sh "$E2E_ROOT" "$PWD/.github/ci/minecraft-e2e/build/run/clientGameTest"
+          grep -E 'vkAllocateDescriptorSets failed|descriptor pool exhausted|prepare_draw DROPPED|validation|VUID' \
+            "$E2E_ROOT/gradle-minecraft.log" > "$E2E_ROOT/pool-types-summary.log" || true
+
+      - name: Upload visual evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: mithril-vulkan-pool-types-${{ github.sha }}-${{ github.run_attempt }}
+          retention-days: 7
+          compression-level: 6
+          path: build/minecraft-vulkan-pool-types-artifacts/**
