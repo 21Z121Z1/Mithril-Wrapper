@@ -1,0 +1,1 @@
+Temporary PR validation trigger for the DirectVulkan Minecraft visual closure. Remove after the final 8-frame oracle is inspected.

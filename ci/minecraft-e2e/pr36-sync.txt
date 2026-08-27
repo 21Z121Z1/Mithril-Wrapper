@@ -1,0 +1,2 @@
+PR36 DirectVulkan validation trigger.
+DirectMetal visual differential 2026-08-27.

@@ -38,6 +38,9 @@ public final class MithrilPrePresentClientGameTest implements FabricClientGameTe
     public void runTest(ClientGameTestContext context) {
         Path root = Path.of(System.getProperty("mithril.e2e.root", "build/evidence"))
                 .toAbsolutePath().normalize();
+        String requestedBackend = System.getenv().getOrDefault("MITHRIL_BACKEND", "metal");
+        String expectedBackend = "vulkan".equals(requestedBackend)
+                ? "Vulkan 1.2 (MoltenVK)" : "DirectMetal";
         try {
             Files.createDirectories(root.resolve("render"));
         } catch (IOException e) {
@@ -68,10 +71,10 @@ public final class MithrilPrePresentClientGameTest implements FabricClientGameTe
                     "GAME_INVALID_FRAMEBUFFER_SIZE", "game_state",
                     "Invalid Minecraft framebuffer size " + identity.width + "x" + identity.height);
             require(root,
-                    identity.version.contains("Mithril-Wrapper") && identity.version.contains("DirectMetal")
-                            && identity.renderer.contains("Mithril-Wrapper") && identity.renderer.contains("DirectMetal"),
+                    identity.version.contains("Mithril-Wrapper") && identity.version.contains(expectedBackend)
+                            && identity.renderer.contains("Mithril-Wrapper") && identity.renderer.contains(expectedBackend),
                     "WRAPPER_NOT_ACTIVE", "runtime_identity",
-                    "Active OpenGL implementation is not Mithril DirectMetal: version="
+                    "Active OpenGL implementation is not Mithril " + expectedBackend + ": version="
                             + identity.version + ", renderer=" + identity.renderer);
 
             writeGameState(root, identity, chunkRenderTicks);
@@ -134,7 +137,7 @@ public final class MithrilPrePresentClientGameTest implements FabricClientGameTe
             writeOracle(root, "l4_gpu_render", "pass");
             writeOracle(root, "l5_presentation", "diagnostic");
             event(root, "client_gametest_completed", "render_probe",
-                    "L1-L4 passed using requested pre-present DirectMetal readback; L5 is diagnostic");
+                    "L1-L4 passed using requested pre-present " + expectedBackend + " readback; L5 is diagnostic");
         }
     }
 

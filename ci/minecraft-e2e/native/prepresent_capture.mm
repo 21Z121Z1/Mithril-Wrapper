@@ -84,6 +84,31 @@ extern "C" void mithril_e2e_capture_before_present(int width, int height, void* 
         return;
     }
 
+    // glGetError reports the oldest pending context error; it does not identify
+    // which call produced it. Minecraft can leave unrelated GL errors queued
+    // before this test-only seam runs. ErrorState is capped at 64 entries, so
+    // drain up to 128 calls: this both empties the entire bounded queue and
+    // observes the terminating GL_NO_ERROR. The previous 32-call cap could
+    // leave half of a full queue behind and then misattribute those leftovers
+    // to the controlled state queries that followed.
+    auto drain_errors = [&](const char* event) -> GLenum {
+        GLenum first = GL_NO_ERROR;
+        GLenum error = GL_NO_ERROR;
+        int count = 0;
+        while (count < 128 && (error = getError()) != GL_NO_ERROR) {
+            if (first == GL_NO_ERROR) first = error;
+            ++count;
+        }
+        if (first != GL_NO_ERROR) {
+            char detail[128];
+            std::snprintf(detail, sizeof(detail),
+                          "drained %d GL error(s), first=0x%04x", count, first);
+            append_event(root, event, frame, detail);
+        }
+        return first;
+    };
+    (void)drain_errors("prepresent_capture_prior_gl_errors");
+
     GLint read_fbo = 0, pack_pbo = 0;
     GLint pack_alignment = 4, pack_row_length = 0, pack_skip_rows = 0, pack_skip_pixels = 0;
     GLint pack_image_height = 0, pack_skip_images = 0;
@@ -95,6 +120,22 @@ extern "C" void mithril_e2e_capture_before_present(int width, int height, void* 
     getIntegerv(GL_PACK_SKIP_PIXELS, &pack_skip_pixels);
     getIntegerv(GL_PACK_IMAGE_HEIGHT, &pack_image_height);
     getIntegerv(GL_PACK_SKIP_IMAGES, &pack_skip_images);
+    if (GLenum error = drain_errors("prepresent_capture_state_query_error"); error != GL_NO_ERROR) {
+        append_event(root, "prepresent_capture_failed", frame,
+                     "controlled state query generated a GL error");
+        return;
+    }
+
+    auto restore_state = [&] {
+        bindFramebuffer(GL_READ_FRAMEBUFFER, static_cast<GLuint>(read_fbo));
+        bindBuffer(GL_PIXEL_PACK_BUFFER, static_cast<GLuint>(pack_pbo));
+        pixelStorei(GL_PACK_ALIGNMENT, pack_alignment);
+        pixelStorei(GL_PACK_ROW_LENGTH, pack_row_length);
+        pixelStorei(GL_PACK_SKIP_ROWS, pack_skip_rows);
+        pixelStorei(GL_PACK_SKIP_PIXELS, pack_skip_pixels);
+        pixelStorei(GL_PACK_IMAGE_HEIGHT, pack_image_height);
+        pixelStorei(GL_PACK_SKIP_IMAGES, pack_skip_images);
+    };
 
     bindFramebuffer(GL_READ_FRAMEBUFFER, 0);
     bindBuffer(GL_PIXEL_PACK_BUFFER, 0);
@@ -104,29 +145,35 @@ extern "C" void mithril_e2e_capture_before_present(int width, int height, void* 
     pixelStorei(GL_PACK_SKIP_PIXELS, 0);
     pixelStorei(GL_PACK_IMAGE_HEIGHT, 0);
     pixelStorei(GL_PACK_SKIP_IMAGES, 0);
+    if (GLenum error = drain_errors("prepresent_capture_setup_error"); error != GL_NO_ERROR) {
+        restore_state();
+        (void)drain_errors("prepresent_capture_restore_error");
+        append_event(root, "prepresent_capture_failed", frame,
+                     "controlled readback setup generated a GL error");
+        return;
+    }
 
     std::vector<unsigned char> rgba(static_cast<size_t>(width) * static_cast<size_t>(height) * 4u);
-    // glReadPixels is synchronous by GL contract. In Mithril this path ends the
-    // active render pass, submits the DirectMetal command buffer, blits the
-    // current default-color texture into CPU-visible storage, and waits for the
-    // copy. Crucially this runs before eglSwapBuffers presents/acquires the next
-    // drawable, so it observes the frame that Minecraft just rendered.
+    // glReadPixels is synchronous by GL contract. Mithril's backend ends the
+    // active render pass, submits the frame work needed to make the current
+    // default colour image readable, copies it into CPU-visible storage, and
+    // waits for the copy. This runs before eglSwapBuffers presents/acquires the
+    // next drawable, so it observes the frame Minecraft just rendered.
     readPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
-    GLenum error = getError();
+    GLenum read_error = drain_errors("prepresent_capture_readback_error");
 
-    bindFramebuffer(GL_READ_FRAMEBUFFER, static_cast<GLuint>(read_fbo));
-    bindBuffer(GL_PIXEL_PACK_BUFFER, static_cast<GLuint>(pack_pbo));
-    pixelStorei(GL_PACK_ALIGNMENT, pack_alignment);
-    pixelStorei(GL_PACK_ROW_LENGTH, pack_row_length);
-    pixelStorei(GL_PACK_SKIP_ROWS, pack_skip_rows);
-    pixelStorei(GL_PACK_SKIP_PIXELS, pack_skip_pixels);
-    pixelStorei(GL_PACK_IMAGE_HEIGHT, pack_image_height);
-    pixelStorei(GL_PACK_SKIP_IMAGES, pack_skip_images);
+    restore_state();
+    GLenum restore_error = drain_errors("prepresent_capture_restore_error");
 
-    if (error != GL_NO_ERROR) {
+    if (read_error != GL_NO_ERROR) {
         char detail[96];
-        std::snprintf(detail, sizeof(detail), "glReadPixels error 0x%04x", error);
+        std::snprintf(detail, sizeof(detail), "glReadPixels error 0x%04x", read_error);
         append_event(root, "prepresent_capture_failed", frame, detail);
+        return;
+    }
+    if (restore_error != GL_NO_ERROR) {
+        append_event(root, "prepresent_capture_failed", frame,
+                     "controlled state restore generated a GL error");
         return;
     }
 
