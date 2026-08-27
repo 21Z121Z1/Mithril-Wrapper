@@ -4,46 +4,62 @@ from pathlib import Path
 p = Path('Mithril-Wrapper-cpp/MG_Impl/Drawing.cpp')
 s = p.read_text()
 anchor = '''    // Get-or-create the VkGraphicsPipeline. Blend state + colorWriteMask are\n'''
-probe = r'''    // EXPERIMENT: byte-level vertex-input probe for the programs that dominate
-    // world + GUI rendering in the real Minecraft E2E. We inspect the GL
-    // authoritative CPU shadow before backend translation and record whether
-    // the source buffer is immutable/persistently mapped.
-    const bool uvProbeProgram =
-        prog->id == 1 || prog->id == 11 || prog->id == 12 ||
-        prog->id == 61 || prog->id == 65 || prog->id == 66 ||
-        prog->id == 67 || prog->id == 69;
+probe = r'''    // EXPERIMENT: automatically probe vertex streams for any program that has
+    // a plausible 2-component texture-coordinate attribute. Program ids are
+    // assigned dynamically by Minecraft and are not stable between runs, so
+    // never key diagnostics on hard-coded ids.
+    bool uvProbeProgram = false;
+    for (int ai = 0; ai < attrib_count; ++ai) {
+        const MGVertexAttrib& a = attribs[ai];
+        if (a.enabled && a.size == 2 &&
+            (a.type == GL_FLOAT || a.type == GL_HALF_FLOAT ||
+             a.type == GL_SHORT || a.type == GL_UNSIGNED_SHORT ||
+             a.type == GL_BYTE || a.type == GL_UNSIGNED_BYTE)) {
+            uvProbeProgram = true;
+            break;
+        }
+    }
     if (uvProbeProgram) {
-        static std::unordered_map<GLuint, int> uvProbeCounts;
-        int& probeCount = uvProbeCounts[prog->id];
-        if (probeCount < 12) {
-            MITHRIL_LOG_WARN("vk", "UV_PROBE draw=%d prog=%u vao=%u attribs=%d fbo=%u",
-                             probeCount, (unsigned)prog->id,
-                             (unsigned)g_state->currentVAO, attrib_count,
-                             (unsigned)g_state->currentDrawFBO);
+        static std::unordered_set<GLuint> uvProbedPrograms;
+        if (uvProbedPrograms.size() < 48 && uvProbedPrograms.insert(prog->id).second) {
+            MITHRIL_LOG_WARN("vk", "UV_PROBE prog=%u vao=%u attribs=%d fbo=%u samplerMap=%zu",
+                             (unsigned)prog->id, (unsigned)g_state->currentVAO,
+                             attrib_count, (unsigned)g_state->currentDrawFBO,
+                             prog->samplerUnitForBinding.size());
             for (int ai = 0; ai < attrib_count; ++ai) {
                 const MGVertexAttrib& m = attribs[ai];
                 const mithril::VertexAttrib& srcA = vao->attribs[m.location];
                 const mithril::VertexBinding& vb = vao->bindings[srcA.bindingIndex];
                 mithril::Buffer* buf = mithril::state_get_buffer(vb.buffer);
+                void* backendBase = vb.buffer ? backend_get_buffer_mapped_pointer(vb.buffer) : nullptr;
                 MITHRIL_LOG_WARN("vk",
-                    "UV_ATTR prog=%u loc=%d bindIndex=%u buf=%u type=0x%x size=%d norm=%d int=%d stride=%d bindOff=%lld relOff=%u shadow=%zu storageFlags=0x%x mapped=%d",
+                    "UV_ATTR prog=%u loc=%d bindIndex=%u buf=%u type=0x%x size=%d norm=%d int=%d stride=%d bindOff=%lld relOff=%u shadow=%zu storageFlags=0x%x mapped=%d backendMapped=%d",
                     (unsigned)prog->id, m.location, (unsigned)srcA.bindingIndex,
                     (unsigned)vb.buffer, (unsigned)m.type, m.size, m.normalized,
                     m.integer, m.stride, (long long)vb.offset,
                     (unsigned)srcA.relativeOffset, buf ? buf->data.size() : 0u,
                     buf ? (unsigned)buf->storageFlags : 0u,
-                    (buf && buf->mapped) ? 1 : 0);
+                    (buf && buf->mapped) ? 1 : 0, backendBase ? 1 : 0);
                 if (!buf || buf->data.empty() || m.stride <= 0) continue;
                 for (int vi = 0; vi < 4; ++vi) {
                     size_t off = (size_t)vb.offset + (size_t)vi * (size_t)m.stride
                                + (size_t)srcA.relativeOffset;
                     if (off >= buf->data.size()) continue;
                     const size_t avail = std::min<size_t>(16, buf->data.size() - off);
-                    char hex[16 * 3 + 1] = {};
-                    size_t hp = 0;
-                    for (size_t bi = 0; bi < avail && hp + 3 < sizeof(hex); ++bi) {
-                        hp += (size_t)std::snprintf(hex + hp, sizeof(hex) - hp, "%02x ",
-                                                   (unsigned)buf->data[off + bi]);
+                    char shadowHex[16 * 3 + 1] = {};
+                    char mappedHex[16 * 3 + 1] = {};
+                    size_t sp = 0, mp = 0;
+                    const uint8_t* mapped = backendBase
+                        ? static_cast<const uint8_t*>(backendBase) + off : nullptr;
+                    bool differs = false;
+                    for (size_t bi = 0; bi < avail; ++bi) {
+                        sp += (size_t)std::snprintf(shadowHex + sp, sizeof(shadowHex) - sp,
+                                                   "%02x ", (unsigned)buf->data[off + bi]);
+                        if (mapped) {
+                            mp += (size_t)std::snprintf(mappedHex + mp, sizeof(mappedHex) - mp,
+                                                       "%02x ", (unsigned)mapped[bi]);
+                            if (mapped[bi] != buf->data[off + bi]) differs = true;
+                        }
                     }
                     if (m.type == GL_FLOAT) {
                         float f[4] = {0,0,0,0};
@@ -52,17 +68,18 @@ probe = r'''    // EXPERIMENT: byte-level vertex-input probe for the programs th
                         if (off + need <= buf->data.size())
                             std::memcpy(f, buf->data.data() + off, need);
                         MITHRIL_LOG_WARN("vk",
-                            "UV_VERT prog=%u loc=%d v=%d off=%zu float=(%.7g,%.7g,%.7g,%.7g) hex=%s",
+                            "UV_VERT prog=%u loc=%d v=%d off=%zu float=(%.7g,%.7g,%.7g,%.7g) diverged=%d shadow=%s mapped=%s",
                             (unsigned)prog->id, m.location, vi, off,
-                            f[0], f[1], f[2], f[3], hex);
+                            f[0], f[1], f[2], f[3], differs ? 1 : 0,
+                            shadowHex, mapped ? mappedHex : "<none>");
                     } else {
                         MITHRIL_LOG_WARN("vk",
-                            "UV_VERT prog=%u loc=%d v=%d off=%zu hex=%s",
-                            (unsigned)prog->id, m.location, vi, off, hex);
+                            "UV_VERT prog=%u loc=%d v=%d off=%zu diverged=%d shadow=%s mapped=%s",
+                            (unsigned)prog->id, m.location, vi, off,
+                            differs ? 1 : 0, shadowHex, mapped ? mappedHex : "<none>");
                     }
                 }
             }
-            ++probeCount;
         }
     }
 
@@ -74,13 +91,20 @@ p.write_text(s)
 p = Path('Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Pipeline.cpp')
 s = p.read_text()
 anchor = '''    if (shaderLocations.empty()) {\n        for (uint32_t loc = 0; loc < 16; ++loc) shaderLocations.push_back(loc);\n    }\n'''
-insert = r'''    const bool uvProbeProgram =
-        program == 1 || program == 11 || program == 12 ||
-        program == 61 || program == 65 || program == 66 ||
-        program == 67 || program == 69;
+insert = r'''    bool uvProbeProgram = false;
+    for (int i = 0; i < attrib_count; ++i) {
+        const auto& a = attribs[i];
+        if (a.enabled && a.size == 2 &&
+            (a.type == GL_FLOAT || a.type == GL_HALF_FLOAT ||
+             a.type == GL_SHORT || a.type == GL_UNSIGNED_SHORT ||
+             a.type == GL_BYTE || a.type == GL_UNSIGNED_BYTE)) {
+            uvProbeProgram = true;
+            break;
+        }
+    }
     if (uvProbeProgram) {
         static std::unordered_set<GLuint> loggedPrograms;
-        if (loggedPrograms.insert(program).second) {
+        if (loggedPrograms.size() < 48 && loggedPrograms.insert(program).second) {
             std::string locs;
             for (uint32_t loc : shaderLocations) {
                 if (!locs.empty()) locs += ",";
