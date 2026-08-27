@@ -1,0 +1,132 @@
+name: DirectVulkan vertex interface probe
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'experiment/dvk-vertex-interface-probe-20260827'
+
+permissions:
+  contents: read
+
+jobs:
+  minecraft:
+    runs-on: macos-26
+    timeout-minutes: 30
+    env:
+      E2E_ROOT: ${{ github.workspace }}/build/minecraft-vulkan-vertex-interface-artifacts
+      GRADLE_OPTS: -Dorg.gradle.caching=true
+      MITHRIL_BACKEND: vulkan
+      MITHRIL_DEBUG: '1'
+      MTL_DEBUG_LAYER: '1'
+      MTL_SHADER_VALIDATION: '0'
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - name: Instrument SPIR-V inputs and VAO slots
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Pipeline.cpp')
+          s = p.read_text()
+          anchor = '''    std::vector<uint32_t> shaderLocations =
+        reflect_vertex_input_locations(vertex_spirv, vertex_word_count);
+'''
+          probe = anchor + r'''    static unsigned mithril_vertex_iface_probe = 0;
+    if (mithril_vertex_iface_probe < 160) {
+        MITHRIL_LOG_WARN("vk", "VERTEX_IFACE_BEGIN seq=%u program=%u attrib_count=%d",
+                         mithril_vertex_iface_probe, (unsigned)program, attrib_count);
+        for (int ai = 0; ai < attrib_count; ++ai) {
+            const MGVertexAttrib& pa = attribs[ai];
+            MITHRIL_LOG_WARN("vk",
+                "VERTEX_IFACE_VAO seq=%u program=%u slot=%d enabled=%d size=%d type=0x%x norm=%d integer=%d stride=%d offset=%d buffer=%u divisor=%d",
+                mithril_vertex_iface_probe, (unsigned)program, pa.location, pa.enabled,
+                pa.size, (unsigned)pa.type, pa.normalized, pa.integer, pa.stride,
+                pa.offset, (unsigned)pa.buffer_name, pa.divisor);
+        }
+        try {
+            spirv_cross::Compiler ifaceCompiler(vertex_spirv, static_cast<size_t>(vertex_word_count));
+            auto ifaceResources = ifaceCompiler.get_shader_resources();
+            for (auto& input : ifaceResources.stage_inputs) {
+                const uint32_t loc = ifaceCompiler.get_decoration(input.id, spv::DecorationLocation);
+                std::string nm = ifaceCompiler.get_name(input.id);
+                if (nm.empty()) nm = input.name;
+                MITHRIL_LOG_WARN("vk",
+                    "VERTEX_IFACE_SPV seq=%u program=%u name=%s loc=%u id=%u",
+                    mithril_vertex_iface_probe, (unsigned)program, nm.c_str(),
+                    loc, (unsigned)input.id);
+            }
+        } catch (const std::exception& e) {
+            MITHRIL_LOG_WARN("vk", "VERTEX_IFACE_REFLECT_FAIL seq=%u program=%u err=%s",
+                             mithril_vertex_iface_probe, (unsigned)program, e.what());
+        }
+        MITHRIL_LOG_WARN("vk", "VERTEX_IFACE_END seq=%u program=%u",
+                         mithril_vertex_iface_probe, (unsigned)program);
+        ++mithril_vertex_iface_probe;
+    }
+'''
+          assert s.count(anchor) == 1, s.count(anchor)
+          s = s.replace(anchor, probe, 1)
+          p.write_text(s)
+          PY
+          git diff --check
+      - name: Initialize evidence
+        run: python3 ci/minecraft-e2e/evidence.py --root "$E2E_ROOT" init
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb
+        with:
+          gradle-version: '9.4.1'
+          cache-read-only: true
+      - run: brew install glfw vulkan-loader molten-vk ninja
+      - name: Build probed Mithril dylib
+        id: mithril
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-vertex-interface -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS='-Wno-error' -DCMAKE_CXX_FLAGS='-Wno-error'
+          cmake --build build-vertex-interface --target mithril --parallel
+          dylib=$(find build-vertex-interface -type f -name libmithril.dylib -print -quit)
+          test -s "$dylib"
+          dylib="$(cd "$(dirname "$dylib")" && pwd)/$(basename "$dylib")"
+          echo "dylib=$dylib" >> "$GITHUB_OUTPUT"
+      - name: Build GLFW bridge
+        id: bridge
+        shell: bash
+        run: |
+          set -euo pipefail
+          GLFW_PREFIX=$(brew --prefix glfw)
+          GLFW_REAL="$GLFW_PREFIX/lib/libglfw.3.dylib"
+          test -f "$GLFW_REAL" || GLFW_REAL="$GLFW_PREFIX/lib/libglfw.dylib"
+          mkdir -p build-vertex-interface/bridge
+          BRIDGE="$PWD/build-vertex-interface/bridge/libglfw_mithril.dylib"
+          clang++ -std=c++20 -fobjc-arc -dynamiclib -Wall -Wextra -Werror ci/minecraft-e2e/native/glfw_mithril_bridge.mm ci/minecraft-e2e/native/prepresent_capture.mm -I"$GLFW_PREFIX/include" -IMithril-Wrapper-cpp/include -framework AppKit -framework QuartzCore -framework Foundation -Wl,-reexport_library,"$GLFW_REAL" -o "$BRIDGE"
+          echo "bridge=$BRIDGE" >> "$GITHUB_OUTPUT"
+          echo "glfw_real=$GLFW_REAL" >> "$GITHUB_OUTPUT"
+      - name: Run real Minecraft 26.2
+        shell: bash
+        run: |
+          set -o pipefail
+          rm -f "$E2E_ROOT/failure.json"
+          gradle -p .github/ci/minecraft-e2e --build-cache --stacktrace -PmithrilBackend=vulkan -PmithrilDylib="${{ steps.mithril.outputs.dylib }}" -PglfwBridge="${{ steps.bridge.outputs.bridge }}" -PglfwDelegate="${{ steps.bridge.outputs.glfw_real }}" -PevidenceRoot="$E2E_ROOT" runProductionClientGameTest 2>&1 | tee "$E2E_ROOT/gradle-minecraft.log"
+      - name: Collect diagnostics
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: |
+          ci/minecraft-e2e/collect-diagnostics.sh "$E2E_ROOT" "$PWD/.github/ci/minecraft-e2e/build/run/clientGameTest"
+          grep -E 'VERTEX_IFACE_|prepare_draw DROPPED|vkCreateGraphicsPipelines' "$E2E_ROOT/gradle-minecraft.log" > "$E2E_ROOT/vertex-interface.log" || true
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: mithril-vulkan-vertex-interface-${{ github.sha }}-${{ github.run_attempt }}
+          retention-days: 7
+          compression-level: 6
+          path: build/minecraft-vulkan-vertex-interface-artifacts/**
