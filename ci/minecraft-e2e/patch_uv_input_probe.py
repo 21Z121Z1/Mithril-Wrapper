@@ -9,10 +9,12 @@ probe = r'''    // EXPERIMENT: byte-level vertex-input probe for the programs th
     // authoritative CPU shadow before any backend translation so a constant UV
     // stream can be separated from a Vulkan location/format bug.
     if (prog->id == 34 || prog->id == 58 || prog->id == 88) {
-        static int uvProbeCount = 0;
-        if (uvProbeCount < 48) {
+        static int uvProbeCount34 = 0, uvProbeCount58 = 0, uvProbeCount88 = 0;
+        int* probeCount = prog->id == 34 ? &uvProbeCount34
+                        : prog->id == 58 ? &uvProbeCount58 : &uvProbeCount88;
+        if (*probeCount < 24) {
             MITHRIL_LOG_WARN("probe", "UV_PROBE draw=%d prog=%u vao=%u attribs=%d fbo=%u",
-                             uvProbeCount, (unsigned)prog->id,
+                             *probeCount, (unsigned)prog->id,
                              (unsigned)g_state->currentVAO, attrib_count,
                              (unsigned)g_state->currentDrawFBO);
             for (int ai = 0; ai < attrib_count; ++ai) {
@@ -21,11 +23,13 @@ probe = r'''    // EXPERIMENT: byte-level vertex-input probe for the programs th
                 const mithril::VertexBinding& vb = vao->bindings[srcA.bindingIndex];
                 mithril::Buffer* buf = mithril::state_get_buffer(vb.buffer);
                 MITHRIL_LOG_WARN("probe",
-                    "UV_ATTR prog=%u loc=%d bindIndex=%u buf=%u type=0x%x size=%d norm=%d int=%d stride=%d bindOff=%lld relOff=%u shadow=%zu",
+                    "UV_ATTR prog=%u loc=%d bindIndex=%u buf=%u type=0x%x size=%d norm=%d int=%d stride=%d bindOff=%lld relOff=%u shadow=%zu storageFlags=0x%x mapped=%d",
                     (unsigned)prog->id, m.location, (unsigned)srcA.bindingIndex,
                     (unsigned)vb.buffer, (unsigned)m.type, m.size, m.normalized,
                     m.integer, m.stride, (long long)vb.offset,
-                    (unsigned)srcA.relativeOffset, buf ? buf->data.size() : 0u);
+                    (unsigned)srcA.relativeOffset, buf ? buf->data.size() : 0u,
+                    buf ? (unsigned)buf->storageFlags : 0u,
+                    (buf && buf->mapped) ? 1 : 0);
                 if (!buf || buf->data.empty() || m.stride <= 0) continue;
                 for (int vi = 0; vi < 4; ++vi) {
                     size_t off = (size_t)vb.offset + (size_t)vi * (size_t)m.stride
@@ -55,7 +59,7 @@ probe = r'''    // EXPERIMENT: byte-level vertex-input probe for the programs th
                     }
                 }
             }
-            ++uvProbeCount;
+            ++*probeCount;
         }
     }
 
