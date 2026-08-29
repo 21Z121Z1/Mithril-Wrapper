@@ -1,0 +1,167 @@
+name: DirectVulkan combined full-unpack A/B
+
+on:
+  push:
+    branches:
+      - experiment/dvk-full-unpack-combined-20260829
+    paths:
+      - .github/workflows/experiment-dvk-full-unpack-combined.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  minecraft-ab:
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [baseline, full-unpack]
+    runs-on: macos-26
+    timeout-minutes: 35
+    env:
+      E2E_ROOT: ${{ github.workspace }}/build/minecraft-vulkan-full-unpack-${{ matrix.variant }}-artifacts
+      GRADLE_OPTS: -Dorg.gradle.caching=true
+      MITHRIL_BACKEND: vulkan
+      MITHRIL_DEBUG: '1'
+      MTL_DEBUG_LAYER: '1'
+      MTL_SHADER_VALIDATION: '0'
+    steps:
+      - name: Checkout exact combined baseline
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Apply full pixel-unpack semantics
+        if: matrix.variant == 'full-unpack'
+        run: python3 ci/minecraft-e2e/patch_full_unpack_combined.py
+
+      - name: Validate patch shape
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check
+          if [[ '${{ matrix.variant }}' == 'full-unpack' ]]; then
+            git diff -- Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Resources.cpp
+          else
+            test -z "$(git diff -- Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Resources.cpp)"
+          fi
+
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb
+        with:
+          gradle-version: '9.4.1'
+          cache-read-only: true
+
+      - name: Install native dependencies
+        run: brew install glfw vulkan-loader molten-vk ninja
+
+      - name: Build Mithril
+        id: mithril
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-full-unpack-${{ matrix.variant }} -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_FLAGS='-Wno-error' \
+            -DCMAKE_CXX_FLAGS='-Wno-error'
+          cmake --build build-full-unpack-${{ matrix.variant }} --target mithril --parallel
+          dylib=$(find build-full-unpack-${{ matrix.variant }} -type f -name libmithril.dylib -print -quit)
+          test -s "$dylib"
+          dylib="$(cd "$(dirname "$dylib")" && pwd)/$(basename "$dylib")"
+          echo "dylib=$dylib" >> "$GITHUB_OUTPUT"
+
+      - name: Run isolated pixel-unpack regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang -std=c11 -Wall -Wextra -Werror \
+            tests/texture_unpack_smoke.c \
+            -IMithril-Wrapper-cpp/include \
+            -o build-full-unpack-${{ matrix.variant }}/texture_unpack_smoke
+          set +e
+          MITHRIL_BACKEND=vulkan \
+          MITHRIL_DEBUG=0 \
+          DYLD_LIBRARY_PATH="$(brew --prefix molten-vk)/lib" \
+            ./build-full-unpack-${{ matrix.variant }}/texture_unpack_smoke \
+            "${{ steps.mithril.outputs.dylib }}" \
+            > build-full-unpack-${{ matrix.variant }}/texture-unpack.log 2>&1
+          rc=$?
+          set -e
+          cat build-full-unpack-${{ matrix.variant }}/texture-unpack.log
+          if [[ '${{ matrix.variant }}' == 'baseline' ]]; then
+            if [[ $rc -eq 0 ]]; then
+              echo 'Baseline unexpectedly passed; the regression no longer distinguishes the patch.' >&2
+              exit 1
+            fi
+            grep -F 'TEXTURE UNPACK SMOKE FAILED' build-full-unpack-${{ matrix.variant }}/texture-unpack.log
+          else
+            if [[ $rc -ne 0 ]]; then
+              echo 'Full-unpack patch failed the isolated regression.' >&2
+              exit "$rc"
+            fi
+            grep -F 'TEXTURE UNPACK SMOKE PASSED' build-full-unpack-${{ matrix.variant }}/texture-unpack.log
+          fi
+
+      - name: Initialize Minecraft evidence
+        run: python3 ci/minecraft-e2e/evidence.py --root "$E2E_ROOT" init
+
+      - name: Build GLFW bridge
+        id: bridge
+        shell: bash
+        run: |
+          set -euo pipefail
+          GLFW_PREFIX=$(brew --prefix glfw)
+          GLFW_REAL="$GLFW_PREFIX/lib/libglfw.3.dylib"
+          test -f "$GLFW_REAL" || GLFW_REAL="$GLFW_PREFIX/lib/libglfw.dylib"
+          mkdir -p build-full-unpack-${{ matrix.variant }}/bridge
+          BRIDGE="$PWD/build-full-unpack-${{ matrix.variant }}/bridge/libglfw_mithril.dylib"
+          clang++ -std=c++20 -fobjc-arc -dynamiclib -Wall -Wextra -Werror \
+            ci/minecraft-e2e/native/glfw_mithril_bridge.mm \
+            ci/minecraft-e2e/native/prepresent_capture.mm \
+            -I"$GLFW_PREFIX/include" -IMithril-Wrapper-cpp/include \
+            -framework AppKit -framework QuartzCore -framework Foundation \
+            -Wl,-reexport_library,"$GLFW_REAL" \
+            -o "$BRIDGE"
+          echo "bridge=$BRIDGE" >> "$GITHUB_OUTPUT"
+          echo "glfw_real=$GLFW_REAL" >> "$GITHUB_OUTPUT"
+
+      - name: Run real Minecraft 26.2
+        shell: bash
+        run: |
+          set -o pipefail
+          rm -f "$E2E_ROOT/failure.json"
+          gradle -p .github/ci/minecraft-e2e --build-cache --stacktrace \
+            -PmithrilBackend=vulkan \
+            -PmithrilDylib="${{ steps.mithril.outputs.dylib }}" \
+            -PglfwBridge="${{ steps.bridge.outputs.bridge }}" \
+            -PglfwDelegate="${{ steps.bridge.outputs.glfw_real }}" \
+            -PevidenceRoot="$E2E_ROOT" \
+            runProductionClientGameTest 2>&1 | tee "$E2E_ROOT/gradle-minecraft.log"
+
+      - name: Collect diagnostics
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: |
+          ci/minecraft-e2e/collect-diagnostics.sh \
+            "$E2E_ROOT" \
+            "$PWD/.github/ci/minecraft-e2e/build/run/clientGameTest"
+          cp build-full-unpack-${{ matrix.variant }}/texture-unpack.log \
+            "$E2E_ROOT/texture-unpack.log" || true
+          git diff -- Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Resources.cpp \
+            > "$E2E_ROOT/production-diff.patch" || true
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: mithril-vulkan-full-unpack-${{ matrix.variant }}-${{ github.sha }}-${{ github.run_attempt }}
+          retention-days: 7
+          compression-level: 6
+          path: build/minecraft-vulkan-full-unpack-${{ matrix.variant }}-artifacts/**
