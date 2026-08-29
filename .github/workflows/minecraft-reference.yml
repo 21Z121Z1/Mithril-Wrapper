@@ -1,0 +1,55 @@
+name: Minecraft reference smoke
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'scripts/minecraft-reference.sh'
+      - '.github/workflows/minecraft-reference.yml'
+      - '.gitignore'
+      - 'AGENTS.md'
+      - 'docs/minecraft-reference.md'
+
+permissions:
+  contents: read
+
+jobs:
+  minecraft-reference:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Java 25
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - name: Validate bootstrap syntax
+        run: bash -n scripts/minecraft-reference.sh
+
+      - name: Materialize Minecraft reference sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          printed="$(bash scripts/minecraft-reference.sh --print-path)"
+          test "$printed" = "$PWD/.minecraft-reference/26.2/sources"
+
+      - name: Verify stable source tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          root='.minecraft-reference/26.2/sources'
+          test -f "$root/net/minecraft/client/Minecraft.java"
+          java_count="$(find "$root" -type f -name '*.java' | wc -l | tr -d '[:space:]')"
+          test "$java_count" -ge 500
+          grep -Fqx 'minecraft_version=26.2' '.minecraft-reference/26.2/REFERENCE_INFO.txt'
+          printed="$(bash scripts/minecraft-reference.sh --print-path)"
+          test "$printed" = "$PWD/.minecraft-reference/26.2/sources"
+          echo "Verified $java_count decompiled Java files"
+
+      - name: Ensure Minecraft files stay untracked
+        run: |
+          test -z "$(git status --short --untracked-files=all -- .minecraft-reference)"
