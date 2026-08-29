@@ -1,0 +1,207 @@
+name: DirectVulkan final GUI rendering validation
+
+on:
+  push:
+    branches:
+      - experiment/dvk-gui-text-ab-20260829
+    paths:
+      - .github/workflows/experiment-dvk-final-gui-validation.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  final-gui-validation:
+    runs-on: macos-26
+    timeout-minutes: 45
+    env:
+      E2E_ROOT: ${{ github.workspace }}/build/final-gui-evidence
+      GRADLE_OPTS: -Dorg.gradle.caching=true
+      MITHRIL_BACKEND: vulkan
+      MITHRIL_DEBUG: '1'
+      MTL_DEBUG_LAYER: '1'
+      MTL_SHADER_VALIDATION: '0'
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Apply complete validated GUI fixes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 ci/minecraft-e2e/patch_full_unpack_combined.py
+          python3 ci/minecraft-e2e/patch_pbo_shadow_source_combined.py
+          python3 ci/minecraft-e2e/patch_vulkan_default_yflip.py
+          python3 ci/minecraft-e2e/patch_readpixels_bgra.py
+          git diff --check
+
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb
+        with:
+          gradle-version: '9.4.1'
+          cache-read-only: true
+
+      - name: Install native dependencies
+        run: brew install glfw vulkan-loader molten-vk ninja
+
+      - name: Build Release Mithril
+        id: mithril
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-final-gui -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_FLAGS='-Wno-error' \
+            -DCMAKE_CXX_FLAGS='-Wno-error'
+          cmake --build build-final-gui --target mithril --parallel
+          dylib=$(find build-final-gui -type f -name libmithril.dylib -print -quit)
+          test -s "$dylib"
+          dylib="$(cd "$(dirname "$dylib")" && pwd)/$(basename "$dylib")"
+          echo "dylib=$dylib" >> "$GITHUB_OUTPUT"
+
+      - name: Gate complete host pixel-store semantics
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang -std=c11 -Wall -Wextra -Werror tests/texture_unpack_smoke.c \
+            -IMithril-Wrapper-cpp/include -o build-final-gui/texture_unpack_smoke
+          DYLD_LIBRARY_PATH="$(brew --prefix molten-vk)/lib" \
+            ./build-final-gui/texture_unpack_smoke "${{ steps.mithril.outputs.dylib }}" \
+            | tee build-final-gui/texture-unpack.log
+          grep -F 'TEXTURE UNPACK SMOKE PASSED' build-final-gui/texture-unpack.log
+
+      - name: Gate persistent-PBO atlas semantics
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang -std=c11 -Wall -Wextra -Werror tests/persistent_pbo_unpack_smoke.c \
+            -IMithril-Wrapper-cpp/include -o build-final-gui/persistent_pbo_unpack_smoke
+          DYLD_LIBRARY_PATH="$(brew --prefix molten-vk)/lib" \
+            ./build-final-gui/persistent_pbo_unpack_smoke "${{ steps.mithril.outputs.dylib }}" \
+            | tee build-final-gui/persistent-pbo.log
+          grep -F 'PERSISTENT PBO UNPACK SMOKE PASSED' build-final-gui/persistent-pbo.log
+
+      - name: Gate G/I atlas-sampling-blend pipeline in user FBO
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang -std=c11 -Wall -Wextra -Werror tests/gui_glyph_pipeline_smoke.c \
+            -IMithril-Wrapper-cpp/include -o build-final-gui/gui_glyph_pipeline_smoke
+          DYLD_LIBRARY_PATH="$(brew --prefix molten-vk)/lib" \
+            ./build-final-gui/gui_glyph_pipeline_smoke "${{ steps.mithril.outputs.dylib }}" \
+            | tee build-final-gui/glyph-user-fbo.log
+          grep -F 'glyph_rgb_mismatches=0' build-final-gui/glyph-user-fbo.log
+          grep -F 'GUI GLYPH PIPELINE SMOKE PASSED' build-final-gui/glyph-user-fbo.log
+
+      - name: Initialize evidence
+        run: python3 ci/minecraft-e2e/evidence.py --root "$E2E_ROOT" init
+
+      - name: Build real GLFW/CAMetalLayer bridge
+        id: bridge
+        shell: bash
+        run: |
+          set -euo pipefail
+          GLFW_PREFIX=$(brew --prefix glfw)
+          GLFW_REAL="$GLFW_PREFIX/lib/libglfw.3.dylib"
+          test -f "$GLFW_REAL" || GLFW_REAL="$GLFW_PREFIX/lib/libglfw.dylib"
+          mkdir -p build-final-gui/bridge
+          BRIDGE="$PWD/build-final-gui/bridge/libglfw_mithril.dylib"
+          clang++ -std=c++20 -fobjc-arc -dynamiclib -Wall -Wextra -Werror \
+            ci/minecraft-e2e/native/glfw_mithril_bridge.mm \
+            ci/minecraft-e2e/native/prepresent_capture.mm \
+            -I"$GLFW_PREFIX/include" -IMithril-Wrapper-cpp/include \
+            -framework AppKit -framework QuartzCore -framework Foundation \
+            -Wl,-reexport_library,"$GLFW_REAL" \
+            -o "$BRIDGE"
+          echo "bridge=$BRIDGE" >> "$GITHUB_OUTPUT"
+          echo "glfw_real=$GLFW_REAL" >> "$GITHUB_OUTPUT"
+          echo "glfw_prefix=$GLFW_PREFIX" >> "$GITHUB_OUTPUT"
+
+      - name: Hard-gate G/I on real default CAMetalLayer framebuffer
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang++ -std=c++20 -Wall -Wextra -Werror \
+            tests/glfw_default_glyph_smoke.cpp \
+            -I"${{ steps.bridge.outputs.glfw_prefix }}/include" \
+            -IMithril-Wrapper-cpp/include \
+            "${{ steps.bridge.outputs.bridge }}" \
+            -framework AppKit -framework Foundation \
+            -o build-final-gui/glfw_default_glyph_smoke
+          MITHRIL_E2E_MITHRIL_DYLIB="${{ steps.mithril.outputs.dylib }}" \
+          MITHRIL_E2E_GLFW_DELEGATE="${{ steps.bridge.outputs.glfw_real }}" \
+          MITHRIL_E2E_ROOT="$E2E_ROOT" \
+          DYLD_LIBRARY_PATH="$(brew --prefix molten-vk)/lib" \
+            ./build-final-gui/glfw_default_glyph_smoke \
+            | tee build-final-gui/glyph-default.log
+          grep -F 'glyph_cell_mismatches=0' build-final-gui/glyph-default.log
+          grep -F 'GLFW DEFAULT G/I GLYPH SMOKE PASSED' build-final-gui/glyph-default.log
+
+      - name: Run real Minecraft 26.2 through Mithril Vulkan
+        shell: bash
+        run: |
+          set -o pipefail
+          rm -f "$E2E_ROOT/failure.json"
+          gradle -p .github/ci/minecraft-e2e --build-cache --stacktrace \
+            -PmithrilBackend=vulkan \
+            -PmithrilDylib="${{ steps.mithril.outputs.dylib }}" \
+            -PglfwBridge="${{ steps.bridge.outputs.bridge }}" \
+            -PglfwDelegate="${{ steps.bridge.outputs.glfw_real }}" \
+            -PevidenceRoot="$E2E_ROOT" \
+            runProductionClientGameTest 2>&1 | tee "$E2E_ROOT/gradle-minecraft.log"
+
+      - name: Collect final diagnostics
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: |
+          ci/minecraft-e2e/collect-diagnostics.sh \
+            "$E2E_ROOT" \
+            "$PWD/.github/ci/minecraft-e2e/build/run/clientGameTest"
+          cp build-final-gui/texture-unpack.log "$E2E_ROOT/" || true
+          cp build-final-gui/persistent-pbo.log "$E2E_ROOT/" || true
+          cp build-final-gui/glyph-user-fbo.log "$E2E_ROOT/" || true
+          cp build-final-gui/glyph-default.log "$E2E_ROOT/" || true
+          git diff -- \
+            Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Resources.cpp \
+            Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/ImageOps.cpp \
+            Mithril-Wrapper-cpp/MG_Impl/Texture.cpp \
+            Mithril-Wrapper-cpp/MG_Impl/Drawing.cpp \
+            > "$E2E_ROOT/validated-production.patch" || true
+          grep -E 'DEVICE_LOST|GPU Address Fault|CallbackErrorPageFault|prepare_draw DROPPED|VUID-' \
+            "$E2E_ROOT/gradle-minecraft.log" > "$E2E_ROOT/render-errors.log" || true
+
+      - name: Hard final verdict
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test ! -s "$E2E_ROOT/failure.json"
+          test -f "$E2E_ROOT/oracle-summary.json"
+          if test -s "$E2E_ROOT/render-errors.log"; then
+            echo 'render/validation errors detected:' >&2
+            cat "$E2E_ROOT/render-errors.log" >&2
+            exit 1
+          fi
+          grep -F 'TEXTURE UNPACK SMOKE PASSED' build-final-gui/texture-unpack.log
+          grep -F 'PERSISTENT PBO UNPACK SMOKE PASSED' build-final-gui/persistent-pbo.log
+          grep -F 'glyph_rgb_mismatches=0' build-final-gui/glyph-user-fbo.log
+          grep -F 'GUI GLYPH PIPELINE SMOKE PASSED' build-final-gui/glyph-user-fbo.log
+          grep -F 'glyph_cell_mismatches=0' build-final-gui/glyph-default.log
+          grep -F 'GLFW DEFAULT G/I GLYPH SMOKE PASSED' build-final-gui/glyph-default.log
+
+      - name: Upload final evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: dvk-final-gui-validation-${{ github.sha }}
+          retention-days: 7
+          compression-level: 6
+          path: build/final-gui-evidence/**
