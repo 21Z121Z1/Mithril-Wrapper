@@ -1,4 +1,4 @@
-name: DirectVulkan GUI text + orientation A/B
+name: DirectVulkan GUI glyph upload A/B
 
 on:
   push:
@@ -12,11 +12,11 @@ permissions:
   contents: read
 
 jobs:
-  render-contract-ab:
+  glyph-contract-ab:
     strategy:
       fail-fast: false
       matrix:
-        variant: [baseline, full-unpack, full-unpack-shadow, full-unpack-shadow-yflip]
+        variant: [baseline, full-unpack, full-unpack-shadow]
     runs-on: macos-26
     timeout-minutes: 30
     env:
@@ -33,11 +33,8 @@ jobs:
         if: matrix.variant != 'baseline'
         run: python3 ci/minecraft-e2e/patch_full_unpack_combined.py
       - name: Use GL-visible PBO bytes
-        if: matrix.variant == 'full-unpack-shadow' || matrix.variant == 'full-unpack-shadow-yflip'
+        if: matrix.variant == 'full-unpack-shadow'
         run: python3 ci/minecraft-e2e/patch_pbo_shadow_source_combined.py
-      - name: Correct Vulkan default framebuffer orientation
-        if: matrix.variant == 'full-unpack-shadow-yflip'
-        run: python3 ci/minecraft-e2e/patch_vulkan_default_yflip.py
       - name: Validate patch shape
         run: git diff --check
       - run: brew install vulkan-loader molten-vk ninja
@@ -88,33 +85,33 @@ jobs:
           rc=$?
           set -e
           cat build-gui-${{ matrix.variant }}/persistent-pbo.log
-          case '${{ matrix.variant }}' in
-            full-unpack-shadow|full-unpack-shadow-yflip)
-              test $rc -eq 0
-              grep -F 'PERSISTENT PBO UNPACK SMOKE PASSED' build-gui-${{ matrix.variant }}/persistent-pbo.log ;;
-            *)
-              test $rc -ne 0
-              grep -F 'PERSISTENT PBO UNPACK SMOKE FAILED' build-gui-${{ matrix.variant }}/persistent-pbo.log ;;
-          esac
-      - name: Run default framebuffer orientation regression
+          if [[ '${{ matrix.variant }}' == 'full-unpack-shadow' ]]; then
+            test $rc -eq 0
+            grep -F 'PERSISTENT PBO UNPACK SMOKE PASSED' build-gui-${{ matrix.variant }}/persistent-pbo.log
+          else
+            test $rc -ne 0
+            grep -F 'PERSISTENT PBO UNPACK SMOKE FAILED' build-gui-${{ matrix.variant }}/persistent-pbo.log
+          fi
+      - name: Run end-to-end G/I glyph pipeline regression
         shell: bash
         run: |
           set -euo pipefail
-          clang -std=c11 -Wall -Wextra -Werror tests/default_framebuffer_orientation_smoke.c \
-            -IMithril-Wrapper-cpp/include -o build-gui-${{ matrix.variant }}/default_orientation_smoke
+          clang -std=c11 -Wall -Wextra -Werror tests/gui_glyph_pipeline_smoke.c \
+            -IMithril-Wrapper-cpp/include -o build-gui-${{ matrix.variant }}/gui_glyph_pipeline_smoke
           set +e
           DYLD_LIBRARY_PATH="$(brew --prefix molten-vk)/lib" \
-            ./build-gui-${{ matrix.variant }}/default_orientation_smoke "${{ steps.mithril.outputs.dylib }}" \
-            > build-gui-${{ matrix.variant }}/orientation.log 2>&1
+            ./build-gui-${{ matrix.variant }}/gui_glyph_pipeline_smoke "${{ steps.mithril.outputs.dylib }}" \
+            > build-gui-${{ matrix.variant }}/glyph.log 2>&1
           rc=$?
           set -e
-          cat build-gui-${{ matrix.variant }}/orientation.log
-          if [[ '${{ matrix.variant }}' == 'full-unpack-shadow-yflip' ]]; then
+          cat build-gui-${{ matrix.variant }}/glyph.log
+          if [[ '${{ matrix.variant }}' == 'full-unpack-shadow' ]]; then
             test $rc -eq 0
-            grep -F 'DEFAULT FRAMEBUFFER ORIENTATION SMOKE PASSED' build-gui-${{ matrix.variant }}/orientation.log
+            grep -F 'GUI GLYPH PIPELINE SMOKE PASSED' build-gui-${{ matrix.variant }}/glyph.log
+            grep -F 'glyph_rgb_mismatches=0' build-gui-${{ matrix.variant }}/glyph.log
           else
             test $rc -ne 0
-            grep -F 'DEFAULT FRAMEBUFFER ORIENTATION SMOKE FAILED' build-gui-${{ matrix.variant }}/orientation.log
+            grep -F 'GUI GLYPH PIPELINE SMOKE FAILED' build-gui-${{ matrix.variant }}/glyph.log
           fi
       - name: Write explicit A/B verdict
         if: always()
@@ -125,17 +122,18 @@ jobs:
             printf 'variant=%s\n' '${{ matrix.variant }}'
             grep -E 'TEXTURE UNPACK SMOKE (PASSED|FAILED)' build-gui-${{ matrix.variant }}/host-unpack.log || true
             grep -E 'PERSISTENT PBO UNPACK SMOKE (PASSED|FAILED)' build-gui-${{ matrix.variant }}/persistent-pbo.log || true
-            grep -E 'DEFAULT FRAMEBUFFER ORIENTATION SMOKE (PASSED|FAILED)' build-gui-${{ matrix.variant }}/orientation.log || true
+            grep -E 'GUI GLYPH PIPELINE SMOKE (PASSED|FAILED)' build-gui-${{ matrix.variant }}/glyph.log || true
+            grep -E '^glyph_rgb_mismatches=' build-gui-${{ matrix.variant }}/glyph.log || true
           } > build-gui-${{ matrix.variant }}/evidence/verdict.txt
-          git diff -- Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Resources.cpp Mithril-Wrapper-cpp/MG_Impl/Texture.cpp Mithril-Wrapper-cpp/MG_Impl/Drawing.cpp \
+          git diff -- Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Resources.cpp Mithril-Wrapper-cpp/MG_Impl/Texture.cpp \
             > build-gui-${{ matrix.variant }}/evidence/production.patch
           cp build-gui-${{ matrix.variant }}/host-unpack.log build-gui-${{ matrix.variant }}/evidence/ || true
           cp build-gui-${{ matrix.variant }}/persistent-pbo.log build-gui-${{ matrix.variant }}/evidence/ || true
-          cp build-gui-${{ matrix.variant }}/orientation.log build-gui-${{ matrix.variant }}/evidence/ || true
+          cp build-gui-${{ matrix.variant }}/glyph.log build-gui-${{ matrix.variant }}/evidence/ || true
       - name: Upload evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: dvk-gui-render-${{ matrix.variant }}-${{ github.sha }}
+          name: dvk-gui-glyph-${{ matrix.variant }}-${{ github.sha }}
           retention-days: 7
           path: build-gui-${{ matrix.variant }}/evidence/**
