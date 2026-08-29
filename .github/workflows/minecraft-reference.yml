@@ -31,7 +31,11 @@ jobs:
         run: bash -n scripts/minecraft-reference.sh
 
       - name: Materialize Minecraft reference sources
-        run: bash scripts/minecraft-reference.sh
+        shell: bash
+        run: |
+          set -euo pipefail
+          printed="$(bash scripts/minecraft-reference.sh --print-path)"
+          test "$printed" = "$PWD/.minecraft-reference/26.2/sources"
 
       - name: Verify stable source tree
         shell: bash
