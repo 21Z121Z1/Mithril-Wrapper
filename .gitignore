@@ -10,5 +10,8 @@ build-headless/
 MobileGL/
 glslang_check/
 
+# 本地 Minecraft 客户端/反编译参考源码，勿提交
+.minecraft-reference/
+
 # 本地根因分析文档，含敏感信息，勿提交
 ROOT_CAUSE_CONTEXT.md
