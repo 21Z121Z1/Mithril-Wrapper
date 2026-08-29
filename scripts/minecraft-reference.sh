@@ -178,8 +178,9 @@ rm -rf "${TMP_SOURCES}"
 mkdir -p "${TMP_SOURCES}"
 
 echo "Decompiling Minecraft ${MC_VERSION} for local reference..." >&2
+# Keep stdout reserved for the final machine-readable result used by agents.
 # shellcheck disable=SC2086
-java ${JAVA_OPTS} -jar "${VINEFLOWER_JAR}" --folder -s "${CLIENT_JAR}" "${TMP_SOURCES}"
+java ${JAVA_OPTS} -jar "${VINEFLOWER_JAR}" --folder -s "${CLIENT_JAR}" "${TMP_SOURCES}" >&2
 
 EXPECTED_SOURCE="${TMP_SOURCES}/net/minecraft/client/Minecraft.java"
 if [[ ! -f "${EXPECTED_SOURCE}" ]]; then
