@@ -16,13 +16,17 @@ def normalize_path(raw: str) -> Path:
         return ROOT / "CMakeLists.txt"
     raise RuntimeError(f"cannot normalize patch path: {raw}")
 
-def find_subseq(lines: list[str], needle: list[str]) -> int:
+def find_subseq(lines: list[str], needle: list[str], start: int) -> int:
     hits = [i for i in range(len(lines)-len(needle)+1) if lines[i:i+len(needle)] == needle]
-    if len(hits) != 1:
-        raise RuntimeError(f"hunk match count {len(hits)} != 1: {needle[:8]!r}")
-    return hits[0]
+    if len(hits) == 1:
+        return hits[0]
+    forward = [i for i in hits if i >= start]
+    if forward:
+        return forward[0]
+    raise RuntimeError(
+        f"hunk match count {len(hits)} with no match at/after {start}: {needle[:8]!r}")
 
-def apply_hunk(path: Path, hunk: list[str]) -> None:
+def apply_hunk(path: Path, hunk: list[str], start: int) -> int:
     old, new = [], []
     for line in hunk:
         if line.startswith("\\ No newline"):
@@ -41,27 +45,30 @@ def apply_hunk(path: Path, hunk: list[str]) -> None:
     text = path.read_text(encoding="utf-8")
     had_nl = text.endswith("\n")
     lines = text.splitlines()
-    at = find_subseq(lines, old)
+    at = find_subseq(lines, old, start)
     lines[at:at+len(old)] = new
     path.write_text("\n".join(lines) + ("\n" if had_nl else ""), encoding="utf-8")
+    return at + len(new)
 
 def apply_patch(patch: str) -> None:
     lines = patch.splitlines()
     if lines[0] != "*** Begin Patch" or lines[-1] != "*** End Patch":
         raise RuntimeError("bad patch envelope")
     current = None
+    cursor = 0
     hunk = []
     def flush():
-        nonlocal hunk
+        nonlocal hunk, cursor
         if hunk:
             if current is None:
                 raise RuntimeError("hunk without file")
-            apply_hunk(current, hunk)
+            cursor = apply_hunk(current, hunk, cursor)
             hunk = []
     for line in lines[1:-1]:
         if line.startswith("*** Update File: "):
             flush()
             current = normalize_path(line[len("*** Update File: "):])
+            cursor = 0
             if not current.is_file():
                 raise RuntimeError(f"missing file: {current}")
         elif line.startswith("@@"):
