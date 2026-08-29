@@ -1,0 +1,112 @@
+name: DirectVulkan GUI text upload A/B
+
+on:
+  push:
+    branches:
+      - experiment/dvk-gui-text-ab-20260829
+    paths:
+      - .github/workflows/experiment-dvk-gui-text-ab.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  upload-ab:
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [baseline, full-unpack, full-unpack-shadow]
+    runs-on: macos-26
+    timeout-minutes: 25
+    env:
+      MITHRIL_BACKEND: vulkan
+      MITHRIL_DEBUG: '1'
+      MTL_DEBUG_LAYER: '1'
+      MTL_SHADER_VALIDATION: '0'
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - name: Apply complete pixel-unpack state
+        if: matrix.variant != 'baseline'
+        run: python3 ci/minecraft-e2e/patch_full_unpack_combined.py
+      - name: Use GL-visible PBO bytes
+        if: matrix.variant == 'full-unpack-shadow'
+        run: python3 ci/minecraft-e2e/patch_pbo_shadow_source_combined.py
+      - name: Validate patch shape
+        run: git diff --check
+      - run: brew install vulkan-loader molten-vk ninja
+      - name: Build Mithril
+        id: mithril
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-gui-${{ matrix.variant }} -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_FLAGS='-Wno-error' \
+            -DCMAKE_CXX_FLAGS='-Wno-error'
+          cmake --build build-gui-${{ matrix.variant }} --target mithril --parallel
+          dylib=$(find build-gui-${{ matrix.variant }} -type f -name libmithril.dylib -print -quit)
+          test -s "$dylib"
+          dylib="$(cd "$(dirname "$dylib")" && pwd)/$(basename "$dylib")"
+          echo "dylib=$dylib" >> "$GITHUB_OUTPUT"
+      - name: Run host pixel-store regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang -std=c11 -Wall -Wextra -Werror tests/texture_unpack_smoke.c \
+            -IMithril-Wrapper-cpp/include -o build-gui-${{ matrix.variant }}/texture_unpack_smoke
+          set +e
+          DYLD_LIBRARY_PATH="$(brew --prefix molten-vk)/lib" \
+            ./build-gui-${{ matrix.variant }}/texture_unpack_smoke "${{ steps.mithril.outputs.dylib }}" \
+            > build-gui-${{ matrix.variant }}/host-unpack.log 2>&1
+          rc=$?
+          set -e
+          cat build-gui-${{ matrix.variant }}/host-unpack.log
+          if [[ '${{ matrix.variant }}' == 'baseline' ]]; then
+            test $rc -ne 0
+            grep -F 'TEXTURE UNPACK SMOKE FAILED' build-gui-${{ matrix.variant }}/host-unpack.log
+          else
+            test $rc -eq 0
+            grep -F 'TEXTURE UNPACK SMOKE PASSED' build-gui-${{ matrix.variant }}/host-unpack.log
+          fi
+      - name: Run persistent-PBO atlas regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang -std=c11 -Wall -Wextra -Werror tests/persistent_pbo_unpack_smoke.c \
+            -IMithril-Wrapper-cpp/include -o build-gui-${{ matrix.variant }}/persistent_pbo_unpack_smoke
+          set +e
+          DYLD_LIBRARY_PATH="$(brew --prefix molten-vk)/lib" \
+            ./build-gui-${{ matrix.variant }}/persistent_pbo_unpack_smoke "${{ steps.mithril.outputs.dylib }}" \
+            > build-gui-${{ matrix.variant }}/persistent-pbo.log 2>&1
+          rc=$?
+          set -e
+          cat build-gui-${{ matrix.variant }}/persistent-pbo.log
+          if [[ '${{ matrix.variant }}' == 'full-unpack-shadow' ]]; then
+            test $rc -eq 0
+            grep -F 'PERSISTENT PBO UNPACK SMOKE PASSED' build-gui-${{ matrix.variant }}/persistent-pbo.log
+          else
+            test $rc -ne 0
+            grep -F 'PERSISTENT PBO UNPACK SMOKE FAILED' build-gui-${{ matrix.variant }}/persistent-pbo.log
+          fi
+      - name: Write explicit A/B verdict
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p build-gui-${{ matrix.variant }}/evidence
+          printf 'variant=%s\n' '${{ matrix.variant }}' > build-gui-${{ matrix.variant }}/evidence/verdict.txt
+          grep -E 'TEXTURE UNPACK SMOKE (PASSED|FAILED)' build-gui-${{ matrix.variant }}/host-unpack.log >> build-gui-${{ matrix.variant }}/evidence/verdict.txt || true
+          grep -E 'PERSISTENT PBO UNPACK SMOKE (PASSED|FAILED)' build-gui-${{ matrix.variant }}/persistent-pbo.log >> build-gui-${{ matrix.variant }}/evidence/verdict.txt || true
+          git diff -- Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Resources.cpp Mithril-Wrapper-cpp/MG_Impl/Texture.cpp > build-gui-${{ matrix.variant }}/evidence/production.patch
+          cp build-gui-${{ matrix.variant }}/*-unpack.log build-gui-${{ matrix.variant }}/evidence/ 2>/dev/null || true
+          cp build-gui-${{ matrix.variant }}/persistent-pbo.log build-gui-${{ matrix.variant }}/evidence/ || true
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: dvk-gui-text-upload-${{ matrix.variant }}-${{ github.sha }}
+          retention-days: 7
+          path: build-gui-${{ matrix.variant }}/evidence/**
