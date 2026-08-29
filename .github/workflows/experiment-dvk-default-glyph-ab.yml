@@ -1,0 +1,116 @@
+name: DirectVulkan real default-FBO G/I A/B
+
+on:
+  push:
+    branches:
+      - experiment/dvk-gui-text-ab-20260829
+    paths:
+      - .github/workflows/experiment-dvk-default-glyph-ab.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  default-glyph-ab:
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [combined, combined-yflip]
+    runs-on: macos-26
+    timeout-minutes: 25
+    env:
+      MITHRIL_BACKEND: vulkan
+      MITHRIL_DEBUG: '1'
+      MTL_DEBUG_LAYER: '1'
+      MTL_SHADER_VALIDATION: '0'
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - name: Apply glyph upload fixes
+        run: |
+          python3 ci/minecraft-e2e/patch_full_unpack_combined.py
+          python3 ci/minecraft-e2e/patch_pbo_shadow_source_combined.py
+      - name: Apply default framebuffer Y flip
+        if: matrix.variant == 'combined-yflip'
+        run: python3 ci/minecraft-e2e/patch_vulkan_default_yflip.py
+      - run: git diff --check
+      - run: brew install glfw vulkan-loader molten-vk ninja
+      - name: Build Mithril
+        id: mithril
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-default-${{ matrix.variant }} -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_FLAGS='-Wno-error' \
+            -DCMAKE_CXX_FLAGS='-Wno-error'
+          cmake --build build-default-${{ matrix.variant }} --target mithril --parallel
+          dylib=$(find build-default-${{ matrix.variant }} -type f -name libmithril.dylib -print -quit)
+          test -s "$dylib"
+          dylib="$(cd "$(dirname "$dylib")" && pwd)/$(basename "$dylib")"
+          echo "dylib=$dylib" >> "$GITHUB_OUTPUT"
+      - name: Build GLFW/CAMetalLayer bridge
+        id: bridge
+        shell: bash
+        run: |
+          set -euo pipefail
+          GLFW_PREFIX=$(brew --prefix glfw)
+          GLFW_REAL="$GLFW_PREFIX/lib/libglfw.3.dylib"
+          test -f "$GLFW_REAL" || GLFW_REAL="$GLFW_PREFIX/lib/libglfw.dylib"
+          mkdir -p build-default-${{ matrix.variant }}/bridge
+          BRIDGE="$PWD/build-default-${{ matrix.variant }}/bridge/libglfw_mithril.dylib"
+          clang++ -std=c++20 -fobjc-arc -dynamiclib -Wall -Wextra -Werror \
+            ci/minecraft-e2e/native/glfw_mithril_bridge.mm \
+            ci/minecraft-e2e/native/prepresent_capture.mm \
+            -I"$GLFW_PREFIX/include" -IMithril-Wrapper-cpp/include \
+            -framework AppKit -framework QuartzCore -framework Foundation \
+            -Wl,-reexport_library,"$GLFW_REAL" \
+            -o "$BRIDGE"
+          echo "bridge=$BRIDGE" >> "$GITHUB_OUTPUT"
+          echo "glfw_real=$GLFW_REAL" >> "$GITHUB_OUTPUT"
+          echo "glfw_prefix=$GLFW_PREFIX" >> "$GITHUB_OUTPUT"
+      - name: Run deterministic real-default G/I gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build-default-${{ matrix.variant }}/evidence
+          clang++ -std=c++20 -Wall -Wextra -Werror \
+            tests/glfw_default_glyph_smoke.cpp \
+            -I"${{ steps.bridge.outputs.glfw_prefix }}/include" \
+            -IMithril-Wrapper-cpp/include \
+            "${{ steps.bridge.outputs.bridge }}" \
+            -framework AppKit -framework Foundation \
+            -o build-default-${{ matrix.variant }}/glfw_default_glyph_smoke
+          set +e
+          MITHRIL_E2E_MITHRIL_DYLIB="${{ steps.mithril.outputs.dylib }}" \
+          MITHRIL_E2E_GLFW_DELEGATE="${{ steps.bridge.outputs.glfw_real }}" \
+          MITHRIL_E2E_ROOT="$PWD/build-default-${{ matrix.variant }}/evidence" \
+          DYLD_LIBRARY_PATH="$(brew --prefix molten-vk)/lib" \
+            ./build-default-${{ matrix.variant }}/glfw_default_glyph_smoke \
+            > build-default-${{ matrix.variant }}/evidence/glyph-default.log 2>&1
+          rc=$?
+          set -e
+          cat build-default-${{ matrix.variant }}/evidence/glyph-default.log
+          grep -F 'backend=' build-default-${{ matrix.variant }}/evidence/glyph-default.log
+          if [[ '${{ matrix.variant }}' == 'combined-yflip' ]]; then
+            test $rc -eq 0
+            grep -F 'glyph_cell_mismatches=0' build-default-${{ matrix.variant }}/evidence/glyph-default.log
+            grep -F 'GLFW DEFAULT G/I GLYPH SMOKE PASSED' build-default-${{ matrix.variant }}/evidence/glyph-default.log
+          else
+            test $rc -ne 0
+            grep -F 'GLFW DEFAULT G/I GLYPH SMOKE FAILED' build-default-${{ matrix.variant }}/evidence/glyph-default.log
+          fi
+          printf 'variant=%s rc=%s\n' '${{ matrix.variant }}' "$rc" > build-default-${{ matrix.variant }}/evidence/verdict.txt
+          git diff -- Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Resources.cpp \
+            Mithril-Wrapper-cpp/MG_Impl/Texture.cpp Mithril-Wrapper-cpp/MG_Impl/Drawing.cpp \
+            > build-default-${{ matrix.variant }}/evidence/production.patch
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: dvk-real-default-glyph-${{ matrix.variant }}-${{ github.sha }}
+          retention-days: 7
+          path: build-default-${{ matrix.variant }}/evidence/**
