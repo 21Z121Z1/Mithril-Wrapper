@@ -16,7 +16,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        variant: [combined, combined-yflip]
+        variant: [combined-yflip, combined-yflip-readback]
     runs-on: macos-26
     timeout-minutes: 25
     env:
@@ -34,8 +34,10 @@ jobs:
           python3 ci/minecraft-e2e/patch_full_unpack_combined.py
           python3 ci/minecraft-e2e/patch_pbo_shadow_source_combined.py
       - name: Apply default framebuffer Y flip
-        if: matrix.variant == 'combined-yflip'
         run: python3 ci/minecraft-e2e/patch_vulkan_default_yflip.py
+      - name: Convert BGRA swapchain readback to requested RGBA
+        if: matrix.variant == 'combined-yflip-readback'
+        run: python3 ci/minecraft-e2e/patch_readpixels_bgra.py
       - run: git diff --check
       - run: brew install glfw vulkan-loader molten-vk ninja
       - name: Build Mithril
@@ -95,17 +97,21 @@ jobs:
           set -e
           cat build-default-${{ matrix.variant }}/evidence/glyph-default.log
           grep -F 'backend=' build-default-${{ matrix.variant }}/evidence/glyph-default.log
-          if [[ '${{ matrix.variant }}' == 'combined-yflip' ]]; then
+          if [[ '${{ matrix.variant }}' == 'combined-yflip-readback' ]]; then
             test $rc -eq 0
             grep -F 'glyph_cell_mismatches=0' build-default-${{ matrix.variant }}/evidence/glyph-default.log
             grep -F 'GLFW DEFAULT G/I GLYPH SMOKE PASSED' build-default-${{ matrix.variant }}/evidence/glyph-default.log
           else
             test $rc -ne 0
+            grep -F 'glyph_cell_mismatches=38' build-default-${{ matrix.variant }}/evidence/glyph-default.log
             grep -F 'GLFW DEFAULT G/I GLYPH SMOKE FAILED' build-default-${{ matrix.variant }}/evidence/glyph-default.log
           fi
           printf 'variant=%s rc=%s\n' '${{ matrix.variant }}' "$rc" > build-default-${{ matrix.variant }}/evidence/verdict.txt
-          git diff -- Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Resources.cpp \
-            Mithril-Wrapper-cpp/MG_Impl/Texture.cpp Mithril-Wrapper-cpp/MG_Impl/Drawing.cpp \
+          git diff -- \
+            Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Resources.cpp \
+            Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/ImageOps.cpp \
+            Mithril-Wrapper-cpp/MG_Impl/Texture.cpp \
+            Mithril-Wrapper-cpp/MG_Impl/Drawing.cpp \
             > build-default-${{ matrix.variant }}/evidence/production.patch
       - name: Upload evidence
         if: always()
