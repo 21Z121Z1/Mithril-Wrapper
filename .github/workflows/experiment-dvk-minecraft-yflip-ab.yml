@@ -1,0 +1,145 @@
+name: DirectVulkan Minecraft default-FBO Y-flip A/B
+
+on:
+  push:
+    branches:
+      - experiment/dvk-gui-text-ab-20260829
+    paths:
+      - .github/workflows/experiment-dvk-minecraft-yflip-ab.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  minecraft-ab:
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [combined, combined-yflip]
+    runs-on: macos-26
+    timeout-minutes: 40
+    env:
+      E2E_ROOT: ${{ github.workspace }}/build/minecraft-gui-${{ matrix.variant }}-artifacts
+      GRADLE_OPTS: -Dorg.gradle.caching=true
+      MITHRIL_BACKEND: vulkan
+      MITHRIL_DEBUG: '1'
+      MTL_DEBUG_LAYER: '1'
+      MTL_SHADER_VALIDATION: '0'
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - name: Apply validated glyph upload fixes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 ci/minecraft-e2e/patch_full_unpack_combined.py
+          python3 ci/minecraft-e2e/patch_pbo_shadow_source_combined.py
+      - name: Apply default framebuffer Y flip
+        if: matrix.variant == 'combined-yflip'
+        run: python3 ci/minecraft-e2e/patch_vulkan_default_yflip.py
+      - name: Validate patch shape
+        run: git diff --check
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb
+        with:
+          gradle-version: '9.4.1'
+          cache-read-only: true
+      - name: Install native dependencies
+        run: brew install glfw vulkan-loader molten-vk ninja
+      - name: Build Mithril
+        id: mithril
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-mc-${{ matrix.variant }} -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_FLAGS='-Wno-error' \
+            -DCMAKE_CXX_FLAGS='-Wno-error'
+          cmake --build build-mc-${{ matrix.variant }} --target mithril --parallel
+          dylib=$(find build-mc-${{ matrix.variant }} -type f -name libmithril.dylib -print -quit)
+          test -s "$dylib"
+          dylib="$(cd "$(dirname "$dylib")" && pwd)/$(basename "$dylib")"
+          echo "dylib=$dylib" >> "$GITHUB_OUTPUT"
+      - name: Gate G/I glyph pipeline before Minecraft
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang -std=c11 -Wall -Wextra -Werror tests/gui_glyph_pipeline_smoke.c \
+            -IMithril-Wrapper-cpp/include -o build-mc-${{ matrix.variant }}/gui_glyph_pipeline_smoke
+          DYLD_LIBRARY_PATH="$(brew --prefix molten-vk)/lib" \
+            ./build-mc-${{ matrix.variant }}/gui_glyph_pipeline_smoke "${{ steps.mithril.outputs.dylib }}" \
+            | tee build-mc-${{ matrix.variant }}/glyph.log
+          grep -F 'GUI GLYPH PIPELINE SMOKE PASSED' build-mc-${{ matrix.variant }}/glyph.log
+          grep -F 'glyph_rgb_mismatches=0' build-mc-${{ matrix.variant }}/glyph.log
+      - name: Initialize Minecraft evidence
+        run: python3 ci/minecraft-e2e/evidence.py --root "$E2E_ROOT" init
+      - name: Build GLFW bridge
+        id: bridge
+        shell: bash
+        run: |
+          set -euo pipefail
+          GLFW_PREFIX=$(brew --prefix glfw)
+          GLFW_REAL="$GLFW_PREFIX/lib/libglfw.3.dylib"
+          test -f "$GLFW_REAL" || GLFW_REAL="$GLFW_PREFIX/lib/libglfw.dylib"
+          mkdir -p build-mc-${{ matrix.variant }}/bridge
+          BRIDGE="$PWD/build-mc-${{ matrix.variant }}/bridge/libglfw_mithril.dylib"
+          clang++ -std=c++20 -fobjc-arc -dynamiclib -Wall -Wextra -Werror \
+            ci/minecraft-e2e/native/glfw_mithril_bridge.mm \
+            ci/minecraft-e2e/native/prepresent_capture.mm \
+            -I"$GLFW_PREFIX/include" -IMithril-Wrapper-cpp/include \
+            -framework AppKit -framework QuartzCore -framework Foundation \
+            -Wl,-reexport_library,"$GLFW_REAL" \
+            -o "$BRIDGE"
+          echo "bridge=$BRIDGE" >> "$GITHUB_OUTPUT"
+          echo "glfw_real=$GLFW_REAL" >> "$GITHUB_OUTPUT"
+      - name: Run real Minecraft 26.2
+        shell: bash
+        run: |
+          set -o pipefail
+          rm -f "$E2E_ROOT/failure.json"
+          gradle -p .github/ci/minecraft-e2e --build-cache --stacktrace \
+            -PmithrilBackend=vulkan \
+            -PmithrilDylib="${{ steps.mithril.outputs.dylib }}" \
+            -PglfwBridge="${{ steps.bridge.outputs.bridge }}" \
+            -PglfwDelegate="${{ steps.bridge.outputs.glfw_real }}" \
+            -PevidenceRoot="$E2E_ROOT" \
+            runProductionClientGameTest 2>&1 | tee "$E2E_ROOT/gradle-minecraft.log"
+      - name: Collect diagnostics
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: |
+          ci/minecraft-e2e/collect-diagnostics.sh \
+            "$E2E_ROOT" \
+            "$PWD/.github/ci/minecraft-e2e/build/run/clientGameTest"
+          cp build-mc-${{ matrix.variant }}/glyph.log "$E2E_ROOT/glyph.log" || true
+          printf 'variant=%s\n' '${{ matrix.variant }}' > "$E2E_ROOT/variant.txt"
+          git diff -- Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Resources.cpp \
+            Mithril-Wrapper-cpp/MG_Impl/Texture.cpp Mithril-Wrapper-cpp/MG_Impl/Drawing.cpp \
+            > "$E2E_ROOT/production.patch" || true
+          grep -E 'DEVICE_LOST|VUID|prepare_draw DROPPED|GPU Address Fault|CallbackErrorPageFault' \
+            "$E2E_ROOT/gradle-minecraft.log" > "$E2E_ROOT/render-errors.log" || true
+      - name: Reject GPU/validation regressions
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test ! -s "$E2E_ROOT/failure.json"
+          if grep -E 'DEVICE_LOST|GPU Address Fault|CallbackErrorPageFault' "$E2E_ROOT/gradle-minecraft.log"; then
+            echo 'fatal GPU failure detected' >&2
+            exit 1
+          fi
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: dvk-minecraft-yflip-${{ matrix.variant }}-${{ github.sha }}
+          retention-days: 7
+          compression-level: 6
+          path: build/minecraft-gui-${{ matrix.variant }}-artifacts/**
