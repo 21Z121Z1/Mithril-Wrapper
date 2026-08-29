@@ -177,7 +177,7 @@ TMP_SOURCES="${VERSION_DIR}/sources.tmp.$$"
 rm -rf "${TMP_SOURCES}"
 mkdir -p "${TMP_SOURCES}"
 
-echo "Decompiling Minecraft ${MC_VERSION} for local reference..."
+echo "Decompiling Minecraft ${MC_VERSION} for local reference..." >&2
 # shellcheck disable=SC2086
 java ${JAVA_OPTS} -jar "${VINEFLOWER_JAR}" --folder -s "${CLIENT_JAR}" "${TMP_SOURCES}"
 
