@@ -82,3 +82,5 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git commit -m 'fix(vulkan): replay validated FBO subresource fixes'
           git push origin "HEAD:${GITHUB_REF_NAME}"
+
+# replay attempt 3: sequential hunk anchors
