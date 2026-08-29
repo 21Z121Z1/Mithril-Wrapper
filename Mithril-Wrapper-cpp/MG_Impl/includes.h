@@ -96,7 +96,15 @@ static inline void mithril_frontend_begin_render_pass(
                 if (n < 0) n = 0;
                 if (n > 8) n = 8;
                 for (int i = 0; i < n; ++i) {
-                    color_tex_ids[i] = ::mithril::fbo_attachment_texture(fbo->colors[i]);
+                    int attachmentIndex = i;
+                    if (fbo->drawBuffers[i] >= GL_COLOR_ATTACHMENT0 &&
+                        fbo->drawBuffers[i] < GL_COLOR_ATTACHMENT0 +
+                                                  ::mithril::kMaxColorAttachments) {
+                        attachmentIndex = static_cast<int>(
+                            fbo->drawBuffers[i] - GL_COLOR_ATTACHMENT0);
+                    }
+                    color_tex_ids[i] = ::mithril::fbo_attachment_texture(
+                        fbo->colors[attachmentIndex]);
                 }
                 const GLuint depth_tex_id = ::mithril::fbo_attachment_texture(fbo->depth);
                 backend_set_fbo_attachment_tex_ids(color_tex_ids, n, depth_tex_id);

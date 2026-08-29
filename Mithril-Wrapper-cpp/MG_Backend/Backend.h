@@ -370,6 +370,11 @@ void        backend_texture_set_params(GLuint name, GLint min_filter, GLint mag_
                                        GLint wrap_s, GLint wrap_t, GLint wrap_r,
                                        const float* border_color);
 VkImageView backend_get_texture_view(GLuint name);
+/* Resolve an attachment view for exactly the FBO subresource selected by
+ * glFramebufferTexture*.  Sampling continues to use the full texture view. */
+VkImageView backend_get_texture_attachment_view(GLuint name, GLint level,
+                                                GLint layer,
+                                                GLboolean layered);
 VkImage     backend_get_texture_image(GLuint name);
 void        backend_delete_texture(GLuint name);
 /* Clear a texture level (or sub-region) to a caller-provided value. Implements

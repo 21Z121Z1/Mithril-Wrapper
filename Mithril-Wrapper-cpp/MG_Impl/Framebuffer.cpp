@@ -238,7 +238,9 @@ void glFramebufferTextureLayer(GLenum target, GLenum attachment, GLuint texture,
     a.texture = texture;
     a.level = level;
     a.layer = layer;
-    a.layered = true;
+    // This entry point selects one layer; GL_FRAMEBUFFER_ATTACHMENT_LAYERED is
+    // false. glFramebufferTexture (without Layer) is the layered attachment.
+    a.layered = false;
     if (attachment >= GL_COLOR_ATTACHMENT0 && attachment < GL_COLOR_ATTACHMENT0 + mithril::kMaxColorAttachments) {
         fbo->colors[attachment - GL_COLOR_ATTACHMENT0] = a;
     } else if (attachment == GL_DEPTH_ATTACHMENT) {
@@ -1122,22 +1124,38 @@ int collect_draw_fbo_attachments(VkImageView out_color[8], VkImageView* out_dept
     for (int i = 0; i < 8; ++i) {
         if (i >= fbo->drawBufferCount) break;
         if (fbo->drawBuffers[i] == GL_NONE) break;
-        GLuint tex = fbo_attachment_texture(fbo->colors[i]);
+        int attachmentIndex = i;
+        if (fbo->drawBuffers[i] >= GL_COLOR_ATTACHMENT0 &&
+            fbo->drawBuffers[i] < GL_COLOR_ATTACHMENT0 + kMaxColorAttachments) {
+            attachmentIndex = static_cast<int>(fbo->drawBuffers[i] - GL_COLOR_ATTACHMENT0);
+        }
+        const FBOAttachment& attachment = fbo->colors[attachmentIndex];
+        GLuint tex = fbo_attachment_texture(attachment);
         if (tex == 0) { out_color[i] = VK_NULL_HANDLE; continue; }
-        VkImageView view = backend_get_texture_view(tex);
+        VkImageView view = backend_get_texture_attachment_view(
+            tex, attachment.level, attachment.layer,
+            attachment.layered ? GL_TRUE : GL_FALSE);
         out_color[i] = view;
         if (view != VK_NULL_HANDLE) { count = i + 1; }
         if (w == 0) {
             Texture* t = state_get_texture(tex);
-            if (t) { w = t->width; h = t->height; }
+            if (t) {
+                w = std::max(1, t->width >> attachment.level);
+                h = std::max(1, t->height >> attachment.level);
+            }
         }
     }
     GLuint depth_tex = fbo_attachment_texture(fbo->depth);
     if (depth_tex) {
-        *out_depth = backend_get_texture_view(depth_tex);
+        *out_depth = backend_get_texture_attachment_view(
+            depth_tex, fbo->depth.level, fbo->depth.layer,
+            fbo->depth.layered ? GL_TRUE : GL_FALSE);
         if (w == 0) {
             Texture* t = state_get_texture(depth_tex);
-            if (t) { w = t->width; h = t->height; }
+            if (t) {
+                w = std::max(1, t->width >> fbo->depth.level);
+                h = std::max(1, t->height >> fbo->depth.level);
+            }
         }
     }
     if (w > 0 && out_w) *out_w = w;

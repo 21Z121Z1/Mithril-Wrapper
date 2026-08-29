@@ -396,6 +396,11 @@ void backend_texture_set_params(GLuint name, GLint min_filter, GLint mag_filter,
 VkImageView backend_get_texture_view(GLuint name) {
     return MITHRIL_BC(get_texture_view, name);
 }
+VkImageView backend_get_texture_attachment_view(GLuint name, GLint level,
+                                                GLint layer,
+                                                GLboolean layered) {
+    return MITHRIL_BC(get_texture_attachment_view, name, level, layer, layered);
+}
 VkImage backend_get_texture_image(GLuint name) {
     return MITHRIL_BC(get_texture_image, name);
 }

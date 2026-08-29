@@ -345,11 +345,18 @@ void glBindBufferRange(GLenum target, GLuint index, GLuint buffer,
         mithril::state_set_error(GL_INVALID_VALUE);
         return;
     }
-    // GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT is implementation-defined; approximate
-    // with 256 (a common desktop value). Enforced only for uniform buffers.
-    if (target == GL_UNIFORM_BUFFER && (offset % 256) != 0) {
-        mithril::state_set_error(GL_INVALID_VALUE);
-        return;
+    // Validate against the same implementation limit exposed by
+    // GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT.  MoltenVK commonly reports an
+    // alignment smaller than 256; rejecting those legal offsets leaves the
+    // previous indexed range bound and makes later draws read stale matrices.
+    if (target == GL_UNIFORM_BUFFER) {
+        GLint alignment = backend_device_limit(
+            MITHRIL_LIMIT_UNIFORM_BUFFER_ALIGNMENT, 256);
+        if (alignment < 1) alignment = 1;
+        if (offset < 0 || (offset % alignment) != 0) {
+            mithril::state_set_error(GL_INVALID_VALUE);
+            return;
+        }
     }
     if (buffer != 0 && !mithril::state_get_buffer(buffer)) {
         g_state->buffers[buffer] = mithril::Buffer{};

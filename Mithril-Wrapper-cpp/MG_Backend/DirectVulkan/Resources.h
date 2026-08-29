@@ -40,6 +40,10 @@ struct TextureEntry {
     VkImage        image = VK_NULL_HANDLE;
     VkDeviceMemory memory = VK_NULL_HANDLE;
     VkImageView    view = VK_NULL_HANDLE;
+    // Render-target views are single-mip (and, for layer attachment entry
+    // points, single-layer).  The sampling view above intentionally spans the
+    // complete mip/layer range and is not valid as a replacement.
+    std::unordered_map<uint64_t, VkImageView> attachmentViews;
     VkFormat       format = VK_FORMAT_UNDEFINED;
     int            width = 0;
     int            height = 0;

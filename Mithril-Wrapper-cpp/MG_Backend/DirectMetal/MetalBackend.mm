@@ -507,6 +507,16 @@ VkImageView dmt_get_texture_view(GLuint name) {
     return t ? mithril::dmt::to_vkview(t) : VK_NULL_HANDLE;
 }
 
+VkImageView dmt_get_texture_attachment_view(GLuint name, GLint level,
+                                            GLint layer,
+                                            GLboolean layered) {
+    // DirectMetal attachment slicing is handled by its render-pass encoder.
+    // Preserve its existing resource identity here; this API exists so the
+    // Vulkan backend can materialize the required VkImageView.
+    (void)level; (void)layer; (void)layered;
+    return dmt_get_texture_view(name);
+}
+
 VkImage dmt_get_texture_image(GLuint name) {
     mithril::dmt::MetalTexture* t = mithril::dmt::texture_table_get(name);
     return t ? mithril::dmt::to_vkimg(t) : VK_NULL_HANDLE;

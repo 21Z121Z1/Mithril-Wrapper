@@ -134,10 +134,16 @@ static bool prepare_draw(GLenum mode) {
     // 这里是第二道防线，捕获兜底未覆盖的路径（如翻转编译半途失败）。
     const bool clip_upper_left = (g_state->clipOrigin == GL_UPPER_LEFT);
     const bool zero_to_one = (g_state->clipDepthMode == GL_ZERO_TO_ONE);
-    // Existing framebuffer convention: FBO0 needs one Y inversion relative to
-    // user FBOs. ARB_clip_control UPPER_LEFT contributes one additional
-    // inversion, therefore the two compose by XOR.
-    const bool want_y_flip = is_default_fbo ^ clip_upper_left;
+    // MoltenVK's swapchain presentation already supplies the destination
+    // orientation expected by this bridge, while render-to-texture passes do
+    // not.  User FBOs therefore need the clip-space inversion (otherwise
+    // GPU-built atlases place every sprite at the mirrored Y location), and
+    // FBO 0 must remain unflipped (otherwise the completed world is presented
+    // upside down). ARB_clip_control UPPER_LEFT toggles that convention.
+    const bool want_y_flip =
+        (backend_active_kind() == MITHRIL_BACKEND_KIND_VULKAN)
+            ? ((!is_default_fbo) ^ clip_upper_left)
+            : (is_default_fbo ^ clip_upper_left);
     const std::vector<uint32_t>& vs_spirv = [&]() -> const std::vector<uint32_t>& {
         if (zero_to_one) {
             const auto& preferred = want_y_flip
@@ -195,7 +201,15 @@ static bool prepare_draw(GLenum mode) {
     if (fbo) {
         for (int i = 0; i < color_count; ++i) {
             // renderbuffer 附件取影子纹理（fbo_attachment_texture）。
-            GLuint t = mithril::fbo_attachment_texture(fbo->colors[i]);
+            int attachmentIndex = i;
+            if (fbo->drawBuffers[i] >= GL_COLOR_ATTACHMENT0 &&
+                fbo->drawBuffers[i] < GL_COLOR_ATTACHMENT0 +
+                                          mithril::kMaxColorAttachments) {
+                attachmentIndex = static_cast<int>(
+                    fbo->drawBuffers[i] - GL_COLOR_ATTACHMENT0);
+            }
+            GLuint t = mithril::fbo_attachment_texture(
+                fbo->colors[attachmentIndex]);
             mithril::Texture* tex = mithril::state_get_texture(t);
             if (tex) color_formats[i] = backend_vk_format_for_gl((GLenum)tex->internalFormat);
         }
@@ -305,7 +319,15 @@ static bool prepare_draw(GLenum mode) {
     if (fbo) {
         GLuint color_tex_ids[8] = {0};
         for (int i = 0; i < color_count && i < 8; ++i) {
-            color_tex_ids[i] = mithril::fbo_attachment_texture(fbo->colors[i]);
+            int attachmentIndex = i;
+            if (fbo->drawBuffers[i] >= GL_COLOR_ATTACHMENT0 &&
+                fbo->drawBuffers[i] < GL_COLOR_ATTACHMENT0 +
+                                          mithril::kMaxColorAttachments) {
+                attachmentIndex = static_cast<int>(
+                    fbo->drawBuffers[i] - GL_COLOR_ATTACHMENT0);
+            }
+            color_tex_ids[i] = mithril::fbo_attachment_texture(
+                fbo->colors[attachmentIndex]);
         }
         GLuint depth_tex_id = mithril::fbo_attachment_texture(fbo->depth);
         backend_set_fbo_attachment_tex_ids(color_tex_ids, color_count, depth_tex_id);
@@ -399,9 +421,9 @@ static bool prepare_draw(GLenum mode) {
         // headless/offscreen MoltenVK uses the existing user-FBO orientation;
         // keep that distinction at the platform/backend boundary rather than
         // keying it on Minecraft programs or transient object IDs.
-        bool invert_front_face = is_default_fbo;
+        bool invert_front_face = want_y_flip;
 #if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
-        invert_front_face = true;
+        invert_front_face = want_y_flip;
 #endif
         // ARB_clip_control: changing to UPPER_LEFT negates the signed polygon
         // area used for front-face determination. Toggle the existing backend

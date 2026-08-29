@@ -2,13 +2,13 @@
  * fbo_clear_sample_smoke.c
  *
  * Regression for the DirectVulkan clear-only user-FBO layout path:
- *   glTexImage2D(NULL) -> attach -> glClear -> sample that texture in a draw.
+ *   mipmapped glTexImage2D(NULL) -> attach level 1 -> glClear -> sample it.
  *
  * A Vulkan backend must transition the source image to attachment-optimal
  * before the clear pass, then to a sampled read-only layout after the pass.
- * The old clear path skipped backend_set_fbo_attachment_tex_ids(), so the
- * backend could leave TextureEntry::currentLayout at UNDEFINED and later bind
- * the image through a SHADER_READ_ONLY descriptor without a matching barrier.
+ * This covers both clear-only layout tracking and the attachment-subresource
+ * contract: the render pass must use a single-mip view and the 8x8 level-1
+ * extent rather than the texture's 16x16 base-level view/extent.
  */
 #include <dlfcn.h>
 #include <stdio.h>
@@ -122,17 +122,20 @@ int main(int argc, char** argv) {
 
     /* Source: define storage with NULL data, then touch it ONLY through glClear. */
     bindTexture(GL_TEXTURE_2D, tex[0]);
-    texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST);
     texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     texParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     texParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     texImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 16, 16, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    texImage2D(GL_TEXTURE_2D, 1, GL_RGBA8, 8, 8, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    texParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 1);
+    texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 1);
     bindFramebuffer(GL_FRAMEBUFFER, fbo[0]);
-    framebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex[0], 0);
+    framebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex[0], 1);
     if (checkFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
         fprintf(stderr, "source FBO incomplete\n"); return 4;
     }
-    viewport(0, 0, 16, 16);
+    viewport(0, 0, 8, 8);
     clearColor(0.25f, 0.50f, 0.75f, 1.0f);
     clear(GL_COLOR_BUFFER_BIT);
     GLenum err_after_clear = getError();
@@ -161,7 +164,7 @@ int main(int argc, char** argv) {
         "in vec2 uv;\n"
         "uniform sampler2D srcTex;\n"
         "out vec4 color;\n"
-        "void main(){ color = texture(srcTex, uv); }\n";
+        "void main(){ color = textureLod(srcTex, uv, 1.0); }\n";
 
     GLuint vs = compile_stage(createShader, shaderSource, compileShader, getShaderiv, GL_VERTEX_SHADER, vs_src);
     GLuint fs = compile_stage(createShader, shaderSource, compileShader, getShaderiv, GL_FRAGMENT_SHADER, fs_src);

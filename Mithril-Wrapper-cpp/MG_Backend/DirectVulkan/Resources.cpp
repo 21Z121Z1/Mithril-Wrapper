@@ -461,6 +461,10 @@ void destroy_buffer_entry(BufferEntry& e) {
 void destroy_texture_entry(TextureEntry& e) {
     Backend* b = backend();
     if (!b->device) return;
+    for (auto& kv : e.attachmentViews) {
+        if (kv.second) vkDestroyImageView(b->device, kv.second, nullptr);
+    }
+    e.attachmentViews.clear();
     if (e.view)          { vkDestroyImageView(b->device, e.view, nullptr); e.view = VK_NULL_HANDLE; }
     if (e.image)         { vkDestroyImage(b->device, e.image, nullptr); e.image = VK_NULL_HANDLE; }
     if (e.memory)        {
@@ -530,6 +534,14 @@ void defer_destroy_texture_entry(TextureEntry& e) {
     // process. The VkFramebuffer rides the same deferred-destroy path (a
     // pending command buffer may still hold its vkCmdBeginRenderPass).
     mithril::vk::retire_framebuffers_referencing(e.view);
+    for (auto& kv : e.attachmentViews) {
+        if (kv.second == VK_NULL_HANDLE) continue;
+        mithril::vk::retire_framebuffers_referencing(kv.second);
+        DeferredDestroy viewDestroy;
+        viewDestroy.view = kv.second;
+        b->disposalQueue[b->currentFrame].push_back(viewDestroy);
+    }
+    e.attachmentViews.clear();
     DeferredDestroy d;
     d.image = e.image;
     d.view  = e.view;
@@ -2062,6 +2074,60 @@ VkImageView dvk_get_texture_view(GLuint name) {
     // ErrorPageFault。只有当 image 和 view 都有效时才认为该 view 可采样。
     if (it->second.image == VK_NULL_HANDLE) return VK_NULL_HANDLE;
     return it->second.view;
+}
+
+VkImageView dvk_get_texture_attachment_view(GLuint name, GLint level,
+                                            GLint layer,
+                                            GLboolean layered) {
+    using namespace mithril::vk;
+    auto& tbl = texture_table();
+    auto it = tbl.find(name);
+    if (it == tbl.end()) return VK_NULL_HANDLE;
+    TextureEntry& tex = it->second;
+    if (tex.image == VK_NULL_HANDLE || level < 0 || level >= tex.levels)
+        return VK_NULL_HANDLE;
+
+    uint32_t totalLayers = tex.target == GL_TEXTURE_CUBE_MAP ? 6u : 1u;
+    uint32_t baseLayer = layered ? 0u : static_cast<uint32_t>(layer < 0 ? 0 : layer);
+    uint32_t layerCount = layered ? totalLayers : 1u;
+    if (baseLayer >= totalLayers || baseLayer + layerCount > totalLayers)
+        return VK_NULL_HANDLE;
+
+    const uint64_t key = static_cast<uint64_t>(static_cast<uint32_t>(level)) |
+        (static_cast<uint64_t>(baseLayer) << 16) |
+        (static_cast<uint64_t>(layerCount) << 32);
+    auto cached = tex.attachmentViews.find(key);
+    if (cached != tex.attachmentViews.end()) return cached->second;
+
+    VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT;
+    if (tex.format == VK_FORMAT_D16_UNORM || tex.format == VK_FORMAT_D32_SFLOAT)
+        aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
+    else if (tex.format == VK_FORMAT_D24_UNORM_S8_UINT ||
+             tex.format == VK_FORMAT_D32_SFLOAT_S8_UINT)
+        aspect = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT;
+    else if (tex.format == VK_FORMAT_S8_UINT)
+        aspect = VK_IMAGE_ASPECT_STENCIL_BIT;
+
+    VkImageViewCreateInfo vci{};
+    vci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    vci.image = tex.image;
+    vci.viewType = layerCount > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY
+                                  : VK_IMAGE_VIEW_TYPE_2D;
+    vci.format = tex.format;
+    vci.subresourceRange.aspectMask = aspect;
+    vci.subresourceRange.baseMipLevel = static_cast<uint32_t>(level);
+    vci.subresourceRange.levelCount = 1;
+    vci.subresourceRange.baseArrayLayer = baseLayer;
+    vci.subresourceRange.layerCount = layerCount;
+    vci.components = {VK_COMPONENT_SWIZZLE_IDENTITY,
+                      VK_COMPONENT_SWIZZLE_IDENTITY,
+                      VK_COMPONENT_SWIZZLE_IDENTITY,
+                      VK_COMPONENT_SWIZZLE_IDENTITY};
+    VkImageView view = VK_NULL_HANDLE;
+    if (vkCreateImageView(backend()->device, &vci, nullptr, &view) != VK_SUCCESS)
+        return VK_NULL_HANDLE;
+    tex.attachmentViews.emplace(key, view);
+    return view;
 }
 
 VkImage dvk_get_texture_image(GLuint name) {
