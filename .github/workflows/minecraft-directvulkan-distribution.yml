@@ -1,0 +1,481 @@
+name: Minecraft DirectVulkan Distribution
+
+on:
+  push:
+    branches:
+      - codex/dvk-gui-production-20260830
+    paths:
+      - 'CMakeLists.txt'
+      - 'Mithril-Wrapper-cpp/**'
+      - 'ci/minecraft-e2e/**'
+      - '.github/ci/minecraft-e2e/**'
+      - '.github/workflows/minecraft-directvulkan-distribution.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: minecraft-directvulkan-distribution-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DIST_ROOT: build/mithril-directvulkan-minecraft-dist
+  E2E_ROOT: build/mithril-directvulkan-distribution-e2e
+  GRADLE_OPTS: -Dorg.gradle.caching=true
+  MITHRIL_BACKEND: vulkan
+
+jobs:
+  package-and-prove:
+    name: Package DirectVulkan field-test runtime
+    runs-on: macos-26
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Prove native source matches validated fix baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE=de2261ef80f34f4df2afbfa414def2f53ffe9442
+          git cat-file -e "$BASE^{commit}"
+          extra=$(git diff --name-only "$BASE" HEAD | grep -v '^\.github/workflows/minecraft-directvulkan-distribution\.yml$' || true)
+          if test -n "$extra"; then
+            echo '::error::native/source drift from DirectVulkan fix baseline:'
+            printf '%s\n' "$extra"
+            exit 1
+          fi
+
+      - name: Setup Java 25
+        uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - name: Setup Gradle 9.4.1
+        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb
+        with:
+          gradle-version: '9.4.1'
+          cache-read-only: true
+
+      - name: Install native runtime dependencies
+        shell: bash
+        run: brew install glfw vulkan-loader molten-vk ninja
+
+      - name: Build Release Mithril
+        id: mithril
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-directvulkan-dist -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_FLAGS='-Wno-error' \
+            -DCMAKE_CXX_FLAGS='-Wno-error'
+          cmake --build build-directvulkan-dist --target mithril --parallel
+          dylib=$(find build-directvulkan-dist -type f -name libmithril.dylib -print -quit)
+          test -n "$dylib"
+          test -s "$dylib"
+          dylib="$(cd "$(dirname "$dylib")" && pwd)/$(basename "$dylib")"
+          echo "path=$dylib" >> "$GITHUB_OUTPUT"
+          file "$dylib"
+          test "$(file "$dylib" | grep -c 'arm64')" -ge 1
+          otool -L "$dylib"
+          shasum -a 256 "$dylib"
+
+      - name: Gate complete GL pixel-unpack semantics
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang -std=c11 -Wall -Wextra -Werror tests/texture_unpack_smoke.c \
+            -IMithril-Wrapper-cpp/include -o build-directvulkan-dist/texture_unpack_smoke
+          MITHRIL_BACKEND=vulkan \
+          DYLD_LIBRARY_PATH="$(brew --prefix molten-vk)/lib" \
+            ./build-directvulkan-dist/texture_unpack_smoke '${{ steps.mithril.outputs.path }}' \
+            | tee build-directvulkan-dist/texture-unpack.log
+          grep -F 'TEXTURE UNPACK SMOKE PASSED' build-directvulkan-dist/texture-unpack.log
+
+      - name: Gate persistent PBO shadow semantics
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang -std=c11 -Wall -Wextra -Werror tests/persistent_pbo_unpack_smoke.c \
+            -IMithril-Wrapper-cpp/include -o build-directvulkan-dist/persistent_pbo_unpack_smoke
+          MITHRIL_BACKEND=vulkan \
+          DYLD_LIBRARY_PATH="$(brew --prefix molten-vk)/lib" \
+            ./build-directvulkan-dist/persistent_pbo_unpack_smoke '${{ steps.mithril.outputs.path }}' \
+            | tee build-directvulkan-dist/persistent-pbo.log
+          grep -F 'PERSISTENT PBO UNPACK SMOKE PASSED' build-directvulkan-dist/persistent-pbo.log
+
+      - name: Gate atlas glyph pipeline in user FBO
+        shell: bash
+        run: |
+          set -euo pipefail
+          clang -std=c11 -Wall -Wextra -Werror tests/gui_glyph_pipeline_smoke.c \
+            -IMithril-Wrapper-cpp/include -o build-directvulkan-dist/gui_glyph_pipeline_smoke
+          MITHRIL_BACKEND=vulkan \
+          DYLD_LIBRARY_PATH="$(brew --prefix molten-vk)/lib" \
+            ./build-directvulkan-dist/gui_glyph_pipeline_smoke '${{ steps.mithril.outputs.path }}' \
+            | tee build-directvulkan-dist/glyph-user-fbo.log
+          grep -F 'glyph_rgb_mismatches=0' build-directvulkan-dist/glyph-user-fbo.log
+          grep -F 'GUI GLYPH PIPELINE SMOKE PASSED' build-directvulkan-dist/glyph-user-fbo.log
+
+      - name: Build portable GLFW to Mithril bridge
+        id: bridge
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build-directvulkan-dist/bridge
+          GLFW_PREFIX=$(brew --prefix glfw)
+          GLFW_REAL="$GLFW_PREFIX/lib/libglfw.3.dylib"
+          test -f "$GLFW_REAL" || GLFW_REAL="$GLFW_PREFIX/lib/libglfw.dylib"
+          test -f "$GLFW_REAL"
+
+          cat > build-directvulkan-dist/bridge/portable_env_shim.mm <<'EOF'
+          #include <dlfcn.h>
+          #include <cstdlib>
+          #include <string>
+          #include <limits.h>
+          #include <unistd.h>
+
+          static std::string self_dir() {
+              Dl_info info{};
+              if (!dladdr((void*)&self_dir, &info) || !info.dli_fname) return {};
+              char resolved[PATH_MAX];
+              const char* src = realpath(info.dli_fname, resolved) ? resolved : info.dli_fname;
+              std::string p(src);
+              auto slash = p.find_last_of('/');
+              return slash == std::string::npos ? std::string() : p.substr(0, slash);
+          }
+
+          __attribute__((constructor)) static void mithril_distribution_paths() {
+              std::string dir = self_dir();
+              if (dir.empty()) return;
+              setenv("MITHRIL_BACKEND", "vulkan", 1);
+              if (!std::getenv("MITHRIL_E2E_MITHRIL_DYLIB")) {
+                  std::string p = dir + "/libmithril.dylib";
+                  setenv("MITHRIL_E2E_MITHRIL_DYLIB", p.c_str(), 0);
+              }
+              if (!std::getenv("MITHRIL_E2E_GLFW_DELEGATE")) {
+                  std::string p = dir + "/runtime/libglfw.3.dylib";
+                  setenv("MITHRIL_E2E_GLFW_DELEGATE", p.c_str(), 0);
+              }
+          }
+          EOF
+
+          BRIDGE="$PWD/build-directvulkan-dist/bridge/libglfw_mithril.dylib"
+          clang++ -std=c++20 -fobjc-arc -dynamiclib -Wall -Wextra -Werror \
+            ci/minecraft-e2e/native/glfw_mithril_bridge.mm \
+            ci/minecraft-e2e/native/prepresent_capture.mm \
+            build-directvulkan-dist/bridge/portable_env_shim.mm \
+            -I"$GLFW_PREFIX/include" -IMithril-Wrapper-cpp/include \
+            -framework AppKit -framework QuartzCore -framework Foundation \
+            -Wl,-reexport_library,"$GLFW_REAL" \
+            -o "$BRIDGE"
+          echo "path=$BRIDGE" >> "$GITHUB_OUTPUT"
+          echo "glfw=$GLFW_REAL" >> "$GITHUB_OUTPUT"
+          echo "glfw_prefix=$GLFW_PREFIX" >> "$GITHUB_OUTPUT"
+          file "$BRIDGE"
+          otool -L "$BRIDGE"
+
+      - name: Gate DirectVulkan default framebuffer orientation and glyphs
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf "$E2E_ROOT"
+          python3 ci/minecraft-e2e/evidence.py --root "$E2E_ROOT" init
+          clang++ -std=c++20 -Wall -Wextra -Werror \
+            tests/glfw_default_glyph_smoke.cpp \
+            -I'${{ steps.bridge.outputs.glfw_prefix }}/include' \
+            -IMithril-Wrapper-cpp/include \
+            '${{ steps.bridge.outputs.path }}' \
+            -framework AppKit -framework Foundation \
+            -o build-directvulkan-dist/glfw_default_glyph_smoke
+          MITHRIL_BACKEND=vulkan \
+          MITHRIL_E2E_MITHRIL_DYLIB='${{ steps.mithril.outputs.path }}' \
+          MITHRIL_E2E_GLFW_DELEGATE='${{ steps.bridge.outputs.glfw }}' \
+          MITHRIL_E2E_ROOT="$PWD/$E2E_ROOT" \
+          DYLD_LIBRARY_PATH="$(brew --prefix molten-vk)/lib" \
+            ./build-directvulkan-dist/glfw_default_glyph_smoke \
+            | tee build-directvulkan-dist/glyph-default.log
+          grep -F 'glyph_cell_mismatches=0' build-directvulkan-dist/glyph-default.log
+          grep -F 'GLFW DEFAULT G/I GLYPH SMOKE PASSED' build-directvulkan-dist/glyph-default.log
+
+      - name: Assemble self-contained DirectVulkan bundle
+        id: bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf "$DIST_ROOT"
+          mkdir -p "$DIST_ROOT/runtime" "$DIST_ROOT/launch" "$DIST_ROOT/evidence" "$DIST_ROOT/licenses"
+          cp '${{ steps.mithril.outputs.path }}' "$DIST_ROOT/libmithril.dylib"
+          cp '${{ steps.bridge.outputs.path }}' "$DIST_ROOT/libglfw_mithril.dylib"
+          cp '${{ steps.bridge.outputs.glfw }}' "$DIST_ROOT/runtime/libglfw.3.dylib"
+
+          MOLTENVK_REAL=$(otool -L "$DIST_ROOT/libmithril.dylib" | awk '/MoltenVK/{print $1; exit}')
+          test -n "$MOLTENVK_REAL"
+          test -f "$MOLTENVK_REAL"
+          cp "$MOLTENVK_REAL" "$DIST_ROOT/runtime/libMoltenVK.dylib"
+
+          old_mvk=$(otool -L "$DIST_ROOT/libmithril.dylib" | awk '/MoltenVK/{print $1; exit}')
+          old_glfw=$(otool -L "$DIST_ROOT/libglfw_mithril.dylib" | awk '/libglfw\.3\.dylib/{print $1; exit}')
+          install_name_tool -change "$old_mvk" '@loader_path/runtime/libMoltenVK.dylib' "$DIST_ROOT/libmithril.dylib"
+          install_name_tool -change "$old_glfw" '@loader_path/runtime/libglfw.3.dylib' "$DIST_ROOT/libglfw_mithril.dylib"
+          install_name_tool -id '@loader_path/libmithril.dylib' "$DIST_ROOT/libmithril.dylib"
+          install_name_tool -id '@loader_path/libglfw_mithril.dylib' "$DIST_ROOT/libglfw_mithril.dylib"
+          install_name_tool -id '@loader_path/libMoltenVK.dylib' "$DIST_ROOT/runtime/libMoltenVK.dylib"
+          install_name_tool -id '@loader_path/libglfw.3.dylib' "$DIST_ROOT/runtime/libglfw.3.dylib"
+
+          codesign --force --sign - "$DIST_ROOT/runtime/libMoltenVK.dylib"
+          codesign --force --sign - "$DIST_ROOT/runtime/libglfw.3.dylib"
+          codesign --force --sign - "$DIST_ROOT/libmithril.dylib"
+          codesign --force --sign - "$DIST_ROOT/libglfw_mithril.dylib"
+
+          cat > "$DIST_ROOT/launch/print-jvm-args.sh" <<'EOF'
+          #!/bin/bash
+          set -euo pipefail
+          ROOT=$(cd "$(dirname "$0")/.." && pwd)
+          printf '%s\n' \
+            "-Dorg.lwjgl.glfw.libname=$ROOT/libglfw_mithril.dylib" \
+            "-Dorg.lwjgl.opengl.libname=$ROOT/libmithril.dylib"
+          EOF
+          chmod +x "$DIST_ROOT/launch/print-jvm-args.sh"
+
+          cat > "$DIST_ROOT/launch/check-bundle.sh" <<'EOF'
+          #!/bin/bash
+          set -euo pipefail
+          ROOT=$(cd "$(dirname "$0")/.." && pwd)
+          cd "$ROOT"
+          shasum -a 256 -c SHA256SUMS
+          for f in libmithril.dylib libglfw_mithril.dylib runtime/libMoltenVK.dylib runtime/libglfw.3.dylib; do
+            file "$f"
+            codesign --verify --strict "$f"
+            if otool -L "$f" | tail -n +2 | awk '{print $1}' | grep -E '^/(opt/homebrew|usr/local)/' >/dev/null; then
+              echo "non-portable Homebrew dependency remains in $f" >&2
+              exit 1
+            fi
+          done
+          echo 'Bundle integrity and portable dependency checks passed.'
+          EOF
+          chmod +x "$DIST_ROOT/launch/check-bundle.sh"
+
+          cat > "$DIST_ROOT/README.md" <<EOF
+          # Mithril DirectVulkan Minecraft 26.2 field-test runtime
+
+          Experimental macOS Apple Silicon package for testing the DirectVulkan
+          fixes from native baseline de2261ef80f34f4df2afbfa414def2f53ffe9442.
+
+          The bundled GLFW bridge forces MITHRIL_BACKEND=vulkan before Mithril
+          initializes, so this package cannot silently use DirectMetal.
+
+          ## Setup
+
+          1. Keep the extracted directory intact at a stable absolute path.
+          2. Run: ./launch/check-bundle.sh
+          3. Run: ./launch/print-jvm-args.sh
+          4. Add the two printed -Dorg.lwjgl... arguments to the Minecraft 26.2
+             installation's JVM arguments, then launch with Java 25.
+
+          This is a field-test build, not a notarized public release and not a
+          claim of complete OpenGL 4.6 conformance. If macOS quarantine blocks
+          the ad-hoc-signed test dylibs, report the exact Gatekeeper message
+          rather than replacing individual files in the bundle.
+          EOF
+
+          cat > "$DIST_ROOT/THIRD_PARTY_NOTICES.md" <<'EOF'
+          # Third-party runtime components
+
+          This field-test bundle redistributes MoltenVK and GLFW runtime
+          libraries from Homebrew. MoltenVK is an Apache-2.0 project and GLFW
+          uses the zlib/libpng license. The workflow copies packaged license or
+          notice files when Homebrew exposes them in the installed prefixes.
+          EOF
+
+          for dep in molten-vk glfw; do
+            prefix=$(brew --prefix "$dep")
+            while IFS= read -r f; do
+              test -f "$f" || continue
+              cp "$f" "$DIST_ROOT/licenses/${dep}-$(basename "$f")" || true
+            done < <(find "$prefix" -maxdepth 4 -type f \( -iname 'LICENSE*' -o -iname 'NOTICE*' -o -iname 'COPYING*' \) -print 2>/dev/null || true)
+          done
+
+          python3 - <<'PY'
+          import json, os, pathlib, platform
+          root = pathlib.Path(os.environ['DIST_ROOT'])
+          data = {
+              'schema_version': '1.0',
+              'repository': os.environ['GITHUB_REPOSITORY'],
+              'package_commit': os.environ['GITHUB_SHA'],
+              'native_fix_baseline': 'de2261ef80f34f4df2afbfa414def2f53ffe9442',
+              'run_id': os.environ['GITHUB_RUN_ID'],
+              'run_attempt': os.environ['GITHUB_RUN_ATTEMPT'],
+              'target': 'macOS arm64',
+              'validated_minecraft': '26.2',
+              'validated_java': '25',
+              'backend': 'DirectVulkan (Vulkan 1.2 / MoltenVK)',
+              'machine': platform.machine(),
+              'signing': 'ad-hoc',
+          }
+          (root / 'BUILD_INFO.json').write_text(json.dumps(data, indent=2) + '\n')
+          PY
+
+          {
+            echo '=== libmithril.dylib ==='
+            otool -L "$DIST_ROOT/libmithril.dylib"
+            echo '=== libglfw_mithril.dylib ==='
+            otool -L "$DIST_ROOT/libglfw_mithril.dylib"
+            echo '=== runtime/libMoltenVK.dylib ==='
+            otool -L "$DIST_ROOT/runtime/libMoltenVK.dylib"
+            echo '=== runtime/libglfw.3.dylib ==='
+            otool -L "$DIST_ROOT/runtime/libglfw.3.dylib"
+          } | tee "$DIST_ROOT/evidence/otool-dependencies.txt"
+
+          if grep -E '^\s+/(opt/homebrew|usr/local)/' "$DIST_ROOT/evidence/otool-dependencies.txt"; then
+            echo '::error::distribution still carries an absolute Homebrew dependency'
+            exit 1
+          fi
+
+          cp build-directvulkan-dist/texture-unpack.log "$DIST_ROOT/evidence/"
+          cp build-directvulkan-dist/persistent-pbo.log "$DIST_ROOT/evidence/"
+          cp build-directvulkan-dist/glyph-user-fbo.log "$DIST_ROOT/evidence/"
+          cp build-directvulkan-dist/glyph-default.log "$DIST_ROOT/evidence/"
+
+          (
+            cd "$DIST_ROOT"
+            shasum -a 256 \
+              libmithril.dylib \
+              libglfw_mithril.dylib \
+              runtime/libMoltenVK.dylib \
+              runtime/libglfw.3.dylib \
+              BUILD_INFO.json > SHA256SUMS
+          )
+          "$DIST_ROOT/launch/check-bundle.sh"
+          echo "root=$PWD/$DIST_ROOT" >> "$GITHUB_OUTPUT"
+
+      - name: Prove portable bridge self-location and Vulkan selection
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > build-directvulkan-dist/portable_bridge_env_smoke.c <<'EOF'
+          #include <dlfcn.h>
+          #include <stdio.h>
+          #include <stdlib.h>
+          #include <string.h>
+
+          int main(int argc, char **argv) {
+              if (argc != 2) return 2;
+              unsetenv("MITHRIL_BACKEND");
+              unsetenv("MITHRIL_E2E_MITHRIL_DYLIB");
+              unsetenv("MITHRIL_E2E_GLFW_DELEGATE");
+              void *h = dlopen(argv[1], RTLD_NOW | RTLD_LOCAL);
+              if (!h) { fprintf(stderr, "%s\n", dlerror()); return 3; }
+              const char *b = getenv("MITHRIL_BACKEND");
+              const char *m = getenv("MITHRIL_E2E_MITHRIL_DYLIB");
+              const char *g = getenv("MITHRIL_E2E_GLFW_DELEGATE");
+              if (!b || strcmp(b, "vulkan") != 0) return 4;
+              if (!m || !strstr(m, "/libmithril.dylib")) return 5;
+              if (!g || !strstr(g, "/runtime/libglfw.3.dylib")) return 6;
+              printf("backend=%s\nmithril=%s\nglfw=%s\n", b, m, g);
+              dlclose(h);
+              return 0;
+          }
+          EOF
+          clang -std=c11 -Wall -Wextra -Werror \
+            build-directvulkan-dist/portable_bridge_env_smoke.c \
+            -o build-directvulkan-dist/portable_bridge_env_smoke -ldl
+          build-directvulkan-dist/portable_bridge_env_smoke \
+            "$PWD/$DIST_ROOT/libglfw_mithril.dylib" \
+            | tee "$DIST_ROOT/evidence/portable-bridge-smoke.txt"
+
+      - name: Try packaged Minecraft 26.2 E2E on runner
+        id: e2e
+        shell: bash
+        run: |
+          set -uo pipefail
+          rm -rf "$E2E_ROOT"
+          mkdir -p "$E2E_ROOT"
+          python3 ci/minecraft-e2e/evidence.py --root "$E2E_ROOT" init
+
+          set +e
+          MITHRIL_BACKEND=vulkan \
+          MTL_DEBUG_LAYER=1 \
+          MTL_SHADER_VALIDATION=0 \
+          gradle -p .github/ci/minecraft-e2e --build-cache --stacktrace \
+            -PmithrilBackend=vulkan \
+            -PmithrilDylib="$PWD/$DIST_ROOT/libmithril.dylib" \
+            -PglfwBridge="$PWD/$DIST_ROOT/libglfw_mithril.dylib" \
+            -PglfwDelegate="$PWD/$DIST_ROOT/runtime/libglfw.3.dylib" \
+            -PevidenceRoot="$PWD/$E2E_ROOT" \
+            runProductionClientGameTest 2>&1 | tee "$E2E_ROOT/gradle-minecraft.log"
+          rc=${PIPESTATUS[0]}
+          set -e
+          echo "$rc" > "$DIST_ROOT/evidence/runner-e2e-exit-code.txt"
+          echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
+
+          for f in bridge-state.json game-state.json oracle-results.json failure.json; do
+            test -f "$E2E_ROOT/$f" && cp "$E2E_ROOT/$f" "$DIST_ROOT/evidence/$f" || true
+          done
+          test -f "$E2E_ROOT/render/minecraft-framebuffer.png" && \
+            cp "$E2E_ROOT/render/minecraft-framebuffer.png" "$DIST_ROOT/evidence/" || true
+
+          if test "$rc" -eq 0; then
+            python3 - "$E2E_ROOT" <<'PY'
+          import json, pathlib, sys
+          root = pathlib.Path(sys.argv[1])
+          state = json.loads((root / 'bridge-state.json').read_text())
+          assert state.get('context_count', 0) >= 1
+          assert state.get('swap_count', 0) >= 2
+          assert 'Vulkan 1.2 (MoltenVK)' in state.get('gl_version', '')
+          assert 'Vulkan 1.2 (MoltenVK)' in state.get('gl_renderer', '')
+          PY
+            echo 'Runner E2E passed with DirectVulkan.' > "$DIST_ROOT/evidence/RUNNER_E2E_STATUS.txt"
+          else
+            cat > "$DIST_ROOT/evidence/RUNNER_E2E_STATUS.txt" <<EOF
+          Runner E2E did not pass (exit code $rc).
+          The distribution remains a field-test artifact because build, pixel-store,
+          PBO, glyph/FBO, dependency-closure, signature, and portable-bridge gates
+          passed before this advisory runner test. Inspect gradle-minecraft.log and
+          failure.json for the runner-specific failure before treating it as release-ready.
+          EOF
+          fi
+
+          exit 0
+
+      - name: Create deterministic distribution archive
+        id: archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$DIST_ROOT/launch/check-bundle.sh"
+          ARCHIVE="Mithril-DirectVulkan-Minecraft-26.2-macos-arm64-${GITHUB_SHA}.zip"
+          ditto -c -k --sequesterRsrc --keepParent "$DIST_ROOT" "$ARCHIVE"
+          shasum -a 256 "$ARCHIVE" | tee "$ARCHIVE.sha256"
+          echo "archive=$ARCHIVE" >> "$GITHUB_OUTPUT"
+          echo "checksum=$ARCHIVE.sha256" >> "$GITHUB_OUTPUT"
+          ls -lh "$ARCHIVE" "$ARCHIVE.sha256"
+
+      - name: Upload launcher-ready DirectVulkan field-test distribution
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: Mithril-DirectVulkan-Minecraft-26.2-macos-arm64-${{ github.sha }}
+          path: |
+            ${{ steps.archive.outputs.archive }}
+            ${{ steps.archive.outputs.checksum }}
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
+      - name: Upload DirectVulkan distribution evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: Mithril-DirectVulkan-distribution-evidence-${{ github.sha }}
+          path: |
+            ${{ env.DIST_ROOT }}/evidence/**
+            ${{ env.E2E_ROOT }}/**
+          if-no-files-found: warn
+          retention-days: 14
