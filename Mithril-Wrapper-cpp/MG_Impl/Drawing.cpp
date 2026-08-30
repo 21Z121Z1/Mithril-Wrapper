@@ -142,7 +142,7 @@ static bool prepare_draw(GLenum mode) {
     // upside down). ARB_clip_control UPPER_LEFT toggles that convention.
     const bool want_y_flip =
         (backend_active_kind() == MITHRIL_BACKEND_KIND_VULKAN)
-            ? ((!is_default_fbo) ^ clip_upper_left)
+            ? (!clip_upper_left)
             : (is_default_fbo ^ clip_upper_left);
     const std::vector<uint32_t>& vs_spirv = [&]() -> const std::vector<uint32_t>& {
         if (zero_to_one) {

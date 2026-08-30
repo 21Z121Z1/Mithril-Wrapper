@@ -184,7 +184,7 @@ jobs:
         run: |
           set -euo pipefail
           test ! -s "$E2E_ROOT/failure.json"
-          test -f "$E2E_ROOT/oracle-summary.json"
+          test -f "$E2E_ROOT/oracle-results.json"
           if test -s "$E2E_ROOT/render-errors.log"; then
             echo 'render/validation errors detected:' >&2
             cat "$E2E_ROOT/render-errors.log" >&2

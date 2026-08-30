@@ -598,7 +598,7 @@ static VkPipelineStageFlags dst_stage_for_layout(VkImageLayout layout);
 
 void stage_and_copy_image(TextureEntry& tex, int level, int x, int y, int z,
                           int w, int h, int d, const void* pixels,
-                          int unpack_alignment, GLenum format, GLenum type,
+                          const MGUnpackParams* unpack, GLenum format, GLenum type,
                           bool is_full_upload) {
     Backend* b = backend();
     if (!b->commandBuffer) return;
@@ -609,7 +609,18 @@ void stage_and_copy_image(TextureEntry& tex, int level, int x, int y, int z,
     // vkCmdPipelineBarrier / vkCmdCopyBufferToImage calls below would record
     // into a non-recording buffer (spec UB).
     if (!ensure_command_buffer_recording()) return;
-    if (unpack_alignment <= 0) unpack_alignment = 4;  // GL default UNPACK_ALIGNMENT
+    int unpack_alignment = (unpack && unpack->unpackAlignment > 0)
+                               ? unpack->unpackAlignment : 4;
+    const int unpack_row_length = (unpack && unpack->unpackRowLength > 0)
+                                      ? unpack->unpackRowLength : w;
+    const int unpack_image_height = (unpack && unpack->unpackImageHeight > 0)
+                                        ? unpack->unpackImageHeight : h;
+    const int unpack_skip_pixels = (unpack && unpack->unpackSkipPixels > 0)
+                                       ? unpack->unpackSkipPixels : 0;
+    const int unpack_skip_rows = (unpack && unpack->unpackSkipRows > 0)
+                                     ? unpack->unpackSkipRows : 0;
+    const int unpack_skip_images = (unpack && unpack->unpackSkipImages > 0)
+                                       ? unpack->unpackSkipImages : 0;
 
     // Compute host-side bytes per pixel for this (format, type) pair and
     // honour GL_UNPACK_ALIGNMENT when computing the source row stride. The
@@ -657,12 +668,17 @@ void stage_and_copy_image(TextureEntry& tex, int level, int x, int y, int z,
     }
 
     size_t mask = (size_t)unpack_alignment - 1;
-    // staging 装的是展开后的 RGBA 数据（紧密排列）；tight_row 按 dst_bpp 计算。
-    // 源行 stride 按 src_bpp 计算并受 GL_UNPACK_ALIGNMENT 约束。
-    // 非展开路径下 src_bpp == dst_bpp == bpp，行为与原实现完全一致。
+    // Destination staging is tightly packed. Source addressing must honor the
+    // complete OpenGL pixel-unpack state, not just UNPACK_ALIGNMENT. Minecraft
+    // atlas uploads routinely use ROW_LENGTH + SKIP_PIXELS/SKIP_ROWS.
     size_t tight_row = (size_t)w * (size_t)dst_bpp;
-    size_t src_tight_row = (size_t)w * (size_t)src_bpp;
+    size_t src_tight_row = (size_t)unpack_row_length * (size_t)src_bpp;
     size_t src_stride = (src_tight_row + mask) & ~mask;
+    size_t src_image_stride = src_stride * (size_t)unpack_image_height;
+    size_t src_base_offset = (size_t)unpack_skip_images * src_image_stride
+                           + (size_t)unpack_skip_rows * src_stride
+                           + (size_t)unpack_skip_pixels * (size_t)src_bpp;
+    const char* src_base = (const char*)pixels + src_base_offset;
     size_t staging = tight_row * (size_t)h * (size_t)d;
 
     // ---- FIX (Invalid Resource 根因 - per-frame transient staging arena) ----
@@ -770,10 +786,10 @@ void stage_and_copy_image(TextureEntry& tex, int level, int x, int y, int z,
                     alpha_bits = 0x000000FFu; break;
             }
             const int alpha_bytes = src_bpp / 3;  // 每分量字节数: 1/2/4
-            const char* s8 = (const char*)pixels;
             for (int layer = 0; layer < d; ++layer) {
+                const char* layer_src = src_base + (size_t)layer * src_image_stride;
                 for (int row = 0; row < h; ++row) {
-                    const char* src_row = s8;
+                    const char* src_row = layer_src + (size_t)row * src_stride;
                     for (int px = 0; px < w; ++px) {
                         std::memcpy(dst, src_row, src_bpp);         // 复制 RGB 3 分量
                         dst += src_bpp;
@@ -781,21 +797,20 @@ void stage_and_copy_image(TextureEntry& tex, int level, int x, int y, int z,
                         std::memcpy(dst, &alpha_bits, alpha_bytes); // 填充 alpha 第 4 分量
                         dst += alpha_bytes;
                     }
-                    s8 += src_stride;  // 源行按 GL_UNPACK_ALIGNMENT stride
                 }
             }
-        } else if (src_stride == tight_row) {
-            // Source rows are already tightly packed — single memcpy.
-            std::memcpy(dst, pixels, staging);
+        } else if (src_base_offset == 0 && src_stride == tight_row &&
+                   src_image_stride == tight_row * (size_t)h) {
+            // Source rows/layers are already tightly packed — single memcpy.
+            std::memcpy(dst, src_base, staging);
         } else {
-            // Source rows carry GL_UNPACK_ALIGNMENT padding; repack to tight
-            // so VkBufferImageCopy.bufferRowLength == 0 (== w) is valid.
-            const char* s8 = (const char*)pixels;
+            // Repack the requested sub-rectangle/layers into tight staging.
             for (int layer = 0; layer < d; ++layer) {
+                const char* layer_src = src_base + (size_t)layer * src_image_stride;
                 for (int row = 0; row < h; ++row) {
-                    std::memcpy(dst, s8, tight_row);
+                    const char* src_row = layer_src + (size_t)row * src_stride;
+                    std::memcpy(dst, src_row, tight_row);
                     dst += tight_row;
-                    s8 += src_stride;
                 }
             }
         }
@@ -1931,10 +1946,8 @@ void dvk_texture_upload(GLuint name, int level, int x, int y, int z,
     auto& tbl = mithril::vk::texture_table();
     auto it = tbl.find(name);
     if (it == tbl.end() || !pixels) return;
-    const int unpack_alignment = (unpack && unpack->unpackAlignment > 0)
-                                     ? unpack->unpackAlignment : 4;
     mithril::vk::stage_and_copy_image(it->second, level, x, y, z, w, h, d,
-                                      pixels, unpack_alignment, format, type,
+                                      pixels, unpack, format, type,
                                       is_full_upload != 0);
 }
 

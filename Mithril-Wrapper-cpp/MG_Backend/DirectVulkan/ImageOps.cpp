@@ -859,6 +859,7 @@ int read_pixels(int x, int y, int w, int h, GLenum format, GLenum type, void* ou
     int src_bpp = 4;
     switch (staging_fmt) {
         case VK_FORMAT_B8G8R8A8_UNORM:
+        case VK_FORMAT_B8G8R8A8_SRGB:
         case VK_FORMAT_R8G8B8A8_UNORM:
         case VK_FORMAT_R8G8B8A8_SRGB: src_bpp = 4; break;
         case VK_FORMAT_R8G8B8_UNORM:  src_bpp = 3; break;
@@ -959,7 +960,34 @@ int read_pixels(int x, int y, int w, int h, GLenum format, GLenum type, void* ou
     int dst_bpp = host_texel_bytes(format, type);
     if (dst_bpp <= 0) dst_bpp = 4;
 
-    if (src_bpp == dst_bpp) {
+    // vkCmdCopyImageToBuffer preserves the image format's byte/component
+    // layout. The default macOS swapchain is normally B8G8R8A8_UNORM, while
+    // OpenGL glReadPixels(GL_RGBA, GL_UNSIGNED_BYTE, ...) promises RGBA bytes
+    // independently of the framebuffer's internal storage format. A raw memcpy
+    // therefore exposes BGRA memory as RGBA and swaps red/blue in screenshots
+    // and readback-based conformance tests. Convert the two common 8-bit
+    // four-component layouts explicitly; keep identical-layout reads memcpy-fast.
+    const bool src_bgra8 =
+        src_fmt == VK_FORMAT_B8G8R8A8_UNORM ||
+        src_fmt == VK_FORMAT_B8G8R8A8_SRGB;
+    const bool src_rgba8 =
+        src_fmt == VK_FORMAT_R8G8B8A8_UNORM ||
+        src_fmt == VK_FORMAT_R8G8B8A8_SRGB;
+    const bool dst_rgba8 = format == GL_RGBA && type == GL_UNSIGNED_BYTE;
+    const bool dst_bgra8 = format == GL_BGRA && type == GL_UNSIGNED_BYTE;
+
+    if (src_bpp == 4 && dst_bpp == 4 &&
+        ((src_bgra8 && dst_rgba8) || (src_rgba8 && dst_bgra8))) {
+        const uint8_t* src = static_cast<const uint8_t*>(mapped);
+        uint8_t* dst = static_cast<uint8_t*>(out_pixels);
+        const size_t count = (size_t)w * (size_t)h;
+        for (size_t i = 0; i < count; ++i) {
+            dst[i * 4 + 0] = src[i * 4 + 2];
+            dst[i * 4 + 1] = src[i * 4 + 1];
+            dst[i * 4 + 2] = src[i * 4 + 0];
+            dst[i * 4 + 3] = src[i * 4 + 3];
+        }
+    } else if (src_bpp == dst_bpp) {
         std::memcpy(out_pixels, mapped, (size_t)staging_size);
     } else {
         // Best-effort: copy byte-for-byte up to the smaller of the two sizes.

@@ -215,14 +215,18 @@ static const void* resolve_unpack_pixels(const void* pixels,
         return nullptr;
     }
 
-    void* base = backend_get_buffer_mapped_pointer(pboName);
-    if (!base) {
-        if (pbo->data.size() < bufferSize) {
-            mithril::state_set_error(GL_INVALID_OPERATION);
-            return nullptr;
-        }
-        base = pbo->data.data();
+    // glMapBuffer/glMapBufferRange currently expose Buffer::data to the GL
+    // application. For persistent/coherent mappings, application writes can
+    // therefore live only in this CPU shadow until an explicit flush/unmap.
+    // A pixel-unpack operation must read the bytes the GL client actually
+    // wrote, not a separate persistently mapped VkBuffer allocation that may
+    // still contain old data. Keep this source consistent with the mapping
+    // API until those APIs are redesigned to expose one authoritative alias.
+    if (pbo->data.size() < bufferSize) {
+        mithril::state_set_error(GL_INVALID_OPERATION);
+        return nullptr;
     }
+    const void* base = pbo->data.data();
     return static_cast<const uint8_t*>(base) + offset;
 }
 
