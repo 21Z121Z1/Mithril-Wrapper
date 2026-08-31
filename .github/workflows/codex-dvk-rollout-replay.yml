@@ -1,0 +1,150 @@
+name: Codex DirectVulkan rollout replay
+
+on:
+  push:
+    branches:
+      - codex/dvk-rollout-replay-20260831
+    paths:
+      - ci/replay_rollout_dvk_local_patches.py
+      - .github/workflows/codex-dvk-rollout-replay.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: codex-dvk-rollout-replay-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  replay-build-review:
+    runs-on: macos-26
+    timeout-minutes: 45
+    env:
+      MITHRIL_BACKEND: vulkan
+    steps:
+      - name: Checkout exact replay branch
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Strictly replay recovered Codex patches
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 ci/replay_rollout_dvk_local_patches.py
+          git diff --check
+          git diff --name-only | sort
+
+      - name: Gate recovered semantics
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          d = Path('Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/DescriptorSet.cpp').read_text()
+          i = Path('Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/ImageOps.cpp').read_text()
+          c = Path('CMakeLists.txt').read_text()
+          assert 'pr.allocatedSets[slot].clear();' not in d
+          inv = d[d.index('void invalidate_descriptor_memo()'):]
+          inv = inv[:inv.index('void reset_all_descriptor_pools()')]
+          assert 'pr.allocatedSets[i].clear();' not in inv
+          assert 'pr.setCursor[i] = 0;' not in inv
+          assert 'option(MITHRIL_HIDE_GLSLANG_SYMBOLS' in c and '\n    ON)' in c
+          assert 'active_swapchain_color_layout()' in i or 'resolve_blit_layouts' in i
+          assert 'kOneShotFenceTimeoutNs' in i
+          assert 'src_layouts.initial, src_layouts.final' in i
+          assert 'dst_layouts.initial, dst_layouts.final' in i
+          PY
+
+      - name: Install native dependencies
+        shell: bash
+        run: brew install glfw vulkan-loader molten-vk ninja
+
+      - name: Build Release Mithril
+        id: mithril
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-rollout-replay -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_FLAGS='-Wno-error' \
+            -DCMAKE_CXX_FLAGS='-Wno-error'
+          cmake --build build-rollout-replay --target mithril --parallel
+          dylib=$(find build-rollout-replay -type f -name libmithril.dylib -print -quit)
+          test -s "$dylib"
+          dylib="$(cd "$(dirname "$dylib")" && pwd)/$(basename "$dylib")"
+          file "$dylib"
+          file "$dylib" | grep -F arm64
+          echo "path=$dylib" >> "$GITHUB_OUTPUT"
+
+      - name: Gate bundled glslang ABI isolation
+        shell: bash
+        run: |
+          set -euo pipefail
+          dylib='${{ steps.mithril.outputs.path }}'
+          nm -gU "$dylib" > build-rollout-replay/exported-defined-symbols.txt
+          if grep -E '(^|[^A-Za-z])(_+ZN7glslang|7glslang)' build-rollout-replay/exported-defined-symbols.txt; then
+            echo '::error::bundled glslang C++ symbols are still globally exported' >&2
+            exit 1
+          fi
+
+      - name: Run established DirectVulkan semantic smokes
+        shell: bash
+        run: |
+          set -euo pipefail
+          DYLIB='${{ steps.mithril.outputs.path }}'
+          MVK_LIB="$(brew --prefix molten-vk)/lib"
+
+          clang -std=c11 -Wall -Wextra -Werror tests/texture_unpack_smoke.c \
+            -IMithril-Wrapper-cpp/include -o build-rollout-replay/texture_unpack_smoke
+          MITHRIL_BACKEND=vulkan DYLD_LIBRARY_PATH="$MVK_LIB" \
+            build-rollout-replay/texture_unpack_smoke "$DYLIB" \
+            | tee build-rollout-replay/texture-unpack.log
+          grep -F 'TEXTURE UNPACK SMOKE PASSED' build-rollout-replay/texture-unpack.log
+
+          clang -std=c11 -Wall -Wextra -Werror tests/persistent_pbo_unpack_smoke.c \
+            -IMithril-Wrapper-cpp/include -o build-rollout-replay/persistent_pbo_unpack_smoke
+          MITHRIL_BACKEND=vulkan DYLD_LIBRARY_PATH="$MVK_LIB" \
+            build-rollout-replay/persistent_pbo_unpack_smoke "$DYLIB" \
+            | tee build-rollout-replay/persistent-pbo.log
+          grep -F 'PERSISTENT PBO UNPACK SMOKE PASSED' build-rollout-replay/persistent-pbo.log
+
+          clang -std=c11 -Wall -Wextra -Werror tests/gui_glyph_pipeline_smoke.c \
+            -IMithril-Wrapper-cpp/include -o build-rollout-replay/gui_glyph_pipeline_smoke
+          MITHRIL_BACKEND=vulkan DYLD_LIBRARY_PATH="$MVK_LIB" \
+            build-rollout-replay/gui_glyph_pipeline_smoke "$DYLIB" \
+            | tee build-rollout-replay/glyph-user-fbo.log
+          grep -F 'glyph_rgb_mismatches=0' build-rollout-replay/glyph-user-fbo.log
+          grep -F 'GUI GLYPH PIPELINE SMOKE PASSED' build-rollout-replay/glyph-user-fbo.log
+
+          clang -std=c11 -Wall -Wextra -Werror tests/render_smoke.c \
+            -IMithril-Wrapper-cpp/include -o build-rollout-replay/render_smoke
+          MITHRIL_BACKEND=vulkan DYLD_LIBRARY_PATH="$MVK_LIB" \
+            build-rollout-replay/render_smoke "$DYLIB" \
+            | tee build-rollout-replay/render-smoke.log
+          grep -F 'RENDER SMOKE ALL PASSED' build-rollout-replay/render-smoke.log
+
+      - name: Review final diff and publish only validated source changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check
+          git diff --stat
+          git diff -- \
+            CMakeLists.txt \
+            Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/DescriptorSet.cpp \
+            Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/CommandStream.h \
+            Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/CommandStream.cpp \
+            Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/ImageOps.cpp
+
+          rm ci/replay_rollout_dvk_local_patches.py
+          rm .github/workflows/codex-dvk-rollout-replay.yml
+          git add -A
+          git diff --cached --check
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix(dvk): replay local iOS DirectVulkan fixes'
+          git push origin HEAD:codex/dvk-rollout-replay-20260831
