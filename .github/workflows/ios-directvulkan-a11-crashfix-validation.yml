@@ -1,0 +1,195 @@
+name: Mithril DirectVulkan A11 Crashfix Validation
+
+on:
+  push:
+    branches:
+      - codex/dvk-a11-single-mvk-shader-oracle-20260831
+    paths:
+      - 'CMakeLists.txt'
+      - 'Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Resources.cpp'
+      - 'Mithril-Wrapper-cpp/MG_Impl/Shader.cpp'
+      - '.github/workflows/ios-directvulkan-a11-crashfix-validation.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  MOLTENVK_HEADERS_TAG: v1.4.2
+  AMETHYST_COMMIT: e4b2689b5a627ea4b223b76e2e832085029f0b00
+  AMETHYST_MVK_BLOB: 30477a5badd5114a2016e5fb27a27dc637c28b5d
+
+jobs:
+  build-ios-arm64:
+    name: iPhoneOS arm64 / glslang serialization ${{ matrix.serialize }}
+    runs-on: macos-26
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        serialize: [ON, OFF]
+
+    steps:
+      - name: Checkout exact candidate
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          submodules: recursive
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Source semantic gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --check
+          R='Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Resources.cpp'
+          S='Mithril-Wrapper-cpp/MG_Impl/Shader.cpp'
+          grep -Fq 'VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT' "$R"
+          grep -Fq 'VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO' "$R"
+          grep -Fq 'tex.target == GL_TEXTURE_CUBE_MAP ? 6u : 1u' "$R"
+          grep -Fq 'MITHRIL_MOLTENVK_LINKAGE STREQUAL "HOST_DYLIB"' CMakeLists.txt
+          grep -Fq 'MITHRIL_SERIALIZE_GLSLANG' "$S"
+          grep -Fq 'mithril-shader-last-parse.meta' "$S"
+          grep -Fq 'dump_shader_oracle_snapshot("preprocessed"' "$S"
+          python3 -c "from pathlib import Path; s=Path('$R').read_text(); x=s[s.index('primaryViewUsage.usage ='):s.index('if (primaryViewUsage.usage != 0)')]; assert 'VK_IMAGE_USAGE_SAMPLED_BIT' in x and 'VK_IMAGE_USAGE_STORAGE_BIT' in x; assert 'VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT' not in x and 'VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT' not in x and 'VK_IMAGE_USAGE_TRANSFER_SRC_BIT' not in x"
+          echo 'source semantic gates: PASS'
+
+      - name: Fetch pinned ios-cmake
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL -o ios.toolchain.cmake https://raw.githubusercontent.com/leetal/ios-cmake/4.5.0/ios.toolchain.cmake
+          test -s ios.toolchain.cmake
+
+      - name: Fetch Vulkan headers from pinned MoltenVK SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL -o MoltenVK-ios.tar "https://github.com/KhronosGroup/MoltenVK/releases/download/${MOLTENVK_HEADERS_TAG}/MoltenVK-ios.tar"
+          mkdir mvk-sdk
+          tar -xf MoltenVK-ios.tar -C mvk-sdk
+          HDRS=$(find mvk-sdk -type d -name vulkan -path '*/include/vulkan' | head -1)
+          test -n "$HDRS"
+          mv "$(dirname "$HDRS")" MoltenVK-Headers
+          test -f MoltenVK-Headers/vulkan/vulkan.h
+
+      - name: Fetch exact Amethyst host MoltenVK
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir host
+          curl -fsSL -o host/libMoltenVK.dylib "https://raw.githubusercontent.com/21Z121Z1/Amethyst-iOS/${AMETHYST_COMMIT}/Natives/resources/Frameworks/libMoltenVK.dylib"
+          test -s host/libMoltenVK.dylib
+          test "$(git hash-object host/libMoltenVK.dylib)" = "$AMETHYST_MVK_BLOB"
+          file host/libMoltenVK.dylib | tee /tmp/host-file.txt
+          grep -q arm64 /tmp/host-file.txt
+          xcrun vtool -show-build host/libMoltenVK.dylib | tee /tmp/host-build.txt
+          otool -D host/libMoltenVK.dylib | tee /tmp/host-id-before.txt
+          otool -L host/libMoltenVK.dylib | tee /tmp/host-deps.txt
+          HOST_ID=$(tail -1 /tmp/host-id-before.txt | xargs)
+          if [ "$HOST_ID" != '@rpath/libMoltenVK.dylib' ]; then
+            install_name_tool -id '@rpath/libMoltenVK.dylib' host/libMoltenVK.dylib
+          fi
+          test "$(otool -D host/libMoltenVK.dylib | tail -1 | xargs)" = '@rpath/libMoltenVK.dylib'
+
+      - name: Configure DirectVulkan against host MoltenVK
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-ios-dvk -G Xcode \
+            -DCMAKE_TOOLCHAIN_FILE="$PWD/ios.toolchain.cmake" \
+            -DPLATFORM=OS64 -DDEPLOYMENT_TARGET=15.0 \
+            -DENABLE_BITCODE=OFF -DENABLE_ARC=OFF \
+            -DMITHRIL_METAL_BACKEND=OFF \
+            -DMITHRIL_MOLTENVK_LINKAGE=HOST_DYLIB \
+            -DMOLTENVK_HOST_DYLIB="$PWD/host/libMoltenVK.dylib" \
+            -DMITHRIL_SHADER_CRASH_ORACLE=ON \
+            -DMITHRIL_SERIALIZE_GLSLANG=${{ matrix.serialize }} \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_FLAGS='-Wno-error=implicit-function-declaration' \
+            -DCMAKE_CXX_FLAGS='-Wno-error'
+
+      - name: Build libmithril.dylib
+        id: build
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake --build build-ios-dvk --config Release --target mithril --parallel
+          D=$(find build-ios-dvk -type f -name libmithril.dylib -print | head -1)
+          test -s "$D"
+          D="$(cd "$(dirname "$D")" && pwd)/$(basename "$D")"
+          echo "path=$D" >> "$GITHUB_OUTPUT"
+          ls -lh "$D"
+
+      - name: Hard-gate single MoltenVK and iPhoneOS ABI
+        shell: bash
+        run: |
+          set -euo pipefail
+          D='${{ steps.build.outputs.path }}'
+          H="$PWD/host/libMoltenVK.dylib"
+          file "$D" | tee /tmp/mithril-file.txt
+          grep -q arm64 /tmp/mithril-file.txt
+          xcrun vtool -show-build "$D" | tee /tmp/mithril-build.txt
+          grep -Eiq 'platform[[:space:]]+IOS|platform[[:space:]]+2' /tmp/mithril-build.txt
+          if grep -Eiq 'platform[[:space:]]+MACOS|platform[[:space:]]+1' /tmp/mithril-build.txt; then exit 1; fi
+
+          otool -L "$D" | tee /tmp/mithril-deps.txt
+          test "$(grep -c 'libMoltenVK' /tmp/mithril-deps.txt)" -eq 1
+          grep -Fq '@rpath/libMoltenVK.dylib' /tmp/mithril-deps.txt
+          if grep -Fq 'MoltenVK.framework' /tmp/mithril-deps.txt; then exit 1; fi
+
+          nm -u "$D" | awk '{print $NF}' | grep '^_vk' | sort -u > /tmp/required-vulkan.txt || true
+          test -s /tmp/required-vulkan.txt
+          nm -gU "$H" | awk '{print $NF}' | sort -u > /tmp/host-exports.txt
+          comm -23 /tmp/required-vulkan.txt /tmp/host-exports.txt > /tmp/missing-vulkan.txt
+          if test -s /tmp/missing-vulkan.txt; then
+            echo 'Missing Vulkan exports in Amethyst host MoltenVK:' >&2
+            cat /tmp/missing-vulkan.txt >&2
+            exit 1
+          fi
+
+          nm -gU "$D" > /tmp/mithril-defined.txt
+          if grep -E 'OBJC_(CLASS|METACLASS)_.*MVK' /tmp/mithril-defined.txt; then
+            echo 'MoltenVK Objective-C implementation was embedded into libmithril' >&2
+            exit 1
+          fi
+          if strings "$D" | grep -Fq 'MVKBlockObserver'; then
+            echo 'MoltenVK implementation strings found inside libmithril' >&2
+            exit 1
+          fi
+          strings "$D" | grep -Fq 'mithril-shader-last-parse.meta'
+          strings "$D" | grep -Fq 'crash-oracle phase='
+          echo 'single-MoltenVK / ABI / crash-oracle gates: PASS'
+
+      - name: Ad-hoc sign and verify
+        shell: bash
+        run: |
+          set -euo pipefail
+          D='${{ steps.build.outputs.path }}'
+          codesign --force --sign - "$D"
+          codesign --verify --strict --verbose=2 "$D"
+
+      - name: Assemble evidence artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          D='${{ steps.build.outputs.path }}'
+          mkdir dist
+          cp "$D" dist/libmithril.dylib
+          cp /tmp/mithril-deps.txt dist/mithril-dependencies.txt
+          cp /tmp/required-vulkan.txt dist/required-vulkan-symbols.txt
+          cp /tmp/host-id-before.txt dist/amethyst-moltenvk-original-id.txt
+          cp /tmp/host-build.txt dist/amethyst-moltenvk-build-version.txt
+          shasum -a 256 dist/libmithril.dylib > dist/libmithril.dylib.sha256
+          printf 'repository=%s\ncommit=%s\nbackend=DirectVulkan\ntarget=iPhoneOS-arm64\nmoltenvk=Amethyst:%s:%s\nglslang_serialized=%s\nshader_crash_oracle=ON\n' \
+            "$GITHUB_REPOSITORY" "$GITHUB_SHA" "$AMETHYST_COMMIT" "$AMETHYST_MVK_BLOB" '${{ matrix.serialize }}' > dist/BUILD_INFO.txt
+          cat dist/BUILD_INFO.txt
+
+      - name: Upload evidence artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: Mithril-DirectVulkan-A11-crashfix-serialize-${{ matrix.serialize }}-${{ github.sha }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
