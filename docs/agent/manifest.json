@@ -1,0 +1,149 @@
+{
+  "schema_version": 1,
+  "as_of": "2026-09-01",
+  "purpose": "Machine-readable navigation and ownership contract for agents working on Mithril-Wrapper.",
+  "entrypoint": "AGENTS.md",
+  "authoritative_documents": {
+    "system_model": "docs/system-model.md",
+    "current_status": "docs/agent/status.md",
+    "evidence_model": "docs/evidence-model.md",
+    "branch_policy": "docs/branches.md",
+    "branch_ledger": "docs/agent/branch-ledger.md",
+    "ci_policy": "docs/ci.md"
+  },
+  "product": {
+    "host": "Minecraft Java / LWJGL",
+    "clean_tree_root": "src",
+    "shipping_branch": "main",
+    "apple_shipping_backend": "directmetal",
+    "reference_backend": "vulkan",
+    "legacy_tree_root": "Mithril-Wrapper-cpp"
+  },
+  "layers": [
+    {
+      "id": "L0",
+      "name": "acceptance",
+      "question": "What observable Minecraft behavior must be preserved?",
+      "paths": ["README.md", "CHECKLIST.md"]
+    },
+    {
+      "id": "L1",
+      "name": "host_api_contract",
+      "question": "What EGL/GL/LWJGL behavior is visible at the host boundary?",
+      "paths": ["src/egl", "src/gl/exports.cpp", "include"]
+    },
+    {
+      "id": "L2",
+      "name": "gl_semantics",
+      "question": "What API state/object/error semantics exist independent of a native backend?",
+      "paths": ["src/gl", "src/state", "src/shader"]
+    },
+    {
+      "id": "L3",
+      "name": "backend_neutral_lowering",
+      "question": "What explicit immutable/native-ready contract is passed to execution backends?",
+      "paths": ["src/backend"]
+    },
+    {
+      "id": "L4",
+      "name": "native_execution",
+      "question": "How is the lowered contract executed efficiently and safely?",
+      "paths": ["src/metal", "src/vk"]
+    },
+    {
+      "id": "L5",
+      "name": "platform_presentation",
+      "question": "How does native GPU work reach the real Apple host and display?",
+      "paths": ["src/egl", "scripts/build_iphoneos.sh", "tests/amethyst_egl_smoke.mm"]
+    },
+    {
+      "id": "L6",
+      "name": "evidence",
+      "question": "Which oracle and environment falsify or prove each contract?",
+      "paths": ["tests", "cmake/MithrilSmokeTests.cmake", ".github/workflows/build.yml", ".github/workflows/hosted-metal-gpu-probe.yml"]
+    },
+    {
+      "id": "L7",
+      "name": "convergence",
+      "question": "Which exact implementation and evidence may be treated as current?",
+      "paths": ["docs/agent/status.md", "docs/agent/branch-ledger.md", "docs/branches.md"]
+    }
+  ],
+  "branch_roles": [
+    {
+      "name": "main",
+      "tree": "clean",
+      "role": "shipping_baseline",
+      "merge_policy": "normal_reviewed_change"
+    },
+    {
+      "name": "integration/directmetal-next",
+      "tree": "clean",
+      "role": "directmetal_integration",
+      "merge_policy": "reviewed_integration_then_promote_to_main"
+    },
+    {
+      "name": "integration/directvulkan-reference",
+      "tree": "legacy_disconnected",
+      "role": "vulkan_reference_migration_source",
+      "merge_policy": "semantic_port_only_to_clean_tree"
+    },
+    {
+      "name": "integration/legacy-capability-port",
+      "tree": "legacy_disconnected",
+      "role": "legacy_semantic_reconciliation_source",
+      "merge_policy": "semantic_port_only_to_clean_tree"
+    }
+  ],
+  "invariants": [
+    "Observable GL/EGL semantics are owned above native backend execution whenever possible.",
+    "The DirectMetal shipping target must not contain or link Vulkan or MoltenVK implementation dependencies.",
+    "Queued native work must not depend on mutable frontend state after its lowering contract has been captured.",
+    "Legacy disconnected histories are sources of semantics, tests and evidence; they are not wholesale merge targets for the clean tree.",
+    "A capability claim is bound to an exact implementation SHA and its actual oracle/environment evidence.",
+    "Branch dates and branch names never establish semantic containment.",
+    "Squash-merged work requires PR/tree comparison in addition to ancestry checks.",
+    "Temporary experiments should converge into a stable contract, regression or evidence plane before their branch is retired."
+  ],
+  "evidence_planes": [
+    {
+      "id": "normal_build",
+      "workflow": ".github/workflows/build.yml",
+      "role": "required main/PR build, semantic and boundary gate",
+      "mutation": "read_only"
+    },
+    {
+      "id": "hosted_platform_runtime",
+      "workflow": ".github/workflows/hosted-metal-gpu-probe.yml",
+      "role": "manual Apple runtime evidence not duplicated by normal build",
+      "mutation": "read_only"
+    },
+    {
+      "id": "minecraft_reference_source",
+      "script": "scripts/minecraft-reference.sh",
+      "role": "local source-of-behavior input for Minecraft 26.2 investigations",
+      "artifact_policy": "never_commit_or_upload_generated_tree"
+    }
+  ],
+  "proof_of_branch_reuse": [
+    "ancestry_or_explicit_no_common_ancestor",
+    "changed_files_and_semantic_delta",
+    "exact_implementation_evidence"
+  ],
+  "knowledge_lifetimes": {
+    "architecture": ["docs/system-model.md", "docs/evidence-model.md"],
+    "current": ["docs/agent/status.md", "docs/agent/branch-ledger.md"],
+    "executable": ["tests", "cmake", "scripts/validate_agent_contract.py"],
+    "historical": ["pull_requests", "commits", "workflow_artifacts"]
+  },
+  "completion_protocol": [
+    "identify_owning_layer",
+    "choose_correct_tree_and_destination_branch",
+    "establish_or_add_focused_oracle",
+    "implement_smallest_complete_vertical_slice",
+    "run_targeted_then_broader_validation",
+    "verify_ci_against_latest_sha_when_applicable",
+    "update_status_or_branch_ledger_if_convergence_changed",
+    "report_verified_partial_and_unverified_claims_separately"
+  ]
+}

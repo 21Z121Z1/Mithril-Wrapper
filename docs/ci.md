@@ -1,45 +1,142 @@
-# Continuous integration
+# Continuous integration as evidence infrastructure
 
-Mithril keeps the number of GitHub Actions workflows deliberately small. A workflow must represent a durable evidence plane, not a temporary implementation step.
+GitHub Actions is an evidence execution plane. It should answer “what does this exact implementation prove in this environment?” without becoming a second build system or a branch-mutation engine.
 
-## Mainline workflows
+See `docs/evidence-model.md` for evidence tiers and exact-SHA claim rules.
 
-### `build.yml` — required development gate
+## Durable workflow ownership
 
-Runs on pushes to `main`, pull requests targeting `main`, and manual dispatch.
+### `.github/workflows/build.yml` — normal product gate
 
-It owns the normal build and regression contract:
+Owns the cheap, repeatable evidence required for `main` and pull requests to `main`:
 
-- DirectMetal macOS build and the registered `directmetal` CTest suite.
-- Verification that the shipping DirectMetal artifact is Vulkan-free.
-- iPhoneOS arm64 shipping build and package checks.
-- Linux DirectVulkan reference build and the registered `vulkan` CTest suite.
+- clean DirectMetal macOS configure/build;
+- DirectMetal semantic/regression CTest label;
+- Vulkan-free shipping boundary verification;
+- iPhoneOS arm64 shipping build/ABI/Mach-O/signature checks;
+- Linux Vulkan reference regression;
+- agent-facing manifest/document contract validation.
 
-Feature, fix, refactor, probe, and agent branches do **not** get their own copy of this matrix. They are validated by opening a pull request to the branch that owns the relevant gate.
+This workflow is read-only (`contents: read`). Keep it deterministic enough to be a required merge gate.
 
-### `hosted-metal-gpu-probe.yml` — manual platform runtime validation
+### `.github/workflows/hosted-metal-gpu-probe.yml` — unique platform runtime evidence
 
-The workflow is named `platform-runtime-validation` in the Actions UI and is intentionally manual.
+Manual/deep lane for real Apple runtime evidence the normal matrix should not duplicate. It may exercise a hosted Metal GPU or simulator presentation seam, but it should remain an evidence producer, not a source mutator.
 
-It exists only for evidence that the normal build matrix cannot provide:
+## Test ownership versus workflow ownership
 
-- macOS 26 hosted Apple Silicon running the DirectMetal suite on a real Metal GPU;
-- arm64 iOS Simulator loading the produced DirectMetal dylib and executing representative GL/GPU smokes inside Simulator application sandboxes.
+Tests belong to contracts. Workflows supply environments.
 
-The iPhoneOS cross-build is not repeated here because `build.yml` already owns that contract.
+Prefer:
 
-## Workflow policy
+```text
+new semantic rule
+  -> focused test in tests/
+  -> register under existing CTest label
+  -> normal build workflow runs it
+```
 
-Do not add workflows whose purpose is to apply a patch, materialize generated source, locate source text, stage a migration, recover a branch, commit changes, or push changes back to the repository. Names such as `apply-*`, `materialize-*`, `bootstrap-*`, `stage-*`, `finalize-*`, `one-shot-*`, `recover-*`, `*-once`, or `*-source-locate` are a strong sign that the task belongs in a normal commit or a local/agent tool rather than GitHub Actions.
+Do not prefer:
 
-CI is read-only with respect to repository contents. Workflow permissions should default to `contents: read`.
+```text
+new semantic rule
+  -> new top-level workflow
+  -> another bespoke build of the same library
+  -> source grep used as behavioral proof
+```
 
-A new top-level workflow is justified only when it provides a durable evidence plane that cannot be expressed clearly as a job in an existing workflow. Prefer one build followed by several test jobs or steps over rebuilding the same artifact in several workflow files.
+If a test needs a special environment, add a narrowly scoped job/selector to the existing relevant plane before creating a new durable workflow.
 
-Heavy platform, stress, and diagnostic lanes should default to `workflow_dispatch` unless they are required for the normal development gate. Packaging validation may run automatically on a dedicated E2E/distribution integration branch when it is itself a required evidence plane and is protected by narrow path filters; on the mainline it should normally be release-oriented or manually dispatched rather than rebuilding packages for unrelated changes.
+## Agent contract validation
 
-## Branch policy
+The repository exposes `docs/agent/manifest.json` as machine-readable navigation and ownership data. `scripts/validate_agent_contract.py` verifies the manifest schema, required document references, layer ordering/IDs, branch-role uniqueness and referenced repository paths.
 
-Short-lived development branches contain source and tests, not bespoke copies of the repository CI. Duplicate branch names pointing at the same commit should be removed. Once a branch is fully contained by a newer canonical branch, the older branch should be deleted rather than kept as a permanent snapshot; Git history already preserves the commits.
+This check is intentionally cheap and runs before expensive renderer jobs. Its purpose is to prevent the agent-facing system map from silently rotting while code/branches move.
 
-Keep one canonical branch per active development line and make its purpose obvious from the name.
+It does **not** claim that the live GitHub branch inventory matches a static snapshot; `docs/agent/status.md` and `docs/agent/branch-ledger.md` are explicitly dated and require human/agent reconciliation when topology changes.
+
+## Exact product identity
+
+When a workflow validates its own checkout, `GITHUB_SHA` is the implementation identity.
+
+When a validation branch checks out another candidate, the workflow must record at least:
+
+- harness SHA;
+- candidate product SHA;
+- loaded artifact SHA-256 when applicable;
+- platform/toolchain/runtime identity relevant to the claim.
+
+A trigger-only commit is evidence orchestration, not the product implementation. Keep those identities separate in logs and PR descriptions.
+
+## Branch-specific workflows
+
+Temporary workflows on experiment/validation branches are tolerated when necessary to answer a question that cannot be expressed by current durable planes. They are not architectural assets by default.
+
+Before that branch is retired:
+
+1. decide whether the result is a reusable semantic oracle, platform capability, artifact/provenance record or rejected hypothesis;
+2. move reusable pieces into the durable test/evidence structure;
+3. delete one-off workflow files rather than merging them into the clean tree by inertia.
+
+The 2026-08 DirectVulkan investigation family contains many candidate/A-B workflows; they should be mined for oracles and provenance, not reproduced wholesale on `main`.
+
+## Forbidden CI roles
+
+Do not keep workflows whose primary role is to:
+
+- `apply-*`, `materialize-*`, `bootstrap-*`, `stage-*`, `finalize-*`, `recover-*` or `*-once` source changes;
+- commit/push implementation edits from Actions;
+- locate source once and preserve the answer as workflow code;
+- duplicate another workflow’s build/test matrix without unique evidence;
+- weaken/fork an oracle merely to make a branch green;
+- treat source-text grep as a substitute for runtime semantics when an executable oracle is practical.
+
+Automation that changes source belongs in an explicit agent/PR workflow with reviewable commits, not a recurring CI gate.
+
+## Evidence artifact policy
+
+Artifacts are useful when they make a claim independently inspectable:
+
+- shipping dylib/package and checksum;
+- framebuffer/pixel output that is itself an oracle;
+- concise logs/provenance metadata;
+- benchmark distributions and configuration.
+
+Avoid uploading:
+
+- generated Minecraft reference source/client JAR;
+- full dependency/build directories without diagnostic value;
+- giant unthrottled runtime logs;
+- duplicate artifacts from multiple jobs when one exact product artifact is sufficient.
+
+## Heavy validation
+
+Real Minecraft, stress, performance, long-running diagnostics and physical-device claims are expensive and often environment-sensitive. Run them when they add information that E0-E3 cannot provide.
+
+A normal PR should not pay for every historic experiment. Conversely, do not declare a release/device claim from cheap CI alone because the heavy lane is inconvenient.
+
+## Failure interpretation
+
+A failed job is evidence too. Classify it before rerunning:
+
+- product implementation/semantic failure;
+- test/harness defect;
+- dependency/toolchain incompatibility;
+- environment/capability absence;
+- flaky/infrastructure failure.
+
+Only rerun without code/harness changes when evidence supports a transient infrastructure failure. Do not use reruns to hide deterministic red states.
+
+## Workflow change checklist
+
+Before adding or modifying CI, ask:
+
+1. What claim does this job uniquely prove?
+2. Which evidence tier is it?
+3. Can an existing test label/workflow host it?
+4. Is the exact product SHA unambiguous?
+5. Is the workflow read-only?
+6. Does it produce a reusable oracle/artifact rather than branch-specific noise?
+7. What will delete or simplify this machinery later?
+
+The best CI architecture is not the one with the most checks. It is the smallest graph that gives an agent high-confidence, exact-SHA feedback for every meaningful contract boundary.

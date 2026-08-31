@@ -15,8 +15,25 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  agent-contract:
+    name: Agent system contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Validate machine-readable agent contract
+        run: python3 scripts/validate_agent_contract.py
+
+      - name: Validate Minecraft reference helper shape
+        run: |
+          bash -n scripts/minecraft-reference.sh
+          bash scripts/minecraft-reference.sh --help >/dev/null
+
   directmetal-macos:
     name: DirectMetal macOS semantics + boundary
+    needs: agent-contract
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
@@ -69,6 +86,7 @@ jobs:
 
   directmetal-ios-arm64:
     name: DirectMetal iPhoneOS arm64
+    needs: agent-contract
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
@@ -112,6 +130,7 @@ jobs:
 
   legacy-vulkan-linux:
     name: Vulkan reference regression
+    needs: agent-contract
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
