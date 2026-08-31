@@ -6,6 +6,7 @@ on:
       - codex/dvk-a11-single-mvk-shader-oracle-20260831
     paths:
       - 'CMakeLists.txt'
+      - 'Mithril-Wrapper-cpp/3rdparty/glslang'
       - 'Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Resources.cpp'
       - 'Mithril-Wrapper-cpp/MG_Impl/Shader.cpp'
       - '.github/workflows/ios-directvulkan-a11-crashfix-validation.yml'
