@@ -1,6 +1,8 @@
 # Agent status snapshot
 
-As of: 2026-09-01
+As of: 2026-09-01 (pre-change repository audit)
+
+Scope note: the audit found 55 pre-existing branch refs. PR #38 creates temporary branch `architecture/agent-operating-model-20260901`; while that PR is open the live repository therefore has one additional ref. The temporary architecture branch is not counted as part of the 55-branch input set and should be deleted after convergence.
 
 This file is intentionally transient. It answers “where is the work now?” while `docs/system-model.md` answers “what is the system?” Update this snapshot whenever branch ownership, a major merge, or a release-quality evidence gate materially changes.
 
@@ -10,7 +12,7 @@ This file is intentionally transient. It answers “where is the work now?” wh
 - Clean-tree DirectMetal integration: `integration/directmetal-next` at `296ee3b14ef2753e4abe8d4853baae38b84a6cb2`.
 - Those two refs are currently divergent. A GitHub compare on this snapshot reports `integration/directmetal-next` 150 commits ahead and 10 commits behind `main`, with merge base `4b02c653795d4067a0a3820ef9c0e4e615d7312c`.
 - `integration/directvulkan-reference` and `integration/legacy-capability-port` currently have no common Git ancestor with `main`. They are legacy migration/reference histories, not clean-tree merge bases.
-- The repository currently exposes 55 branch refs. Most dated `experiment/*`, `codex/*`, `ci/*`, `fix/*` and `perf/*` refs are evidence or reconciliation sources, not independent product lines.
+- The pre-change repository audit covers 55 branch refs. Most dated `experiment/*`, `codex/*`, `ci/*`, `fix/*` and `perf/*` refs are evidence or reconciliation sources, not independent product lines.
 
 ## DirectMetal frontier
 
