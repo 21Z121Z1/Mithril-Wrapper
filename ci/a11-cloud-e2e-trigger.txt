@@ -1,0 +1,3 @@
+A11 DirectVulkan cloud E2E trigger
+source=c62e775c5266322e6aec9f8d5800dd20885da8f2
+purpose=run real Minecraft 26.2 DirectVulkan E2E before next device test
