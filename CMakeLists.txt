@@ -484,7 +484,7 @@ if(APPLE)
     # dylib path — patching it to @rpath/libMoltenVK.dylib would break dyld
     # resolution. install_name_tool -change would silently no-op (old string
     # absent) but we keep the guard explicit so macOS keeps the true path.
-    if(IOS AND MITHRIL_MOLTENVK_LINKAGE STREQUAL "STATIC")
+    if(IOS AND MITHRIL_MOLTENVK_LINKAGE STREQUAL "HOST_DYLIB")
         add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
             COMMAND install_name_tool -change
                 "@rpath/MoltenVK.framework/MoltenVK"
