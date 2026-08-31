@@ -6,6 +6,7 @@ on:
       - codex/dvk-rollout-replay-20260831
     paths:
       - ci/replay_rollout_dvk_local_patches.py
+      - ci/replay_rollout_dvk_local_patches_v2.py
       - .github/workflows/codex-dvk-rollout-replay.yml
   workflow_dispatch:
 
@@ -33,7 +34,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python3 ci/replay_rollout_dvk_local_patches.py
+          python3 ci/replay_rollout_dvk_local_patches_v2.py
           git diff --check
           git diff --name-only | sort
 
@@ -52,7 +53,7 @@ jobs:
           assert 'pr.allocatedSets[i].clear();' not in inv
           assert 'pr.setCursor[i] = 0;' not in inv
           assert 'option(MITHRIL_HIDE_GLSLANG_SYMBOLS' in c and '\n    ON)' in c
-          assert 'active_swapchain_color_layout()' in i or 'resolve_blit_layouts' in i
+          assert 'resolve_blit_layouts' in i
           assert 'kOneShotFenceTimeoutNs' in i
           assert 'src_layouts.initial, src_layouts.final' in i
           assert 'dst_layouts.initial, dst_layouts.final' in i
@@ -140,6 +141,7 @@ jobs:
             Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/ImageOps.cpp
 
           rm ci/replay_rollout_dvk_local_patches.py
+          rm ci/replay_rollout_dvk_local_patches_v2.py
           rm .github/workflows/codex-dvk-rollout-replay.yml
           git add -A
           git diff --cached --check
