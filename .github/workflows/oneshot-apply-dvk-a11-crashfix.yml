@@ -29,39 +29,17 @@ jobs:
           from pathlib import Path
           p = Path('Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Resources.cpp')
           s = p.read_text()
-          old = '''    VkImageCreateInfo ici{};
-    ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-    ici.imageType = imgType;
-'''
-          new = '''    VkImageCreateInfo ici{};
-    ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-    // Vulkan requires CUBE_COMPATIBLE for a 2D image viewed through
-    // VK_IMAGE_VIEW_TYPE_CUBE; six array layers alone are not sufficient.
-    if (target == GL_TEXTURE_CUBE_MAP) {
-        ici.flags |= VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
-    }
-    ici.imageType = imgType;
-'''
+          old = "    VkImageCreateInfo ici{};\n    ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;\n    ici.imageType = imgType;\n"
+          new = "    VkImageCreateInfo ici{};\n    ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;\n    // Vulkan requires CUBE_COMPATIBLE for a 2D image viewed through\n    // VK_IMAGE_VIEW_TYPE_CUBE; six array layers alone are not sufficient.\n    if (target == GL_TEXTURE_CUBE_MAP) {\n        ici.flags |= VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;\n    }\n    ici.imageType = imgType;\n"
           assert s.count(old) == 1
           s = s.replace(old, new, 1)
-          old = '''        primaryViewUsage.usage = ici.usage &
-            (VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-             VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT);
-'''
-          new = '''        // Transfer commands address VkImage subresources directly; this view
-        // is consumed only by shader descriptors, so keep its usage minimal.
-        primaryViewUsage.usage = ici.usage &
-            (VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT);
-'''
+          old = "        primaryViewUsage.usage = ici.usage &\n            (VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |\n             VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT);\n"
+          new = "        // Transfer commands address VkImage subresources directly; this view\n        // is consumed only by shader descriptors, so keep its usage minimal.\n        primaryViewUsage.usage = ici.usage &\n            (VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT);\n"
           assert s.count(old) == 1
           s = s.replace(old, new, 1)
-          s = s.replace(
-              '    // restrict a view to a subset of the parent image usages. Transfer usages\n'
-              '    // are retained because they are harmless for view creation; all attachment\n'
-              '    // usages are deliberately excluded. Actual FBO views are created below as\n',
-              '    // restrict a view to a subset of the parent image usages. All attachment\n'
-              '    // usages are deliberately excluded. Actual FBO views are created below as\n',
-              1)
+          old = "    // restrict a view to a subset of the parent image usages. Transfer usages\n    // are retained because they are harmless for view creation; all attachment\n    // usages are deliberately excluded. Actual FBO views are created below as\n"
+          new = "    // restrict a view to a subset of the parent image usages. All attachment\n    // usages are deliberately excluded. Actual FBO views are created below as\n"
+          s = s.replace(old, new, 1)
           p.write_text(s)
           PY
           git diff --check
