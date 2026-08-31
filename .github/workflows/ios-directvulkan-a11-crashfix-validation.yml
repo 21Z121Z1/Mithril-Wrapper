@@ -127,38 +127,70 @@ jobs:
           set -euo pipefail
           D='${{ steps.build.outputs.path }}'
           H="$PWD/host/libMoltenVK.dylib"
-          file "$D" | tee /tmp/mithril-file.txt
+
+          file "$D" > /tmp/mithril-file.txt
+          cat /tmp/mithril-file.txt
           grep -q arm64 /tmp/mithril-file.txt
-          xcrun vtool -show-build "$D" | tee /tmp/mithril-build.txt
+
+          xcrun vtool -show-build "$D" > /tmp/mithril-build.txt
+          cat /tmp/mithril-build.txt
           grep -Eiq 'platform[[:space:]]+IOS|platform[[:space:]]+2' /tmp/mithril-build.txt
-          if grep -Eiq 'platform[[:space:]]+MACOS|platform[[:space:]]+1' /tmp/mithril-build.txt; then exit 1; fi
+          if grep -Eiq 'platform[[:space:]]+MACOS|platform[[:space:]]+1' /tmp/mithril-build.txt; then
+            echo '::error::libmithril is tagged for macOS rather than iPhoneOS'
+            exit 1
+          fi
 
-          otool -L "$D" | tee /tmp/mithril-deps.txt
-          test "$(grep -c 'libMoltenVK' /tmp/mithril-deps.txt)" -eq 1
-          grep -Fq '@rpath/libMoltenVK.dylib' /tmp/mithril-deps.txt
-          if grep -Fq 'MoltenVK.framework' /tmp/mithril-deps.txt; then exit 1; fi
+          otool -L "$D" > /tmp/mithril-deps.txt
+          cat /tmp/mithril-deps.txt
+          MVK_DEP_COUNT=$(grep -c 'libMoltenVK' /tmp/mithril-deps.txt || true)
+          echo "MoltenVK dependency count: $MVK_DEP_COUNT"
+          if [ "$MVK_DEP_COUNT" -ne 1 ]; then
+            echo '::error::libmithril must have exactly one MoltenVK dylib dependency'
+            exit 1
+          fi
+          if ! grep -Fq '@rpath/libMoltenVK.dylib' /tmp/mithril-deps.txt; then
+            echo '::error::MoltenVK dependency is not @rpath/libMoltenVK.dylib'
+            exit 1
+          fi
+          if grep -Fq 'MoltenVK.framework' /tmp/mithril-deps.txt; then
+            echo '::error::unexpected MoltenVK.framework dependency'
+            exit 1
+          fi
 
-          nm -u "$D" | awk '{print $NF}' | grep '^_vk' | sort -u > /tmp/required-vulkan.txt || true
+          nm -u "$D" > /tmp/mithril-undefined.txt
+          awk '{print $NF}' /tmp/mithril-undefined.txt | grep '^_vk' | sort -u > /tmp/required-vulkan.txt || true
+          echo "Direct Vulkan imports required by Mithril: $(wc -l < /tmp/required-vulkan.txt | xargs)"
           test -s /tmp/required-vulkan.txt
-          nm -gU "$H" | awk '{print $NF}' | sort -u > /tmp/host-exports.txt
+
+          nm -gU "$H" > /tmp/host-defined.txt
+          awk '{print $NF}' /tmp/host-defined.txt | sort -u > /tmp/host-exports.txt
           comm -23 /tmp/required-vulkan.txt /tmp/host-exports.txt > /tmp/missing-vulkan.txt
           if test -s /tmp/missing-vulkan.txt; then
-            echo 'Missing Vulkan exports in Amethyst host MoltenVK:' >&2
+            echo '::error::Missing Vulkan exports in Amethyst host MoltenVK:' >&2
             cat /tmp/missing-vulkan.txt >&2
             exit 1
           fi
+          echo 'All directly linked Vulkan imports are exported by Amethyst MoltenVK.'
 
           nm -gU "$D" > /tmp/mithril-defined.txt
           if grep -E 'OBJC_(CLASS|METACLASS)_.*MVK' /tmp/mithril-defined.txt; then
-            echo 'MoltenVK Objective-C implementation was embedded into libmithril' >&2
+            echo '::error::MoltenVK Objective-C implementation was embedded into libmithril' >&2
             exit 1
           fi
-          if strings "$D" | grep -Fq 'MVKBlockObserver'; then
-            echo 'MoltenVK implementation strings found inside libmithril' >&2
+
+          strings "$D" > /tmp/mithril-strings.txt
+          if grep -Fq 'MVKBlockObserver' /tmp/mithril-strings.txt; then
+            echo '::error::MoltenVK implementation strings found inside libmithril' >&2
             exit 1
           fi
-          strings "$D" | grep -Fq 'mithril-shader-last-parse.meta'
-          strings "$D" | grep -Fq 'crash-oracle phase='
+          if ! grep -Fq 'mithril-shader-last-parse.meta' /tmp/mithril-strings.txt; then
+            echo '::error::shader crash-oracle metadata marker missing from built dylib'
+            exit 1
+          fi
+          if ! grep -Fq 'crash-oracle phase=' /tmp/mithril-strings.txt; then
+            echo '::error::shader crash-oracle log marker missing from built dylib'
+            exit 1
+          fi
           echo 'single-MoltenVK / ABI / crash-oracle gates: PASS'
 
       - name: Ad-hoc sign and verify
