@@ -1753,6 +1753,11 @@ VkImage dvk_get_or_create_texture(GLuint name, int width, int height, int depth,
     VkImageType imgType = (target == GL_TEXTURE_3D) ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D;
     VkImageCreateInfo ici{};
     ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    // Vulkan requires CUBE_COMPATIBLE for a 2D image viewed through
+    // VK_IMAGE_VIEW_TYPE_CUBE; six array layers alone are not sufficient.
+    if (target == GL_TEXTURE_CUBE_MAP) {
+        ici.flags |= VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
+    }
     ici.imageType = imgType;
     ici.format = fmt;
     ici.extent = { (uint32_t)width, (uint32_t)height, (uint32_t)(imgType == VK_IMAGE_TYPE_3D ? depth : 1) };
@@ -1916,16 +1921,16 @@ VkImage dvk_get_or_create_texture(GLuint name, int width, int height, int depth,
     // treats the six-layer cube view as a layered render target; A11 supports
     // cube arrays but not layered rendering and rejects vkCreateImageView.
     // VK_VERSION_1_1 VkImageViewUsageCreateInfo is the spec-defined way to
-    // restrict a view to a subset of the parent image usages. Transfer usages
-    // are retained because they are harmless for view creation; all attachment
+    // restrict a view to a subset of the parent image usages. All attachment
     // usages are deliberately excluded. Actual FBO views are created below as
     // dedicated 2D/2D-array attachment views.
     VkImageViewUsageCreateInfo primaryViewUsage{};
     if (target == GL_TEXTURE_CUBE_MAP) {
         primaryViewUsage.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO;
+        // Transfer commands address VkImage subresources directly; this view
+        // is consumed only by shader descriptors, so keep its usage minimal.
         primaryViewUsage.usage = ici.usage &
-            (VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-             VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT);
+            (VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT);
         if (primaryViewUsage.usage != 0) {
             vci.pNext = &primaryViewUsage;
         }
