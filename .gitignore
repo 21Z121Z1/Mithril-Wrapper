@@ -19,6 +19,9 @@ tests/render3d_smoke
 tests/render3d.ppm
 tests/render3d.png
 
+# local agent reference inputs; never commit or upload generated Minecraft material
+.minecraft-reference/
+
 # legacy / tooling
 .trae/
 latestlog.txt
