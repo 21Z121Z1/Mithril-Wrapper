@@ -18,6 +18,17 @@ This file is intentionally transient. It answers “where is the work now?” wh
 
 `integration/directmetal-next` is the current clean-tree development line for native Metal work.
 
+### Current shared-contract shape
+
+The code already supports the system-model direction rather than merely aspiring to it:
+
+- `src/backend/types.h` explicitly defines backend-neutral descriptions as **resolved GL semantics** with no Vulkan or Metal handles.
+- Hot draw/resource data carries stable lifetime IDs, content versions, previous versions and partial-update ranges where native resources can outlive frontend mutation. `DrawParams` also captures pipeline/dynamic state and borrowed UBO/texture views with an explicit synchronous-Draw lifetime rule.
+- `src/backend/backend.cpp` is primarily a narrow backend dispatcher over that shared contract instead of a second semantic model.
+- `MetalDeviceSession` is deliberately a process-level shared migration seam around the mature Metal engine. Its own contract says the renderer still lives behind the older engine implementation and that the abstraction does **not** yet imply multiple independent Metal devices/sessions.
+
+Implication for future work: preserve and strengthen this seam. Do not let a native backend reach back into mutable GL state after lowering, and do not assume `MetalDeviceSession` already solved complete device/session ownership merely because the class name exists.
+
 Important recent convergence facts:
 
 - PR #35 (`fix/minecraft26-directmetal-runtime-closure-20260819`) was merged into `integration/directmetal-next`; merge result is current integration head `296ee3b14ef2753e4abe8d4853baae38b84a6cb2`.
@@ -49,9 +60,11 @@ When a sustained clean-tree Vulkan port begins, create its integration ref from 
 
 PR #37 created a useful one-command Minecraft 26.2 reference-source materializer and a small `AGENTS.md`, but it was merged into the legacy `fix/dvk-gui-text-render-20260829` line rather than `main`. The agent-operating-model change ports the reusable tooling and expands the entrypoint on the clean shipping lineage.
 
+The same change adds `scripts/audit-branches.py` so agents can regenerate live branch graph facts instead of relying on this dated snapshot. The deep mode fetches commit graphs with `--filter=blob:none` and never checks out or edits product branches.
+
 ## Repository hygiene priorities
 
-1. Make this status + branch ledger the authoritative inventory instead of relying on dated prose in `docs/branches.md`.
+1. Make this status + branch ledger the authoritative audited snapshot, and use the live branch-audit tool when current topology affects a decision.
 2. Reconcile `main` and `integration/directmetal-next` deliberately; do not allow the shipping baseline to remain indefinitely detached from the clean integration line.
 3. Keep recent DirectVulkan legacy branches until their unique semantics, tests and evidence are accounted for; then retire redundant experiment/evidence refs aggressively.
 4. When two refs point to the same SHA, retain only the name that best expresses durable ownership after checking PR/artifact references. Current example: `fix/dvk-pixel-unpack-state-20260829` and `experiment/dvk-full-unpack-combined-20260829` both point to `b6bc7b04ccb3d92a859e1a80959a044a77d62e4d`.

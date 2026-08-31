@@ -6,12 +6,20 @@ This file is the entry point for coding and review agents. Do not begin by readi
 
 1. `docs/system-model.md` — stable abstraction tower, ownership and invariants.
 2. `docs/agent/status.md` — dated snapshot of the current product and branch frontier.
-3. `docs/agent/manifest.json` — machine-readable paths, roles and evidence planes.
+3. `docs/agent/manifest.json` — machine-readable paths, roles, tools and evidence planes.
 4. `docs/evidence-model.md` — what counts as proof and how to bind proof to an exact product SHA.
-5. `docs/branches.md` and `docs/agent/branch-ledger.md` — branch policy and current inventory.
+5. `docs/branches.md` and `docs/agent/branch-ledger.md` — branch policy and audited inventory.
 6. Only then read the subsystem code, neighboring tests and relevant CI workflow.
 
 `README.md` and `CHECKLIST.md` are useful product/history references, but they are not the sole source of current branch truth.
+
+When branch topology materially affects the task, refresh the graph instead of trusting a dated narrative:
+
+```bash
+python3 scripts/audit-branches.py --fetch-graph --markdown
+```
+
+The command is read-only with respect to product branches/worktrees. `--fetch-graph` refreshes remote-tracking refs using a blob-filtered fetch so ancestry and ahead/behind facts are current without checking out every branch.
 
 ## System invariants
 
@@ -29,12 +37,13 @@ Before editing:
 
 1. Identify the product tree (`src/*` clean tree versus `Mithril-Wrapper-cpp/*` legacy tree).
 2. Identify the owning abstraction layer from `docs/system-model.md`.
-3. Determine the intended destination branch from `docs/agent/status.md`.
-4. If reusing another branch, establish all three facts:
+3. Refresh live branch topology if the dated snapshot may affect the decision.
+4. Determine the intended destination branch from `docs/agent/status.md` and live graph.
+5. If reusing another branch, establish all three facts:
    - Git ancestry or an explicit absence of common ancestry;
    - changed-file / semantic delta;
    - evidence attached to the exact implementation being reused.
-5. Prefer a semantic port with a focused regression over a wholesale merge from a disconnected legacy tree.
+6. Prefer a semantic port with a focused regression over a wholesale merge from a disconnected legacy tree.
 
 Do not infer containment from branch age. Squash merges intentionally make ancestry insufficient; use PR state and final tree/diff evidence as well.
 
@@ -87,7 +96,7 @@ Put information at the narrowest durable layer:
 
 - stable architecture/invariants -> `docs/system-model.md`;
 - current frontier/blockers -> `docs/agent/status.md`;
-- branch inventory/reconciliation -> `docs/agent/branch-ledger.md`;
+- branch inventory/reconciliation -> `docs/agent/branch-ledger.md` plus live `scripts/audit-branches.py` output when needed;
 - proof rules -> `docs/evidence-model.md`;
 - subsystem contract -> a focused subsystem document/test near its owner;
 - historical experiment detail -> PR/commit/artifact, referenced from the ledger only if still decision-relevant.

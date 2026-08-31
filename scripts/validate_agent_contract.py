@@ -133,11 +133,27 @@ def validate_evidence_planes(manifest: dict[str, Any]) -> None:
         require(isinstance(plane, dict), f"evidence_planes[{index}] must be an object")
         ids.append(require_string(plane.get("id"), f"evidence_planes[{index}].id"))
         require_string(plane.get("role"), f"evidence_planes[{index}].role")
-        locator_fields = [field for field in ("workflow", "script") if field in plane]
-        require(len(locator_fields) == 1, f"evidence_planes[{index}] must define exactly one workflow or script")
-        repo_path(plane[locator_fields[0]], f"evidence_planes[{index}].{locator_fields[0]}")
+        repo_path(plane.get("workflow"), f"evidence_planes[{index}].workflow")
+        require_string(plane.get("mutation"), f"evidence_planes[{index}].mutation")
 
     unique_strings(ids, "evidence_planes.id")
+
+
+def validate_agent_tools(manifest: dict[str, Any]) -> None:
+    tools = manifest.get("agent_tools")
+    require(isinstance(tools, list) and tools, "agent_tools must be a non-empty array")
+
+    ids: list[str] = []
+    for index, tool in enumerate(tools):
+        require(isinstance(tool, dict), f"agent_tools[{index}] must be an object")
+        ids.append(require_string(tool.get("id"), f"agent_tools[{index}].id"))
+        repo_path(tool.get("script"), f"agent_tools[{index}].script")
+        require_string(tool.get("role"), f"agent_tools[{index}].role")
+
+    unique_strings(ids, "agent_tools.id")
+    require("branch_topology" in ids, "agent_tools must expose live branch topology")
+    require("minecraft_reference_source" in ids, "agent_tools must expose Minecraft reference materialization")
+    require("agent_contract_validator" in ids, "agent_tools must expose its own contract validator")
 
 
 def validate_protocols(manifest: dict[str, Any]) -> None:
@@ -166,6 +182,7 @@ def validate_document_links() -> None:
         "docs/agent/manifest.json",
         "docs/evidence-model.md",
         "docs/agent/branch-ledger.md",
+        "scripts/audit-branches.py",
     ):
         require(required in agents, f"AGENTS.md must point agents to {required}")
 
@@ -185,6 +202,7 @@ def main() -> int:
         validate_branch_roles(manifest)
         validate_invariants(manifest)
         validate_evidence_planes(manifest)
+        validate_agent_tools(manifest)
         validate_protocols(manifest)
         validate_document_links()
     except ContractError as exc:
@@ -192,8 +210,10 @@ def main() -> int:
         return 1
 
     print("AGENT CONTRACT VALID")
-    print("layers=L0-L7 branch_roles=%d evidence_planes=%d" % (
-        len(manifest["branch_roles"]), len(manifest["evidence_planes"])
+    print("layers=L0-L7 branch_roles=%d evidence_planes=%d agent_tools=%d" % (
+        len(manifest["branch_roles"]),
+        len(manifest["evidence_planes"]),
+        len(manifest["agent_tools"]),
     ))
     return 0
 

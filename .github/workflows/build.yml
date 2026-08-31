@@ -26,8 +26,10 @@ jobs:
       - name: Validate machine-readable agent contract
         run: python3 scripts/validate_agent_contract.py
 
-      - name: Validate Minecraft reference helper shape
+      - name: Validate agent helper shapes
         run: |
+          python3 -m py_compile scripts/validate_agent_contract.py scripts/audit-branches.py
+          python3 scripts/audit-branches.py --help >/dev/null
           bash -n scripts/minecraft-reference.sh
           bash scripts/minecraft-reference.sh --help >/dev/null
 

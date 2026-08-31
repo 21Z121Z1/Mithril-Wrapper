@@ -117,12 +117,26 @@
       "workflow": ".github/workflows/hosted-metal-gpu-probe.yml",
       "role": "manual Apple runtime evidence not duplicated by normal build",
       "mutation": "read_only"
+    }
+  ],
+  "agent_tools": [
+    {
+      "id": "branch_topology",
+      "script": "scripts/audit-branches.py",
+      "role": "emit live remote branch heads, graph relation to a base, tree flavor and duplicate SHA groups",
+      "default_mutation": "none",
+      "deep_mode": "--fetch-graph performs a blob-filtered remote-tracking ref refresh"
     },
     {
       "id": "minecraft_reference_source",
       "script": "scripts/minecraft-reference.sh",
-      "role": "local source-of-behavior input for Minecraft 26.2 investigations",
+      "role": "materialize local Minecraft 26.2 reference sources for host/client behavior analysis",
       "artifact_policy": "never_commit_or_upload_generated_tree"
+    },
+    {
+      "id": "agent_contract_validator",
+      "script": "scripts/validate_agent_contract.py",
+      "role": "validate the machine-readable agent navigation and ownership contract"
     }
   ],
   "proof_of_branch_reuse": [
@@ -133,7 +147,7 @@
   "knowledge_lifetimes": {
     "architecture": ["docs/system-model.md", "docs/evidence-model.md"],
     "current": ["docs/agent/status.md", "docs/agent/branch-ledger.md"],
-    "executable": ["tests", "cmake", "scripts/validate_agent_contract.py"],
+    "executable": ["tests", "cmake", "scripts/validate_agent_contract.py", "scripts/audit-branches.py"],
     "historical": ["pull_requests", "commits", "workflow_artifacts"]
   },
   "completion_protocol": [
