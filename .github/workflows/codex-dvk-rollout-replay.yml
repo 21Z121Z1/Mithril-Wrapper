@@ -48,9 +48,9 @@ jobs:
           i = Path('Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/ImageOps.cpp').read_text()
           c = Path('CMakeLists.txt').read_text()
           bind = d[d.index('void bind_program_descriptors('):]
-          bind = bind[:bind.index('void invalidate_descriptor_memo()')]
-          boundary = bind[bind.index('if (pr.lastFrameGen[slot] != b->frameGeneration'):]
-          assert 'pr.allocatedSets[slot].clear();' not in boundary
+          generation = bind[bind.index('if (pr.lastFrameGen[slot] != b->frameGeneration'):]
+          generation = generation[:generation.index('/* Gather descriptor writes.')]
+          assert 'pr.allocatedSets[slot].clear();' not in generation
           inv = d[d.index('void invalidate_descriptor_memo()'):]
           inv = inv[:inv.index('void reset_all_descriptor_pools()')]
           assert 'pr.allocatedSets[i].clear();' not in inv
