@@ -1,0 +1,188 @@
+name: Mithril DirectVulkan iOS FBO Orientation Candidate v3
+
+on:
+  push:
+    branches:
+      - codex/dvk-ios-fbo-orientation-20260831
+    paths:
+      - '.github/workflows/ios-directvulkan-fbo-orientation-candidate-v3.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  MOLTENVK_TAG: v1.4.2
+  NATIVE_BASELINE: de2261ef80f34f4df2afbfa414def2f53ffe9442
+
+jobs:
+  build-ios-arm64:
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          submodules: recursive
+          persist-credentials: false
+          fetch-depth: 5
+
+      - name: Prove baseline and apply only the iOS orientation candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          git cat-file -e "$NATIVE_BASELINE^{commit}"
+          git diff --exit-code "$NATIVE_BASELINE" HEAD -- CMakeLists.txt Mithril-Wrapper-cpp
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('Mithril-Wrapper-cpp/MG_Impl/Drawing.cpp')
+          s = p.read_text()
+          old = '''    const bool want_y_flip =
+                  (backend_active_kind() == MITHRIL_BACKEND_KIND_VULKAN)
+                      ? (!clip_upper_left)
+                      : (is_default_fbo ^ clip_upper_left);
+          '''
+          new = '''    const bool want_y_flip =
+                  (backend_active_kind() == MITHRIL_BACKEND_KIND_VULKAN)
+          #if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+                      // iOS CAMetalLayer follows per-target OpenGL orientation:
+                      // FBO 0 is already presentation-oriented; render-to-texture
+                      // user FBOs require the clip-space Y inversion.
+                      ? ((!is_default_fbo) ^ clip_upper_left)
+          #else
+                      // Preserve de2261ef's validated macOS DirectVulkan behavior.
+                      ? (!clip_upper_left)
+          #endif
+                      : (is_default_fbo ^ clip_upper_left);
+          '''
+          assert s.count(old) == 1, f'unexpected y-flip block count: {s.count(old)}'
+          p.write_text(s.replace(old, new))
+          PY
+          git diff --check
+          test "$(git diff --name-only)" = 'Mithril-Wrapper-cpp/MG_Impl/Drawing.cpp'
+          git diff -- Mithril-Wrapper-cpp/MG_Impl/Drawing.cpp | tee /tmp/orientation.patch
+          test "$(git diff --numstat | awk '{print $1":"$2":"$3}')" = '8:0:Mithril-Wrapper-cpp/MG_Impl/Drawing.cpp'
+
+      - name: Prove orientation semantics
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          ios = lambda fbo0, upper: (not fbo0) ^ upper
+          mac = lambda fbo0, upper: not upper
+          assert ios(True, False) is False
+          assert ios(False, False) is True
+          assert ios(True, True) is True
+          assert ios(False, True) is False
+          assert mac(True, False) is True and mac(False, False) is True
+          assert mac(True, True) is False and mac(False, True) is False
+          print('iOS/default-FBO/user-FBO/clip-control truth table: PASS')
+          PY
+          grep -Fq '#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE' Mithril-Wrapper-cpp/MG_Impl/Drawing.cpp
+          grep -Fq '? ((!is_default_fbo) ^ clip_upper_left)' Mithril-Wrapper-cpp/MG_Impl/Drawing.cpp
+          grep -Fq '? (!clip_upper_left)' Mithril-Wrapper-cpp/MG_Impl/Drawing.cpp
+
+      - name: Fetch pinned ios-cmake
+        run: |
+          set -euo pipefail
+          curl -fsSL -o ios.toolchain.cmake https://raw.githubusercontent.com/leetal/ios-cmake/4.5.0/ios.toolchain.cmake
+          test -s ios.toolchain.cmake
+
+      - name: Fetch pinned MoltenVK iOS static SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL -o MoltenVK-ios.tar "https://github.com/KhronosGroup/MoltenVK/releases/download/${MOLTENVK_TAG}/MoltenVK-ios.tar"
+          mkdir mvk && tar -xf MoltenVK-ios.tar -C mvk
+          FOUND=$(find mvk -type d -name MoltenVK.xcframework -path '*static*' | head -1)
+          if [ -z "$FOUND" ]; then FOUND=$(find mvk -type d -name MoltenVK.xcframework | head -1); fi
+          test -n "$FOUND" && mv "$FOUND" MoltenVK.xcframework
+          HDRS=$(find mvk -type d -name vulkan -path '*/include/vulkan' | head -1)
+          test -n "$HDRS" && mv "$(dirname "$HDRS")" MoltenVK-Headers
+          rm -rf mvk
+          test -f MoltenVK.xcframework/ios-arm64/libMoltenVK.a
+          test -f MoltenVK-Headers/vulkan/vulkan.h
+
+      - name: Configure iPhoneOS arm64 DirectVulkan only
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-ios-dvk -G Xcode \
+            -DCMAKE_TOOLCHAIN_FILE="$PWD/ios.toolchain.cmake" \
+            -DPLATFORM=OS64 -DDEPLOYMENT_TARGET=15.0 \
+            -DENABLE_BITCODE=OFF -DENABLE_ARC=OFF \
+            -DMITHRIL_METAL_BACKEND=OFF \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_FLAGS='-Wno-error=implicit-function-declaration' \
+            -DCMAKE_CXX_FLAGS='-Wno-error'
+
+      - name: Build libmithril.dylib
+        id: build
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake --build build-ios-dvk --config Release --target mithril --parallel
+          DYLIB=$(find build-ios-dvk -type f -name libmithril.dylib -print | head -1)
+          test -s "$DYLIB"
+          DYLIB="$(cd "$(dirname "$DYLIB")" && pwd)/$(basename "$DYLIB")"
+          echo "path=$DYLIB" >> "$GITHUB_OUTPUT"
+          ls -lh "$DYLIB"
+
+      - name: Hard-gate iPhoneOS and DirectVulkan payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          D='${{ steps.build.outputs.path }}'
+          file "$D" | tee /tmp/file.txt
+          grep -q arm64 /tmp/file.txt
+          xcrun vtool -show-build "$D" | tee /tmp/build.txt
+          grep -Eiq 'platform[[:space:]]+IOS|platform[[:space:]]+2' /tmp/build.txt
+          ! grep -Eiq 'platform[[:space:]]+MACOS|platform[[:space:]]+1' /tmp/build.txt
+          otool -L "$D" | tee /tmp/otool.txt
+          ! grep -E '^\s+/(opt/homebrew|usr/local)/' /tmp/otool.txt
+          ! grep -Fq libMoltenVK.dylib /tmp/otool.txt
+          nm -gU "$D" > /tmp/global.txt
+          for s in eglGetDisplay eglInitialize eglCreateWindowSurface eglCreateContext eglMakeCurrent eglSwapBuffers glGetString glGetError glCreateShader glCreateProgram glDrawArrays glDrawElements glReadPixels; do
+            grep -qE " [Tt] _?${s}$" /tmp/global.txt || exit 1
+          done
+          nm "$D" > /tmp/all.txt
+          for s in dvk_init dvk_available dvk_create_swapchain dvk_texture_upload; do grep -qE " _?${s}$" /tmp/all.txt || exit 1; done
+          ! grep -qE ' _dmt_(init|available|create_swapchain)$' /tmp/all.txt
+          strings "$D" | grep -Fq 'Vulkan 1.2 (MoltenVK)'
+
+      - name: Ad-hoc sign and verify
+        run: |
+          set -euo pipefail
+          D='${{ steps.build.outputs.path }}'
+          codesign --force --sign - "$D"
+          codesign --verify --strict --verbose=2 "$D"
+
+      - name: Assemble artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir dist
+          cp '${{ steps.build.outputs.path }}' dist/libmithril.dylib
+          cp /tmp/orientation.patch dist/orientation-candidate.patch
+          shasum -a 256 dist/libmithril.dylib | tee dist/libmithril.dylib.sha256
+          cat > dist/BUILD_INFO.txt <<EOF
+          repository=${GITHUB_REPOSITORY}
+          workflow_commit=${GITHUB_SHA}
+          native_fix_baseline=${NATIVE_BASELINE}
+          candidate=ios-fbo-aware-yflip
+          source_delta=Drawing.cpp +8/-0, iOS-only preprocessor branch
+          target=iPhoneOS arm64
+          deployment_target=15.0
+          backend=DirectVulkan only
+          moltenvk=${MOLTENVK_TAG} static
+          signing=ad-hoc
+          EOF
+
+      - name: Upload candidate
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: Mithril-DirectVulkan-iOS-FBO-orientation-${{ github.sha }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
