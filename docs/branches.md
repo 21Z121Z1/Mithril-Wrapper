@@ -2,131 +2,149 @@
 
 Mithril-Wrapper has one product architecture but more than one historical Git lineage. Branch policy exists to prevent that history from becoming architecture.
 
-For the dated live inventory, read `docs/agent/branch-ledger.md`. For the current frontier, read `docs/agent/status.md`. This document defines the stable rules.
+**Live Git topology outranks dated branch prose.** When branch state matters, run:
+
+```bash
+python3 scripts/audit-branches.py --fetch-graph --markdown
+```
+
+`docs/agent/status.md` and `docs/agent/branch-ledger.md` are dated reconciliation checkpoints. Use them for rationale and unresolved accounting, but cross-check roles/containment against the generated graph.
 
 ## Canonical roles
 
 ### `main` — shipping baseline
 
-`main` is the clean-tree shipping baseline. It is the default destination for promoted, release-worthy architecture and repository governance.
-
-`main` is not defined as “the branch with the most commits.” A clean integration branch may be newer while a deliberate promotion is pending.
+`main` is the clean-tree shipping baseline and stable destination for promoted architecture/governance. It is not defined as “the branch with the most commits.”
 
 ### `integration/directmetal-next` — clean DirectMetal integration
 
-This is the current clean `src/*` development line for DirectMetal product work.
-
-Feature/fix/performance branches that target it should be short-lived. Once a PR is merged and unique artifacts are accounted for, source refs should normally be deleted even if squash merge makes them remain Git-divergent.
+Current clean `src/*` DirectMetal development line. Feature/fix/performance refs targeting it should be short-lived and reconciled by semantic/tree/PR evidence before retirement.
 
 ### `integration/directvulkan-reference` — legacy DirectVulkan migration source
 
-Despite the historical name, this ref is currently disconnected from `main` and therefore is **not** the canonical clean-tree Vulkan development base.
-
-Its purpose is to preserve/reconcile verified DirectVulkan semantics, diagnostics and tests from the legacy lineage until those capabilities are represented in the clean `src/*` architecture.
+Despite the historical name, this ref has no common ancestor with `main`. It is a migration/reference anchor in the legacy history universe, **not** a clean-tree Vulkan development base.
 
 ### `integration/legacy-capability-port` — legacy semantic reconciliation source
 
-This ref is also disconnected from `main`. It is a temporary knowledge-convergence line for older GL/Metal/Minecraft semantics that still require explicit accounting.
+Also disconnected from `main`; preserves older semantic/evidence work pending explicit accounting. It must not be wholesale-merged into the clean product tree.
 
-It must not be merged wholesale into the clean product tree.
+The machine-readable anchors and history universes live in `docs/agent/manifest.json`.
+
+## History universe before branch role
+
+Before merge/rebase/promotion reasoning, first establish whether the relevant refs have a merge base.
+
+The live audit assigns each branch to declared history universes when the commit graph supports that relation, then chooses the nearest anchor inside that universe. This is more informative than comparing every DirectVulkan experiment only to `main`, where all would merely appear `no_common_ancestor`.
+
+Across disconnected histories, use **semantic transplant**:
+
+```text
+source exact SHA/tree
+  -> unique observable behavior or backend invariant
+  -> focused oracle
+  -> clean owning layer
+  -> exact clean-candidate evidence
+```
+
+A direct tree diff across disconnected universes is useful archaeology, not an ancestry/promotion argument.
 
 ## Canonical ownership is not Git ancestry
 
-This repository uses squash merges and contains disconnected histories. Therefore two distinct questions must never be conflated:
+Squash merges and disconnected histories require three independent questions:
 
-1. Which branch owns future work in this area?
-2. Is another branch an ancestor / already semantically contained?
+1. **history/ancestry** — same, ancestor, descendant, diverged, squash-represented, or explicit no-common-ancestor;
+2. **semantic delta** — unique changed behavior/tests/contracts, not commit count;
+3. **proof subject** — which exact source/tree/binary and oracle now represent the valuable behavior.
 
-A branch may have an obsolete ownership role while still containing unique semantics. A squash-merged feature may be semantically contained while not being an ancestor. A branch may have a canonical-sounding name while sharing no ancestor with `main`.
+A branch may have obsolete ownership while retaining unique semantics. A merged squash source may remain Git-divergent. A validation branch may be newer while containing no newer product semantics.
 
-Before reusing, deleting or declaring a divergent branch absorbed, establish the three-part proof:
-
-1. **ancestry** — ancestor, diverged, squash-merged, or explicit no-common-ancestor;
-2. **semantic delta** — changed files, tests and observable behavior that remain unique;
-3. **evidence** — where the current exact implementation is proved.
-
-Branch date and commit count are only search hints.
+Branch date and prefix are search hints only.
 
 ## Clean tree versus legacy tree
 
-The clean product architecture is rooted at `src/*` and the current mainline CMake model.
-
-The older DirectVulkan/dual-backend family is commonly rooted at `Mithril-Wrapper-cpp/*` and may carry different CMake/workflow organization. It is a source of hard-won behavior, not a structure to preserve forever.
+The clean product architecture is rooted at `src/*`; the older DirectVulkan/dual-backend family commonly carries `Mithril-Wrapper-cpp/*` and many branch-local workflows.
 
 When a legacy branch contains a valid fix:
 
-1. identify the GL/EGL semantic rule or backend-lifetime rule the fix represents;
-2. identify the smallest clean-tree owning layer;
-3. add/port a focused oracle in the clean test architecture;
-4. implement the rule in `src/*` at the correct layer;
-5. run clean-tree evidence planes;
-6. record the legacy source branch/commit in the PR for provenance;
-7. retire the legacy branch when all unique value is accounted for.
+1. identify the GL/EGL semantic or native-lifetime rule;
+2. identify the smallest clean-tree owning layer from `docs/system-model.md` / manifest;
+3. preserve or add the focused oracle;
+4. implement the rule in the clean architecture, preferably above backend execution when semantics are shared;
+5. run clean-tree evidence planes on the exact candidate;
+6. retain old SHA/PR only as provenance;
+7. retire the legacy ref only after all unique value is represented and deletion is authorized.
 
-Do not mechanically transplant file layouts, duplicated backend semantics or one-off workflows.
+Do not mechanically transplant old file layouts, duplicated backend policy or one-shot workflows.
+
+## Product, evidence and provenance subjects
+
+Recent DirectVulkan work demonstrates why one branch name is insufficient. A branch can contain a product lineage whose HEAD is only a trigger commit; another descendant may add only a cloud-E2E trigger. `scripts/audit-branches.py` therefore reports changed-path delta class, nearest anchor, coverage and same-tree groups in addition to the HEAD name.
+
+Keep these concepts separate:
+
+- **product subject** — source/tree that actually implements behavior;
+- **validation/orchestration subject** — harness/workflow that tests a product subject;
+- **replay/provenance subject** — patch reconstruction/history source.
+
+A trigger commit is not automatically the product implementation, and an evidence-only descendant does not supersede a product-bearing ancestor semantically.
 
 ## Creating branches
 
-New long-lived integration refs are exceptional. Prefer:
+New long-lived integration refs are exceptional. Prefer bounded task refs:
 
-- `fix/<scope>-<date>` for a bounded correctness repair;
-- `perf/<scope>-<date>` for a bounded performance phase;
-- `experiment/<hypothesis>-<date>` for an A/B or diagnostic hypothesis;
-- `validation/<claim>-<date>` for a harness/evidence-only branch;
-- `tooling/<capability>` for reusable developer/agent tooling.
+- `fix/<scope>-<date>` — correctness repair;
+- `perf/<scope>-<date>` — performance phase;
+- `experiment/<hypothesis>-<date>` — controlled A/B hypothesis;
+- `validation/<claim>-<date>` — evidence-only harness;
+- `tooling/<capability>` — reusable tooling.
 
-An experiment must have an exit route at creation time: merge/port a rule, preserve a negative result, or delete after falsification.
+Every experiment needs an exit route: promote a rule/oracle, preserve a negative result, or delete after falsification.
 
-When the clean-tree Vulkan migration becomes sustained product development, create a new integration branch **from the clean shipping lineage** and record its ownership in `docs/agent/manifest.json` and status. Do not silently repurpose the disconnected historical ref.
+When sustained clean-tree Vulkan development begins, create its integration ref from the clean shipping universe and record that ownership in the manifest. Do not silently repurpose the disconnected historical DirectVulkan anchor.
 
-## Pull requests
+## Pull requests and CI
 
-A PR description should make four things discoverable:
+A PR should state:
 
-- owning layer / behavior being changed;
-- source and destination tree/branch;
-- exact semantic or performance oracle;
-- which evidence is already complete versus still required.
+- owning layer / behavior;
+- source/destination history universe and branch;
+- semantic/performance oracle;
+- exact product subject;
+- evidence complete vs still required.
 
-Validation-only PRs must say so explicitly and must identify the exact product SHA under test when it differs from the harness HEAD.
-
-An open PR is not proof of active ownership. A merged PR is not proof that its source ref can be deleted until post-merge unique commits and external references are checked.
-
-## CI ownership
-
-Branches reuse durable evidence planes wherever possible. Do not create a permanent workflow per fix/experiment.
-
-Temporary branch-specific workflows are acceptable during investigation only when the existing workflow cannot express the experiment. Before retirement, move any durable oracle/capability into the normal evidence architecture and delete the temporary workflow with the branch.
+Validation-only PRs must say so explicitly. CI supplies environments; tests own contracts. Do not make one permanent workflow per fix/experiment.
 
 See `docs/ci.md` and `docs/evidence-model.md`.
 
+## Same-head / same-tree aliases
+
+Two names can point to the same commit, and different commits can produce the same tree. The live audit reports both forms.
+
+These are strong retirement candidates, not deletion authorization. Check open PRs, external workflows/artifacts and unique rationale first.
+
 ## Branch retirement
 
-Delete branches aggressively **after** their information has converged, not merely because they look old.
+Retire a ref only after:
 
-Required checks:
+1. live topology is refreshed;
+2. history universe and ancestry/squash state are understood;
+3. unique implementation/test/evidence delta is enumerated;
+4. every valuable invariant/oracle is represented by current code or explicitly rejected with evidence;
+5. important provenance remains discoverable in PR/commit/artifact history;
+6. no active workflow/human testing process requires the branch name;
+7. repository owner explicitly authorizes destructive cleanup.
 
-- no unresolved unique implementation/test delta;
-- PR state and squash-merge semantics understood;
-- no workflow, artifact note or automation depends on branch name;
-- important provenance remains in PR/commit history;
-- branch ledger/status updated.
-
-Exact duplicate refs are strong retirement candidates, but still check open PRs and external references before deleting either name.
+Unknown/unclassified deltas fail closed: investigate rather than infer absorption.
 
 ## Desired steady state
 
-The target topology is small:
-
 ```text
 main
-  |
-  +-- integration/directmetal-next      (only while ahead work exists)
-  |
-  +-- <future clean Vulkan integration> (only while sustained port work exists)
+  +-- integration/directmetal-next      (only while ahead clean work exists)
+  +-- <future clean Vulkan integration> (only while sustained clean port exists)
 
-legacy reconciliation sources           (temporary, shrinking)
-short-lived fix/perf/experiment refs      (bounded, evidence-backed)
+legacy migration anchors                (temporary and shrinking)
+short-lived product/experiment/evidence refs
 ```
 
-The system should accumulate capabilities in contracts/tests/types/docs, not accumulate permanent branches as memory.
+The system should accumulate memory in types, contracts, tests, manifest rules and exact evidence—not in an ever-growing branch namespace.

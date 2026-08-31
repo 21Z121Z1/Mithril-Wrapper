@@ -1,57 +1,73 @@
 # Mithril-Wrapper agent operating contract
 
-This file is the entry point for coding and review agents. Do not begin by reading the repository breadth-first. Build a small, verified model first, then drill into the subsystem that owns the requested behavior.
+This file is the entry point for coding and review agents. Do not begin by reading the repository breadth-first or by treating branch names as state. Compile the smallest current world model first, then drill into the subsystem that owns the requested behavior.
 
-## Read order
+## Bootstrap and context budget
 
-1. `docs/system-model.md` — stable abstraction tower, ownership and invariants.
-2. `docs/agent/status.md` — dated snapshot of the current product and branch frontier.
-3. `docs/agent/manifest.json` — machine-readable paths, roles, tools and evidence planes.
-4. `docs/evidence-model.md` — what counts as proof and how to bind proof to an exact product SHA.
-5. `docs/branches.md` and `docs/agent/branch-ledger.md` — branch policy and audited inventory.
-6. Only then read the subsystem code, neighboring tests and relevant CI workflow.
+Start with the task-local capsule:
 
-`README.md` and `CHECKLIST.md` are useful product/history references, but they are not the sole source of current branch truth.
+```bash
+python3 scripts/agent-context.py --task "<short task>"
+```
 
-When branch topology materially affects the task, refresh the graph instead of trusting a dated narrative:
+It reports exact Git identity, likely owning layer/component, changed paths when a comparable anchor is available, boundary risk, proof obligations and the smallest set of files to read next.
+
+If the task depends on branch ancestry, migration, replay, "latest branch", absorption or cleanup, refresh the live graph before trusting any dated snapshot:
 
 ```bash
 python3 scripts/audit-branches.py --fetch-graph --markdown
 ```
 
-The command is read-only with respect to product branches/worktrees. `--fetch-graph` refreshes remote-tracking refs using a blob-filtered fetch so ancestry and ahead/behind facts are current without checking out every branch.
+The audit is read-only with respect to product refs/worktrees. It refreshes remote-tracking commit graphs with `--filter=blob:none`, discovers history-universe membership/nearest anchors and does not check out every branch.
+
+Then use progressive disclosure:
+
+1. `docs/system-model.md` — stable abstraction tower and invariants.
+2. task-routed source/tests returned by `agent-context.py`.
+3. `docs/evidence-model.md` when the claim needs runtime/presentation/performance proof.
+4. `docs/branches.md` when convergence/branch lifecycle matters.
+5. `docs/agent/status.md` / `docs/agent/branch-ledger.md` only as dated reconciliation checkpoints, cross-checked against the live graph.
+6. historical PRs, workflows, patch/replay scripts and raw artifacts only to answer a concrete unresolved question.
+
+`docs/agent/manifest.json` is the machine-readable map behind the capsule. `README.md` and `CHECKLIST.md` remain useful product/history references, but they are not current branch/runtime authority by themselves.
 
 ## System invariants
 
 - The shipping architecture is the clean `src/*` tree. Do not copy a legacy `Mithril-Wrapper-cpp/*` tree wholesale into it.
 - Apple shipping uses the Vulkan-free DirectMetal target. Vulkan is a separate reference/fallback backend and must not leak into the DirectMetal build boundary.
 - Observable GL/EGL/Minecraft semantics belong above backend execution whenever possible. Backends consume an explicit lowered contract; they must not independently invent different API semantics.
-- `main` is the shipping baseline, not automatically the newest implementation. `integration/directmetal-next` is the current clean-tree DirectMetal integration line. See the dated status file before choosing a base.
-- `integration/directvulkan-reference` and `integration/legacy-capability-port` are currently disconnected Git histories relative to `main`. Treat them as migration/reference sources, not direct merge bases for the clean tree.
+- `src/backend/*` is the architectural lowering seam: mutable frontend state is resolved into explicit draw/resource/state identity before native execution.
+- Queued native work must not reread mutable GL state after the observing operation has captured its semantic snapshot.
+- Resource reuse must be keyed by stable generation/lifetime/content identity where native work may outlive frontend mutation.
+- Internal framebuffer/texture storage semantics stay stable; platform origin or RGBA/BGRA conversion belongs at an explicit presentation seam.
+- Unsupported observable behavior fails closed. A backend capability gap must not silently approximate GL semantics.
+- `main` is the shipping baseline, not automatically the newest implementation. `integration/directmetal-next` is the current clean-tree DirectMetal integration line.
+- `integration/directvulkan-reference` and `integration/legacy-capability-port` are disconnected Git-history anchors relative to `main`. Treat their universe as semantic/evidence transplant source, not a direct clean-tree merge base.
 - A branch name, date, green workflow, PR title or existence of a ref is not proof that behavior is current or absorbed.
-- Never claim a capability for SHA B from evidence produced by SHA A unless the relevant tree identity is proven.
+- Never claim a capability for candidate B from evidence produced by candidate A unless relevant source/tree/binary equivalence is explicitly established.
 
 ## Branch selection protocol
 
 Before editing:
 
-1. Identify the product tree (`src/*` clean tree versus `Mithril-Wrapper-cpp/*` legacy tree).
-2. Identify the owning abstraction layer from `docs/system-model.md`.
-3. Refresh live branch topology if the dated snapshot may affect the decision.
-4. Determine the intended destination branch from `docs/agent/status.md` and live graph.
-5. If reusing another branch, establish all three facts:
-   - Git ancestry or an explicit absence of common ancestry;
-   - changed-file / semantic delta;
-   - evidence attached to the exact implementation being reused.
-6. Prefer a semantic port with a focused regression over a wholesale merge from a disconnected legacy tree.
+1. Generate the task capsule.
+2. Identify the product tree (`src/*` clean tree versus `Mithril-Wrapper-cpp/*` legacy tree).
+3. Identify the owning abstraction layer/component.
+4. Refresh live topology if branch state affects the decision.
+5. Determine the intended destination branch from stable policy plus live topology; use dated status only as supporting context.
+6. If reusing another branch, establish:
+   - its Git history universe and ancestry/explicit lack of common ancestry;
+   - its unique changed-file / semantic delta;
+   - the exact product subject and evidence attached to that delta.
+7. Prefer a semantic port with a focused regression over a wholesale merge from a disconnected legacy tree.
 
-Do not infer containment from branch age. Squash merges intentionally make ancestry insufficient; use PR state and final tree/diff evidence as well.
+Do not infer containment from age or commit count. Squash merges make ancestry insufficient in the other direction; use PR/tree/semantic evidence as well.
 
 ## Investigation loop
 
 Use the shortest closed evidence loop:
 
-`observable failure -> owning contract -> smallest oracle -> implementation -> exact-SHA verification -> broader gate`
+`observable failure -> owning contract -> smallest oracle -> implementation -> exact-subject verification -> broader gate`
 
 Start from an existing oracle. If no oracle can distinguish the bug from adjacent behavior, add one before changing implementation when practical. Do not create a new one-bug/one-workflow Actions file when an existing evidence plane can host the oracle.
 
@@ -73,6 +89,7 @@ The generated `.minecraft-reference/` tree is local analysis input only. Never c
 - Vulkan reference execution only: `src/vk/*`.
 - Cross-platform test registration: `cmake/MithrilSmokeTests.cmake`.
 - Durable normal CI: `.github/workflows/build.yml`; unique hosted Apple runtime evidence: `hosted-metal-gpu-probe.yml`.
+- Legacy/replay source: `Mithril-Wrapper-cpp/*`, `ci/*`; extract semantics/oracles rather than preserving its architecture.
 
 If a change seems to require the same semantic rule in both `src/metal/*` and `src/vk/*`, first check whether the rule belongs in the shared frontend/backend-neutral contract instead.
 
@@ -80,25 +97,32 @@ If a change seems to require the same semantic rule in both `src/metal/*` and `s
 
 Use the smallest applicable prefix, then expand:
 
-1. source/manifest invariants and formatting;
+1. agent/manifest/control invariants;
 2. focused regression for the changed contract;
 3. backend semantic label (`ctest -L directmetal` or `ctest -L vulkan`);
 4. shipping boundary/build checks;
 5. host/presentation runtime evidence when the seam is touched;
 6. Minecraft E2E when behavior depends on real client call patterns;
-7. device/long-run evidence only for claims that hosted CI cannot establish.
+7. physical-device/long-run evidence only for claims hosted CI cannot establish;
+8. paired/fixed-workload performance evidence only after correctness and activation are established.
 
-A task is not complete merely because code exists. Record what was actually verified, what exact SHA was verified, and any remaining evidence gap.
+Compilation is not activation. Activation is not semantic correctness. Semantic correctness is not physical presentation correctness. One average FPS number is not performance acceptance.
+
+On pull requests distinguish **candidate-head proof** from **synthetic merge-result proof**. Record which object a workflow actually checked out; a check attached to a PR is not automatically a check of the PR head.
+
+A task is not complete merely because code exists. Record what was actually verified, exact source/tree/binary identity, and any remaining evidence gap.
 
 ## Knowledge accumulation
 
 Put information at the narrowest durable layer:
 
 - stable architecture/invariants -> `docs/system-model.md`;
-- current frontier/blockers -> `docs/agent/status.md`;
-- branch inventory/reconciliation -> `docs/agent/branch-ledger.md` plus live `scripts/audit-branches.py` output when needed;
+- current frontier/blockers -> dated `docs/agent/status.md` only when a snapshot is useful;
+- live branch topology -> generated `scripts/audit-branches.py` output;
+- branch reconciliation decisions -> `docs/agent/branch-ledger.md` plus PR history;
+- ownership/boundary/proof routing -> `docs/agent/manifest.json` + validator/self-tests;
 - proof rules -> `docs/evidence-model.md`;
-- subsystem contract -> a focused subsystem document/test near its owner;
+- subsystem contract -> focused source-adjacent document/test;
 - historical experiment detail -> PR/commit/artifact, referenced from the ledger only if still decision-relevant.
 
-Do not grow `README.md`, `CHECKLIST.md` or this file into an append-only incident log. Promote repeated lessons into invariants, tests or machine-checkable contracts; retire duplicated narrative once the stronger representation exists.
+A durable result should be compiled into a type, invariant, test, manifest rule, oracle or evidence contract. Do not grow `README.md`, `CHECKLIST.md`, status, ledger or this file into append-only incident logs.

@@ -1,7 +1,7 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "as_of": "2026-09-01",
-  "purpose": "Machine-readable navigation and ownership contract for agents working on Mithril-Wrapper.",
+  "purpose": "Machine-readable navigation, ownership, history-universe and proof-routing contract for agents working on Mithril-Wrapper.",
   "entrypoint": "AGENTS.md",
   "authoritative_documents": {
     "system_model": "docs/system-model.md",
@@ -95,21 +95,235 @@
       "merge_policy": "semantic_port_only_to_clean_tree"
     }
   ],
+  "history_universes": [
+    {
+      "id": "clean_shipping",
+      "anchors": ["main", "integration/directmetal-next"],
+      "promotion_mode": "normal_git_plus_semantic_proof",
+      "preferred_roots": ["src", "include", "tests", "scripts"]
+    },
+    {
+      "id": "legacy_experimental",
+      "anchors": ["integration/directvulkan-reference", "integration/legacy-capability-port"],
+      "promotion_mode": "semantic_transplant_only",
+      "preferred_roots": ["Mithril-Wrapper-cpp", "ci", "tests"]
+    }
+  ],
+  "components": [
+    {
+      "id": "host.egl",
+      "layer": "L1",
+      "summary": "EGL exports, host negotiation, context/surface lifecycle and swap entry.",
+      "owned_paths": ["src/egl/**"],
+      "read_now": ["src/egl", "docs/egl_list.md"],
+      "required_proofs": ["control", "focused_semantic"]
+    },
+    {
+      "id": "gl.semantics",
+      "layer": "L2",
+      "summary": "Observable OpenGL state, object/error/framebuffer/pixel-store/query/sync semantics.",
+      "owned_paths": ["src/gl/**", "src/state/**"],
+      "read_now": ["src/gl", "src/state", "docs/directmetal-gl33-semantic-matrix.md"],
+      "required_proofs": ["control", "focused_semantic"]
+    },
+    {
+      "id": "shader.contract",
+      "layer": "L2",
+      "summary": "GLSL to SPIR-V translation, reflection and shared shader/resource ABI.",
+      "owned_paths": ["src/shader/**"],
+      "read_now": ["src/shader"],
+      "required_proofs": ["control", "focused_semantic"]
+    },
+    {
+      "id": "semantic.lowering",
+      "layer": "L3",
+      "summary": "Backend-neutral resolved draw/resource/FBO contract and backend selection.",
+      "owned_paths": ["src/backend/**", "include/mithril/draw_diagnostics.h"],
+      "read_now": ["src/backend/types.h", "src/backend/backend.h"],
+      "required_proofs": ["control", "focused_semantic"]
+    },
+    {
+      "id": "backend.directmetal",
+      "layer": "L4",
+      "summary": "Metal-specific resource, pipeline and command execution below resolved semantics.",
+      "owned_paths": ["src/metal/**", "include/mithril/directmetal_diagnostics.h", "include/mithril/program_diagnostics.h"],
+      "read_now": ["src/metal", "docs/directmetal-gl33-semantic-matrix.md"],
+      "required_proofs": ["control", "focused_semantic", "directmetal_ctest"]
+    },
+    {
+      "id": "backend.directvulkan",
+      "layer": "L4",
+      "summary": "Vulkan/MoltenVK reference/fallback execution below resolved semantics.",
+      "owned_paths": ["src/vk/**"],
+      "read_now": ["src/vk"],
+      "required_proofs": ["control", "focused_semantic", "directvulkan_ctest"]
+    },
+    {
+      "id": "platform.presentation",
+      "layer": "L5",
+      "summary": "CAMetalLayer/default-framebuffer origin/format and physical host presentation seam.",
+      "owned_paths": ["tests/amethyst_egl_smoke.mm", "tests/surface_metal_smoke.mm", "scripts/build_iphoneos.sh"],
+      "read_now": ["tests/amethyst_egl_smoke.mm", "docs/evidence-model.md"],
+      "required_proofs": ["control", "focused_semantic", "presentation_device"]
+    },
+    {
+      "id": "validation.contract",
+      "layer": "L6",
+      "summary": "Focused semantic/readback/runtime oracles and cross-platform CTest registration.",
+      "owned_paths": ["tests/**", "cmake/MithrilSmokeTests.cmake"],
+      "read_now": ["tests", "cmake/MithrilSmokeTests.cmake", "docs/evidence-model.md"],
+      "required_proofs": ["control"]
+    },
+    {
+      "id": "evaluation.control",
+      "layer": "L6",
+      "summary": "Agent routing, branch audit, CI/evidence policy and machine-checkable repository control.",
+      "owned_paths": ["AGENTS.md", "docs/agent/**", "docs/branches.md", "docs/ci.md", "docs/evidence-model.md", ".github/workflows/**", "scripts/agent-context.py", "scripts/audit-branches.py", "scripts/validate_agent_contract.py"],
+      "read_now": ["AGENTS.md", "docs/system-model.md", "docs/evidence-model.md", "docs/branches.md"],
+      "required_proofs": ["control"]
+    },
+    {
+      "id": "legacy.migration",
+      "layer": "L7",
+      "summary": "Disconnected legacy implementation, patch/replay and migration evidence sources.",
+      "owned_paths": ["Mithril-Wrapper-cpp/**", "ci/**"],
+      "read_now": ["docs/system-model.md", "docs/branches.md", "docs/agent/branch-ledger.md"],
+      "required_proofs": ["control", "focused_semantic"]
+    }
+  ],
+  "boundaries": [
+    {
+      "id": "egl_to_gl",
+      "from": ["host.egl"],
+      "to": ["gl.semantics"],
+      "contract": "host aliases/lifecycle may adapt negotiation but must not silently redefine LWJGL-visible GL semantics"
+    },
+    {
+      "id": "gl_to_lowering",
+      "from": ["gl.semantics", "shader.contract"],
+      "to": ["semantic.lowering"],
+      "contract": "mutable observable GL/shader state is resolved into explicit snapshots at the operation that observes it"
+    },
+    {
+      "id": "lowering_to_metal",
+      "from": ["semantic.lowering"],
+      "to": ["backend.directmetal"],
+      "contract": "DirectMetal executes resolved intent and does not invent backend-local GL policy"
+    },
+    {
+      "id": "lowering_to_vulkan",
+      "from": ["semantic.lowering"],
+      "to": ["backend.directvulkan"],
+      "contract": "DirectVulkan executes resolved intent and does not invent backend-local GL policy"
+    },
+    {
+      "id": "backend_to_presentation",
+      "from": ["backend.directmetal", "backend.directvulkan"],
+      "to": ["platform.presentation"],
+      "contract": "internal storage/origin semantics stay stable; platform origin/format conversion occurs only at an explicit presentation seam"
+    },
+    {
+      "id": "runtime_to_evidence",
+      "from": ["host.egl", "gl.semantics", "shader.contract", "semantic.lowering", "backend.directmetal", "backend.directvulkan", "platform.presentation"],
+      "to": ["validation.contract"],
+      "contract": "runtime evidence is bound to exact semantic and source/tree/binary identity, not logs or native addresses alone"
+    },
+    {
+      "id": "legacy_transplant",
+      "from": ["legacy.migration"],
+      "to": ["gl.semantics", "shader.contract", "semantic.lowering", "backend.directmetal", "backend.directvulkan", "platform.presentation"],
+      "contract": "disconnected legacy history contributes focused invariants/oracles through explicit semantic transplant; it is not wholesale-promoted"
+    }
+  ],
+  "proof_profiles": [
+    {
+      "id": "control",
+      "rank": 0,
+      "environment": "any",
+      "cost": "tiny",
+      "command": "python3 scripts/validate_agent_contract.py",
+      "proves": "agent navigation/ownership/history/proof model consistency"
+    },
+    {
+      "id": "focused_semantic",
+      "rank": 1,
+      "environment": "hosted_or_local",
+      "cost": "small",
+      "command": "run the nearest focused smoke/oracle for the changed contract",
+      "proves": "the changed semantic invariant in isolation"
+    },
+    {
+      "id": "directmetal_ctest",
+      "rank": 2,
+      "environment": "macOS",
+      "cost": "medium",
+      "command": "ctest --test-dir <build> -L directmetal --output-on-failure",
+      "proves": "registered DirectMetal semantic/boundary regression"
+    },
+    {
+      "id": "directvulkan_ctest",
+      "rank": 2,
+      "environment": "Linux_Vulkan_or_MoltenVK",
+      "cost": "medium",
+      "command": "ctest --test-dir <build> -L vulkan --output-on-failure",
+      "proves": "registered Vulkan reference semantic regression"
+    },
+    {
+      "id": "hosted_metal",
+      "rank": 3,
+      "environment": "hosted_Apple_Silicon",
+      "cost": "medium",
+      "command": "platform-runtime-validation workflow",
+      "proves": "hosted Metal runtime behavior, not physical-device equivalence"
+    },
+    {
+      "id": "minecraft_e2e",
+      "rank": 4,
+      "environment": "Minecraft_26_2_capable",
+      "cost": "large",
+      "command": "run canonical Minecraft 26.2 client/E2E oracle against an exact product subject",
+      "proves": "real client integration for the selected scenario"
+    },
+    {
+      "id": "presentation_device",
+      "rank": 5,
+      "environment": "physical_macOS_or_iOS_when_required",
+      "cost": "physical",
+      "command": "run exact-binary surface/presentation/device oracle",
+      "proves": "physical presentation/platform behavior not established by hosted CI"
+    },
+    {
+      "id": "performance_paired",
+      "rank": 6,
+      "environment": "stable_physical_Apple_Silicon",
+      "cost": "very_large",
+      "command": "run correctness-gated fixed-workload interleaved baseline/candidate measurement",
+      "proves": "performance change under a stable matched workload"
+    }
+  ],
+  "claim_proofs": {
+    "control": ["control"],
+    "semantic": ["control", "focused_semantic"],
+    "integration": ["control", "focused_semantic", "minecraft_e2e"],
+    "presentation": ["control", "focused_semantic", "presentation_device"],
+    "performance": ["control", "focused_semantic", "minecraft_e2e", "performance_paired"]
+  },
   "invariants": [
     "Observable GL/EGL semantics are owned above native backend execution whenever possible.",
     "The DirectMetal shipping target must not contain or link Vulkan or MoltenVK implementation dependencies.",
     "Queued native work must not depend on mutable frontend state after its lowering contract has been captured.",
     "Legacy disconnected histories are sources of semantics, tests and evidence; they are not wholesale merge targets for the clean tree.",
-    "A capability claim is bound to an exact implementation SHA and its actual oracle/environment evidence.",
+    "A capability claim is bound to an exact implementation SHA/tree and its actual oracle/environment evidence.",
     "Branch dates and branch names never establish semantic containment.",
     "Squash-merged work requires PR/tree comparison in addition to ancestry checks.",
-    "Temporary experiments should converge into a stable contract, regression or evidence plane before their branch is retired."
+    "Temporary experiments should converge into a stable contract, regression or evidence plane before their branch is retired.",
+    "Pull-request candidate-head proof and synthetic merge-result proof are distinct subjects and must not be conflated."
   ],
   "evidence_planes": [
     {
       "id": "normal_build",
       "workflow": ".github/workflows/build.yml",
-      "role": "required main/PR build, semantic and boundary gate",
+      "role": "required main/PR build, semantic, merge-result integration and boundary gate",
       "mutation": "read_only"
     },
     {
@@ -121,9 +335,15 @@
   ],
   "agent_tools": [
     {
+      "id": "task_context",
+      "script": "scripts/agent-context.py",
+      "role": "compile exact Git identity, task/diff ownership, history-universe warnings, boundary risk and minimum proof/read set",
+      "default_mutation": "none"
+    },
+    {
       "id": "branch_topology",
       "script": "scripts/audit-branches.py",
-      "role": "emit live remote branch heads, graph relation to a base, tree flavor and duplicate SHA groups",
+      "role": "emit live remote branch heads, history-universe/nearest-anchor topology, duplicate heads/trees and lineage coverage",
       "default_mutation": "none",
       "deep_mode": "--fetch-graph performs a blob-filtered remote-tracking ref refresh"
     },
@@ -136,28 +356,29 @@
     {
       "id": "agent_contract_validator",
       "script": "scripts/validate_agent_contract.py",
-      "role": "validate the machine-readable agent navigation and ownership contract"
+      "role": "validate the machine-readable agent navigation, ownership, history-universe and proof contract"
     }
   ],
   "proof_of_branch_reuse": [
-    "ancestry_or_explicit_no_common_ancestor",
+    "history_universe_and_ancestry_or_explicit_no_common_ancestor",
     "changed_files_and_semantic_delta",
-    "exact_implementation_evidence"
+    "exact_product_subject_evidence"
   ],
   "knowledge_lifetimes": {
-    "architecture": ["docs/system-model.md", "docs/evidence-model.md"],
-    "current": ["docs/agent/status.md", "docs/agent/branch-ledger.md"],
-    "executable": ["tests", "cmake", "scripts/validate_agent_contract.py", "scripts/audit-branches.py"],
-    "historical": ["pull_requests", "commits", "workflow_artifacts"]
+    "architecture": ["docs/system-model.md", "docs/evidence-model.md", "docs/agent/manifest.json"],
+    "current": ["docs/agent/status.md", "docs/agent/branch-ledger.md", "generated_live_branch_audit"],
+    "executable": ["tests", "cmake", "scripts/validate_agent_contract.py", "scripts/agent-context.py", "scripts/audit-branches.py"],
+    "historical": ["pull_requests", "commits", "workflow_artifacts", "experiment_workflows", "patch_replay_scripts"]
   },
   "completion_protocol": [
-    "identify_owning_layer",
+    "compile_task_local_context",
+    "identify_history_universe_and_owning_layer",
     "choose_correct_tree_and_destination_branch",
     "establish_or_add_focused_oracle",
     "implement_smallest_complete_vertical_slice",
     "run_targeted_then_broader_validation",
-    "verify_ci_against_latest_sha_when_applicable",
-    "update_status_or_branch_ledger_if_convergence_changed",
+    "verify_exact_proof_subject_and_latest_sha_when_applicable",
+    "update_dated_status_or_branch_ledger_only_if_convergence_changed",
     "report_verified_partial_and_unverified_claims_separately"
   ]
 }

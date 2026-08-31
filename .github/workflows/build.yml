@@ -16,31 +16,49 @@ concurrency:
 
 jobs:
   agent-contract:
-    name: Agent system contract
+    name: Agent system contract (candidate HEAD)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Verify exact candidate identity
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          ACTUAL_SHA="$(git rev-parse HEAD)"
+          ACTUAL_TREE="$(git rev-parse HEAD^{tree})"
+          test "$ACTUAL_SHA" = "$EXPECTED_SHA"
+          printf 'proof_subject=candidate-head\nsource_sha=%s\nsource_tree=%s\n' "$ACTUAL_SHA" "$ACTUAL_TREE"
 
       - name: Validate machine-readable agent contract
         run: python3 scripts/validate_agent_contract.py
 
       - name: Validate agent helper shapes
         run: |
-          python3 -m py_compile scripts/validate_agent_contract.py scripts/audit-branches.py
+          python3 -m py_compile scripts/validate_agent_contract.py scripts/audit-branches.py scripts/agent-context.py
           python3 scripts/audit-branches.py --help >/dev/null
+          python3 scripts/agent-context.py --help >/dev/null
           bash -n scripts/minecraft-reference.sh
           bash scripts/minecraft-reference.sh --help >/dev/null
 
   directmetal-macos:
-    name: DirectMetal macOS semantics + boundary
+    name: DirectMetal macOS semantics + boundary (merge result)
     needs: agent-contract
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: false
+
+      - name: Record integration proof subject
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          printf 'proof_subject=merge-result-or-push\nsource_sha=%s\nsource_tree=%s\n' "$(git rev-parse HEAD)" "$(git rev-parse HEAD^{tree})"
 
       - name: Fetch DirectMetal shader submodules only
         run: >-
@@ -87,13 +105,19 @@ jobs:
           if-no-files-found: error
 
   directmetal-ios-arm64:
-    name: DirectMetal iPhoneOS arm64
+    name: DirectMetal iPhoneOS arm64 (merge result)
     needs: agent-contract
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: false
+
+      - name: Record integration proof subject
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          printf 'proof_subject=merge-result-or-push\nsource_sha=%s\nsource_tree=%s\n' "$(git rev-parse HEAD)" "$(git rev-parse HEAD^{tree})"
 
       - name: Fetch DirectMetal shader submodules only
         run: >-
@@ -131,13 +155,19 @@ jobs:
           if-no-files-found: error
 
   legacy-vulkan-linux:
-    name: Vulkan reference regression
+    name: Vulkan reference regression (merge result)
     needs: agent-contract
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+
+      - name: Record integration proof subject
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          printf 'proof_subject=merge-result-or-push\nsource_sha=%s\nsource_tree=%s\n' "$(git rev-parse HEAD)" "$(git rev-parse HEAD^{tree})"
 
       - name: Install Vulkan CPU runtime
         run: |
