@@ -32,14 +32,13 @@ def fork_semantic_gates() -> None:
     assert "src_layouts.initial, src_layouts.final" in img
     assert "dst_layouts.initial, dst_layouts.final" in img
 
-    # The ownership fix is deliberately local. Clearing the CPU ownership list
-    # is correct after vkResetDescriptorPool; it is wrong at a mere generation
-    # boundary or resource-memo invalidation because those paths do not free the
-    # VkDescriptorSets back to the pool.
+    # Only inspect the generation-boundary block itself. Later in this same
+    # function there are legitimate ownership-list clears tied to actual pool
+    # recreation; those must not be conflated with this bug.
     bind = desc[desc.index("void bind_program_descriptors("):]
-    bind = bind[:bind.index("void invalidate_descriptor_memo()")]
-    boundary = bind[bind.index("if (pr.lastFrameGen[slot] != b->frameGeneration"):]
-    assert "pr.allocatedSets[slot].clear();" not in boundary
+    generation = bind[bind.index("if (pr.lastFrameGen[slot] != b->frameGeneration"):]
+    generation = generation[:generation.index("/* Gather descriptor writes.")]
+    assert "pr.allocatedSets[slot].clear();" not in generation
 
     invalidate = desc[desc.index("void invalidate_descriptor_memo()"):]
     invalidate = invalidate[:invalidate.index("void reset_all_descriptor_pools()")]
