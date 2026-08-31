@@ -1059,7 +1059,11 @@ void transition_image_layout(TextureEntry& tex, VkImageLayout newLayout) {
     barrier.subresourceRange.baseMipLevel = 0;
     barrier.subresourceRange.levelCount = (uint32_t)tex.levels;
     barrier.subresourceRange.baseArrayLayer = 0;
-    barrier.subresourceRange.layerCount = 1;
+    // A cubemap is one 2D image with six array layers. Global texture-layout
+    // transitions must cover all faces; transitioning only layer 0 leaves faces
+    // 1..5 in an incompatible layout before upload/sampling.
+    barrier.subresourceRange.layerCount =
+        tex.target == GL_TEXTURE_CUBE_MAP ? 6u : 1u;
 
     vkCmdPipelineBarrier(b->commandBuffer,
                          src_stage_for_layout(tex.currentLayout),
@@ -1905,6 +1909,27 @@ VkImage dvk_get_or_create_texture(GLuint name, int width, int height, int depth,
     vci.subresourceRange.layerCount = ici.arrayLayers;
     vci.components = { VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
                        VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY };
+
+    // A cubemap's primary view is a sampling/storage view, never the framebuffer
+    // attachment view. Without an explicit view-usage restriction, Vulkan makes
+    // the view inherit ici.usage, including COLOR_ATTACHMENT_BIT. MoltenVK then
+    // treats the six-layer cube view as a layered render target; A11 supports
+    // cube arrays but not layered rendering and rejects vkCreateImageView.
+    // VK_VERSION_1_1 VkImageViewUsageCreateInfo is the spec-defined way to
+    // restrict a view to a subset of the parent image usages. Transfer usages
+    // are retained because they are harmless for view creation; all attachment
+    // usages are deliberately excluded. Actual FBO views are created below as
+    // dedicated 2D/2D-array attachment views.
+    VkImageViewUsageCreateInfo primaryViewUsage{};
+    if (target == GL_TEXTURE_CUBE_MAP) {
+        primaryViewUsage.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO;
+        primaryViewUsage.usage = ici.usage &
+            (VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+             VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT);
+        if (primaryViewUsage.usage != 0) {
+            vci.pNext = &primaryViewUsage;
+        }
+    }
     // FIX (GPU page fault root cause): the view creation return value was not
     // checked. On failure e.view stayed VK_NULL_HANDLE but the entry was still
     // stored in texture_table; a later descriptor bind would then feed that NULL
@@ -2093,6 +2118,7 @@ VkImageView dvk_get_texture_attachment_view(GLuint name, GLint level,
                                             GLint layer,
                                             GLboolean layered) {
     using namespace mithril::vk;
+    Backend* b = backend();
     auto& tbl = texture_table();
     auto it = tbl.find(name);
     if (it == tbl.end()) return VK_NULL_HANDLE;
@@ -2136,9 +2162,30 @@ VkImageView dvk_get_texture_attachment_view(GLuint name, GLint level,
                       VK_COMPONENT_SWIZZLE_IDENTITY,
                       VK_COMPONENT_SWIZZLE_IDENTITY,
                       VK_COMPONENT_SWIZZLE_IDENTITY};
+
+    // Attachment views get only attachment usage. A face-specific cubemap FBO
+    // therefore remains a single-layer VK_IMAGE_VIEW_TYPE_2D even though the
+    // parent image is also sampled through a six-layer cube view. Layered GL
+    // attachments retain their real layerCount and are allowed to fail on GPUs
+    // (such as A11) that cannot provide layered render targets; silently
+    // flattening them to one face would violate GL semantics.
+    VkImageViewUsageCreateInfo attachmentViewUsage{};
+    attachmentViewUsage.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO;
+    const bool depthStencil = aspect != VK_IMAGE_ASPECT_COLOR_BIT;
+    attachmentViewUsage.usage = depthStencil
+        ? VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT
+        : VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    vci.pNext = &attachmentViewUsage;
+
     VkImageView view = VK_NULL_HANDLE;
-    if (vkCreateImageView(backend()->device, &vci, nullptr, &view) != VK_SUCCESS)
+    const VkResult viewResult = vkCreateImageView(b->device, &vci, nullptr, &view);
+    if (viewResult != VK_SUCCESS) {
+        MITHRIL_LOG_WARN("vk",
+            "attachment vkCreateImageView failed tex=%u level=%d baseLayer=%u "
+            "layerCount=%u layered=%d result=%d",
+            name, level, baseLayer, layerCount, layered ? 1 : 0, (int)viewResult);
         return VK_NULL_HANDLE;
+    }
     tex.attachmentViews.emplace(key, view);
     return view;
 }

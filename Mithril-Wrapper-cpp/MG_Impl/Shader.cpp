@@ -44,6 +44,7 @@
 
 #include <atomic>
 #include <cstdio>
+#include <cstdlib>
 
 #include <spirv_reflect.h>
 
@@ -528,6 +529,69 @@ static bool remap_descriptor_bindings(
 // ---------------------------------------------------------------------------
 // Per-stage glslang configuration + parse (MobileGL ParseShaderSource).
 // ---------------------------------------------------------------------------
+// Forward declaration; the stable FNV-1a implementation below is shared by
+// the link cache and the crash oracle so hashes are deterministic across runs.
+uint64_t fnv1a(const std::string& s);
+
+std::mutex& glslang_transaction_mutex() {
+    static std::mutex m;
+    return m;
+}
+
+const char* shader_stage_label(EShLanguage lang) {
+    switch (lang) {
+        case EShLangVertex:   return "vert";
+        case EShLangFragment: return "frag";
+        case EShLangGeometry: return "geom";
+        case EShLangTessControl: return "tesc";
+        case EShLangTessEvaluation: return "tese";
+        case EShLangCompute:  return "comp";
+        default:              return "unknown";
+    }
+}
+
+void dump_shader_oracle_snapshot(const char* phase, EShLanguage lang,
+                                 const std::string& source) {
+#if defined(MITHRIL_SHADER_CRASH_ORACLE)
+    const char* dir = std::getenv("MITHRIL_SHADER_DUMP_DIR");
+    if (!dir || !*dir) dir = std::getenv("TMPDIR");
+    if (!dir || !*dir) return;
+
+    const uint64_t hash = fnv1a(source);
+    static std::atomic<uint64_t> sequence{0};
+    const uint64_t seq = sequence.fetch_add(1, std::memory_order_relaxed) + 1;
+    char path[1024];
+    std::snprintf(path, sizeof(path), "%s/mithril-shader-last-%s-%s.glsl",
+                  dir, phase, shader_stage_label(lang));
+    if (FILE* f = std::fopen(path, "wb")) {
+        std::fwrite(source.data(), 1, source.size(), f);
+        std::fclose(f);
+    } else {
+        MITHRIL_LOG_WARN("shader", "crash oracle could not write %s", path);
+    }
+
+    // This file is intentionally overwritten immediately before every parse.
+    // If glslang SIGSEGVs inside parse(), it identifies the exact transformed
+    // source that was active, while the per-stage raw files preserve the input.
+    if (std::strcmp(phase, "preprocessed") == 0) {
+        char meta[1024];
+        std::snprintf(meta, sizeof(meta), "%s/mithril-shader-last-parse.meta", dir);
+        if (FILE* f = std::fopen(meta, "wb")) {
+            std::fprintf(f, "sequence=%llu\nstage=%s\nhash=%016llx\nbytes=%zu\nsource=%s\n",
+                         (unsigned long long)seq, shader_stage_label(lang),
+                         (unsigned long long)hash, source.size(), path);
+            std::fclose(f);
+        }
+    }
+    MITHRIL_LOG_INFO("shader",
+        "crash-oracle phase=%s seq=%llu stage=%s hash=%016llx bytes=%zu path=%s",
+        phase, (unsigned long long)seq, shader_stage_label(lang),
+        (unsigned long long)hash, source.size(), path);
+#else
+    (void)phase; (void)lang; (void)source;
+#endif
+}
+
 struct StageConfig {
     glslang::TShader* shader;
     EShLanguage lang;
@@ -553,6 +617,10 @@ bool parse_stage(const StageConfig& cfg, const TBuiltInResource& resources,
     sh.setAutoMapLocations(true);
     sh.setAutoMapBindings(true);
     sh.setGlobalUniformBlockName(kGlobalBlockName);
+
+    // Snapshot after every Mithril rewrite and immediately before glslang
+    // touches the source. A parser crash therefore leaves the exact reproducer.
+    dump_shader_oracle_snapshot("preprocessed", cfg.lang, *cfg.source);
 
     // EShMsgDefault exactly as MobileGL uses; the Vulkan client dialect
     // already enforces Vulkan rules, and EShMsgVulkanRules on top would
@@ -679,12 +747,16 @@ LinkCache& link_cache() { static LinkCache c; return c; }
 
 bool shader_compile_stage(GLenum gl_stage, const std::string& glsl_source,
                           std::string& out_info_log) {
+#if defined(MITHRIL_SERIALIZE_GLSLANG)
+    std::lock_guard<std::mutex> glslangTransaction(glslang_transaction_mutex());
+#endif
     glslang_init();
     EShLanguage lang = to_esh_stage(gl_stage);
     if (lang == EShLangCount) {
         out_info_log = "unsupported shader stage";
         return false;
     }
+    dump_shader_oracle_snapshot("raw", lang, glsl_source);
 
     // Same preprocessing as the link path so COMPILE_STATUS matches what a
     // later link would report.
@@ -702,6 +774,9 @@ bool shader_compile_stage(GLenum gl_stage, const std::string& glsl_source,
 bool shader_link_program(const std::string& vs_source, const std::string& fs_source,
                          const std::unordered_map<std::string, GLuint>* attrib_bindings,
                          ShaderLinkOutput& out, std::string& out_info_log) {
+#if defined(MITHRIL_SERIALIZE_GLSLANG)
+    std::lock_guard<std::mutex> glslangTransaction(glslang_transaction_mutex());
+#endif
     // Cache key: both sources + attrib bindings. The Y-flipped and
     // non-flipped variants are compiled together and cached as a unit so the
     // shared binding assignment stays consistent.
@@ -723,6 +798,9 @@ bool shader_link_program(const std::string& vs_source, const std::string& fs_sou
             return true;
         }
     }
+
+    dump_shader_oracle_snapshot("raw", EShLangVertex, vs_source);
+    dump_shader_oracle_snapshot("raw", EShLangFragment, fs_source);
 
     // Preprocess (shared by both variants).
     std::string vs = vs_source;

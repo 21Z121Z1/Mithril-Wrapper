@@ -9,6 +9,22 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
+# iOS distribution policy: Mithril may either embed MoltenVK (standalone builds)
+# or link the single MoltenVK dylib supplied by the host application. Amethyst
+# already ships Frameworks/libMoltenVK.dylib, so production candidate builds use
+# HOST_DYLIB to avoid two Objective-C MoltenVK runtimes in one process.
+set(MITHRIL_MOLTENVK_LINKAGE "STATIC" CACHE STRING
+    "MoltenVK linkage mode on Apple platforms: STATIC or HOST_DYLIB")
+set_property(CACHE MITHRIL_MOLTENVK_LINKAGE PROPERTY STRINGS STATIC HOST_DYLIB)
+set(MOLTENVK_HOST_DYLIB "" CACHE FILEPATH
+    "Host-provided libMoltenVK.dylib used when MITHRIL_MOLTENVK_LINKAGE=HOST_DYLIB")
+
+# Diagnostics are opt-in for normal builds. The iOS crash candidate enables both:
+# serialize the full glslang transaction and snapshot the exact raw/rewritten GLSL
+# immediately before parse(), so an in-parser SIGSEGV leaves a reproducible oracle.
+option(MITHRIL_SERIALIZE_GLSLANG "Serialize complete glslang compile/link transactions" OFF)
+option(MITHRIL_SHADER_CRASH_ORACLE "Snapshot last raw and rewritten GLSL before glslang parse" OFF)
+
 # Build identity: stamp the git commit id so the dylib prints it on every game
 # startup (crash-log triage). Source it directly from GITHUB_SHA — the commit
 # id GitHub Actions injects as an environment variable on every run. Local
@@ -83,24 +99,34 @@ if(APPLE)
     )
     message(STATUS "MoltenVK headers: ${MOLTENVK_INCLUDE_DIR}")
 
-    # Link against the MoltenVK static library. The CI workflow downloads the
-    # MoltenVK iOS tarball and stages it at the REPO ROOT as
-    #   MoltenVK.xcframework/ios-arm64/libMoltenVK.a   (static lib)
-    #   MoltenVK-Headers/vulkan/vulkan.h               (headers)
-    # (see .github/workflows/build.yml "Download MoltenVK" step). The legacy
-    # Mithril-Wrapper-cpp/3rdparty/MoltenVK location is kept only as a fallback
-    # for local checkouts that vendor the dylib there. NAMES covers both
-    # libMoltenVK.a (CI) and a bare MoltenVK.framework (local).
-    find_library(MOLTENVK_LIBRARY
-        NAMES MoltenVK libMoltenVK
-        PATHS
-            "${CMAKE_SOURCE_DIR}/MoltenVK.xcframework/ios-arm64"
-            "${CMAKE_SOURCE_DIR}/MoltenVK.xcframework"
-            "${CMAKE_SOURCE_DIR}/Mithril-Wrapper-cpp/3rdparty/MoltenVK"
-        NO_CMAKE_FIND_ROOT_PATH
-        REQUIRED
-    )
-    message(STATUS "MoltenVK library: ${MOLTENVK_LIBRARY}")
+    # Keep headers independent from runtime linkage. For Amethyst packaging,
+    # HOST_DYLIB links exactly the dylib already shipped in the host app instead
+    # of embedding another MoltenVK archive into libmithril.dylib.
+    if(MITHRIL_MOLTENVK_LINKAGE STREQUAL "HOST_DYLIB")
+        if(NOT IOS)
+            message(FATAL_ERROR "MITHRIL_MOLTENVK_LINKAGE=HOST_DYLIB is supported only for iOS packaging")
+        endif()
+        if(NOT MOLTENVK_HOST_DYLIB OR NOT EXISTS "${MOLTENVK_HOST_DYLIB}")
+            message(FATAL_ERROR
+                "HOST_DYLIB requires -DMOLTENVK_HOST_DYLIB=/path/to/libMoltenVK.dylib")
+        endif()
+        get_filename_component(MOLTENVK_LIBRARY "${MOLTENVK_HOST_DYLIB}" ABSOLUTE)
+        message(STATUS "MoltenVK linkage: HOST_DYLIB (${MOLTENVK_LIBRARY})")
+    elseif(MITHRIL_MOLTENVK_LINKAGE STREQUAL "STATIC")
+        find_library(MOLTENVK_LIBRARY
+            NAMES MoltenVK libMoltenVK
+            PATHS
+                "${CMAKE_SOURCE_DIR}/MoltenVK.xcframework/ios-arm64"
+                "${CMAKE_SOURCE_DIR}/MoltenVK.xcframework"
+                "${CMAKE_SOURCE_DIR}/Mithril-Wrapper-cpp/3rdparty/MoltenVK"
+            NO_CMAKE_FIND_ROOT_PATH
+            REQUIRED
+        )
+        message(STATUS "MoltenVK linkage: STATIC (${MOLTENVK_LIBRARY})")
+    else()
+        message(FATAL_ERROR
+            "Unsupported MITHRIL_MOLTENVK_LINKAGE='${MITHRIL_MOLTENVK_LINKAGE}' (expected STATIC or HOST_DYLIB)")
+    endif()
 endif()
 
 # ---------------------------------------------------------------------------
@@ -458,7 +484,7 @@ if(APPLE)
     # dylib path — patching it to @rpath/libMoltenVK.dylib would break dyld
     # resolution. install_name_tool -change would silently no-op (old string
     # absent) but we keep the guard explicit so macOS keeps the true path.
-    if(IOS)
+    if(IOS AND MITHRIL_MOLTENVK_LINKAGE STREQUAL "STATIC")
         add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
             COMMAND install_name_tool -change
                 "@rpath/MoltenVK.framework/MoltenVK"
@@ -487,6 +513,12 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE VK_ENABLE_BETA_EXTENSIONS=1)
 target_compile_definitions(${PROJECT_NAME} PRIVATE
     MITHRIL_COMMIT_ID="${MITHRIL_COMMIT_ID}"
 )
+if(MITHRIL_SERIALIZE_GLSLANG)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE MITHRIL_SERIALIZE_GLSLANG=1)
+endif()
+if(MITHRIL_SHADER_CRASH_ORACLE)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE MITHRIL_SHADER_CRASH_ORACLE=1)
+endif()
 
 # ARC for Objective-C++ translation units (EGL surface, GPU info, Vulkan
 # swapchain + the whole DirectMetal backend: its wrapper structs hold strong
