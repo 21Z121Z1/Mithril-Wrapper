@@ -1,0 +1,87 @@
+name: One-shot tighten cubemap contract
+
+on:
+  push:
+    branches:
+      - codex/dvk-a11-single-mvk-shader-oracle-20260831
+    paths:
+      - '.github/workflows/oneshot-tighten-cubemap-contract.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Tighten Vulkan cubemap contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Resources.cpp')
+          s = p.read_text()
+          old = '''    VkImageCreateInfo ici{};
+    ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    ici.imageType = imgType;
+'''
+          new = '''    VkImageCreateInfo ici{};
+    ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    // Vulkan requires CUBE_COMPATIBLE on every 2D image that will be viewed
+    // through VK_IMAGE_VIEW_TYPE_CUBE / CUBE_ARRAY (VUID 01003).  Six array
+    // layers alone are not sufficient.
+    if (target == GL_TEXTURE_CUBE_MAP) {
+        ici.flags |= VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
+    }
+    ici.imageType = imgType;
+'''
+          assert s.count(old) == 1
+          s = s.replace(old, new, 1)
+
+          old = '''        primaryViewUsage.usage = ici.usage &
+            (VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+             VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT);
+'''
+          new = '''        // Image views are consumed only by shader descriptors here; transfer
+        // commands address VkImage subresources directly and do not use a view.
+        // Keep the view contract as narrow as possible so MoltenVK never infers
+        // render-target semantics from this six-layer cube view.
+        primaryViewUsage.usage = ici.usage &
+            (VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT);
+'''
+          assert s.count(old) == 1
+          s = s.replace(old, new, 1)
+
+          s = s.replace('    // restrict a view to a subset of the parent image usages. Transfer usages\n    // are retained because they are harmless for view creation; all attachment\n    // usages are deliberately excluded. Actual FBO views are created below as\n',
+                        '    // restrict a view to a subset of the parent image usages. All attachment\n    // usages are deliberately excluded. Actual FBO views are created below as\n', 1)
+          p.write_text(s)
+          PY
+          git diff --check
+          grep -Fq 'VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT' Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Resources.cpp
+          python3 - <<'PY'
+          from pathlib import Path
+          s=Path('Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Resources.cpp').read_text()
+          segment=s[s.index('primaryViewUsage.usage ='):s.index('if (primaryViewUsage.usage != 0)')]
+          assert 'VK_IMAGE_USAGE_SAMPLED_BIT' in segment
+          assert 'VK_IMAGE_USAGE_STORAGE_BIT' in segment
+          assert 'VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT' not in segment
+          assert 'VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT' not in segment
+          assert 'VK_IMAGE_USAGE_TRANSFER_SRC_BIT' not in segment
+          print('cubemap contract tightening: PASS')
+          PY
+      - name: Commit and remove one-shot workflow
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm .github/workflows/oneshot-tighten-cubemap-contract.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Resources.cpp .github/workflows/oneshot-tighten-cubemap-contract.yml
+          git commit -m 'fix(dvk): make cubemap images Vulkan-compatible'
+          git push origin HEAD:codex/dvk-a11-single-mvk-shader-oracle-20260831
