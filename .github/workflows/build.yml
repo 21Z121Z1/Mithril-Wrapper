@@ -2,9 +2,9 @@ name: build-mithril
 
 on:
   push:
-    branches: [main]
+    branches: [main, integration/directmetal-next]
   pull_request:
-    branches: [main]
+    branches: [main, integration/directmetal-next]
   workflow_dispatch:
 
 permissions:
@@ -16,7 +16,7 @@ concurrency:
 
 jobs:
   agent-contract:
-    name: Agent system contract (candidate HEAD)
+    name: Agent system contract (candidate source)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -32,7 +32,7 @@ jobs:
           ACTUAL_SHA="$(git rev-parse HEAD)"
           ACTUAL_TREE="$(git rev-parse HEAD^{tree})"
           test "$ACTUAL_SHA" = "$EXPECTED_SHA"
-          printf 'proof_subject=candidate-head\nsource_sha=%s\nsource_tree=%s\n' "$ACTUAL_SHA" "$ACTUAL_TREE"
+          printf 'proof_subject=candidate-head-or-push\nsource_sha=%s\nsource_tree=%s\n' "$ACTUAL_SHA" "$ACTUAL_TREE"
 
       - name: Validate machine-readable agent contract
         run: python3 scripts/validate_agent_contract.py
@@ -46,7 +46,7 @@ jobs:
           bash scripts/minecraft-reference.sh --help >/dev/null
 
   directmetal-macos:
-    name: DirectMetal macOS semantics + boundary (merge result)
+    name: DirectMetal macOS semantics + boundary (integration subject)
     needs: agent-contract
     runs-on: macos-15
     steps:
@@ -105,7 +105,7 @@ jobs:
           if-no-files-found: error
 
   directmetal-ios-arm64:
-    name: DirectMetal iPhoneOS arm64 (merge result)
+    name: DirectMetal iPhoneOS arm64 (integration subject)
     needs: agent-contract
     runs-on: macos-15
     steps:
@@ -155,7 +155,7 @@ jobs:
           if-no-files-found: error
 
   legacy-vulkan-linux:
-    name: Vulkan reference regression (merge result)
+    name: Vulkan reference regression (integration subject)
     needs: agent-contract
     runs-on: ubuntu-latest
     steps:

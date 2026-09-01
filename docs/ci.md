@@ -1,180 +1,124 @@
 # Continuous integration as evidence infrastructure
 
-GitHub Actions is an evidence execution plane. It should answer “what does this exact implementation prove in this environment?” without becoming a second build system, source mutator or branch-status database.
+GitHub Actions is an **evidence execution plane**. It answers: “what does this exact subject prove, in this environment?” It is not a second build system, branch database, patch engine or substitute for semantic tests.
 
-See `docs/evidence-model.md` for evidence tiers and exact-identity claim rules.
+## Clean-tree ownership
 
-## Durable workflow ownership
+The clean shipping family shares one normal gate:
 
-### `.github/workflows/build.yml` — normal product gate
+- `main` — shipping/governance baseline;
+- `integration/directmetal-next` — active clean DirectMetal integration while it exists.
 
-Owns the cheap, repeatable evidence required for `main` and pull requests to `main`:
+`.github/workflows/build.yml` runs for pushes and pull requests on both refs. Keeping one definition is deliberate: clean branch topology should not create two subtly different notions of correctness.
 
-- candidate-head agent/control contract proof;
-- clean DirectMetal macOS configure/build + semantic CTest;
-- Vulkan-free shipping boundary verification;
-- iPhoneOS arm64 shipping build/ABI/Mach-O/signature checks;
-- Linux Vulkan reference regression;
-- merge-result integration proof for renderer/build jobs on pull requests.
+Manual `.github/workflows/hosted-metal-gpu-probe.yml` owns Apple runtime evidence the normal matrix cannot faithfully duplicate.
 
-This workflow is read-only (`contents: read`). Keep it deterministic enough to be a required merge gate.
+## Proof subjects
 
-### `.github/workflows/hosted-metal-gpu-probe.yml` — unique platform runtime evidence
+A pull request has at least two distinct Git subjects:
 
-Manual/deep lane for real Apple runtime evidence the normal matrix should not duplicate. It may exercise a hosted Metal GPU or simulator presentation seam, but remains an evidence producer—not a source mutator and not automatically physical-device proof.
+1. **candidate source** — the PR head selected by the author/agent;
+2. **integration subject** — GitHub's synthetic merge result against the target branch.
 
-## Proof subject identity
+The cheap agent-system job explicitly checks out and asserts candidate identity. Product jobs use the integration checkout and record `source_sha` + `source_tree`.
 
-A workflow association and the object it tests are different facts.
+For a push, both identities collapse to the pushed commit, but logs still name the proof subject.
 
-For pull requests distinguish explicitly:
+Never say “CI passed on SHA X” when the product job actually executed a different synthetic merge SHA.
 
-- **candidate head** — `github.event.pull_request.head.sha`; answers “does this exact proposed source satisfy the stated contract?”
-- **synthetic merge result** — `github.sha` for the PR event/default checkout; answers “does the proposal still satisfy the gate when integrated with the current base?”
-- **fixed external product subject** — an explicitly checked out SHA from another branch/history universe; answers only the claim tied to that named product candidate.
+## Durable jobs
 
-`build.yml` deliberately uses both categories: the cheap `agent-contract` job checks out and asserts the exact candidate head, while renderer/build jobs keep GitHub’s merge-result checkout and assert the actual `GITHUB_SHA`. Neither result may masquerade as the other.
+The normal gate owns:
 
-Every important runtime/promotion record should preserve, as applicable:
+- agent-control-plane validation;
+- DirectMetal macOS build + registered semantic suite;
+- Vulkan-free DirectMetal shipping boundary;
+- iPhoneOS arm64 shipping build/package checks;
+- Linux Vulkan reference regression.
 
-```text
-proof_subject
-source SHA
-source tree SHA
-harness SHA when different
-binary identity/hash/UUID
-backend
-platform/runner/device capability
-scenario/workload
-oracle result + limitation
-```
+The hosted platform workflow owns:
 
-A green check attached to PR X is not automatically proof of PR X’s head source. A PASS on source A is not acceptance of source B without an explicit equivalence argument.
+- real hosted Apple-Silicon Metal execution where available;
+- iOS Simulator runtime execution where useful;
+- platform/presentation evidence that is meaningfully different from a cross-build.
 
-## Test ownership versus workflow ownership
+Tests belong to semantic contracts; workflows supply environments.
 
-Tests belong to contracts. Workflows supply environments.
+## Proof DAG
 
-Prefer:
+`docs/agent/proof-graph.json` defines prerequisite ordering over proof profiles from `docs/agent/manifest.json`.
+
+General shape:
 
 ```text
-new semantic rule
-  -> focused test in tests/
-  -> register under existing CTest label
-  -> normal build workflow runs it
+control
+  |
+focused semantic oracle
+  |\
+  | +--> Vulkan regression
+  +----> DirectMetal regression --> hosted Metal --> physical presentation
+  |
+  +----> Minecraft E2E --> paired performance
 ```
 
-Do not prefer:
+Exact obligations depend on the owning component. Shared EGL/GL/shader/lowering changes require both backend regressions even if one backend exposed the bug first.
 
-```text
-new semantic rule
-  -> new top-level workflow
-  -> another bespoke build of the same library
-  -> source grep used as behavioral proof
-```
+A failed cheap prerequisite blocks promotion to expensive evidence until the failure is explained. Device/performance lanes are not debugging starting points.
 
-If a test needs a special environment, add a narrow job/selector to the existing relevant plane before creating a durable top-level workflow.
+## Focused oracle routing
 
-## Agent control-plane validation
+`docs/agent/oracles.json` maps stable semantic topics/components to existing small tests. `scripts/agent-context.py` combines that index with task text and changed-path ownership.
 
-`docs/agent/manifest.json` is machine-readable navigation, ownership, history-universe, boundary and proof-routing data. `scripts/validate_agent_contract.py` validates the graph and runs self-tests for:
+The index is navigation, not truth: source and the test body remain authoritative. Add an oracle-index entry only for a stable reusable test, not a one-off experiment.
 
-- `scripts/agent-context.py` task/diff routing;
-- `scripts/audit-branches.py` multi-universe branch classification;
-- exact candidate-head workflow identity;
-- layer/component/boundary/proof references.
+## Temporary workflows
 
-This gate is intentionally cheap and runs before expensive renderer jobs. It validates rules, not a copied live branch inventory.
+A branch-specific workflow is acceptable only when the existing evidence plane cannot answer a concrete experiment. Before that branch is retired, its value must converge into one of:
 
-## Live branch state is generated
+- a focused reusable oracle;
+- a durable existing workflow capability;
+- exact artifact/provenance referenced by a PR/ledger;
+- a controlled negative result that eliminates a hypothesis.
 
-Do not make CI assert that a dated branch ledger exactly equals live GitHub refs. Branch state is generated with:
+Do not merge experiment/candidate/replay/apply/recovery workflows into the clean tree by inertia.
 
-```bash
-python3 scripts/audit-branches.py --fetch-graph
-```
+CI must remain read-only with respect to repository source. Source mutations belong in explicit commits/PRs.
 
-`status.md` / `branch-ledger.md` are dated reconciliation context only. A live branch count or SHA list is volatile state, not a canonical schema invariant.
+## Evidence tiers
 
-## Branch-specific workflows
+The detailed claim vocabulary is in `docs/evidence-model.md`. In shorthand:
 
-Temporary workflows on experiment/validation branches are tolerated when necessary to answer a question current durable planes cannot express. They are not architectural assets by default.
+- static/build boundary;
+- focused semantic oracle;
+- native backend runtime;
+- host/presentation integration;
+- Minecraft E2E;
+- physical-device/longevity/performance.
 
-Before that branch is retired:
-
-1. decide whether the result is a reusable semantic oracle, platform capability, artifact/provenance record or rejected hypothesis;
-2. move reusable pieces into the durable test/evidence structure;
-3. preserve exact source/evidence identity in PR/commit history;
-4. delete one-off workflow files rather than merging them into the clean tree by inertia.
-
-The 2026-08 DirectVulkan family contains many A/B/candidate/replay workflows. Mine them for semantics, oracles and provenance; do not reproduce the workflow chronology on `main`.
-
-## Cross-history evidence
-
-The legacy DirectVulkan universe has no common Git ancestor with the clean shipping universe. Evidence on a legacy candidate can establish that a behavior worked there, but it cannot by itself establish that a clean-tree semantic transplant is correct.
-
-Cross-universe closure requires:
-
-```text
-legacy source evidence
-  + focused reusable oracle
-  + clean owning-layer implementation
-  + exact clean-candidate proof
-```
-
-Do not use a successful legacy workflow as a substitute for validation of the clean destination.
-
-## Forbidden CI roles
-
-Do not keep canonical workflows whose primary role is to:
-
-- `apply-*`, `materialize-*`, `bootstrap-*`, `stage-*`, `finalize-*`, `recover-*`, replay or one-shot source changes;
-- commit/push implementation edits from Actions;
-- locate source once and preserve the answer as workflow code;
-- duplicate another workflow’s matrix without unique evidence;
-- weaken/fork an oracle merely to make a branch green;
-- treat source-text grep as behavioral proof when an executable oracle is practical.
-
-Automation that changes source belongs in explicit, reviewable agent/PR work—not recurring CI.
-
-## Evidence artifacts
-
-Artifacts are valuable when they make a claim independently inspectable:
-
-- shipping dylib/package + checksum;
-- framebuffer/pixel output that is itself an oracle;
-- concise structured provenance metadata;
-- benchmark distributions/configuration.
-
-Avoid generated Minecraft reference source/client JARs, whole dependency trees, giant unthrottled logs, and duplicate product artifacts with no added proof value.
-
-## Heavy validation
-
-Real Minecraft, stress, performance, long-running diagnostics and physical-device claims are expensive and environment-sensitive. Run them only when they add information E0–E3 cannot provide—but do not make a release/device claim from cheap CI because the heavier proof is inconvenient.
+A higher tier does not erase the need for a lower reusable regression. Real Minecraft may expose the bug, but once understood, the durable semantic rule should usually be protected below E2E too.
 
 ## Failure interpretation
 
-Classify a failed job before rerunning:
+Classify a red job before rerunning:
 
 - product semantic/implementation failure;
-- test/oracle defect;
+- oracle/harness defect;
 - dependency/toolchain incompatibility;
 - environment/capability absence;
 - transient infrastructure failure.
 
-Rerun unchanged only when evidence supports a transient infrastructure failure. Do not use retries to wash out deterministic red states.
+Only rerun unchanged when evidence supports the last category. Repeated reruns are not a substitute for a causal model.
 
 ## Workflow change checklist
 
-Before adding/modifying CI ask:
+Before adding or changing CI, answer:
 
-1. What claim does this uniquely prove?
-2. What is the exact proof subject: candidate, merge result, or fixed external SHA?
-3. Which evidence tier/environment is required?
-4. Can an existing oracle/label/workflow host it?
-5. Is source/tree/binary identity unambiguous?
-6. Is the workflow read-only?
-7. Does it produce a reusable oracle/artifact rather than branch-specific chronology?
-8. What condition removes/simplifies this machinery later?
+1. Which exact claim and proof subject does this uniquely establish?
+2. Which semantic/component owner does it observe?
+3. Can an existing focused oracle + evidence plane express it?
+4. Is the source/tree/binary identity explicit?
+5. Is it read-only?
+6. What cheaper prerequisite must pass first?
+7. What lets this machinery be removed or folded back later?
 
-The best CI architecture is the smallest graph that gives agents high-confidence, exact-subject feedback at every meaningful semantic boundary.
+The optimal CI graph is the smallest graph that gives an agent exact, falsifiable feedback at every important boundary.

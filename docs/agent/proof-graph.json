@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "purpose": "Dependency graph layered over manifest proof profiles. It defines prerequisite ordering and cross-backend blast-radius obligations without duplicating proof-profile descriptions.",
+  "requires": {
+    "control": [],
+    "focused_semantic": ["control"],
+    "directmetal_ctest": ["focused_semantic"],
+    "directvulkan_ctest": ["focused_semantic"],
+    "hosted_metal": ["directmetal_ctest"],
+    "minecraft_e2e": ["focused_semantic"],
+    "presentation_device": ["hosted_metal"],
+    "performance_paired": ["minecraft_e2e"]
+  },
+  "component_obligations": {
+    "host.egl": ["directmetal_ctest", "directvulkan_ctest"],
+    "gl.semantics": ["directmetal_ctest", "directvulkan_ctest"],
+    "shader.contract": ["directmetal_ctest", "directvulkan_ctest"],
+    "semantic.lowering": ["directmetal_ctest", "directvulkan_ctest"],
+    "backend.directmetal": ["directmetal_ctest"],
+    "backend.directvulkan": ["directvulkan_ctest"],
+    "platform.presentation": ["hosted_metal"],
+    "validation.contract": ["control"],
+    "evaluation.control": ["control"],
+    "legacy.migration": ["focused_semantic"]
+  },
+  "rules": [
+    "Prerequisites are transitive and must run in increasing proof-profile rank.",
+    "A failed cheaper prerequisite blocks promotion to more expensive proofs until explained or repaired.",
+    "Shared GL/shader/lowering changes have both native backend regression obligations even when the symptom was discovered in only one backend.",
+    "Legacy migration proof establishes the extracted invariant/oracle; it never proves clean-tree promotion by itself.",
+    "Physical presentation and paired performance are terminal claim proofs, not debugging starting points."
+  ]
+}

@@ -1,0 +1,110 @@
+{
+  "schema_version": 1,
+  "purpose": "Small routing index from semantic topics/components to focused existing oracles. Source/tests remain authoritative; this index only reduces agent search cost.",
+  "oracles": [
+    {
+      "id": "egl_contract",
+      "path": "tests/contract_smoke.c",
+      "components": ["host.egl"],
+      "keywords": ["egl", "display", "config", "context", "surface", "export", "abi"],
+      "backends": ["vulkan"],
+      "proof": "focused_semantic"
+    },
+    {
+      "id": "gl_state",
+      "path": "tests/state_smoke.c",
+      "components": ["gl.semantics"],
+      "keywords": ["state", "error", "enable", "disable", "viewport", "scissor", "clear"],
+      "backends": ["directmetal", "vulkan"],
+      "proof": "focused_semantic"
+    },
+    {
+      "id": "shader_program",
+      "path": "tests/shader_smoke.c",
+      "components": ["shader.contract", "gl.semantics"],
+      "keywords": ["shader", "program", "link", "spirv", "glsl", "reflection", "uniform", "varying"],
+      "backends": ["directmetal", "vulkan"],
+      "proof": "focused_semantic"
+    },
+    {
+      "id": "draw_lowering",
+      "path": "tests/draw_smoke.c",
+      "components": ["gl.semantics", "semantic.lowering"],
+      "keywords": ["draw", "vertex", "index", "primitive", "instance", "lowering", "pipeline"],
+      "backends": ["directmetal", "vulkan"],
+      "proof": "focused_semantic"
+    },
+    {
+      "id": "texture_semantics",
+      "path": "tests/texture_smoke.c",
+      "components": ["gl.semantics", "semantic.lowering"],
+      "keywords": ["texture", "pixel", "upload", "unpack", "pack", "mipmap", "image", "readback"],
+      "backends": ["directmetal", "vulkan"],
+      "proof": "focused_semantic"
+    },
+    {
+      "id": "framebuffer_semantics",
+      "path": "tests/fbo_smoke.c",
+      "components": ["gl.semantics", "semantic.lowering"],
+      "keywords": ["fbo", "framebuffer", "attachment", "blit", "clear", "mrt", "msaa", "depth", "stencil"],
+      "backends": ["directmetal", "vulkan"],
+      "proof": "focused_semantic"
+    },
+    {
+      "id": "sampler_semantics",
+      "path": "tests/sampler_smoke.c",
+      "components": ["gl.semantics", "semantic.lowering", "backend.directmetal"],
+      "keywords": ["sampler", "texture", "binding", "filter", "wrap", "compare"],
+      "backends": ["directmetal"],
+      "proof": "focused_semantic"
+    },
+    {
+      "id": "uniform_block",
+      "path": "tests/ubo_smoke.c",
+      "components": ["shader.contract", "semantic.lowering", "backend.directmetal"],
+      "keywords": ["ubo", "uniform", "block", "binding", "alignment", "buffer"],
+      "backends": ["directmetal"],
+      "proof": "focused_semantic"
+    },
+    {
+      "id": "sync_lifetime",
+      "path": "tests/sync_smoke.c",
+      "components": ["gl.semantics", "semantic.lowering", "backend.directmetal"],
+      "keywords": ["sync", "fence", "flush", "finish", "wait", "lifetime", "command"],
+      "backends": ["directmetal"],
+      "proof": "focused_semantic"
+    },
+    {
+      "id": "query_semantics",
+      "path": "tests/query_smoke.c",
+      "components": ["gl.semantics", "semantic.lowering", "backend.directmetal"],
+      "keywords": ["query", "occlusion", "conditional", "visibility"],
+      "backends": ["directmetal"],
+      "proof": "focused_semantic"
+    },
+    {
+      "id": "packed_vertex",
+      "path": "tests/packed_vertex_attrib_smoke.c",
+      "components": ["gl.semantics", "semantic.lowering"],
+      "keywords": ["vertex", "attrib", "packed", "normalized", "integer", "format"],
+      "backends": ["directmetal", "vulkan"],
+      "proof": "focused_semantic"
+    },
+    {
+      "id": "amethyst_surface",
+      "path": "tests/amethyst_egl_smoke.mm",
+      "components": ["host.egl", "platform.presentation", "backend.directmetal"],
+      "keywords": ["amethyst", "egl", "surface", "cametallayer", "drawable", "present", "swap", "orientation", "bgra"],
+      "backends": ["directmetal"],
+      "proof": "hosted_metal"
+    },
+    {
+      "id": "directmetal_fbo",
+      "path": "tests/directmetal_fbo_smoke.c",
+      "components": ["gl.semantics", "semantic.lowering", "backend.directmetal"],
+      "keywords": ["directmetal", "fbo", "framebuffer", "attachment", "blit", "readback"],
+      "backends": ["directmetal"],
+      "proof": "focused_semantic"
+    }
+  ]
+}

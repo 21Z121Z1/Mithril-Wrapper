@@ -1,129 +1,142 @@
 # Mithril-Wrapper
 
-在 Apple 平台上为 Minecraft Java（LWJGL 3）提供 OpenGL Core 语义实现的自研渲染库。
+Mithril-Wrapper 是面向 Minecraft Java / LWJGL 的 OpenGL compatibility system。目标不是“把 OpenGL 调用逐个翻译成另一套 API”，而是把 Minecraft 可观察到的 GL/EGL 语义解析成明确、可验证的中间意图，再由原生 GPU backend 高效执行。
 
-当前有两条显式 backend 路径：
+Apple 平台的 shipping path 是 **DirectMetal**。Vulkan 路径保留为隔离的 reference/fallback execution engine；在 Apple 上可借助 MoltenVK，在 Linux 上可用于独立回归。两条 backend 不应各自发明不同的 OpenGL 语义。
 
-- `DirectMetal`：GL frontend/state → shared SPIR-V → SPIRV-Cross MSL → Metal；不调用 Vulkan/MoltenVK。Apple 构建默认选择。
-- `Vulkan`：现有 reference/fallback backend；在 Apple 上可通过 MoltenVK，在 Linux 上可通过 Vulkan loader/lavapipe。用 `MITHRIL_BACKEND=vulkan` 显式选择。
+## 系统模型
 
-可用 `MITHRIL_BACKEND=metal|vulkan` 覆盖默认选择。未知名称或非 Apple 构建请求 `metal` 会明确失败，不会静默切换 backend。
-
-## 状态
-
-- **DirectMetal 原生执行路径**：frontend 已改为 backend-neutral draw/resource contract；Apple 路径直接创建 `MTLDevice`、command queue、offscreen RGBA8 + depth/stencil target，执行 GLSL→SPIR-V→MSL→`MTLLibrary`/`MTLRenderPipelineState`，支持 clear（包括按 `GL_DRAW_BUFFERi` 定向的 `glClearBuffer*`）、triangle/line vertex/index/instance draw、自定义 primitive restart、`glProvokingVertex` 的 FIRST/LAST flat-varying 语义、`GL_SAMPLES_PASSED`/`GL_ANY_SAMPLES_PASSED`、loose uniform、真实 GL uniform block（block reflection/查询、`glUniformBlockBinding`、`glBindBufferBase/Range`，每 stage 最多 12 个）、2D texture/mipmap、带 offset/row/skip pixel-store 的 `GL_PIXEL_UNPACK_BUFFER` texture upload 与 `GL_PIXEL_PACK_BUFFER` readback、单采样 `GL_DEPTH_COMPONENT32F` texture（FBO depth write 后可由 shader 原生读取）、独立 GL sampler object、typed `samplerBuffer`/`isamplerBuffer`/`usamplerBuffer`、texture/renderbuffer FBO、MRT、4× MSAA resolve、RGBA8 `GL_TEXTURE_2D_MULTISAMPLE` render target + `sampler2DMS` 读取、同尺寸 nearest blit、基础 depth/blend/raster/stencil state、GL 3.2 fence sync 和可靠 readback。EGL window surface 接受真实 `CAMetalLayer`，默认 framebuffer 在同一 Metal queue 复制到 drawable 并由 `presentDrawable` 非阻塞提交；当前 Amethyst bridge 使用的 `EGL_OPENGL_ES3_BIT`/`EGL_OPENGL_ES_API` negotiation 被作为显式 host compatibility alias 接受，LWJGL 可见的渲染 API 仍是 Mithril 的 desktop OpenGL 3.3 Core exports。program/pipeline 有缓存与销毁边界，pipeline cache 有上限；`glBindAttribLocation`/`glBindFragDataLocation` 在 link 时改写共享 SPIR-V interface location，显式 GLSL layout 优先，Metal/Vulkan 不各自重写 shader namespace；viewport/scissor、texture-unit target/sampler 选择等 observable state 均在调用点快照，不会在延迟编码时折叠；全幅 clear 走 loadAction，局部/写掩码 clear 使用有上限缓存的 Metal clear pipeline。常见交错 VBO（float/half、normalized 8/16-bit、`glVertexAttribIPointer` 的 signed/unsigned 8/16/32-bit）与 GL uniform buffer 都以不可复用 lifetime ID + content version 驻留并跨 draw 复用；backend-neutral vertex ABI 保留 scalar type/normalized，DirectMetal 直接生成匹配的 `MTLVertexFormat`，只有 Metal 无法原生表达的转换才走 typed transient 重排。frontend 在应用 `baseVertex` 前识别任意 GL restart index；无 flat input 的 triangle/line strip 仍使用原生 32-bit restart 哨兵，flat program 才按 GL provoking-vertex 表在共享 draw 层降为保持绕序的 list，fan 与 `GL_LINE_LOOP` 也在同层展开，因此 backend 不各自复制 GL 语义。每次 query begin 使用独立 backend generation，Metal 提交时为本批次复用一个 visibility buffer；跨 clear/flush 的 query 聚合异步 segment，查询 result 才按 GL 要求等待 CPU。buffer texture 从 authoritative GL buffer 按 content version 派生并使用对齐的 native `MTLBuffer` texture view，普通纹理只拥有 image storage，`MTLSamplerState` 由独立、上限 128 项的 LRU cache 复用，动态索引/实例数据和严格按字节去重后的 loose-uniform block 使用三帧复用 upload arena。每个 native command buffer 只附加轻量 completion 状态；`glFenceSync` 提交此前 deferred batch 但不 CPU wait，有限/无限 `glClientWaitSync` 等待该 completion，删除 GLsync 名称也不会提前释放 in-flight 状态。`glFlush`/`eglSwapBuffers` 不 wait，`glFinish`/readback/query result 才建立 CPU 完成点。
-- **Conditional rendering**：`glBeginConditionalRender`/`glEndConditionalRender` 使用真实 DirectMetal occlusion generation。WAIT 模式等待结果；NO_WAIT 模式在未就绪时按规范允许无条件执行、结果已就绪时精确采用结果。零结果会同时丢弃 draw、`glClear` 和 `glClearBuffer*`，query 名称删除与底层 in-flight lifetime 分离；`query_smoke` 以真实 Metal 像素和错误断言覆盖。
-- **Stencil 跨提交持久化**：DirectMetal 的 default framebuffer 与 packed depth/stencil renderbuffer FBO 均以 Metal `Store`/后续 `Load` 保存 stencil；`stencil_persistence_smoke` 在第一次 draw 后强制完成 command buffer，再由第二个 render pass 读取 stencil，并以真实 GPU 像素覆盖匹配与拒绝路径。
-- **Amethyst 呈现像素契约**：所有 GL framebuffer/texture storage 统一保持 row 0 = GL bottom；viewport、scissor、readback、同尺寸 blit 与 render-to-texture sampling 共享该行序，只有 default framebuffer → `CAMetalDrawable` 的 presentation seam 转换成 Apple top-origin display order。`eglSwapBuffers` 把 pending GL frame 与 RGBA→BGRA presentation encoder 编入同一 Metal command buffer，消除每帧多一次 submit。window surface 初始化时会用当前 framebuffer 尺寸运行一次精确的 RGBA render-target→BGRA shader-read probe：通过则保持零额外 copy 的 direct path；只有 direct probe 失败而 texture→private buffer→fragment `uchar4` probe 的 BGRA 字节精确通过时，才复用一张带 256-byte row alignment 的 private compatibility buffer；两条都失败会拒绝 surface，避免黑屏假成功。`fbo_smoke` 用非对称上下颜色验证 draw→readback→texelFetch 及 FBO→FBO/default blit；`amethyst_egl_smoke` 同时读回 default RGBA source、同 pipeline BGRA reference 和可捕获的真实 `CAMetalLayer` drawable，并在 80×48 → 56×96 resize 后逐像素复验顶部蓝色、底部红色。实体 Apple GPU 要求三者字节都正确；Apple Paravirtual 只有在 source/reference 通过且 drawable 全零时才明确报告 byte-readback capability skip。这不把 `EGL_TRUE` 当成视觉完成，也不把 hosted 虚拟 drawable 当成真机显示证据。
-- **Packed current vertex attributes**：8 个 `glVertexAttribP{1,2,3,4}{ui,uiv}` 会按 `INT_2_10_10_10_REV` / `UNSIGNED_INT_2_10_10_10_REV` 解包，仅消费入口名指定的前 N 分量，正确处理 normalized 与 `(0,0,0,1)` 隐式分量，且不修改 disabled array 的 VBO/format 状态。`packed_vertex_attrib_smoke` 同时覆盖 getter/error、DirectMetal 常量属性像素和重新 enable 后的 array 像素。
-- **DirectMetal 当前诚实边界**：window surface 必须由调用方提供 `CAMetalLayer`；swap 时会在编码 pending frame 前同步 drawable 尺寸，尺寸变化会重建默认 target。depth texture 目前仅支持 level 0、单采样 2D `DEPTH_COMPONENT32F`、NULL 初始数据，并支持匹配的 `sampler2DShadow` compare mode/function；CPU upload/readback、mipmap、D16/D24、depth-stencil 及 array/cube shadow sampler 会明确拒绝或不宣称支持。多重采样纹理目前仅支持 2D RGBA8 color（尚无 multisample array/integer/depth texture）；Vulkan context 对这些尚未迁移的纹理存储入口明确返回 unsupported，而不是单调用切换 backend。buffer texture 当前支持 `RGBA8/R8I/R8UI/R32I/R32UI/R32F`，其余合法 GL texel format 会明确返回 unsupported error。sync objects 当前限于单 context/单 Metal command queue（尚未宣称跨 context 共享）。timer/transform-feedback query、两个 occlusion target 同时重叠、dual-source fragment output/blending 尚未接通，会明确返回错误而不是假值。compute、缩放/过滤 framebuffer blit、任意/整数 border color、非零 sampler LOD bias，以及 3D texture 的 mip 链采样尚未接通；mip filter 遇到不完整链会明确拒绝 draw，其余相关路径也会返回错误并记录 unsupported，不宣称这些能力。需要这些功能时应显式使用 Vulkan backend。
-- **Vulkan reference 边界**：scissored clear 已保持顺序并按矩形执行；部分 color-channel 或 stencil-bit clear 暂不近似；真实 GL uniform block 与 texture-buffer descriptor seam 尚未接入。上述路径均明确返回 unsupported/error，不会误用 loose-uniform allocation 或 2D image descriptor 近似执行。
-- **M0 基建已交付**：CMake 双分支工程、EGL 44 符号 + 契约冒烟、GL 342 符号导出、CI build.yml、契约文档。
-- **M1 状态引擎完成**：`src/state/`（全局 Context、错误 FIFO、capability 表）；`src/gl/state.cpp`（S1 组 48 函数真实现：glClear/glViewport/glEnable/glGetString「3.3 Core Profile」/glGetError 等）；生成脚本 `scripts/gen_gl_stubs.py` 支持实现排除名单重新生成 stub。
-- **M2 完成：着色器管线 + Vulkan 后端接通**：
-  - `src/shader/`：glslang GLSL→SPIR-V + SPIRV-Cross 反射（编译缓存、松散 uniform 折入合成 UBO、GLSL 150 自动升级 330；按域拆分 `glsl.cpp`/`reflect.cpp`/`registry.cpp`）；`src/gl/shader.cpp` S2 组约 60 函数真实现（shader 生命周期、link/use、glUniform* 全系、getter）；shader_smoke 通过。
-  - `src/vk/`：dlsym 动态加载 Vulkan loader/ICD（libvulkan → MoltenVK）；instance 级函数经真实 instance 句柄解析（全局 GIPA 只保证全局函数）；UBO 反射 VS+FS 双阶段合并 → 动态 UBO 池；staging 顶点缓冲；renderpass + 清屏 + 帧读回。
-  - `tests/draw_smoke.c` 全链通过（llvmpipe）：GL 层着色 + glDrawArrays → Vulkan 绘制 → glReadPixels 校验（白三角形、tint 驱动变色、背景色）。
-- **M3 完成：顶点数据**：S3 组 76/114 真实现（顶点属性全家族：pointer/IPointer/常量 1-4 系/Divisor、buffer 映射与查询家族、10 个 draw 入口：DrawArrays(Instanced)/DrawElements(Instanced/BaseVertex/Range 双变体)/MultiDraw 全系）；引擎新增双顶点流（顶点+实例）、索引缓冲（统一 UINT32 staging）、TriangleStrip/Fan 拓扑；实例化采用 CPU 逐实例打包（divisor 行复制）；非 4 字节对齐 stride/offset 由 CPU 规整为 float32 打包；`draw_smoke` 扩展 8 个 M3 断言全部通过。
-- **M4 纹理完成（S4 42/42 函数）**：`src/vk/texture.cpp` 上传路径扩展（staging→CmdCopyBufferToImage 全 mip 逐切片、image/view 覆盖 2D/1D、3D volume、2D/1D array、cubemap、白 dummy 兜底）；sampler 不再错误地归 texture image 所有，而是在 draw 时解析 texture parameter 或 unit 上绑定的 GL sampler object，并在 Metal/Vulkan backend 使用有上限的 native sampler cache。`src/gl/texture.cpp` 全量真实现（TexImage1D/2D/3D + TexSub 全系含 cubemap face/array 分层、GetTexImage PACK 回读、GenerateMipmap 逐切片滤波、TexParameter/GetTexParameter/GetTexLevelParameter 全系、S3TC DXT1/3/5 CPU 解压 + GetCompressedTexImage、CopyTexImage/CopyTexSubImage 帧读回、glTexBuffer、glPixelStoref）；`texture_smoke` 26 断言全通过（llvmpipe：红纹理采样/mip/dummy 白/GetTexImage 往返/3D 切片/数组分层/cubemap 6 面/拷贝/texBuffer/压缩）。
-- **M5 完成（S5 FBO 全量 24 + MRT + MSAA）**：
-  - stage A+B 状态管线：`src/vk/pipeline.cpp` 深度附件 D24S8、`PipelineState` 烘焙进 pipeline 缓存 key、显式清除、动态 scissor Y 翻转、depth/blend/cull/frontFace/stencil 域、colorMask/polygon；GL 侧 `BuildPipelineState` 快照接入。
-  - stage C S5 FBO/渲染缓冲：`src/vk/fbo.cpp`（renderbuffer 表 CreateRbImage/Rb view、FBO 表 SetFramebuffer + 懒重建 Vk framebuffer/renderpass，`ResolveDrawFbo` 脏检测 + 纹理重传跟随、`BlitFramebuffer`）；`draw.cpp` SubmitFlush 按 target（默认或 FBO）清屏-渲染-回读，readback buffer 按目标尺寸重建，read/draw 分离绑定；`src/gl/fbo.cpp` 对象表 + 24 函数真实现。
-  - **MRT**：`src/gl/fbo.cpp` color[8] 多附件槽 + `glDrawBuffers`/`glDrawBuffer`/`glReadBuffer` 真实现；Vk 层 renderpass N 附件 + 附件 N 视图、pipeline `attachmentCount=附件数` 每附件独立 blend（draw_mask 未选型号清写掩码）、显式 clear 逐附件（仅 draw buffer 选中）、读回按 read_buf 挑附件。
-  - **MSAA**：renderbuffer `samples>1` → `rasterizationSamples` + resolve 附件（单采样转储）、clear 写颜色与 resolve、读回 resolve 图；`ToVkSampleCount` 映射 1/2/4/8/16/32/64。
-  - `tests/fbo_smoke.c` 29 行 ok（28 断言）：17 状态断言 + S5 FBO 纹理/RBO/blit + MRT 双附件读回与单 drawBuffer 门控 + MSAA 4x resolve 回读；八冒烟（contract/state/shader/draw/texture/fbo/3d/render3d）回归全过。
-
-## 快速构建（Linux 开发循环）
-
-```sh
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
-cmake --build build
-# 产物: output/libmithril.so
+```text
+Minecraft / LWJGL observable behavior
+              |
+              v
+EGL / host ABI and lifecycle
+              |
+              v
+OpenGL + shader observable semantics
+              |
+              v
+backend-neutral resolved intent
+(draw/resource/state + lifetime/version identity)
+              |
+        +-----+-----+
+        |           |
+        v           v
+ DirectMetal      Vulkan
+ shipping        reference
+        |           |
+        +-----+-----+
+              v
+platform / presentation seam
+              |
+              v
+exact-subject evidence -> promotion
 ```
 
-Apple/DirectMetal 本机构建：
+完整 ownership/invariant 定义见 `docs/system-model.md`。最重要的架构 seam 是 `src/backend/*`：mutable GL state 应在被观察时解析成显式 snapshot，native backend 只执行已经解析好的意图。
 
-```sh
-cmake -S . -B build-macos -G Ninja -DCMAKE_BUILD_TYPE=Debug
-cmake --build build-macos
-clang -o /tmp/mithril-draw-smoke tests/draw_smoke.c
-MITHRIL_BACKEND=metal MITHRIL_EXPECT_RENDERER=DirectMetal /tmp/mithril-draw-smoke
-clang -std=c11 -o /tmp/mithril-ubo-smoke tests/ubo_smoke.c
-MITHRIL_BACKEND=metal MTL_DEBUG_LAYER=1 /tmp/mithril-ubo-smoke
-clang -std=c11 -o /tmp/mithril-sampler-smoke tests/sampler_smoke.c
-MITHRIL_BACKEND=metal MTL_DEBUG_LAYER=1 /tmp/mithril-sampler-smoke
-clang -std=c11 -o /tmp/mithril-matrix-uniform-smoke tests/matrix_uniform_smoke.c
-MITHRIL_BACKEND=metal MTL_DEBUG_LAYER=1 /tmp/mithril-matrix-uniform-smoke
-clang -std=c11 -o /tmp/mithril-provoking-vertex-smoke tests/provoking_vertex_smoke.c
-MITHRIL_BACKEND=metal MTL_DEBUG_LAYER=1 /tmp/mithril-provoking-vertex-smoke
-clang -std=c11 -o /tmp/mithril-buffer-texture-smoke tests/buffer_texture_smoke.c
-MITHRIL_BACKEND=metal MTL_DEBUG_LAYER=1 /tmp/mithril-buffer-texture-smoke
-clang -std=c11 -o /tmp/mithril-sync-smoke tests/sync_smoke.c
-MITHRIL_BACKEND=metal MTL_DEBUG_LAYER=1 /tmp/mithril-sync-smoke
-clang -std=c11 -o /tmp/mithril-typed-vertex-smoke tests/typed_vertex_smoke.c
-MITHRIL_BACKEND=metal MTL_DEBUG_LAYER=1 /tmp/mithril-typed-vertex-smoke
-clang -std=c11 -o /tmp/mithril-packed-vertex-attrib-smoke tests/packed_vertex_attrib_smoke.c
-MITHRIL_BACKEND=metal MTL_DEBUG_LAYER=1 /tmp/mithril-packed-vertex-attrib-smoke
-clang -std=c11 -o /tmp/mithril-query-smoke tests/query_smoke.c
-MITHRIL_BACKEND=metal MTL_DEBUG_LAYER=1 /tmp/mithril-query-smoke
-clang -std=c11 -o /tmp/mithril-stencil-persistence-smoke tests/stencil_persistence_smoke.c
-MITHRIL_BACKEND=metal MTL_DEBUG_LAYER=1 /tmp/mithril-stencil-persistence-smoke
-cmake --build build-macos --target amethyst_egl_smoke
-ctest --test-dir build-macos -R '^amethyst_egl_smoke$' --output-on-failure
+## 分支不是架构
+
+仓库包含两个 Git history universe：
+
+- clean shipping family：`main -> integration/directmetal-next`；
+- disconnected legacy/experimental family：以 `integration/directvulkan-reference`、`integration/legacy-capability-port` 及大量 `Mithril-Wrapper-cpp/*` 实验线为主要来源。
+
+legacy family 的价值是语义、oracle 和 provenance，不是可整体合并的产品架构。跨 history universe 的正确动作是 **semantic transplant**：提炼 invariant -> 建 focused oracle -> 放入 clean owner -> exact-subject 验证。
+
+不要从 README 中猜当前 branch 状态。需要实时拓扑时运行：
+
+```bash
+python3 scripts/audit-branches.py --fetch-graph --markdown
 ```
 
-iPhoneOS artifact contract 使用 `./scripts/build_iphoneos.sh`；默认产物位于
-`build-ios/output/libmithril.dylib`。可分别用 `MITHRIL_IOS_BUILD_DIR` 与
-`MITHRIL_IOS_OUTPUT_DIR` 覆盖 build/output 路径，因此 iPhoneOS 验证不会覆盖
-macOS 的 `output/libmithril.dylib`。
+## Agent 入口
 
-DirectMetal 提供版本化、只读的 binding 诊断 ABI：
-`include/mithril/directmetal_diagnostics.h`。调用方在 workload 前 reset、
-`glFinish` 后读取，可获得实际 vertex/fragment texture/sampler Metal 调用数、
-重复状态省略数和 inactive-stage 省略数。`sampler_smoke` 会输出一行
-`DIRECTMETAL_BINDING_STATS` JSON，并同时用像素断言验证多 sampler、非同号
-texture unit、typed integer uniform 快照及删除后的 deferred lifetime。
+编码、审查或恢复历史工作前先读 `AGENTS.md`，不要 breadth-first 扫整个仓库。
 
-## 冒烟测试
+最小上下文入口：
 
-```sh
-gcc -o tests/contract_smoke tests/contract_smoke.c -ldl
-LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu ./tests/contract_smoke   # EGL 契约
-gcc -o tests/state_smoke tests/state_smoke.c -ldl
-LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu ./tests/state_smoke      # GL 状态机
-gcc -o tests/shader_smoke tests/shader_smoke.c -ldl
-LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu ./tests/shader_smoke     # 着色器管线
-gcc -o tests/draw_smoke tests/draw_smoke.c -ldl
-LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu ./tests/draw_smoke       # GL→Vulkan 全链三角（需 lavapipe/loader）
-gcc -o tests/texture_smoke tests/texture_smoke.c -ldl
-LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu ./tests/texture_smoke   # M4 纹理全链（需 lavapipe/loader）
-gcc -o tests/fbo_smoke tests/fbo_smoke.c -ldl
-LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu ./tests/fbo_smoke      # M5 S5 FBO/渲染缓冲 + MRT + MSAA + 状态管线（depth/scissor/blend/cull/stencil/colorMask）
-gcc -o tests/3d_smoke tests/3d_smoke.c -ldl -lm
-LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu ./tests/3d_smoke       # 3D 深度排序 + 透视投影（mat4 uniform 全链）
-gcc -o tests/render3d_smoke tests/render3d_smoke.c -ldl -lm
-LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu ./tests/render3d_smoke # 俯视场景：地板网格 + 立方体 + 像素断言，导出 tests/render3d.ppm
-python3 scripts/ppm_render.py tests/render3d.ppm tests/render3d.png # PPM→PNG
+```bash
+python3 scripts/agent-context.py --task "describe the task"
 ```
 
-> 本开发容器 ldd 找不到 libstdc++/libm/libgcc_s，运行 .so 相关程序需
-> 显式 `LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu`。
+它会给出当前 HEAD/tree、history universe、nearest anchor、ownership、boundary risk、最小读取集合和 proof plan。涉及 Minecraft 26.2 原始行为时：
 
-## 契约文档
-- `CHECKLIST.md` — 桥接契约（Amethyst GL bridge 硬性要求）+ 里程碑规划 + 架构
-- `docs/directmetal-gl33-semantic-matrix.md` — DirectMetal exact/partial/stub/unsupported/untested 能力账本
-- `docs/gl33_core_list.md` — GL 3.3 core 342 函数分组
-- `docs/egl_list.md` — EGL 导出符号清单
+```bash
+SRC="$(bash scripts/minecraft-reference.sh --print-path)"
+```
 
-## 目录结构
+生成内容仅是本地分析输入，不进入 Git/CI artifact。
+
+## Clean-tree 目录
+
+```text
+src/egl       host/EGL 生命周期与 surface seam
+src/gl        OpenGL observable semantics
+src/state     GL 状态与错误模型
+src/shader    GLSL/SPIR-V translation + reflection contract
+src/backend   backend-neutral resolved intent
+src/metal     DirectMetal native execution
+src/vk        Vulkan reference/fallback execution
+include       public / diagnostic ABI
+tests         focused semantic and backend oracles
+cmake         shared test registration
+scripts       build, verification and agent tools
 ```
-src/egl     EGL 层（44 符号，display/config/context/surface 生命周期）
-src/gl      分发电层（exports.cpp 生成 + 按域拆分的真实现 state/shader/vertex/draw）
-src/shader  glslang GLSL→SPIR-V + SPIRV-Cross 反射（M2 完成）
-src/state   GL 状态引擎（Context 结构、错误队列、capability 表）
-src/backend backend-neutral draw/resource contract 与显式 backend 选择
-src/metal   DirectMetal（SPIR-V→MSL、program/pipeline cache、frame arena、command encoding/readback）
-src/vk      Vulkan reference/fallback（dlsym 加载器、离屏渲染、动态 UBO 池、读回）
-scripts/    gen_gl_stubs.py（stub 生成器）、exported_symbols.txt
-tests/      contract_smoke.c / state_smoke.c / shader_smoke.c / draw_smoke.c / ubo_smoke.c / sampler_smoke.c / matrix_uniform_smoke.c / provoking_vertex_smoke.c / buffer_texture_smoke.c / sync_smoke.c / typed_vertex_smoke.c / packed_vertex_attrib_smoke.c / query_smoke.c / stencil_persistence_smoke.c / texture_smoke.c / fbo_smoke.c / 3d_smoke.c / render3d_smoke.c
+
+`Mithril-Wrapper-cpp/*` 属于 disconnected legacy history 中的迁移来源，不是 clean architecture 的第二棵长期产品树。
+
+## 构建与验证
+
+Linux / Vulkan reference：
+
+```bash
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DMITHRIL_BUILD_LEGACY=ON -DMITHRIL_BUILD_DIRECT=OFF
+cmake --build build --parallel
+ctest --test-dir build -L vulkan --output-on-failure
 ```
+
+macOS / DirectMetal：
+
+```bash
+cmake -S . -B build-direct -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DMITHRIL_BUILD_LEGACY=OFF -DMITHRIL_BUILD_DIRECT=ON \
+  -DMITHRIL_ENABLE_SHADER_TOOLCHAIN=ON
+cmake --build build-direct --parallel
+ctest --test-dir build-direct -L directmetal --output-on-failure
+```
+
+iPhoneOS shipping artifact 使用：
+
+```bash
+scripts/build_iphoneos.sh
+```
+
+正常 GitHub Actions gate 同时服务 `main` 与 `integration/directmetal-next`。PR 中 candidate source identity 与 GitHub synthetic merge/integration subject 是两个不同 proof subject；详见 `docs/evidence-model.md` 与 `docs/ci.md`。
+
+## 什么是“已支持”
+
+README 不维护函数级 capability snapshot，因为那会随实现快速过期。
+
+- DirectMetal capability / exact-partial-unsupported 账本：`docs/directmetal-gl33-semantic-matrix.md`
+- GL 3.3 core symbol/domain inventory：`docs/gl33_core_list.md`
+- EGL symbol inventory：`docs/egl_list.md`
+- Amethyst/LWJGL host seam：`docs/contracts/amethyst-host-contract.md`
+- 当前 convergence checkpoint：`docs/agent/status.md`（明确是 dated snapshot）
+
+任何 capability claim 的优先级都是：shipping source/tests + exact tree/binary evidence > stable contract docs > dated status/ledger > historical experiment prose。
+
+## 文档地图
+
+从 `docs/README.md` 开始。核心文档：
+
+- `AGENTS.md` — agent operating contract
+- `docs/system-model.md` — stable abstraction tower
+- `docs/evidence-model.md` — evidence/claim semantics
+- `docs/branches.md` — branch/history-universe policy
+- `docs/ci.md` — durable evidence-plane policy
+- `docs/agent/manifest.json` — machine-readable ownership/router
+- `docs/agent/status.md` — dated current frontier
+
+历史 milestone/checklist 已从默认入口移出；Git 历史及 `docs/history/` 保留 provenance。
