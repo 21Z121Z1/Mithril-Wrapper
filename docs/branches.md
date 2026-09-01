@@ -1,150 +1,175 @@
 # Branch and convergence policy
 
-Mithril-Wrapper has one product architecture but more than one historical Git lineage. Branch policy exists to prevent that history from becoming architecture.
+Mithril-Wrapper has one product architecture but more than one historical Git lineage. Branch policy exists to prevent history from becoming architecture.
 
-**Live Git topology outranks dated branch prose.** When branch state matters, run:
+## Four authorities, four questions
 
-```bash
-python3 scripts/audit-branches.py --fetch-graph --markdown
-```
+Never maintain one document that tries to answer all branch questions.
 
-`docs/agent/status.md` and `docs/agent/branch-ledger.md` are dated reconciliation checkpoints. Use them for rationale and unresolved accounting, but cross-check roles/containment against the generated graph.
+1. **What refs/SHAs/ancestry exist now?**
+
+   ```bash
+   python3 scripts/audit-branches.py --fetch-graph --markdown
+   ```
+
+   Live Git is the only authority for HEAD/tree/ancestry/coverage facts.
+
+2. **What is this ref for?**
+
+   Read `docs/agent/branch-families.json`. It classifies lifecycle/provenance roles such as canonical, experiment, evidence, migration source, candidate and absorbed provenance. Where a source family has been fully accounted by merged PRs, that accounting belongs here rather than in a copied SHA table.
+
+3. **What semantic knowledge remains or has already been extracted?**
+
+   Read `docs/agent/migration-queue.json`.
+
+   - `items` are unresolved semantic/oracle/proof questions with clean destination components and exit conditions.
+   - `accounted_findings` preserve conclusions already extracted from historical code: translate-not-transplant decisions, clean-architecture representations, rejected hypotheses, or old strategies that are not current clean requirements.
+
+   Work identity is semantic, not a branch name.
+
+4. **How did we get here?**
+
+   Historical snapshots live under `docs/history/`. They are provenance, never current branch authority.
+
+`docs/agent/branch-ledger.md` is the short composition contract for these layers and intentionally contains no live SHA table.
 
 ## Canonical roles
 
-### `main` — shipping baseline
+### `main`
 
-`main` is the clean-tree shipping baseline and stable destination for promoted architecture/governance. It is not defined as “the branch with the most commits.”
+Clean shipping baseline and stable destination for promoted architecture/governance. It is not “the branch with the most commits.”
 
-### `integration/directmetal-next` — clean DirectMetal integration
+### `integration/directmetal-next`
 
-Current clean `src/*` DirectMetal development line. Feature/fix/performance refs targeting it should be short-lived and reconciled by semantic/tree/PR evidence before retirement.
+Active clean DirectMetal development line. Keep `main` as an actual ancestor whenever governance/control changes are promoted; do not allow two canonical clean refs to become long-lived parallel histories.
 
-### `integration/directvulkan-reference` — legacy DirectVulkan migration source
+### `integration/directvulkan-reference`
 
-Despite the historical name, this ref has no common ancestor with `main`. It is a migration/reference anchor in the legacy history universe, **not** a clean-tree Vulkan development base.
+Disconnected legacy DirectVulkan migration anchor. Despite its name, it is not the future clean Vulkan development base and is never wholesale-merged into `src/*`.
 
-### `integration/legacy-capability-port` — legacy semantic reconciliation source
+### `integration/legacy-capability-port`
 
-Also disconnected from `main`; preserves older semantic/evidence work pending explicit accounting. It must not be wholesale-merged into the clean product tree.
+Disconnected legacy semantic-reconciliation anchor. Preserve it as provenance/migration source until its remaining semantic questions are accounted for.
 
-The machine-readable anchors and history universes live in `docs/agent/manifest.json`.
+Canonical names/history universes live in `docs/agent/manifest.json`; lifecycle families live separately in `branch-families.json`.
 
-## History universe before branch role
+## Across disconnected histories: semantic transplant
 
-Before merge/rebase/promotion reasoning, first establish whether the relevant refs have a merge base.
-
-The live audit assigns each branch to declared history universes when the commit graph supports that relation, then chooses the nearest anchor inside that universe. This is more informative than comparing every DirectVulkan experiment only to `main`, where all would merely appear `no_common_ancestor`.
-
-Across disconnected histories, use **semantic transplant**:
+Use:
 
 ```text
-source exact SHA/tree
-  -> unique observable behavior or backend invariant
-  -> focused oracle
-  -> clean owning layer
-  -> exact clean-candidate evidence
+source ref / PR / exact tree
+  -> one observable semantic or native invariant
+  -> search open items + accounted findings
+  -> smallest focused oracle
+  -> clean owning abstraction
+  -> exact clean-candidate proof
+  -> update/close/open-account semantic memory
 ```
 
-A direct tree diff across disconnected universes is useful archaeology, not an ancestry/promotion argument.
+A giant cross-history tree diff is archaeology, not a promotion argument.
 
-## Canonical ownership is not Git ancestry
+Before reusing historical work, answer independently:
 
-Squash merges and disconnected histories require three independent questions:
+- history relation: ancestor/descendant/diverged/squash-represented/no-common-ancestor;
+- lifecycle role: product candidate, experiment, evidence, migration source, provenance;
+- semantic delta: the unique behavior/test/contract that matters;
+- prior accounting: whether this exact strategy was already translated/rejected;
+- proof subject: the exact implementation/evidence that now represents retained behavior.
 
-1. **history/ancestry** — same, ancestor, descendant, diverged, squash-represented, or explicit no-common-ancestor;
-2. **semantic delta** — unique changed behavior/tests/contracts, not commit count;
-3. **proof subject** — which exact source/tree/binary and oracle now represent the valuable behavior.
+A newer validation ref may contain no newer product semantics. A squash-merged source may stay Git-divergent. A branch may be obsolete as ownership while retaining one unique unresolved invariant.
 
-A branch may have obsolete ownership while retaining unique semantics. A merged squash source may remain Git-divergent. A validation branch may be newer while containing no newer product semantics.
+## Semantic memory discipline
 
-Branch date and prefix are search hints only.
+An open migration item is one semantic question, not a ticket for merging a branch. Many branches can support one item, and one comprehensive branch can support many items. This many-to-many relation is intentional and prevents branch count from becoming cognitive workload.
 
-## Clean tree versus legacy tree
+Create an open item only when there is evidence of a concrete unresolved semantic/oracle/proof question. Do not populate the queue from branch names alone.
 
-The clean product architecture is rooted at `src/*`; the older DirectVulkan/dual-backend family commonly carries `Mithril-Wrapper-cpp/*` and many branch-local workflows.
+Close an open item only when one of these is explicit:
 
-When a legacy branch contains a valid fix:
+- missing behavior landed in the clean owner and required proof passed;
+- current clean behavior was shown equivalent and exact evidence recorded;
+- historical hypothesis was falsified/rejected and the reason is durable.
 
-1. identify the GL/EGL semantic or native-lifetime rule;
-2. identify the smallest clean-tree owning layer from `docs/system-model.md` / manifest;
-3. preserve or add the focused oracle;
-4. implement the rule in the clean architecture, preferably above backend execution when semantics are shared;
-5. run clean-tree evidence planes on the exact candidate;
-6. retain old SHA/PR only as provenance;
-7. retire the legacy ref only after all unique value is represented and deletion is authorized.
+When historical analysis determines that a legacy implementation strategy should **not** be mechanically ported, record an `accounted_finding`. Negative/translated knowledge is part of the system memory; otherwise future agents will repeatedly rediscover and reconsider the same branch patch.
 
-Do not mechanically transplant old file layouts, duplicated backend policy or one-shot workflows.
+Deleting or merging a source ref does not by itself close semantic work or erase accounted findings.
+
+## Clean versus legacy tree
+
+The clean architecture is rooted at `src/*`. The older family commonly carries `Mithril-Wrapper-cpp/*` plus branch-local investigation workflows.
+
+When a legacy source contains a valid fix:
+
+1. identify the semantic/native-lifetime rule;
+2. check whether it is already an accounted finding or open item;
+3. select the smallest clean owner from the manifest;
+4. preserve or create the focused oracle;
+5. move shared semantics above backend execution when possible;
+6. run the proof DAG on the exact clean candidate;
+7. update semantic memory;
+8. keep old SHA/PR as provenance;
+9. consider branch retirement separately.
+
+Do not mechanically transplant old layouts, duplicated backend policy, legacy descriptor numbering, giant composite smokes or one-shot workflows when the clean abstraction can represent the same meaning more directly.
 
 ## Product, evidence and provenance subjects
 
-Recent DirectVulkan work demonstrates why one branch name is insufficient. A branch can contain a product lineage whose HEAD is only a trigger commit; another descendant may add only a cloud-E2E trigger. `scripts/audit-branches.py` therefore reports changed-path delta class, nearest anchor, coverage and same-tree groups in addition to the HEAD name.
+Keep distinct:
 
-Keep these concepts separate:
+- **product subject** — tree that implements behavior;
+- **validation subject** — harness/workflow that tests a product subject;
+- **replay/provenance subject** — reconstruction/history source.
 
-- **product subject** — source/tree that actually implements behavior;
-- **validation/orchestration subject** — harness/workflow that tests a product subject;
-- **replay/provenance subject** — patch reconstruction/history source.
-
-A trigger commit is not automatically the product implementation, and an evidence-only descendant does not supersede a product-bearing ancestor semantically.
+A trigger commit is not automatically a product implementation; an evidence-only descendant does not semantically supersede a product-bearing ancestor.
 
 ## Creating branches
 
-New long-lived integration refs are exceptional. Prefer bounded task refs:
+New long-lived integration refs are exceptional. Prefer bounded refs:
 
-- `fix/<scope>-<date>` — correctness repair;
-- `perf/<scope>-<date>` — performance phase;
-- `experiment/<hypothesis>-<date>` — controlled A/B hypothesis;
-- `validation/<claim>-<date>` — evidence-only harness;
-- `tooling/<capability>` — reusable tooling.
+- `fix/<scope>-<date>` correctness candidate;
+- `perf/<scope>-<date>` performance phase;
+- `experiment/<hypothesis>-<date>` controlled hypothesis;
+- `validation/<claim>-<date>` evidence-only subject;
+- `tooling/<capability>` reusable tooling.
 
-Every experiment needs an exit route: promote a rule/oracle, preserve a negative result, or delete after falsification.
+If a new naming family is introduced, add/adjust `branch-families.json` so the live audit does not leave it `UNMATCHED` indefinitely.
 
-When sustained clean-tree Vulkan development begins, create its integration ref from the clean shipping universe and record that ownership in the manifest. Do not silently repurpose the disconnected historical DirectVulkan anchor.
+Every experiment needs an exit route: promote a rule/oracle, preserve a negative result, or become removable provenance.
+
+When sustained clean-tree Vulkan development begins, create its integration ref from the clean shipping universe and explicitly change the manifest/family model. Do not repurpose the disconnected historical Vulkan anchor.
 
 ## Pull requests and CI
 
-A PR should state:
+A PR should name owning behavior/layer, source/destination history relation, focused oracle, exact product subject and remaining proof. Validation-only PRs must say so explicitly.
 
-- owning layer / behavior;
-- source/destination history universe and branch;
-- semantic/performance oracle;
-- exact product subject;
-- evidence complete vs still required.
+CI supplies environments; tests own contracts. Candidate source and synthetic integration result are distinct proof subjects. See `docs/ci.md` and `docs/evidence-model.md`.
 
-Validation-only PRs must say so explicitly. CI supplies environments; tests own contracts. Do not make one permanent workflow per fix/experiment.
+## Retirement
 
-See `docs/ci.md` and `docs/evidence-model.md`.
+Generated facts such as `covered_by`, same-tree, duplicate-head, or an `absorbed_provenance` disposition are evidence, not deletion authorization.
 
-## Same-head / same-tree aliases
-
-Two names can point to the same commit, and different commits can produce the same tree. The live audit reports both forms.
-
-These are strong retirement candidates, not deletion authorization. Check open PRs, external workflows/artifacts and unique rationale first.
-
-## Branch retirement
-
-Retire a ref only after:
+Retire a non-canonical ref only after:
 
 1. live topology is refreshed;
-2. history universe and ancestry/squash state are understood;
-3. unique implementation/test/evidence delta is enumerated;
-4. every valuable invariant/oracle is represented by current code or explicitly rejected with evidence;
-5. important provenance remains discoverable in PR/commit/artifact history;
-6. no active workflow/human testing process requires the branch name;
-7. repository owner explicitly authorizes destructive cleanup.
+2. its branch family permits retirement;
+3. every open migration item citing unique behavior is resolved/rejected;
+4. merged PR/tree evidence or accounted findings explain its unique delta, including squash merges;
+5. important provenance remains discoverable;
+6. no open PR/workflow/external test depends on the branch name;
+7. repository owner authorizes destructive cleanup.
 
-Unknown/unclassified deltas fail closed: investigate rather than infer absorption.
+Unknown/unmatched branches and unclassified deltas fail closed: improve the model or investigate rather than inferring absorption.
 
 ## Desired steady state
 
 ```text
 main
-  +-- integration/directmetal-next      (only while ahead clean work exists)
-  +-- <future clean Vulkan integration> (only while sustained clean port exists)
+  -> integration/directmetal-next
+  -> <future clean integration only when actually needed>
 
-legacy migration anchors                (temporary and shrinking)
-short-lived product/experiment/evidence refs
+small semantic migration queue
+large but cheap-to-ignore provenance pool
 ```
 
-The system should accumulate memory in types, contracts, tests, manifest rules and exact evidence—not in an ever-growing branch namespace.
+The repository may temporarily retain many historical refs without forcing agents to remember them. The system should accumulate memory in contracts, tests, open semantic items, accounted findings, family accounting and exact evidence—not in an ever-growing manual branch encyclopedia.

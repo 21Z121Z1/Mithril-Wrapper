@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 """Compile the smallest useful world model for one Mithril task."""
-
 from __future__ import annotations
 
 import argparse
@@ -16,21 +15,19 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 MANIFEST_PATH = ROOT / "docs/agent/manifest.json"
 PROOF_GRAPH_PATH = ROOT / "docs/agent/proof-graph.json"
 ORACLES_PATH = ROOT / "docs/agent/oracles.json"
+MIGRATION_PATH = ROOT / "docs/agent/migration-queue.json"
 
 
 def run_git(*args: str) -> Optional[str]:
-    proc = subprocess.run(
-        ["git", *args], cwd=ROOT, text=True,
-        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-    )
+    proc = subprocess.run(["git", *args], cwd=ROOT, text=True,
+                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     return proc.stdout.strip() if proc.returncode == 0 else None
 
 
 def git_ok(*args: str) -> bool:
-    return subprocess.run(
-        ["git", *args], cwd=ROOT,
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    ).returncode == 0
+    return subprocess.run(["git", *args], cwd=ROOT,
+                          stdout=subprocess.DEVNULL,
+                          stderr=subprocess.DEVNULL).returncode == 0
 
 
 def load_json(path: pathlib.Path) -> dict[str, Any]:
@@ -124,22 +121,23 @@ def classify_paths(manifest: dict[str, Any], files: Iterable[str]) -> tuple[list
     return sorted(mapping), mapping, sorted(gaps)
 
 
-def tokens(text: str) -> set[str]:
-    return {item for item in re.findall(r"[a-z0-9_.+-]+", text.lower()) if len(item) > 1}
+def tokens(value: str) -> set[str]:
+    return {item for item in re.findall(r"[a-z0-9_.+/-]+", value.lower()) if len(item) > 1}
 
 
 TASK_HINTS = {
-    "host.egl": {"egl", "surface", "context", "amethyst", "glfw", "lwjgl"},
-    "gl.semantics": {"gl", "opengl", "state", "fbo", "framebuffer", "pixel", "unpack", "pack", "query", "sync", "texture", "buffer", "draw"},
-    "shader.contract": {"shader", "spirv", "glsl", "reflection", "ubo", "uniform", "sampler", "varying", "location"},
+    "host.egl": {"egl", "surface", "context", "amethyst", "glfw", "lwjgl", "host"},
+    "gl.semantics": {"gl", "opengl", "state", "fbo", "framebuffer", "pixel", "unpack", "pack", "query", "sync", "texture", "buffer", "draw", "anisotropy"},
+    "shader.contract": {"shader", "spirv", "glsl", "reflection", "ubo", "uniform", "sampler", "varying", "location", "interface"},
     "semantic.lowering": {"lowering", "drawparams", "backend-neutral", "semantic", "snapshot", "intent", "lifetime", "generation"},
     "backend.directmetal": {"metal", "directmetal", "mtl", "pso"},
-    "backend.directvulkan": {"vulkan", "directvulkan", "moltenvk", "descriptor", "vk"},
+    "backend.directvulkan": {"vulkan", "directvulkan", "dvk", "moltenvk", "descriptor", "vk"},
     "platform.presentation": {"presentation", "present", "drawable", "cametallayer", "orientation", "yflip", "bgra", "iphoneos"},
-    "validation.contract": {"test", "oracle", "smoke", "readback", "validation"},
-    "evaluation.control": {"ci", "workflow", "agent", "branch", "evidence", "github", "audit"},
-    "legacy.migration": {"legacy", "replay", "patch", "rollout", "transplant", "mithril-wrapper-cpp"},
+    "validation.contract": {"test", "oracle", "smoke", "readback", "validation", "e2e"},
+    "evaluation.control": {"ci", "workflow", "agent", "branch", "evidence", "github", "audit", "family"},
+    "legacy.migration": {"legacy", "replay", "patch", "rollout", "transplant", "migration", "experiment", "codex", "mithril-wrapper-cpp"},
 }
+HISTORY_HINTS = {"branch", "history", "legacy", "replay", "rollout", "transplant", "migration", "experiment", "codex", "directvulkan", "dvk", "moltenvk", "provenance"}
 
 
 def infer_task_components(task: str) -> list[str]:
@@ -187,11 +185,9 @@ def proof_closure(manifest: dict[str, Any], graph: dict[str, Any], direct: list[
     for component_id in direct:
         selected.update(component_map.get(component_id, {}).get("required_proofs", []))
         selected.update(obligations.get(component_id, []))
-
     requires = graph.get("requires", {})
     visiting: set[str] = set()
     done: set[str] = set()
-
     def visit(proof_id: str) -> None:
         if proof_id in done:
             return
@@ -202,7 +198,6 @@ def proof_closure(manifest: dict[str, Any], graph: dict[str, Any], direct: list[
             visit(dep)
         visiting.remove(proof_id)
         done.add(proof_id)
-
     for proof_id in list(selected):
         visit(proof_id)
     unknown = done - set(profiles)
@@ -216,20 +211,55 @@ def route_oracles(index: dict[str, Any], task: str, direct: list[str], limit: in
     active = set(direct)
     scored: list[tuple[int, str, dict[str, Any]]] = []
     for oracle in index.get("oracles", []):
-        component_overlap = len(active & set(oracle.get("components", [])))
-        keyword_overlap = len(observed & set(oracle.get("keywords", [])))
-        score = component_overlap * 20 + keyword_overlap * 5
+        score = len(active & set(oracle.get("components", []))) * 20
+        score += len(observed & set(oracle.get("keywords", []))) * 5
         if score:
             scored.append((score, oracle["id"], oracle))
     scored.sort(key=lambda item: (-item[0], item[1]))
     return [oracle for _, _, oracle in scored[:limit]]
 
 
+def history_relevant(task: str, task_components: list[str], direct: list[str]) -> bool:
+    observed = tokens(task)
+    return bool(observed & HISTORY_HINTS or "legacy.migration" in task_components or "legacy.migration" in direct)
+
+
+def score_memory(record: dict[str, Any], task: str, components: set[str], text_fields: list[str]) -> int:
+    observed = tokens(task)
+    corpus = " ".join(str(record.get(field, "")) for field in text_fields)
+    corpus_tokens = tokens(corpus)
+    score = len(observed & corpus_tokens) * 6
+    record_components = set(record.get("components", record.get("clean_components", [])))
+    score += len(components & record_components) * 18
+    lower_task = task.lower()
+    for ref in record.get("source_refs", []):
+        if ref.lower() in lower_task:
+            score += 40
+    return score
+
+
+def route_history_memory(queue: dict[str, Any], task: str, components: list[str], limit: int = 5) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    active = set(components)
+    open_scored = [
+        (score_memory(item, task, active, ["id", "question", "source_refs"]), item["id"], item)
+        for item in queue.get("items", [])
+    ]
+    finding_scored = [
+        (score_memory(item, task, active, ["id", "finding", "source_refs", "disposition"]), item["id"], item)
+        for item in queue.get("accounted_findings", [])
+    ]
+    open_scored = [item for item in open_scored if item[0] > 0]
+    finding_scored = [item for item in finding_scored if item[0] > 0]
+    open_scored.sort(key=lambda item: (-item[0], item[1]))
+    finding_scored.sort(key=lambda item: (-item[0], item[1]))
+    return ([item for _, _, item in open_scored[:limit]],
+            [item for _, _, item in finding_scored[:limit]])
+
+
 def build_capsule(task: str, requested_claim: str) -> dict[str, Any]:
     manifest = load_json(MANIFEST_PATH)
     graph = load_json(PROOF_GRAPH_PATH)
     oracle_index = load_json(ORACLES_PATH)
-
     branch = run_git("branch", "--show-current") or "detached/unknown"
     head = run_git("rev-parse", "HEAD") or "unknown"
     tree = run_git("rev-parse", "HEAD^{tree}") or "unknown"
@@ -243,14 +273,25 @@ def build_capsule(task: str, requested_claim: str) -> dict[str, Any]:
     basis = "diff" if changed_components else "task_inference" if task_components else "unresolved"
     claim = infer_claim(task, direct, requested_claim)
     boundaries = boundaries_for(manifest, direct)
-    proofs = proof_closure(manifest, graph, direct, claim)
-    focused_oracles = route_oracles(oracle_index, task, direct)
+    proof_components = sorted(set(direct) | set(task_components))
+    proofs = proof_closure(manifest, graph, proof_components, claim)
+    focused_oracles = route_oracles(oracle_index, task, proof_components)
+
+    open_migrations: list[dict[str, Any]] = []
+    accounted_findings: list[dict[str, Any]] = []
+    needs_history = history_relevant(task, task_components, direct)
+    if needs_history:
+        queue = load_json(MIGRATION_PATH)
+        open_migrations, accounted_findings = route_history_memory(
+            queue, task, proof_components)
 
     component_map = {item["id"]: item for item in manifest.get("components", [])}
     read_now = ["AGENTS.md", "docs/system-model.md"]
-    for component_id in direct:
+    for component_id in proof_components:
         read_now.extend(component_map.get(component_id, {}).get("read_now", []))
     read_now.extend(oracle["path"] for oracle in focused_oracles[:2])
+    if needs_history:
+        read_now.extend(["docs/agent/branch-families.json", "docs/agent/migration-queue.json"])
     read_now = list(dict.fromkeys(read_now))
 
     warnings: list[str] = []
@@ -260,6 +301,8 @@ def build_capsule(task: str, requested_claim: str) -> dict[str, Any]:
         warnings.append("legacy history: clean promotion is semantic/oracle transplant, never wholesale merge")
     if basis == "task_inference":
         warnings.append("ownership is inferred from task text because no comparable diff established it")
+    if changed_components and set(task_components) - set(changed_components):
+        warnings.append("task intent touches components outside the current diff; proof/read routing includes both rather than treating existing diff ownership as the task itself")
     if len(changed_components) > 3:
         warnings.append(f"diff directly owns {len(changed_components)} components; split unless the boundary itself is the task")
     if gaps:
@@ -268,34 +311,26 @@ def build_capsule(task: str, requested_claim: str) -> dict[str, Any]:
         warnings.append("working tree is dirty")
     if any(path.startswith(("Mithril-Wrapper-cpp/", "ci/")) for path in files):
         warnings.append("legacy/replay roots changed; isolate reusable semantics/oracles from historical architecture")
-    if any(path.startswith(".github/workflows/") and any(marker in path.lower() for marker in ("experiment", "candidate", "replay", "patch", "apply", "recover")) for path in files):
-        warnings.append("task-local workflow machinery is present; do not promote it as durable CI by inertia")
 
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "task": task or None,
         "claim": claim,
-        "git": {
-            "branch": branch,
-            "head": head,
-            "tree": tree,
-            "dirty": dirty,
-            "history_universe": universe,
-            "nearest_anchor": anchor,
-            "anchor_relations": anchor_relations,
-            "changed_file_count": len(files),
-            "changed_files": files[:120],
-        },
-        "routing": {
-            "ownership_basis": basis,
-            "direct_components": direct,
-            "changed_components": changed_components,
-            "task_components": task_components,
-            "component_files": component_files,
-            "unclassified_files": gaps,
-            "boundaries": boundaries,
-        },
+        "git": {"branch": branch, "head": head, "tree": tree, "dirty": dirty,
+                "history_universe": universe, "nearest_anchor": anchor,
+                "anchor_relations": anchor_relations,
+                "changed_file_count": len(files), "changed_files": files[:120]},
+        "routing": {"ownership_basis": basis, "direct_components": direct,
+                    "proof_components": proof_components,
+                    "changed_components": changed_components,
+                    "task_components": task_components,
+                    "component_files": component_files,
+                    "unclassified_files": gaps,
+                    "boundaries": boundaries},
         "focused_oracles": focused_oracles,
+        "history_memory": {"projected": needs_history,
+                           "open_migrations": open_migrations,
+                           "accounted_findings": accounted_findings},
         "read_now": read_now,
         "proof_plan": proofs,
         "warnings": warnings,
@@ -304,24 +339,28 @@ def build_capsule(task: str, requested_claim: str) -> dict[str, Any]:
 
 def render_markdown(data: dict[str, Any]) -> str:
     git_data, routing = data["git"], data["routing"]
-    lines = [
-        "# Mithril task context", "",
-        f"- branch: `{git_data['branch']}`",
-        f"- HEAD/tree: `{git_data['head']}` / `{git_data['tree']}`",
-        f"- history universe / nearest anchor: `{git_data['history_universe'] or 'unknown'}` / `{git_data['nearest_anchor'] or 'none'}`",
-        f"- ownership basis: `{routing['ownership_basis']}`",
-        f"- claim: `{data['claim']}`",
-    ]
+    lines = ["# Mithril task context", "",
+             f"- branch: `{git_data['branch']}`",
+             f"- HEAD/tree: `{git_data['head']}` / `{git_data['tree']}`",
+             f"- history universe / nearest anchor: `{git_data['history_universe'] or 'unknown'}` / `{git_data['nearest_anchor'] or 'none'}`",
+             f"- ownership basis: `{routing['ownership_basis']}`",
+             f"- claim: `{data['claim']}`"]
     if data.get("task"):
         lines.append(f"- task: {data['task']}")
     if data["warnings"]:
         lines += ["", "## Warnings"] + [f"- {item}" for item in data["warnings"]]
-    lines += ["", "## Owning components"]
-    lines += [f"- `{item}`" for item in routing["direct_components"]] or ["- unresolved"]
+    lines += ["", "## Owning / proof components"]
+    lines += [f"- `{item}`" for item in routing["proof_components"]] or ["- unresolved"]
     if routing["boundaries"]:
         lines += ["", "## Boundary risk"] + [f"- `{item['id']}` — {item['contract']}" for item in routing["boundaries"]]
     lines += ["", "## Focused oracles"]
     lines += [f"- `{item['id']}` -> `{item['path']}` ({', '.join(item['backends'])})" for item in data["focused_oracles"]] or ["- no indexed oracle; search the owning test slice before implementation"]
+    history = data["history_memory"]
+    if history["projected"]:
+        lines += ["", "## Relevant open migration items"]
+        lines += [f"- `{item['id']}` [{item['priority']}/{item['status']}] — {item['question']}" for item in history["open_migrations"]] or ["- none routed from current task; do not invent one from branch names alone"]
+        lines += ["", "## Accounted historical findings"]
+        lines += [f"- `{item['id']}` [{item['disposition']}] — {item['finding']}" for item in history["accounted_findings"]] or ["- none routed"]
     lines += ["", "## Read now"] + [f"- `{path}`" for path in data["read_now"]]
     lines += ["", "## Minimum proof order"]
     lines += [f"{item['rank']}. `{item['id']}` [{item['environment']}] — {item['proves']}" for item in data["proof_plan"]] or ["- unresolved; absence of a planned gate is not acceptance"]
@@ -334,6 +373,7 @@ def self_test() -> None:
     manifest = load_json(MANIFEST_PATH)
     graph = load_json(PROOF_GRAPH_PATH)
     index = load_json(ORACLES_PATH)
+    queue = load_json(MIGRATION_PATH)
     components, _, gaps = classify_paths(manifest, ["src/gl/fbo.cpp", "src/backend/types.h", "src/metal/engine.mm", "Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Resources.cpp"])
     assert {"gl.semantics", "semantic.lowering", "backend.directmetal", "legacy.migration"}.issubset(components)
     assert not gaps
@@ -341,6 +381,12 @@ def self_test() -> None:
     assert proofs.index("focused_semantic") < proofs.index("directmetal_ctest")
     assert "directvulkan_ctest" in proofs
     assert route_oracles(index, "fix incomplete framebuffer fbo semantics", ["gl.semantics"])[0]["id"] == "framebuffer_semantics"
+    assert not history_relevant("fix framebuffer semantics", ["gl.semantics"], ["gl.semantics"])
+    assert history_relevant("reconcile DirectVulkan PBO legacy branch", ["backend.directvulkan", "legacy.migration"], ["backend.directvulkan"])
+    open_items, findings = route_history_memory(queue, "DirectVulkan PBO unpack legacy branch", ["backend.directvulkan", "gl.semantics"])
+    assert open_items and open_items[0]["id"] == "directvulkan.pixel-transfer-unpack-readback"
+    _, descriptor_findings = route_history_memory(queue, "PR16 shared descriptor number UBO legacy", ["shader.contract", "semantic.lowering"])
+    assert descriptor_findings and descriptor_findings[0]["id"] == "pr16.shared-descriptor-number"
     print("agent context self-test: PASS")
 
 
