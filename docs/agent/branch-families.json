@@ -2,93 +2,17 @@
   "schema_version": 1,
   "purpose": "Stable lifecycle classification for branch names. Live HEADs/ancestry come only from Git; semantic work status comes only from migration-queue.json.",
   "families": [
-    {
-      "id": "canonical.clean",
-      "kind": "canonical",
-      "selectors": ["main", "integration/directmetal-next"],
-      "disposition": "active",
-      "description": "Clean shipping family. Keep main as an actual ancestor of the active DirectMetal integration line.",
-      "exit_condition": "never retire while named as canonical roles in manifest.json"
-    },
-    {
-      "id": "canonical.legacy-anchors",
-      "kind": "canonical",
-      "selectors": ["integration/directvulkan-reference", "integration/legacy-capability-port"],
-      "disposition": "migration_anchor",
-      "description": "Disconnected legacy history anchors. They locate provenance; they are not clean-tree merge bases.",
-      "exit_condition": "retire only after every referenced migration item is resolved and policy is changed explicitly"
-    },
-    {
-      "id": "review.agent-control",
-      "kind": "review",
-      "selectors": ["architecture/agent-*"],
-      "disposition": "temporary_review",
-      "description": "Short-lived review refs for repository control-plane changes.",
-      "exit_condition": "merged/closed PR and no automation or active review depends on the ref"
-    },
-    {
-      "id": "evidence.minecraft-ci",
-      "kind": "evidence",
-      "selectors": ["ci/minecraft-on-mithril-*"],
-      "disposition": "provenance_or_oracle_source",
-      "description": "Minecraft execution/evidence refs. Product ownership is elsewhere.",
-      "exit_condition": "durable oracle and exact-subject provenance are represented outside the branch"
-    },
-    {
-      "id": "legacy.directvulkan-codex",
-      "kind": "migration_source",
-      "selectors": ["codex/dvk-*"],
-      "disposition": "semantic_migration_source",
-      "description": "High-value DirectVulkan investigation/replay/artifact refs in the disconnected legacy universe.",
-      "exit_condition": "all migration-queue items citing the ref are resolved/rejected with durable evidence"
-    },
-    {
-      "id": "legacy.directvulkan-experiments",
-      "kind": "experiment",
-      "selectors": ["experiment/dvk-*"],
-      "disposition": "hypothesis_provenance",
-      "description": "One-hypothesis DirectVulkan experiments. Passing experiments never become architecture by inertia.",
-      "exit_condition": "result is distilled into a reusable oracle/contract or explicitly rejected"
-    },
-    {
-      "id": "clean.directmetal-candidates",
-      "kind": "candidate",
-      "selectors": ["fix/directmetal-*", "fix/ios-amethyst-*", "fix/minecraft26-directmetal-*"],
-      "disposition": "audit_or_land",
-      "description": "Clean-tree correctness/runtime candidates. Some are merged provenance; unresolved semantics are named in migration-queue.json.",
-      "exit_condition": "PR/tree containment is proven or the semantic candidate lands with exact-head proof"
-    },
-    {
-      "id": "legacy.reconciliation-fixes",
-      "kind": "migration_source",
-      "selectors": ["fix/directvulkan-*", "fix/dvk-*", "fix/dual-backend-*", "fix/gl-semantic-*", "fix/mobilegl-*"],
-      "disposition": "semantic_migration_source",
-      "description": "Legacy reconciliation/fix refs. Port semantics/oracles only; do not merge the historical architecture wholesale.",
-      "exit_condition": "cited migration debts are resolved and unique provenance is durable"
-    },
-    {
-      "id": "provenance.directmetal-performance",
-      "kind": "provenance",
-      "selectors": ["perf/directmetal-*"],
-      "disposition": "retirement_candidate_after_pr_tree_check",
-      "description": "Phased DirectMetal performance source refs. Merged PR history indicates this is an evolution lineage, not parallel active product ownership.",
-      "exit_condition": "merged PR/tree equivalence or explicit rejection is recorded for every member"
-    },
-    {
-      "id": "provenance.tooling",
-      "kind": "provenance",
-      "selectors": ["tooling/*"],
-      "disposition": "retirement_candidate_after_reference_check",
-      "description": "Tooling source refs whose reusable behavior should live in the clean control plane.",
-      "exit_condition": "clean-tree equivalent exists and no open PR/automation references the branch"
-    },
-    {
-      "id": "evidence.validation",
-      "kind": "evidence",
-      "selectors": ["validation/*"],
-      "disposition": "provenance_only",
-      "description": "Validation/evidence subjects; never infer product ownership from these branch names.",
-      "exit_condition": "exact-subject evidence/provenance is durable outside the branch"
-    }
+    {"id":"canonical.clean","kind":"canonical","selectors":["main","integration/directmetal-next"],"disposition":"active","description":"Clean shipping family. Keep main as an actual ancestor of the active DirectMetal integration line.","exit_condition":"never retire while named as canonical roles in manifest.json"},
+    {"id":"canonical.legacy-anchors","kind":"canonical","selectors":["integration/directvulkan-reference","integration/legacy-capability-port"],"disposition":"migration_anchor","description":"Disconnected legacy history anchors. They locate provenance; they are not clean-tree merge bases.","exit_condition":"retire only after every referenced migration item is resolved and policy is changed explicitly"},
+    {"id":"review.agent-control","kind":"review","selectors":["architecture/agent-*"],"disposition":"temporary_review","description":"Short-lived review refs for repository control-plane changes.","exit_condition":"merged/closed PR and no automation or active review depends on the ref"},
+    {"id":"evidence.minecraft-ci","kind":"evidence","selectors":["ci/minecraft-on-mithril-*"],"disposition":"provenance_or_oracle_source","description":"Minecraft execution/evidence refs. Product ownership is elsewhere.","exit_condition":"durable oracle and exact-subject provenance are represented outside the branch"},
+    {"id":"legacy.directvulkan-codex","kind":"migration_source","selectors":["codex/dvk-*"],"disposition":"semantic_migration_source","description":"High-value DirectVulkan investigation/replay/artifact refs in the disconnected legacy universe.","exit_condition":"all migration-queue items citing the ref are resolved/rejected with durable evidence"},
+    {"id":"legacy.directvulkan-experiments","kind":"experiment","selectors":["experiment/dvk-*"],"disposition":"hypothesis_provenance","description":"One-hypothesis DirectVulkan experiments. Passing experiments never become architecture by inertia.","exit_condition":"result is distilled into a reusable oracle/contract or explicitly rejected"},
+    {"id":"clean.directmetal-candidates","kind":"candidate","selectors":["fix/directmetal-*","fix/ios-amethyst-*"],"disposition":"audit_or_land","description":"Clean-tree correctness/runtime candidates. Unresolved semantics are named in migration-queue.json.","exit_condition":"PR/tree containment is proven or the semantic candidate lands with exact-head proof"},
+    {"id":"provenance.minecraft26-directmetal-closure","kind":"provenance","selectors":["fix/minecraft26-directmetal-runtime-closure-20260819"],"disposition":"absorbed_provenance","description":"Minecraft 26.2 DirectMetal runtime closure already merged into integration/directmetal-next.","accounted_by_prs":[35],"exit_condition":"safe retirement additionally requires no open PR/workflow/external dependency and explicit deletion authorization"},
+    {"id":"legacy.reconciliation-fixes","kind":"migration_source","selectors":["fix/directvulkan-*","fix/dvk-*","fix/dual-backend-*","fix/gl-semantic-*","fix/mobilegl-*"],"disposition":"semantic_migration_source","description":"Legacy reconciliation/fix refs. Port semantics/oracles only; do not merge the historical architecture wholesale.","exit_condition":"cited migration debts are resolved and unique provenance is durable"},
+    {"id":"provenance.directmetal-performance","kind":"provenance","selectors":["perf/directmetal-*"],"disposition":"absorbed_provenance","description":"Eleven phased DirectMetal performance refs whose PRs were individually merged into integration/directmetal-next. They are historical implementation/proof sources, not parallel active product ownership.","accounted_by_prs":[22,23,24,25,26,27,28,29,30,31,32],"exit_condition":"safe retirement additionally requires no open PR/workflow/external dependency and explicit deletion authorization"},
+    {"id":"provenance.tooling","kind":"provenance","selectors":["tooling/*"],"disposition":"retirement_candidate_after_reference_check","description":"Tooling source refs whose reusable behavior should live in the clean control plane.","exit_condition":"clean-tree equivalent exists and no open PR/automation references the branch"},
+    {"id":"evidence.validation","kind":"evidence","selectors":["validation/*"],"disposition":"provenance_only","description":"Validation/evidence subjects; never infer product ownership from these branch names.","exit_condition":"exact-subject evidence/provenance is durable outside the branch"}
   ]
 }
