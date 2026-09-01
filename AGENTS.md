@@ -1,128 +1,175 @@
 # Mithril-Wrapper agent operating contract
 
-This file is the entry point for coding and review agents. Do not begin by reading the repository breadth-first or by treating branch names as state. Compile the smallest current world model first, then drill into the subsystem that owns the requested behavior.
+This is the coding/review entry point. Do not begin breadth-first. The repository is intentionally designed so an agent can compile a small task-local world model, act on one owning seam, prove the result cheaply, and leave the next agent with less uncertainty than before.
 
-## Bootstrap and context budget
+## Bootstrap
 
-Start with the task-local capsule:
+Start with:
 
 ```bash
-python3 scripts/agent-context.py --task "<short task>"
+python3 scripts/agent-context.py --task "<task>"
 ```
 
-It reports exact Git identity, likely owning layer/component, changed paths when a comparable anchor is available, boundary risk, proof obligations and the smallest set of files to read next.
+The capsule reports exact HEAD/tree identity, history universe/nearest anchor, changed-path or task-inferred ownership, semantic boundary risk, focused existing oracles, the smallest read set, and an ordered proof plan.
 
-If the task depends on branch ancestry, migration, replay, "latest branch", absorption or cleanup, refresh the live graph before trusting any dated snapshot:
+Treat its epistemic labels literally:
+
+- `diff` ownership is stronger than task-text inference;
+- `task_inference` is a routing hypothesis, not a source fact;
+- unclassified paths are model gaps, not permission to guess;
+- `legacy_experimental` means semantic/oracle transplant only.
+
+If branch topology affects a decision, refresh the graph:
 
 ```bash
 python3 scripts/audit-branches.py --fetch-graph --markdown
 ```
 
-The audit is read-only with respect to product refs/worktrees. It refreshes remote-tracking commit graphs with `--filter=blob:none`, discovers history-universe membership/nearest anchors and does not check out every branch.
+Only after those two projections should you read raw branch history or broad documentation.
 
-Then use progressive disclosure:
+## Stable mental model
 
-1. `docs/system-model.md` — stable abstraction tower and invariants.
-2. task-routed source/tests returned by `agent-context.py`.
-3. `docs/evidence-model.md` when the claim needs runtime/presentation/performance proof.
-4. `docs/branches.md` when convergence/branch lifecycle matters.
-5. `docs/agent/status.md` / `docs/agent/branch-ledger.md` only as dated reconciliation checkpoints, cross-checked against the live graph.
-6. historical PRs, workflows, patch/replay scripts and raw artifacts only to answer a concrete unresolved question.
+Read `docs/system-model.md` for the abstraction tower. In compressed form:
 
-`docs/agent/manifest.json` is the machine-readable map behind the capsule. `README.md` and `CHECKLIST.md` remain useful product/history references, but they are not current branch/runtime authority by themselves.
+```text
+Minecraft acceptance
+  -> host/EGL contract
+  -> observable GL + shader semantics
+  -> backend-neutral resolved intent
+  -> DirectMetal / Vulkan execution
+  -> platform presentation
+  -> evidence
+  -> convergence/release identity
+```
 
-## System invariants
+Higher layers define meaning. Lower layers execute it.
 
-- The shipping architecture is the clean `src/*` tree. Do not copy a legacy `Mithril-Wrapper-cpp/*` tree wholesale into it.
-- Apple shipping uses the Vulkan-free DirectMetal target. Vulkan is a separate reference/fallback backend and must not leak into the DirectMetal build boundary.
-- Observable GL/EGL/Minecraft semantics belong above backend execution whenever possible. Backends consume an explicit lowered contract; they must not independently invent different API semantics.
-- `src/backend/*` is the architectural lowering seam: mutable frontend state is resolved into explicit draw/resource/state identity before native execution.
-- Queued native work must not reread mutable GL state after the observing operation has captured its semantic snapshot.
-- Resource reuse must be keyed by stable generation/lifetime/content identity where native work may outlive frontend mutation.
-- Internal framebuffer/texture storage semantics stay stable; platform origin or RGBA/BGRA conversion belongs at an explicit presentation seam.
-- Unsupported observable behavior fails closed. A backend capability gap must not silently approximate GL semantics.
-- `main` is the shipping baseline, not automatically the newest implementation. `integration/directmetal-next` is the current clean-tree DirectMetal integration line.
-- `integration/directvulkan-reference` and `integration/legacy-capability-port` are disconnected Git-history anchors relative to `main`. Treat their universe as semantic/evidence transplant source, not a direct clean-tree merge base.
-- A branch name, date, green workflow, PR title or existence of a ref is not proof that behavior is current or absorbed.
-- Never claim a capability for candidate B from evidence produced by candidate A unless relevant source/tree/binary equivalence is explicitly established.
+The long-term center of gravity is `src/backend/*`: queued native work should be understandable from explicit resolved draw/resource/state/lifetime identity without re-running the mutable GL state machine in a backend.
 
-## Branch selection protocol
+## History model
 
-Before editing:
+The repository contains two different Git reasoning modes.
 
-1. Generate the task capsule.
-2. Identify the product tree (`src/*` clean tree versus `Mithril-Wrapper-cpp/*` legacy tree).
-3. Identify the owning abstraction layer/component.
-4. Refresh live topology if branch state affects the decision.
-5. Determine the intended destination branch from stable policy plus live topology; use dated status only as supporting context.
-6. If reusing another branch, establish:
-   - its Git history universe and ancestry/explicit lack of common ancestry;
-   - its unique changed-file / semantic delta;
-   - the exact product subject and evidence attached to that delta.
-7. Prefer a semantic port with a focused regression over a wholesale merge from a disconnected legacy tree.
+### Clean shipping universe
 
-Do not infer containment from age or commit count. Squash merges make ancestry insufficient in the other direction; use PR/tree/semantic evidence as well.
+`main -> integration/directmetal-next`
+
+Use normal Git ancestry plus semantic/evidence proof. Keep this relation simple; governance/control changes promoted to `main` should be converged into the active clean integration line rather than allowing two canonical clean refs to drift indefinitely.
+
+### Legacy/experimental universe
+
+`integration/directvulkan-reference`, `integration/legacy-capability-port`, `Mithril-Wrapper-cpp/*` and many experiment/replay/evidence refs belong to a disconnected historical family.
+
+They are valuable sources of invariants, tests and provenance. They are **not** wholesale merge targets for `src/*`.
+
+Before reusing a branch, establish:
+
+1. history universe and ancestry/no-common-ancestor state;
+2. unique semantic/test delta rather than commit count;
+3. exact current proof location for the behavior being retained.
+
+Squash merges mean ancestry alone is insufficient in either direction.
+
+## Ownership map
+
+Machine routing lives in `docs/agent/manifest.json`.
+
+Common owners:
+
+- EGL/host lifecycle: `src/egl/*`;
+- GL state/object/error/FBO/pixel-store/query/sync semantics: `src/gl/*`, `src/state/*`;
+- GLSL/SPIR-V/reflection/interface semantics: `src/shader/*`;
+- resolved draw/resource contract: `src/backend/*`;
+- DirectMetal execution only: `src/metal/*`;
+- Vulkan execution only: `src/vk/*`;
+- host/display seam: presentation tests + EGL/backend window seam;
+- validation: `tests/*`, `cmake/MithrilSmokeTests.cmake`;
+- agent/evidence control: `AGENTS.md`, `docs/agent/*`, `docs/ci.md`, `docs/evidence-model.md`, agent scripts and durable workflows.
+
+If the same generic GL rule appears necessary in both `src/metal/*` and `src/vk/*`, first test whether it belongs in GL/shader/lowering instead.
 
 ## Investigation loop
 
-Use the shortest closed evidence loop:
+Use:
 
-`observable failure -> owning contract -> smallest oracle -> implementation -> exact-subject verification -> broader gate`
+`observable failure -> owning contract -> smallest falsifier -> implementation -> exact-subject proof -> broader acceptance`
 
-Start from an existing oracle. If no oracle can distinguish the bug from adjacent behavior, add one before changing implementation when practical. Do not create a new one-bug/one-workflow Actions file when an existing evidence plane can host the oracle.
+Do not start from a giant Minecraft log if a 50-line semantic oracle can distinguish the hypothesis. Conversely, do not claim a real host/device behavior from a headless oracle.
 
-For Minecraft 26.2 behavior, materialize the local reference source instead of guessing from logs:
+For Minecraft 26.2 source behavior:
 
 ```bash
 SRC="$(bash scripts/minecraft-reference.sh --print-path)"
 ```
 
-The generated `.minecraft-reference/` tree is local analysis input only. Never commit or upload it as an artifact. See `docs/minecraft-reference.md`.
+The generated reference tree is local analysis input only and must never be committed or uploaded as an artifact.
 
-## Change placement
+## Oracle routing
 
-- EGL/host ABI and surface lifecycle: `src/egl/*` plus presentation tests.
-- GL state and observable API semantics: `src/gl/*`, `src/state/*` plus semantic smoke tests.
-- Shader semantic translation/reflection: `src/shader/*` and GL shader/program code.
-- Backend-neutral resource/draw contract: `src/backend/*`.
-- DirectMetal execution only: `src/metal/*`.
-- Vulkan reference execution only: `src/vk/*`.
-- Cross-platform test registration: `cmake/MithrilSmokeTests.cmake`.
-- Durable normal CI: `.github/workflows/build.yml`; unique hosted Apple runtime evidence: `hosted-metal-gpu-probe.yml`.
-- Legacy/replay source: `Mithril-Wrapper-cpp/*`, `ci/*`; extract semantics/oracles rather than preserving its architecture.
+`docs/agent/oracles.json` is a small search-cost index over stable tests. It does not replace test bodies. The context compiler uses it to surface likely focused oracles such as framebuffer, shader, texture, draw, sync or Amethyst-surface tests.
 
-If a change seems to require the same semantic rule in both `src/metal/*` and `src/vk/*`, first check whether the rule belongs in the shared frontend/backend-neutral contract instead.
+If no indexed oracle distinguishes the bug, inspect the owning test slice and add a focused reusable oracle before implementation when practical.
 
-## Verification ladder
+Do not add an oracle-index entry for a one-off experiment.
 
-Use the smallest applicable prefix, then expand:
+## Proof DAG
 
-1. agent/manifest/control invariants;
-2. focused regression for the changed contract;
-3. backend semantic label (`ctest -L directmetal` or `ctest -L vulkan`);
-4. shipping boundary/build checks;
-5. host/presentation runtime evidence when the seam is touched;
-6. Minecraft E2E when behavior depends on real client call patterns;
-7. physical-device/long-run evidence only for claims hosted CI cannot establish;
-8. paired/fixed-workload performance evidence only after correctness and activation are established.
+`docs/agent/proof-graph.json` defines prerequisite order over proof profiles in the manifest.
 
-Compilation is not activation. Activation is not semantic correctness. Semantic correctness is not physical presentation correctness. One average FPS number is not performance acceptance.
+Key rules:
 
-On pull requests distinguish **candidate-head proof** from **synthetic merge-result proof**. Record which object a workflow actually checked out; a check attached to a PR is not automatically a check of the PR head.
+- control validation precedes semantic proof;
+- focused semantic proof precedes backend suites;
+- shared EGL/GL/shader/lowering changes require both DirectMetal and Vulkan regressions;
+- hosted platform proof comes after DirectMetal semantic proof;
+- physical presentation and paired performance are terminal claim proofs, not debugging starting points;
+- a red cheaper prerequisite blocks escalation until explained.
 
-A task is not complete merely because code exists. Record what was actually verified, exact source/tree/binary identity, and any remaining evidence gap.
+For pull requests, candidate HEAD and GitHub synthetic merge result are separate proof subjects. See `docs/ci.md` and `docs/evidence-model.md`.
+
+## Performance work
+
+Do not bypass the abstraction tower for speed.
+
+Preferred order:
+
+1. identify a measured or structurally repeated cost;
+2. locate the owner of redundant work;
+3. make identity/lifetime explicit;
+4. preserve the semantic oracle;
+5. use structural counters where they prove the intended shape;
+6. only then run matched performance measurement.
+
+Avoid optimizing through hidden ownership, mutable-state reachback, accidental lifetime extension or backend-specific semantic forks.
 
 ## Knowledge accumulation
 
-Put information at the narrowest durable layer:
+Store knowledge at the narrowest durable level:
 
-- stable architecture/invariants -> `docs/system-model.md`;
-- current frontier/blockers -> dated `docs/agent/status.md` only when a snapshot is useful;
-- live branch topology -> generated `scripts/audit-branches.py` output;
-- branch reconciliation decisions -> `docs/agent/branch-ledger.md` plus PR history;
-- ownership/boundary/proof routing -> `docs/agent/manifest.json` + validator/self-tests;
-- proof rules -> `docs/evidence-model.md`;
-- subsystem contract -> focused source-adjacent document/test;
-- historical experiment detail -> PR/commit/artifact, referenced from the ledger only if still decision-relevant.
+- repeated semantic lesson -> test/type/contract;
+- ownership/routing rule -> manifest + validator;
+- proof dependency -> proof graph;
+- reusable falsifier -> oracle index + test;
+- stable architectural rationale -> ADR/system model;
+- current frontier -> dated status;
+- branch reconciliation -> live Git audit + dated ledger;
+- one experiment -> PR/commit/artifact provenance.
 
-A durable result should be compiled into a type, invariant, test, manifest rule, oracle or evidence contract. Do not grow `README.md`, `CHECKLIST.md`, status, ledger or this file into append-only incident logs.
+Do not append incident history to README, CHECKLIST, AGENTS or stable architecture docs.
+
+The desired invariant is:
+
+> after a successful investigation, a future agent should need fewer tokens and fewer Git/test operations to reach the same understanding.
+
+## Completion
+
+Before declaring a task complete:
+
+- exact source/tree subject is known;
+- ownership layer is explicit;
+- smallest relevant oracle passed;
+- proof-DAG prerequisites for the claimed scope passed;
+- integration/device/performance claims are not inferred from weaker evidence;
+- legacy provenance is separated from clean implementation;
+- durable knowledge was distilled into the proper executable/stable layer;
+- remaining uncertainty is named rather than hidden.
