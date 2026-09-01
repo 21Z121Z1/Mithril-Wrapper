@@ -102,7 +102,7 @@
       "id": "directmetal_fbo",
       "path": "tests/directmetal_fbo_smoke.c",
       "components": ["gl.semantics", "semantic.lowering", "backend.directmetal"],
-      "keywords": ["directmetal", "fbo", "framebuffer", "attachment", "blit", "readback"],
+      "keywords": ["directmetal", "metal", "native", "backend", "render-target"],
       "backends": ["directmetal"],
       "proof": "focused_semantic"
     }
