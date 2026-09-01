@@ -1,24 +1,27 @@
 #!/usr/bin/env python3
-"""Compile live Mithril branch heads into history-universe lineage facts."""
+"""Compile live Mithril refs into topology facts plus stable lifecycle families."""
 
 from __future__ import annotations
 
 import argparse
 import collections
 import datetime as dt
+import fnmatch
 import json
 import pathlib
 import subprocess
 import sys
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from typing import Any, Optional
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / "docs/agent/manifest.json"
+FAMILIES = ROOT / "docs/agent/branch-families.json"
 
 
 def git(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["git", *args], cwd=ROOT, check=check, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    return subprocess.run(["git", *args], cwd=ROOT, check=check, text=True,
+                          stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
 
 def out(*args: str) -> str:
@@ -29,8 +32,8 @@ def exists(spec: str) -> bool:
     return git("cat-file", "-e", spec, check=False).returncode == 0
 
 
-def load_manifest() -> dict[str, Any]:
-    return json.loads(MANIFEST.read_text(encoding="utf-8"))
+def load(path: pathlib.Path) -> dict[str, Any]:
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def live_heads(remote: str) -> dict[str, str]:
@@ -81,14 +84,8 @@ def relation(a: str, b: str) -> tuple[str, Optional[int], Optional[int], Optiona
     mb = merge_base(a, b)
     if not mb:
         return "no_common_ancestor", None, None, None
-    counts = out("rev-list", "--left-right", "--count", f"{a}...{b}")
-    left, right = (int(part) for part in counts.split())
-    if mb == a:
-        kind = "ahead"
-    elif mb == b:
-        kind = "behind"
-    else:
-        kind = "diverged"
+    left, right = (int(part) for part in out("rev-list", "--left-right", "--count", f"{a}...{b}").split())
+    kind = "ahead" if mb == a else "behind" if mb == b else "diverged"
     return kind, right, left, mb
 
 
@@ -103,11 +100,7 @@ def tree_flavor(head: str) -> str:
     legacy = exists(f"{head}:Mithril-Wrapper-cpp")
     if clean and legacy:
         return "hybrid"
-    if clean:
-        return "clean"
-    if legacy:
-        return "legacy"
-    return "other"
+    return "clean" if clean else "legacy" if legacy else "other"
 
 
 def changed_paths(base: str, head: str) -> list[str]:
@@ -134,6 +127,14 @@ def workflow_debt(paths: list[str]) -> list[str]:
     return [path for path in paths if path.startswith(".github/workflows/") and any(marker in path.lower() for marker in markers)]
 
 
+def family_matches(registry: dict[str, Any], branch: str) -> list[dict[str, Any]]:
+    result = []
+    for family in registry.get("families", []):
+        if any(fnmatch.fnmatchcase(branch, selector) for selector in family.get("selectors", [])):
+            result.append(family)
+    return result
+
+
 def anchors(manifest: dict[str, Any], live: dict[str, str]) -> list[tuple[str, str, str]]:
     result = []
     for universe in manifest.get("history_universes", []):
@@ -144,7 +145,7 @@ def anchors(manifest: dict[str, Any], live: dict[str, str]) -> list[tuple[str, s
 
 
 def containing_live_branches(head: str, remote: str, live: dict[str, str], local: dict[str, str]) -> list[str]:
-    """One graph walk per head, replacing pairwise merge-base subprocesses."""
+    """One graph walk per head; stale remote-tracking refs never count as live coverage."""
     if not exists(f"{head}^{{commit}}"):
         return []
     proc = git("for-each-ref", f"--contains={head}", "--format=%(refname:short)", f"refs/remotes/{remote}", check=False)
@@ -156,7 +157,6 @@ def containing_live_branches(head: str, remote: str, live: dict[str, str], local
         if not ref.startswith(prefix) or ref == f"{remote}/HEAD":
             continue
         name = ref[len(prefix):]
-        # Do not let stale local remote-tracking refs masquerade as live coverage.
         if name in live and local.get(name) == live[name]:
             result.append(name)
     return sorted(set(result))
@@ -168,6 +168,9 @@ class BranchFact:
     head: str
     tree: Optional[str]
     tree_flavor: str
+    family_ids: list[str]
+    family_dispositions: list[str]
+    family_unmatched: bool
     relation_to_base: str
     base_ahead: Optional[int]
     base_behind: Optional[int]
@@ -185,7 +188,7 @@ class BranchFact:
 
 
 def build_snapshot(remote: str, base_branch: str, refreshed: bool) -> dict[str, Any]:
-    manifest = load_manifest()
+    manifest, registry = load(MANIFEST), load(FAMILIES)
     live = live_heads(remote)
     if base_branch not in live:
         raise RuntimeError(f"base branch {base_branch!r} does not exist")
@@ -203,7 +206,15 @@ def build_snapshot(remote: str, base_branch: str, refreshed: bool) -> dict[str, 
             tree_groups[tree].append(name)
 
     facts: list[BranchFact] = []
+    family_counts: collections.Counter[str] = collections.Counter()
+    unmatched: list[str] = []
     for name, head in sorted(live.items()):
+        matched = family_matches(registry, name)
+        if not matched:
+            unmatched.append(name)
+        for family in matched:
+            family_counts[family["id"]] += 1
+
         base_kind, base_ahead, base_behind, _ = relation(base_sha, head)
         candidates: list[tuple[int, int, str, str, tuple[str, Optional[int], Optional[int], Optional[str]]]] = []
         universes: set[str] = set()
@@ -230,6 +241,9 @@ def build_snapshot(remote: str, base_branch: str, refreshed: bool) -> dict[str, 
 
         facts.append(BranchFact(
             name=name, head=head, tree=tree, tree_flavor=tree_flavor(head),
+            family_ids=[item["id"] for item in matched],
+            family_dispositions=sorted({item["disposition"] for item in matched}),
+            family_unmatched=not matched,
             relation_to_base=base_kind, base_ahead=base_ahead, base_behind=base_behind,
             history_universes=sorted(universes), nearest_anchor=nearest,
             relation_to_anchor=anchor_kind, anchor_ahead=anchor_ahead, anchor_behind=anchor_behind,
@@ -239,16 +253,8 @@ def build_snapshot(remote: str, base_branch: str, refreshed: bool) -> dict[str, 
         ))
 
     declared = {role["name"] for role in manifest.get("branch_roles", [])}
-    duplicate_heads = [
-        {"head": sha, "branches": sorted(name for name, value in live.items() if value == sha)}
-        for sha, count in sorted(heads_count.items()) if count > 1
-    ]
-    duplicate_trees = [
-        {"tree": tree, "branches": sorted(names)}
-        for tree, names in sorted(tree_groups.items()) if len(names) > 1
-    ]
     return {
-        "schema_version": 3,
+        "schema_version": 4,
         "generated_at_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
         "remote": remote,
         "base_branch": base_branch,
@@ -257,24 +263,37 @@ def build_snapshot(remote: str, base_branch: str, refreshed: bool) -> dict[str, 
         "branch_count": len(facts),
         "declared_anchor_count": len(declared & set(live)),
         "non_anchor_branch_count": len(set(live) - declared),
+        "family_counts": dict(sorted(family_counts.items())),
+        "unmatched_branches": sorted(unmatched),
         "history_universes": manifest.get("history_universes", []),
-        "duplicate_head_groups": duplicate_heads,
-        "duplicate_tree_groups": duplicate_trees,
+        "duplicate_head_groups": [
+            {"head": sha, "branches": sorted(name for name, value in live.items() if value == sha)}
+            for sha, count in sorted(heads_count.items()) if count > 1
+        ],
+        "duplicate_tree_groups": [
+            {"tree": tree, "branches": sorted(names)}
+            for tree, names in sorted(tree_groups.items()) if len(names) > 1
+        ],
         "branches": [asdict(item) for item in facts],
-        "epistemic_note": "Coverage/tree classifications are generated Git facts, not branch-deletion authorization. Without --fetch-graph local reachability may be incomplete."
+        "epistemic_note": "Git fields are live/generated; family fields are lifecycle metadata; neither is deletion authorization. Semantic work status lives in migration-queue.json."
     }
 
 
 def print_markdown(snapshot: dict[str, Any]) -> None:
     print(f"# Branch topology ({snapshot['generated_at_utc']})\n")
     print(f"Base `{snapshot['base_branch']}` @ `{snapshot['base_sha']}`; branches={snapshot['branch_count']}; graph_refreshed={str(snapshot['graph_refreshed']).lower()}\n")
-    print("| Branch | HEAD | Tree | Universe | Anchor | Relation | A/B | Delta | Covered by |")
-    print("| --- | --- | --- | --- | --- | --- | ---: | --- | --- |")
+    print("| Branch | HEAD | Family | Tree | Universe | Anchor | Relation | A/B | Delta | Covered by |")
+    print("| --- | --- | --- | --- | --- | --- | --- | ---: | --- | --- |")
     for item in snapshot["branches"]:
         counts = "?" if item["anchor_ahead"] is None else f"{item['anchor_ahead']}/{item['anchor_behind']}"
         covered = ", ".join(item["covered_by"][:2]) + (f" +{len(item['covered_by']) - 2}" if len(item["covered_by"]) > 2 else "")
         dup = " *" if item["duplicate_head"] else ""
-        print(f"| `{item['name']}` | `{item['head'][:12]}`{dup} | {item['tree_flavor']} | {','.join(item['history_universes']) or 'unknown'} | `{item['nearest_anchor'] or '-'}` | {item['relation_to_anchor']} | {counts} | {item['delta_kind']} ({item['changed_file_count']}) | {covered or '-'} |")
+        family = ",".join(item["family_ids"]) or "UNMATCHED"
+        print(f"| `{item['name']}` | `{item['head'][:12]}`{dup} | {family} | {item['tree_flavor']} | {','.join(item['history_universes']) or 'unknown'} | `{item['nearest_anchor'] or '-'}` | {item['relation_to_anchor']} | {counts} | {item['delta_kind']} ({item['changed_file_count']}) | {covered or '-'} |")
+    if snapshot["unmatched_branches"]:
+        print("\nUnmatched lifecycle refs (control-model debt):")
+        for name in snapshot["unmatched_branches"]:
+            print(f"- `{name}`")
     if snapshot["duplicate_head_groups"]:
         print("\nExact duplicate HEADs:")
         for group in snapshot["duplicate_head_groups"]:
@@ -287,7 +306,10 @@ def self_test() -> None:
     assert delta_kind(["Mithril-Wrapper-cpp/MG_Impl/Drawing.cpp"]) == "product_or_semantic_source"
     assert delta_kind([".github/workflows/experiment-a.yml", "tests/a.c"]) == "evidence_control_or_build_only"
     assert workflow_debt([".github/workflows/ios-candidate-v4.yml"])
-    assert not workflow_debt([".github/workflows/build.yml"])
+    registry = load(FAMILIES)
+    assert [item["id"] for item in family_matches(registry, "main")] == ["canonical.clean"]
+    assert "legacy.directvulkan-experiments" in [item["id"] for item in family_matches(registry, "experiment/dvk-pbo-full-unpack-20260827")]
+    assert "provenance.directmetal-performance" in [item["id"] for item in family_matches(registry, "perf/directmetal-async-pso-precompile-20260818")]
     print("branch audit self-test: PASS")
 
 
@@ -306,7 +328,7 @@ def main() -> int:
         if args.fetch_graph:
             fetch_graph(args.remote)
         snapshot = build_snapshot(args.remote, args.base, args.fetch_graph)
-    except (RuntimeError, subprocess.SubprocessError, ValueError, json.JSONDecodeError) as exc:
+    except (RuntimeError, subprocess.SubprocessError, ValueError, json.JSONDecodeError, OSError) as exc:
         print(f"branch audit failed: {exc}", file=sys.stderr)
         return 1
     if args.markdown:

@@ -1,0 +1,123 @@
+{
+  "schema_version": 1,
+  "purpose": "Semantic convergence queue. Items are behaviors/oracles still needing clean ownership, proof or explicit rejection; branch refs are provenance inputs, not work-item identity.",
+  "items": [
+    {
+      "id": "directmetal.incomplete-fbo-fail-closed",
+      "status": "open_candidate",
+      "priority": "high",
+      "source_refs": ["fix/directmetal-incomplete-fbo-20260819"],
+      "source_prs": [34],
+      "target_branch": "integration/directmetal-next",
+      "components": ["gl.semantics", "semantic.lowering"],
+      "oracles": ["framebuffer_semantics"],
+      "proofs": ["focused_semantic", "directmetal_ctest", "directvulkan_ctest"],
+      "question": "Do all rendering/read/copy/blit operations fail closed with GL_INVALID_FRAMEBUFFER_OPERATION before native lowering when the relevant FBO is incomplete, including zero-work calls?",
+      "exit_condition": "port/rebase the current semantic delta onto current integration, add/retain a focused negative oracle, and close with latest-head shared/backend proof"
+    },
+    {
+      "id": "directmetal.ios-host-runtime-isolation",
+      "status": "needs_audit",
+      "priority": "medium",
+      "source_refs": ["fix/ios-amethyst-runtime-isolation"],
+      "source_prs": [],
+      "target_branch": "integration/directmetal-next",
+      "components": ["host.egl", "platform.presentation"],
+      "oracles": ["amethyst_surface"],
+      "proofs": ["focused_semantic", "hosted_metal"],
+      "question": "Does the clean host/presentation implementation already contain every unique iOS/Amethyst runtime-isolation invariant from this source ref?",
+      "exit_condition": "compare unique source/test delta against current clean host contract and either transplant missing invariants or record exact containment"
+    },
+    {
+      "id": "legacy.x8-d24-depth-aspect",
+      "status": "needs_focused_oracle",
+      "priority": "medium",
+      "source_refs": ["fix/dual-backend-metal-ios-ci", "integration/legacy-capability-port"],
+      "source_prs": [17],
+      "target_branch": "integration/directmetal-next",
+      "components": ["gl.semantics", "backend.directvulkan"],
+      "oracles": [],
+      "proofs": ["focused_semantic", "directvulkan_ctest"],
+      "question": "Should VK_FORMAT_X8_D24_UNORM_PACK32 be represented as depth-only rather than depth/stencil in the relevant Vulkan format/aspect path?",
+      "exit_condition": "build a focused aspect/readback oracle, compare clean Vulkan behavior, then transplant or reject the legacy rule with evidence"
+    },
+    {
+      "id": "legacy.normalized-u32-vertex-format",
+      "status": "needs_focused_oracle",
+      "priority": "medium",
+      "source_refs": ["fix/dual-backend-metal-ios-ci", "integration/legacy-capability-port"],
+      "source_prs": [17],
+      "target_branch": "integration/directmetal-next",
+      "components": ["gl.semantics", "semantic.lowering", "backend.directvulkan"],
+      "oracles": ["packed_vertex"],
+      "proofs": ["focused_semantic", "directmetal_ctest", "directvulkan_ctest"],
+      "question": "Is the current 32-bit normalized integer vertex path semantically correct via shader-side conversion, or must unsupported combinations fail closed?",
+      "exit_condition": "add a focused value-level oracle covering normalization and both backends, then preserve the proven policy"
+    },
+    {
+      "id": "directvulkan.pixel-transfer-unpack-readback",
+      "status": "legacy_source_needs_clean_reconciliation",
+      "priority": "high",
+      "source_refs": ["codex/dvk-gui-production-20260830", "experiment/dvk-pbo-full-unpack-20260827", "experiment/dvk-pbo-shadow-source-20260827", "experiment/dvk-full-unpack-combined-20260829", "fix/dvk-pixel-unpack-state-20260829"],
+      "source_prs": [],
+      "target_branch": "integration/directmetal-next",
+      "components": ["gl.semantics", "semantic.lowering", "backend.directvulkan"],
+      "oracles": ["texture_semantics"],
+      "proofs": ["focused_semantic", "directmetal_ctest", "directvulkan_ctest"],
+      "question": "Which complete GL_PACK/UNPACK row/image/skip, PBO shadow and BGRA/RGBA readback semantics proven in the legacy GUI lineage are still missing from the clean shared/Vulkan path?",
+      "exit_condition": "enumerate semantic delta against clean tree, port only missing shared/Vulkan behavior with focused transfer/readback oracles, then mark source refs provenance-only"
+    },
+    {
+      "id": "directvulkan.presentation-orientation",
+      "status": "needs_oracle_transplant",
+      "priority": "high",
+      "source_refs": ["codex/dvk-gui-production-20260830", "codex/dvk-ios-fbo-orientation-20260831", "fix/dvk-gui-text-render-20260829", "experiment/dvk-gui-text-ab-20260829"],
+      "source_prs": [],
+      "target_branch": "integration/directmetal-next",
+      "components": ["backend.directvulkan", "platform.presentation"],
+      "oracles": [],
+      "proofs": ["focused_semantic", "directvulkan_ctest", "minecraft_e2e"],
+      "question": "Which default-framebuffer orientation, Y-flip, BGRA and GUI/text presentation invariants from the legacy iOS path must exist at the clean Vulkan presentation seam?",
+      "exit_condition": "transplant a clean orientation/presentation oracle first, then port only behavior it proves and close with exact-subject Minecraft/host evidence"
+    },
+    {
+      "id": "directvulkan.resource-binding-lifetime",
+      "status": "needs_reconciliation",
+      "priority": "medium",
+      "source_refs": ["codex/dvk-gui-production-20260830", "experiment/dvk-descriptor-pool-types-20260827", "experiment/dvk-fresh-descriptors-20260827", "experiment/dvk-real-ubo-alignment-20260827", "experiment/dvk-stage-app-ubos-20260827"],
+      "source_prs": [],
+      "target_branch": "integration/directmetal-next",
+      "components": ["semantic.lowering", "backend.directvulkan"],
+      "oracles": ["uniform_block", "sync_lifetime"],
+      "proofs": ["focused_semantic", "directvulkan_ctest"],
+      "question": "Which descriptor/UBO alignment, staging and resource-lifetime findings from the legacy GUI lineage represent real semantic requirements rather than discarded hypotheses?",
+      "exit_condition": "map each experiment outcome to a stable invariant or rejection, create backend-neutral identity where appropriate, and leave only reusable oracles/code"
+    },
+    {
+      "id": "directvulkan.vertex-shader-interface",
+      "status": "needs_reconciliation",
+      "priority": "medium",
+      "source_refs": ["codex/dvk-gui-production-20260830", "experiment/dvk-index-stream-probe-20260827", "experiment/dvk-uv-input-probe-20260827", "experiment/dvk-vertex-interface-probe-20260827", "codex/dvk-a11-single-mvk-shader-oracle-20260831"],
+      "source_prs": [],
+      "target_branch": "integration/directmetal-next",
+      "components": ["shader.contract", "semantic.lowering", "backend.directvulkan"],
+      "oracles": ["shader_program", "draw_lowering", "packed_vertex"],
+      "proofs": ["focused_semantic", "directmetal_ctest", "directvulkan_ctest"],
+      "question": "Which vertex/index/UV/interface and single-MoltenVK shader findings are still unique to legacy DirectVulkan and should be expressed in shared shader/lowering contracts?",
+      "exit_condition": "compare clean shader/draw oracles to the legacy failures, transplant only missing semantics, and record rejected hypotheses"
+    },
+    {
+      "id": "directvulkan.minecraft-e2e-oracle",
+      "status": "needs_clean_evidence_plane",
+      "priority": "medium",
+      "source_refs": ["ci/minecraft-on-mithril-e2e-vulkan-20260826", "ci/minecraft-on-mithril-e2e-vulkan-a11-oracle-20260831", "codex/dvk-a11-single-mvk-shader-oracle-20260831"],
+      "source_prs": [36],
+      "target_branch": "integration/directmetal-next",
+      "components": ["validation.contract", "backend.directvulkan"],
+      "oracles": [],
+      "proofs": ["minecraft_e2e"],
+      "question": "What minimum reusable real-Minecraft DirectVulkan oracle and diagnostics should live in the clean evidence plane without carrying one-off candidate workflows?",
+      "exit_condition": "extract a stable exact-subject E2E oracle/diagnostic contract into clean CI or scripts, then retire branch-local trigger machinery as provenance"
+    }
+  ]
+}

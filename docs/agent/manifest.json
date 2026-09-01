@@ -1,17 +1,19 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "as_of": "2026-09-01",
-  "purpose": "Machine-readable ownership/router for Mithril agents. Source, tests and exact evidence remain executable truth.",
+  "purpose": "Machine-readable ownership/router for Mithril agents. Source, tests, live Git and exact evidence remain executable truth.",
   "entrypoint": "AGENTS.md",
   "authoritative_documents": {
     "documentation_map": "docs/README.md",
     "system_model": "docs/system-model.md",
     "evidence_model": "docs/evidence-model.md",
     "branch_policy": "docs/branches.md",
+    "branch_convergence_map": "docs/agent/branch-ledger.md",
+    "branch_families": "docs/agent/branch-families.json",
+    "migration_queue": "docs/agent/migration-queue.json",
     "ci_policy": "docs/ci.md",
     "host_contract": "docs/contracts/amethyst-host-contract.md",
-    "current_status": "docs/agent/status.md",
-    "branch_ledger": "docs/agent/branch-ledger.md"
+    "current_status": "docs/agent/status.md"
   },
   "product": {
     "host": "Minecraft Java / LWJGL",
@@ -30,7 +32,7 @@
     {"id": "L4", "name": "native_execution", "question": "How is resolved intent executed efficiently and safely?", "paths": ["src/metal", "src/vk"]},
     {"id": "L5", "name": "platform_presentation", "question": "How does native work reach the real Apple host/display?", "paths": ["src/egl", "tests/amethyst_egl_smoke.mm"]},
     {"id": "L6", "name": "evidence", "question": "Which falsifier/environment proves each contract for an exact subject?", "paths": ["tests", "cmake/MithrilSmokeTests.cmake", ".github/workflows/build.yml"]},
-    {"id": "L7", "name": "convergence", "question": "Which implementation/evidence is current and how does history migrate?", "paths": ["docs/branches.md", "docs/agent/status.md"]}
+    {"id": "L7", "name": "convergence", "question": "Which implementation/evidence is current and which semantic debts remain across history?", "paths": ["docs/branches.md", "docs/agent/branch-families.json", "docs/agent/migration-queue.json"]}
   ],
   "branch_roles": [
     {"name": "main", "tree": "clean", "role": "shipping_baseline", "merge_policy": "normal_reviewed_change"},
@@ -51,8 +53,8 @@
     {"id": "backend.directvulkan", "layer": "L4", "summary": "Clean Vulkan reference/fallback execution below resolved semantics.", "owned_paths": ["src/vk/**"], "read_now": ["src/vk"], "required_proofs": ["control", "focused_semantic", "directvulkan_ctest"]},
     {"id": "platform.presentation", "layer": "L5", "summary": "CAMetalLayer/default-framebuffer origin/format and real host presentation seam.", "owned_paths": ["tests/amethyst_egl_smoke.mm", "tests/surface_metal_smoke.mm", "scripts/build_iphoneos.sh"], "read_now": ["tests/amethyst_egl_smoke.mm", "docs/contracts/amethyst-host-contract.md", "docs/evidence-model.md"], "required_proofs": ["control", "focused_semantic", "hosted_metal"]},
     {"id": "validation.contract", "layer": "L6", "summary": "Focused semantic/readback/runtime oracles and cross-platform test registration.", "owned_paths": ["tests/**", "cmake/MithrilSmokeTests.cmake"], "read_now": ["tests", "cmake/MithrilSmokeTests.cmake", "docs/agent/oracles.json"], "required_proofs": ["control"]},
-    {"id": "evaluation.control", "layer": "L6", "summary": "Agent routing, documentation authority, branch audit, proof routing and durable CI policy.", "owned_paths": ["README.md", "CHECKLIST.md", "AGENTS.md", "docs/README.md", "docs/agent/**", "docs/system-model.md", "docs/branches.md", "docs/ci.md", "docs/evidence-model.md", "docs/minecraft-reference.md", ".github/workflows/**", "scripts/agent-context.py", "scripts/audit-branches.py", "scripts/validate_agent_contract.py", "scripts/minecraft-reference.sh"], "read_now": ["AGENTS.md", "docs/README.md", "docs/system-model.md", "docs/evidence-model.md", "docs/agent/proof-graph.json", "docs/agent/oracles.json"], "required_proofs": ["control"]},
-    {"id": "legacy.migration", "layer": "L7", "summary": "Disconnected implementation, patch/replay, historical checklist and migration evidence sources.", "owned_paths": ["Mithril-Wrapper-cpp/**", "ci/**", "docs/history/**"], "read_now": ["docs/system-model.md", "docs/branches.md", "docs/agent/branch-ledger.md"], "required_proofs": ["control", "focused_semantic"]}
+    {"id": "evaluation.control", "layer": "L6", "summary": "Agent routing, documentation authority, branch lifecycle/topology, proof routing and durable CI policy.", "owned_paths": ["README.md", "CHECKLIST.md", "AGENTS.md", "docs/README.md", "docs/agent/**", "docs/system-model.md", "docs/branches.md", "docs/ci.md", "docs/evidence-model.md", "docs/minecraft-reference.md", ".github/workflows/**", "scripts/agent-context.py", "scripts/audit-branches.py", "scripts/validate_agent_contract.py", "scripts/minecraft-reference.sh"], "read_now": ["AGENTS.md", "docs/README.md", "docs/system-model.md", "docs/evidence-model.md", "docs/agent/proof-graph.json", "docs/agent/oracles.json", "docs/agent/branch-families.json"], "required_proofs": ["control"]},
+    {"id": "legacy.migration", "layer": "L7", "summary": "Disconnected implementation, experiments/replay, historical snapshots and explicit cross-history semantic debts.", "owned_paths": ["Mithril-Wrapper-cpp/**", "ci/**", "docs/history/**"], "read_now": ["docs/system-model.md", "docs/branches.md", "docs/agent/branch-ledger.md", "docs/agent/migration-queue.json"], "required_proofs": ["control", "focused_semantic"]}
   ],
   "boundaries": [
     {"id": "egl_to_gl", "from": ["host.egl"], "to": ["gl.semantics"], "contract": "host adaptation may change negotiation/lifecycle but not silently redefine LWJGL-visible GL semantics"},
@@ -87,6 +89,8 @@
     "Legacy disconnected histories are semantic/oracle/provenance sources, not clean-tree merge targets.",
     "Capability claims bind to exact source/tree/binary identity and actual oracle/environment evidence.",
     "Branch names, dates and green badges do not establish semantic containment.",
+    "Live branch HEAD/ancestry facts are generated from Git, never maintained by hand in prose.",
+    "Branch lifecycle families and semantic migration items are orthogonal; a ref may contribute to several migration items.",
     "Squash-merged work requires PR/tree evidence in addition to ancestry.",
     "Temporary experiments converge into tests/contracts/evidence before retirement.",
     "PR candidate source and synthetic integration result are distinct proof subjects.",
@@ -98,16 +102,16 @@
   ],
   "agent_tools": [
     {"id": "task_context", "script": "scripts/agent-context.py", "role": "compile exact Git identity, ownership, focused oracle, boundary risk and transitive proof/read set"},
-    {"id": "branch_topology", "script": "scripts/audit-branches.py", "role": "compile live heads into history-universe/anchor/coverage/tree facts"},
+    {"id": "branch_topology", "script": "scripts/audit-branches.py", "role": "compile live heads into history-universe/anchor/coverage/tree facts and annotate lifecycle families"},
     {"id": "minecraft_reference_source", "script": "scripts/minecraft-reference.sh", "role": "materialize local Minecraft 26.2 reference sources; never commit/upload output"},
-    {"id": "agent_contract_validator", "script": "scripts/validate_agent_contract.py", "role": "validate ownership, history, proof DAG, oracle index, documents and tool self-tests"}
+    {"id": "agent_contract_validator", "script": "scripts/validate_agent_contract.py", "role": "validate ownership, branch families, migration queue, proof DAG, oracle index, documents and self-tests"}
   ],
   "proof_of_branch_reuse": ["history_universe_and_ancestry_or_explicit_no_common_ancestor", "changed_files_and_semantic_delta", "exact_product_subject_evidence"],
   "knowledge_lifetimes": {
-    "architecture": ["docs/system-model.md", "docs/evidence-model.md", "docs/contracts/amethyst-host-contract.md", "docs/agent/manifest.json"],
-    "current": ["docs/agent/status.md", "docs/agent/branch-ledger.md", "generated_live_branch_audit"],
+    "architecture": ["docs/system-model.md", "docs/evidence-model.md", "docs/contracts/amethyst-host-contract.md", "docs/agent/manifest.json", "docs/agent/branch-families.json"],
+    "current": ["docs/agent/status.md", "docs/agent/migration-queue.json", "generated_live_branch_audit"],
     "executable": ["tests", "cmake", "scripts/validate_agent_contract.py", "scripts/agent-context.py", "scripts/audit-branches.py", "docs/agent/proof-graph.json", "docs/agent/oracles.json"],
     "historical": ["docs/history", "pull_requests", "commits", "workflow_artifacts", "experiment_workflows", "patch_replay_scripts"]
   },
-  "completion_protocol": ["compile_task_local_context", "identify_history_universe_and_owning_layer", "choose_correct_tree_and_destination_branch", "establish_or_add_focused_oracle", "implement_smallest_complete_vertical_slice", "run_transitive_proof_dag_from_cheapest_to_claim_scope", "verify_exact_proof_subject_and_latest_sha", "update_dated_status_or_branch_ledger_only_if_convergence_changed", "report_verified_partial_and_unverified_claims_separately"]
+  "completion_protocol": ["compile_task_local_context", "identify_history_universe_and_owning_layer", "if_history_matters_read_live_topology_then_family_then_migration_item", "choose_correct_tree_and_destination_branch", "establish_or_add_focused_oracle", "implement_smallest_complete_vertical_slice", "run_transitive_proof_dag_from_cheapest_to_claim_scope", "verify_exact_proof_subject_and_latest_sha", "update_migration_queue_only_when_semantic_convergence_changes", "report_verified_partial_and_unverified_claims_separately"]
 }
