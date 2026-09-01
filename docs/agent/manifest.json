@@ -39,100 +39,20 @@
     {"name": "integration/legacy-capability-port", "tree": "legacy_disconnected", "role": "legacy_semantic_reconciliation_source", "merge_policy": "semantic_port_only_to_clean_tree"}
   ],
   "history_universes": [
-    {
-      "id": "clean_shipping",
-      "anchors": ["main", "integration/directmetal-next"],
-      "promotion_mode": "normal_git_plus_semantic_proof",
-      "preferred_roots": ["src", "include", "tests", "scripts"]
-    },
-    {
-      "id": "legacy_experimental",
-      "anchors": ["integration/directvulkan-reference", "integration/legacy-capability-port"],
-      "promotion_mode": "semantic_transplant_only",
-      "preferred_roots": ["Mithril-Wrapper-cpp", "ci", "tests", "docs/history"]
-    }
+    {"id": "clean_shipping", "anchors": ["main", "integration/directmetal-next"], "promotion_mode": "normal_git_plus_semantic_proof", "preferred_roots": ["src", "include", "tests", "scripts"]},
+    {"id": "legacy_experimental", "anchors": ["integration/directvulkan-reference", "integration/legacy-capability-port"], "promotion_mode": "semantic_transplant_only", "preferred_roots": ["Mithril-Wrapper-cpp", "ci", "tests", "docs/history"]}
   ],
   "components": [
-    {
-      "id": "host.egl",
-      "layer": "L1",
-      "summary": "EGL exports, host negotiation, context/surface lifecycle and swap entry.",
-      "owned_paths": ["src/egl/**", "docs/egl_list.md", "docs/contracts/amethyst-host-contract.md"],
-      "read_now": ["docs/contracts/amethyst-host-contract.md", "src/egl", "docs/egl_list.md"],
-      "required_proofs": ["control", "focused_semantic"]
-    },
-    {
-      "id": "gl.semantics",
-      "layer": "L2",
-      "summary": "Observable GL state/object/error/framebuffer/pixel-store/query/sync semantics.",
-      "owned_paths": ["src/gl/**", "src/state/**", "docs/gl33_core_list.md"],
-      "read_now": ["src/gl", "src/state", "docs/directmetal-gl33-semantic-matrix.md"],
-      "required_proofs": ["control", "focused_semantic"]
-    },
-    {
-      "id": "shader.contract",
-      "layer": "L2",
-      "summary": "GLSL/SPIR-V translation, reflection and shared shader/resource ABI.",
-      "owned_paths": ["src/shader/**"],
-      "read_now": ["src/shader"],
-      "required_proofs": ["control", "focused_semantic"]
-    },
-    {
-      "id": "semantic.lowering",
-      "layer": "L3",
-      "summary": "Backend-neutral resolved draw/resource/FBO contract and backend selection.",
-      "owned_paths": ["src/backend/**", "include/mithril/draw_diagnostics.h"],
-      "read_now": ["src/backend/types.h", "src/backend/backend.h"],
-      "required_proofs": ["control", "focused_semantic"]
-    },
-    {
-      "id": "backend.directmetal",
-      "layer": "L4",
-      "summary": "Metal-specific resource, pipeline and command execution below resolved semantics.",
-      "owned_paths": ["src/metal/**", "include/mithril/directmetal_diagnostics.h", "include/mithril/program_diagnostics.h", "docs/directmetal-gl33-semantic-matrix.md", "docs/performance_hotpath.md"],
-      "read_now": ["src/metal", "docs/directmetal-gl33-semantic-matrix.md"],
-      "required_proofs": ["control", "focused_semantic", "directmetal_ctest"]
-    },
-    {
-      "id": "backend.directvulkan",
-      "layer": "L4",
-      "summary": "Clean Vulkan reference/fallback execution below resolved semantics.",
-      "owned_paths": ["src/vk/**"],
-      "read_now": ["src/vk"],
-      "required_proofs": ["control", "focused_semantic", "directvulkan_ctest"]
-    },
-    {
-      "id": "platform.presentation",
-      "layer": "L5",
-      "summary": "CAMetalLayer/default-framebuffer origin/format and real host presentation seam.",
-      "owned_paths": ["tests/amethyst_egl_smoke.mm", "tests/surface_metal_smoke.mm", "scripts/build_iphoneos.sh"],
-      "read_now": ["tests/amethyst_egl_smoke.mm", "docs/contracts/amethyst-host-contract.md", "docs/evidence-model.md"],
-      "required_proofs": ["control", "focused_semantic", "presentation_device"]
-    },
-    {
-      "id": "validation.contract",
-      "layer": "L6",
-      "summary": "Focused semantic/readback/runtime oracles and cross-platform test registration.",
-      "owned_paths": ["tests/**", "cmake/MithrilSmokeTests.cmake"],
-      "read_now": ["tests", "cmake/MithrilSmokeTests.cmake", "docs/agent/oracles.json"],
-      "required_proofs": ["control"]
-    },
-    {
-      "id": "evaluation.control",
-      "layer": "L6",
-      "summary": "Agent routing, documentation authority, branch audit, proof routing and durable CI policy.",
-      "owned_paths": ["README.md", "CHECKLIST.md", "AGENTS.md", "docs/README.md", "docs/agent/**", "docs/system-model.md", "docs/branches.md", "docs/ci.md", "docs/evidence-model.md", "docs/minecraft-reference.md", ".github/workflows/**", "scripts/agent-context.py", "scripts/audit-branches.py", "scripts/validate_agent_contract.py", "scripts/minecraft-reference.sh"],
-      "read_now": ["AGENTS.md", "docs/README.md", "docs/system-model.md", "docs/evidence-model.md", "docs/agent/proof-graph.json", "docs/agent/oracles.json"],
-      "required_proofs": ["control"]
-    },
-    {
-      "id": "legacy.migration",
-      "layer": "L7",
-      "summary": "Disconnected implementation, patch/replay, historical checklist and migration evidence sources.",
-      "owned_paths": ["Mithril-Wrapper-cpp/**", "ci/**", "docs/history/**"],
-      "read_now": ["docs/system-model.md", "docs/branches.md", "docs/agent/branch-ledger.md"],
-      "required_proofs": ["control", "focused_semantic"]
-    }
+    {"id": "host.egl", "layer": "L1", "summary": "EGL exports, host negotiation, context/surface lifecycle and swap entry.", "owned_paths": ["src/egl/**", "docs/egl_list.md", "docs/contracts/amethyst-host-contract.md"], "read_now": ["docs/contracts/amethyst-host-contract.md", "src/egl", "docs/egl_list.md"], "required_proofs": ["control", "focused_semantic"]},
+    {"id": "gl.semantics", "layer": "L2", "summary": "Observable GL state/object/error/framebuffer/pixel-store/query/sync semantics.", "owned_paths": ["src/gl/**", "src/state/**", "docs/gl33_core_list.md"], "read_now": ["src/gl", "src/state", "docs/directmetal-gl33-semantic-matrix.md"], "required_proofs": ["control", "focused_semantic"]},
+    {"id": "shader.contract", "layer": "L2", "summary": "GLSL/SPIR-V translation, reflection and shared shader/resource ABI.", "owned_paths": ["src/shader/**"], "read_now": ["src/shader"], "required_proofs": ["control", "focused_semantic"]},
+    {"id": "semantic.lowering", "layer": "L3", "summary": "Backend-neutral resolved draw/resource/FBO contract and backend selection.", "owned_paths": ["src/backend/**", "include/mithril/draw_diagnostics.h"], "read_now": ["src/backend/types.h", "src/backend/backend.h"], "required_proofs": ["control", "focused_semantic"]},
+    {"id": "backend.directmetal", "layer": "L4", "summary": "Metal-specific resource, pipeline and command execution below resolved semantics.", "owned_paths": ["src/metal/**", "include/mithril/directmetal_diagnostics.h", "include/mithril/program_diagnostics.h", "docs/directmetal-gl33-semantic-matrix.md", "docs/performance_hotpath.md"], "read_now": ["src/metal", "docs/directmetal-gl33-semantic-matrix.md"], "required_proofs": ["control", "focused_semantic", "directmetal_ctest"]},
+    {"id": "backend.directvulkan", "layer": "L4", "summary": "Clean Vulkan reference/fallback execution below resolved semantics.", "owned_paths": ["src/vk/**"], "read_now": ["src/vk"], "required_proofs": ["control", "focused_semantic", "directvulkan_ctest"]},
+    {"id": "platform.presentation", "layer": "L5", "summary": "CAMetalLayer/default-framebuffer origin/format and real host presentation seam.", "owned_paths": ["tests/amethyst_egl_smoke.mm", "tests/surface_metal_smoke.mm", "scripts/build_iphoneos.sh"], "read_now": ["tests/amethyst_egl_smoke.mm", "docs/contracts/amethyst-host-contract.md", "docs/evidence-model.md"], "required_proofs": ["control", "focused_semantic", "hosted_metal"]},
+    {"id": "validation.contract", "layer": "L6", "summary": "Focused semantic/readback/runtime oracles and cross-platform test registration.", "owned_paths": ["tests/**", "cmake/MithrilSmokeTests.cmake"], "read_now": ["tests", "cmake/MithrilSmokeTests.cmake", "docs/agent/oracles.json"], "required_proofs": ["control"]},
+    {"id": "evaluation.control", "layer": "L6", "summary": "Agent routing, documentation authority, branch audit, proof routing and durable CI policy.", "owned_paths": ["README.md", "CHECKLIST.md", "AGENTS.md", "docs/README.md", "docs/agent/**", "docs/system-model.md", "docs/branches.md", "docs/ci.md", "docs/evidence-model.md", "docs/minecraft-reference.md", ".github/workflows/**", "scripts/agent-context.py", "scripts/audit-branches.py", "scripts/validate_agent_contract.py", "scripts/minecraft-reference.sh"], "read_now": ["AGENTS.md", "docs/README.md", "docs/system-model.md", "docs/evidence-model.md", "docs/agent/proof-graph.json", "docs/agent/oracles.json"], "required_proofs": ["control"]},
+    {"id": "legacy.migration", "layer": "L7", "summary": "Disconnected implementation, patch/replay, historical checklist and migration evidence sources.", "owned_paths": ["Mithril-Wrapper-cpp/**", "ci/**", "docs/history/**"], "read_now": ["docs/system-model.md", "docs/branches.md", "docs/agent/branch-ledger.md"], "required_proofs": ["control", "focused_semantic"]}
   ],
   "boundaries": [
     {"id": "egl_to_gl", "from": ["host.egl"], "to": ["gl.semantics"], "contract": "host adaptation may change negotiation/lifecycle but not silently redefine LWJGL-visible GL semantics"},
@@ -182,26 +102,12 @@
     {"id": "minecraft_reference_source", "script": "scripts/minecraft-reference.sh", "role": "materialize local Minecraft 26.2 reference sources; never commit/upload output"},
     {"id": "agent_contract_validator", "script": "scripts/validate_agent_contract.py", "role": "validate ownership, history, proof DAG, oracle index, documents and tool self-tests"}
   ],
-  "proof_of_branch_reuse": [
-    "history_universe_and_ancestry_or_explicit_no_common_ancestor",
-    "changed_files_and_semantic_delta",
-    "exact_product_subject_evidence"
-  ],
+  "proof_of_branch_reuse": ["history_universe_and_ancestry_or_explicit_no_common_ancestor", "changed_files_and_semantic_delta", "exact_product_subject_evidence"],
   "knowledge_lifetimes": {
     "architecture": ["docs/system-model.md", "docs/evidence-model.md", "docs/contracts/amethyst-host-contract.md", "docs/agent/manifest.json"],
     "current": ["docs/agent/status.md", "docs/agent/branch-ledger.md", "generated_live_branch_audit"],
     "executable": ["tests", "cmake", "scripts/validate_agent_contract.py", "scripts/agent-context.py", "scripts/audit-branches.py", "docs/agent/proof-graph.json", "docs/agent/oracles.json"],
     "historical": ["docs/history", "pull_requests", "commits", "workflow_artifacts", "experiment_workflows", "patch_replay_scripts"]
   },
-  "completion_protocol": [
-    "compile_task_local_context",
-    "identify_history_universe_and_owning_layer",
-    "choose_correct_tree_and_destination_branch",
-    "establish_or_add_focused_oracle",
-    "implement_smallest_complete_vertical_slice",
-    "run_transitive_proof_dag_from_cheapest_to_claim_scope",
-    "verify_exact_proof_subject_and_latest_sha",
-    "update_dated_status_or_branch_ledger_only_if_convergence_changed",
-    "report_verified_partial_and_unverified_claims_separately"
-  ]
+  "completion_protocol": ["compile_task_local_context", "identify_history_universe_and_owning_layer", "choose_correct_tree_and_destination_branch", "establish_or_add_focused_oracle", "implement_smallest_complete_vertical_slice", "run_transitive_proof_dag_from_cheapest_to_claim_scope", "verify_exact_proof_subject_and_latest_sha", "update_dated_status_or_branch_ledger_only_if_convergence_changed", "report_verified_partial_and_unverified_claims_separately"]
 }
