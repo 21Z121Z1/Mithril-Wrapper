@@ -2,37 +2,38 @@
 
 Mithril documentation is organized by **authority and lifetime**, not by the date somebody happened to write a note.
 
-## 1. Stable system contracts
+## Stable system contracts
 
 Read these when deciding architecture or ownership:
 
 - `system-model.md` — abstraction tower and dependency direction.
 - `evidence-model.md` — claim/evidence identity and proof tiers.
-- `branches.md` — clean versus disconnected history-universe policy.
+- `branches.md` — clean versus disconnected history and convergence policy.
 - `ci.md` — durable evidence-plane ownership.
 - `contracts/amethyst-host-contract.md` — EGL/LWJGL/Apple host seam.
 
-These documents describe invariants. If they conflict with shipping source/tests, the executable implementation wins and the document must be repaired.
+These describe invariants. Shipping source/tests outrank them when there is a conflict; repair the document rather than inventing a second truth.
 
-## 2. Machine-readable agent control
+## Machine-readable agent control
 
-- `agent/manifest.json` — component/path ownership, semantic boundaries, branch roles and proof profiles.
+- `agent/manifest.json` — component/path ownership, semantic boundaries, canonical branch roles and proof profiles.
 - `agent/proof-graph.json` — proof prerequisites and cross-backend blast-radius rules.
-- `agent/oracles.json` — small focused-oracle routing index.
-- `../scripts/agent-context.py` — compiles task-local context.
-- `../scripts/audit-branches.py` — compiles live Git topology.
-- `../scripts/validate_agent_contract.py` — validates this control plane.
+- `agent/oracles.json` — focused-oracle routing index.
+- `agent/branch-families.json` — stable branch lifecycle/provenance classification; contains no live HEAD table.
+- `agent/migration-queue.json` — unresolved cross-history semantic questions and their clean owners/oracles/proofs.
+- `../scripts/agent-context.py` — compiles normal task-local context.
+- `../scripts/audit-branches.py` — compiles live Git topology and annotates lifecycle families.
+- `../scripts/validate_agent_contract.py` — validates the control plane.
 
-Machine-readable control is a router over source/tests/evidence, not a second renderer truth.
+Machine-readable control is a router over source/tests/Git/evidence, not a second renderer truth.
 
-## 3. Current but explicitly dated state
+## Current state
 
-- `agent/status.md` — current convergence checkpoint.
-- `agent/branch-ledger.md` — branch reconciliation/provenance snapshot.
+- `agent/status.md` — dated product/convergence checkpoint. It may become stale and must not outrank source, live Git or exact evidence.
+- live branch state is **not** a document. Generate it with `scripts/audit-branches.py --fetch-graph`.
+- `agent/branch-ledger.md` is a stable convergence/navigation contract explaining how topology, branch families and migration items compose; it intentionally does not copy current SHAs.
 
-These files may become stale. Never prefer them over live Git, source, tests or exact evidence.
-
-## 4. Capability/reference inventories
+## Capability/reference inventories
 
 - `directmetal-gl33-semantic-matrix.md` — DirectMetal semantic support ledger.
 - `gl33_core_list.md` — GL 3.3 function/domain inventory.
@@ -40,18 +41,24 @@ These files may become stale. Never prefer them over live Git, source, tests or 
 - `performance_hotpath.md` — performance-shape notes where present on the active integration line.
 - `minecraft-reference.md` — local Minecraft reference-source materialization.
 
-## 5. Historical material
+## Historical material
 
-`history/` contains frozen milestones/plans that remain useful for provenance but must not drive current implementation without re-validation.
+`history/` contains frozen checkpoints and superseded ledgers. These are provenance only. In particular, a historical branch ledger may contain exact SHAs that were true once and false immediately after the next merge.
 
-Pull requests, commits and workflow artifacts are the preferred home for experiment-specific narratives. A durable lesson should be promoted out of history into an invariant, type, test, oracle or ADR.
+PRs, commits and workflow artifacts are the preferred home for experiment-specific narratives. Promote durable lessons into an invariant, type, test, oracle, branch-family rule, migration item or ADR.
 
 ## Reading rule
 
-For normal agent work do **not** read this entire tree. Start with:
+For normal work, do not read this tree breadth-first:
 
 ```bash
 python3 scripts/agent-context.py --task "<task>"
 ```
 
-Then read only the routed stable contract, source slice, nearby oracle and the exact evidence plane needed for the claim.
+If history affects the decision, then add:
+
+```bash
+python3 scripts/audit-branches.py --fetch-graph --markdown
+```
+
+and consult only the matching branch family / migration item. Raw branch history is a last-mile evidence source, not the default context.
