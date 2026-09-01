@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""Validate Mithril's agent navigation, branch lifecycle, migration, proof and oracle control plane."""
-
+"""Validate Mithril's agent navigation, history, migration, proof and oracle control plane."""
 from __future__ import annotations
 
 import fnmatch
@@ -38,6 +37,13 @@ def unique(values: Iterable[Any], where: str) -> list[str]:
     return result
 
 
+def positive_prs(values: Any, where: str) -> list[int]:
+    require(isinstance(values, list), f"{where} must be an array")
+    require(all(isinstance(value, int) and value > 0 for value in values), f"{where} must contain positive PR numbers")
+    require(len(values) == len(set(values)), f"{where} contains duplicates")
+    return values
+
+
 def load(path: pathlib.Path) -> dict[str, Any]:
     require(path.is_file(), f"missing {path.relative_to(ROOT)}")
     try:
@@ -57,10 +63,12 @@ def repo_path(value: Any, where: str) -> pathlib.Path:
     return resolved
 
 
-def validate_manifest(manifest: dict[str, Any]) -> tuple[set[str], set[str], set[str], set[str]]:
+def validate_manifest(manifest: dict[str, Any]) -> tuple[set[str], set[str], set[str]]:
     require(manifest.get("schema_version") == 3, "manifest schema_version must be 3")
     repo_path(manifest.get("entrypoint"), "manifest.entrypoint")
-    for key, value in manifest.get("authoritative_documents", {}).items():
+    documents = manifest.get("authoritative_documents")
+    require(isinstance(documents, dict) and documents, "authoritative_documents required")
+    for key, value in documents.items():
         repo_path(value, f"manifest.authoritative_documents.{key}")
 
     layers = manifest.get("layers")
@@ -68,7 +76,11 @@ def validate_manifest(manifest: dict[str, Any]) -> tuple[set[str], set[str], set
     layer_ids = [text(item.get("id"), "layer.id") for item in layers]
     require(layer_ids == [f"L{i}" for i in range(8)], f"layer order must be L0-L7, got {layer_ids}")
     for item in layers:
-        for path in item.get("paths", []):
+        text(item.get("name"), f"layer {item['id']}.name")
+        text(item.get("question"), f"layer {item['id']}.question")
+        paths = item.get("paths")
+        require(isinstance(paths, list) and paths, f"layer {item['id']} paths required")
+        for path in paths:
             repo_path(path, f"layer {item['id']} path")
 
     roles = manifest.get("branch_roles")
@@ -84,14 +96,15 @@ def validate_manifest(manifest: dict[str, Any]) -> tuple[set[str], set[str], set
         require(universe.get("promotion_mode") in {"normal_git_plus_semantic_proof", "semantic_transplant_only"}, "unknown history promotion mode")
     require(len(anchors) == len(set(anchors)), "history anchors duplicated across universes")
     require(role_names.issubset(anchors), "every canonical branch role must belong to a history universe")
-    require("clean_shipping" in universe_ids and "legacy_experimental" in universe_ids, "clean and legacy history universes must be explicit")
+    require({"clean_shipping", "legacy_experimental"}.issubset(universe_ids), "clean and legacy history universes must be explicit")
 
     components = manifest.get("components")
     require(isinstance(components, list) and components, "components required")
     component_ids = set(unique([item.get("id") for item in components], "components.id"))
     for component in components:
         require(component.get("layer") in layer_ids, f"component {component['id']} has unknown layer")
-        unique(component.get("owned_paths", []), f"component {component['id']} owned_paths")
+        text(component.get("summary"), f"component {component['id']}.summary")
+        require(unique(component.get("owned_paths", []), f"component {component['id']} owned_paths"), f"component {component['id']} owns no paths")
         for path in component.get("read_now", []):
             repo_path(path, f"component {component['id']} read_now")
 
@@ -99,7 +112,8 @@ def validate_manifest(manifest: dict[str, Any]) -> tuple[set[str], set[str], set
     require(isinstance(boundaries, list) and boundaries, "boundaries required")
     unique([item.get("id") for item in boundaries], "boundaries.id")
     for boundary in boundaries:
-        require(not ((set(boundary.get("from", [])) | set(boundary.get("to", []))) - component_ids), f"boundary {boundary['id']} references unknown component")
+        refs = set(boundary.get("from", [])) | set(boundary.get("to", []))
+        require(refs and not (refs - component_ids), f"boundary {boundary['id']} references unknown component")
         text(boundary.get("contract"), f"boundary {boundary['id']}.contract")
 
     profiles = manifest.get("proof_profiles")
@@ -108,6 +122,7 @@ def validate_manifest(manifest: dict[str, Any]) -> tuple[set[str], set[str], set
     for profile in profiles:
         require(isinstance(profile.get("rank"), int) and profile["rank"] >= 0, f"proof {profile['id']} rank invalid")
         text(profile.get("environment"), f"proof {profile['id']}.environment")
+        text(profile.get("cost"), f"proof {profile['id']}.cost")
         text(profile.get("proves"), f"proof {profile['id']}.proves")
     for claim, refs in manifest.get("claim_proofs", {}).items():
         require(not (set(refs) - proof_ids), f"claim {claim} references unknown proof")
@@ -118,26 +133,30 @@ def validate_manifest(manifest: dict[str, Any]) -> tuple[set[str], set[str], set
     require({"task_context", "branch_topology", "minecraft_reference_source", "agent_contract_validator"}.issubset(tool_ids), "required agent tools missing")
     for tool in manifest.get("agent_tools", []):
         repo_path(tool.get("script"), f"tool {tool['id']}.script")
-    return component_ids, proof_ids, set(layer_ids), role_names
+    return component_ids, proof_ids, role_names
 
 
 def validate_proof_graph(graph: dict[str, Any], proof_ids: set[str], component_ids: set[str], manifest: dict[str, Any]) -> None:
     require(graph.get("schema_version") == 1, "proof graph schema_version must be 1")
     requires = graph.get("requires")
     require(isinstance(requires, dict) and set(requires) == proof_ids, "proof graph must define every proof profile exactly once")
-    for proof_id, deps in requires.items():
-        require(isinstance(deps, list) and not (set(deps) - proof_ids), f"proof {proof_id} has invalid prerequisites")
     ranks = {item["id"]: item["rank"] for item in manifest["proof_profiles"]}
-    visiting: set[str] = set(); done: set[str] = set()
+    visiting: set[str] = set()
+    done: set[str] = set()
     def visit(node: str) -> None:
-        if node in done: return
+        if node in done:
+            return
         require(node not in visiting, f"proof dependency cycle at {node}")
         visiting.add(node)
-        for dep in requires[node]:
+        deps = requires[node]
+        require(isinstance(deps, list) and not (set(deps) - proof_ids), f"proof {node} has invalid prerequisites")
+        for dep in deps:
             require(ranks[dep] <= ranks[node], f"proof prerequisite {dep} ranks after {node}")
             visit(dep)
-        visiting.remove(node); done.add(node)
-    for proof_id in proof_ids: visit(proof_id)
+        visiting.remove(node)
+        done.add(node)
+    for proof_id in proof_ids:
+        visit(proof_id)
     obligations = graph.get("component_obligations")
     require(isinstance(obligations, dict) and not (set(obligations) - component_ids), "invalid component_obligations")
     for component_id, refs in obligations.items():
@@ -151,14 +170,14 @@ def validate_oracles(index: dict[str, Any], component_ids: set[str], proof_ids: 
     oracles = index.get("oracles")
     require(isinstance(oracles, list) and oracles, "oracle index must be non-empty")
     oracle_ids = set(unique([item.get("id") for item in oracles], "oracle.id"))
-    allowed_backends = {"directmetal", "vulkan"}; covered: set[str] = set()
+    covered: set[str] = set()
     for oracle in oracles:
         repo_path(oracle.get("path"), f"oracle {oracle['id']}.path")
         components = set(oracle.get("components", []))
         require(components and not (components - component_ids), f"oracle {oracle['id']} has unknown components")
         covered |= components
         require(isinstance(oracle.get("keywords"), list) and oracle["keywords"], f"oracle {oracle['id']} needs keywords")
-        require(not (set(oracle.get("backends", [])) - allowed_backends), f"oracle {oracle['id']} has unknown backend")
+        require(not (set(oracle.get("backends", [])) - {"directmetal", "vulkan"}), f"oracle {oracle['id']} has unknown backend")
         require(oracle.get("proof") in proof_ids, f"oracle {oracle['id']} has unknown proof")
     require({"host.egl", "gl.semantics", "shader.contract", "semantic.lowering"}.issubset(covered), "core semantic components need indexed oracles")
     return oracle_ids
@@ -176,37 +195,49 @@ def validate_branch_families(registry: dict[str, Any], role_names: set[str]) -> 
     allowed_kinds = {"canonical", "review", "evidence", "migration_source", "experiment", "candidate", "provenance"}
     for family in families:
         require(family.get("kind") in allowed_kinds, f"branch family {family['id']} has unknown kind")
-        unique(family.get("selectors", []), f"branch family {family['id']} selectors")
+        require(unique(family.get("selectors", []), f"branch family {family['id']} selectors"), f"branch family {family['id']} has no selectors")
         text(family.get("disposition"), f"branch family {family['id']}.disposition")
         text(family.get("description"), f"branch family {family['id']}.description")
         text(family.get("exit_condition"), f"branch family {family['id']}.exit_condition")
+        if "accounted_by_prs" in family:
+            positive_prs(family["accounted_by_prs"], f"branch family {family['id']}.accounted_by_prs")
     for role in role_names:
         matches = matching_families(registry, role)
         require(len(matches) == 1 and matches[0].get("kind") == "canonical", f"canonical role {role} must match exactly one canonical family")
     return family_ids
 
 
-def validate_migration_queue(queue: dict[str, Any], component_ids: set[str], proof_ids: set[str], oracle_ids: set[str], role_names: set[str]) -> set[str]:
-    require(queue.get("schema_version") == 1, "migration-queue schema_version must be 1")
+def validate_migration_queue(queue: dict[str, Any], component_ids: set[str], proof_ids: set[str], oracle_ids: set[str], role_names: set[str]) -> tuple[set[str], set[str]]:
+    require(queue.get("schema_version") == 2, "migration-queue schema_version must be 2")
     items = queue.get("items")
     require(isinstance(items, list) and items, "migration queue must be non-empty")
     item_ids = set(unique([item.get("id") for item in items], "migration-item.id"))
     allowed_status = {"open_candidate", "needs_audit", "needs_focused_oracle", "legacy_source_needs_clean_reconciliation", "needs_oracle_transplant", "needs_reconciliation", "needs_clean_evidence_plane"}
-    allowed_priority = {"high", "medium", "low"}
     for item in items:
         require(item.get("status") in allowed_status, f"migration item {item['id']} has unknown status")
-        require(item.get("priority") in allowed_priority, f"migration item {item['id']} has unknown priority")
-        unique(item.get("source_refs", []), f"migration item {item['id']} source_refs")
-        require(item.get("source_refs"), f"migration item {item['id']} needs provenance refs")
-        prs = item.get("source_prs", [])
-        require(isinstance(prs, list) and all(isinstance(pr, int) and pr > 0 for pr in prs), f"migration item {item['id']} source_prs invalid")
+        require(item.get("priority") in {"high", "medium", "low"}, f"migration item {item['id']} has unknown priority")
+        require(unique(item.get("source_refs", []), f"migration item {item['id']} source_refs"), f"migration item {item['id']} needs provenance refs")
+        positive_prs(item.get("source_prs", []), f"migration item {item['id']} source_prs")
         require(item.get("target_branch") in role_names, f"migration item {item['id']} targets non-canonical branch")
         require(not (set(item.get("components", [])) - component_ids), f"migration item {item['id']} references unknown component")
         require(not (set(item.get("oracles", [])) - oracle_ids), f"migration item {item['id']} references unknown oracle")
         require(not (set(item.get("proofs", [])) - proof_ids), f"migration item {item['id']} references unknown proof")
         text(item.get("question"), f"migration item {item['id']}.question")
         text(item.get("exit_condition"), f"migration item {item['id']}.exit_condition")
-    return item_ids
+
+    findings = queue.get("accounted_findings")
+    require(isinstance(findings, list) and findings, "migration queue must preserve accounted findings")
+    finding_ids = set(unique([item.get("id") for item in findings], "accounted-finding.id"))
+    require(not (item_ids & finding_ids), "open migration item IDs and accounted finding IDs must not overlap")
+    allowed_dispositions = {"translate_not_transplant", "not_current_clean_requirement", "split_oracle_semantics", "represented_by_clean_contract", "explicitly_rejected"}
+    for finding in findings:
+        require(unique(finding.get("source_refs", []), f"finding {finding['id']} source_refs"), f"finding {finding['id']} needs provenance refs")
+        positive_prs(finding.get("source_prs", []), f"finding {finding['id']} source_prs")
+        require(finding.get("disposition") in allowed_dispositions, f"finding {finding['id']} has unknown disposition")
+        components = set(finding.get("clean_components", []))
+        require(components and not (components - component_ids), f"finding {finding['id']} references unknown clean component")
+        text(finding.get("finding"), f"finding {finding['id']}.finding")
+    return item_ids, finding_ids
 
 
 def validate_documents() -> None:
@@ -234,17 +265,19 @@ def main() -> int:
     try:
         manifest, graph, oracles = load(MANIFEST), load(PROOF_GRAPH), load(ORACLES)
         families, queue = load(BRANCH_FAMILIES), load(MIGRATION_QUEUE)
-        component_ids, proof_ids, _, role_names = validate_manifest(manifest)
+        component_ids, proof_ids, role_names = validate_manifest(manifest)
         validate_proof_graph(graph, proof_ids, component_ids, manifest)
         oracle_ids = validate_oracles(oracles, component_ids, proof_ids)
         family_ids = validate_branch_families(families, role_names)
-        migration_ids = validate_migration_queue(queue, component_ids, proof_ids, oracle_ids, role_names)
-        validate_documents(); validate_workflow(); run_self_tests()
+        migration_ids, finding_ids = validate_migration_queue(queue, component_ids, proof_ids, oracle_ids, role_names)
+        validate_documents()
+        validate_workflow()
+        run_self_tests()
     except (ContractError, subprocess.CalledProcessError, OSError, json.JSONDecodeError) as exc:
         print(f"AGENT CONTRACT INVALID: {exc}", file=sys.stderr)
         return 1
     print("AGENT CONTRACT VALID")
-    print(f"components={len(component_ids)} proofs={len(proof_ids)} families={len(family_ids)} migration_items={len(migration_ids)} proof_dag=acyclic oracle_index=valid")
+    print(f"components={len(component_ids)} proofs={len(proof_ids)} families={len(family_ids)} open_migrations={len(migration_ids)} accounted_findings={len(finding_ids)} proof_dag=acyclic oracle_index=valid")
     return 0
 
 

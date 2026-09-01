@@ -16,11 +16,16 @@ Never maintain one document that tries to answer all branch questions.
 
 2. **What is this ref for?**
 
-   Read `docs/agent/branch-families.json`. It classifies lifecycle/provenance roles such as canonical, experiment, evidence, migration source and retirement candidate. Classification is not semantic containment or deletion authorization.
+   Read `docs/agent/branch-families.json`. It classifies lifecycle/provenance roles such as canonical, experiment, evidence, migration source, candidate and absorbed provenance. Where a source family has been fully accounted by merged PRs, that accounting belongs here rather than in a copied SHA table.
 
-3. **What behavior still has not converged?**
+3. **What semantic knowledge remains or has already been extracted?**
 
-   Read `docs/agent/migration-queue.json`. Items are semantic questions with clean destination components, oracles, proofs and exit conditions. Work-item identity is not a branch name.
+   Read `docs/agent/migration-queue.json`.
+
+   - `items` are unresolved semantic/oracle/proof questions with clean destination components and exit conditions.
+   - `accounted_findings` preserve conclusions already extracted from historical code: translate-not-transplant decisions, clean-architecture representations, rejected hypotheses, or old strategies that are not current clean requirements.
+
+   Work identity is semantic, not a branch name.
 
 4. **How did we get here?**
 
@@ -55,10 +60,11 @@ Use:
 ```text
 source ref / PR / exact tree
   -> one observable semantic or native invariant
+  -> search open items + accounted findings
   -> smallest focused oracle
   -> clean owning abstraction
   -> exact clean-candidate proof
-  -> update/close migration item
+  -> update/close/open-account semantic memory
 ```
 
 A giant cross-history tree diff is archaeology, not a promotion argument.
@@ -68,25 +74,26 @@ Before reusing historical work, answer independently:
 - history relation: ancestor/descendant/diverged/squash-represented/no-common-ancestor;
 - lifecycle role: product candidate, experiment, evidence, migration source, provenance;
 - semantic delta: the unique behavior/test/contract that matters;
-- proof subject: the exact implementation/evidence that now represents it.
+- prior accounting: whether this exact strategy was already translated/rejected;
+- proof subject: the exact implementation/evidence that now represents retained behavior.
 
 A newer validation ref may contain no newer product semantics. A squash-merged source may stay Git-divergent. A branch may be obsolete as ownership while retaining one unique unresolved invariant.
 
-## Migration queue discipline
+## Semantic memory discipline
 
-A migration item is one semantic question, not a ticket for merging a branch.
+An open migration item is one semantic question, not a ticket for merging a branch. Many branches can support one item, and one comprehensive branch can support many items. This many-to-many relation is intentional and prevents branch count from becoming cognitive workload.
 
-Many branches can support one migration item. One comprehensive branch can support many migration items. This many-to-many relationship is intentional and prevents branch count from becoming cognitive workload.
+Create an open item only when there is evidence of a concrete unresolved semantic/oracle/proof question. Do not populate the queue from branch names alone.
 
-Create an item only when there is evidence of a concrete unresolved semantic/oracle/proof question. Do not populate the queue from branch names alone.
-
-Close an item only when one of these is explicit:
+Close an open item only when one of these is explicit:
 
 - missing behavior landed in the clean owner and required proof passed;
 - current clean behavior was shown equivalent and exact evidence recorded;
 - historical hypothesis was falsified/rejected and the reason is durable.
 
-Deleting/merging one source ref does not by itself close semantic work.
+When historical analysis determines that a legacy implementation strategy should **not** be mechanically ported, record an `accounted_finding`. Negative/translated knowledge is part of the system memory; otherwise future agents will repeatedly rediscover and reconsider the same branch patch.
+
+Deleting or merging a source ref does not by itself close semantic work or erase accounted findings.
 
 ## Clean versus legacy tree
 
@@ -95,15 +102,16 @@ The clean architecture is rooted at `src/*`. The older family commonly carries `
 When a legacy source contains a valid fix:
 
 1. identify the semantic/native-lifetime rule;
-2. select the smallest clean owner from the manifest;
-3. preserve or create the focused oracle;
-4. move shared semantics above backend execution when possible;
-5. run the proof DAG on the exact clean candidate;
-6. update the semantic migration item;
-7. keep old SHA/PR as provenance;
-8. consider branch retirement separately.
+2. check whether it is already an accounted finding or open item;
+3. select the smallest clean owner from the manifest;
+4. preserve or create the focused oracle;
+5. move shared semantics above backend execution when possible;
+6. run the proof DAG on the exact clean candidate;
+7. update semantic memory;
+8. keep old SHA/PR as provenance;
+9. consider branch retirement separately.
 
-Do not mechanically transplant old layouts, duplicated backend policy or one-shot workflows.
+Do not mechanically transplant old layouts, duplicated backend policy, legacy descriptor numbering, giant composite smokes or one-shot workflows when the clean abstraction can represent the same meaning more directly.
 
 ## Product, evidence and provenance subjects
 
@@ -139,14 +147,14 @@ CI supplies environments; tests own contracts. Candidate source and synthetic in
 
 ## Retirement
 
-Generated facts such as `covered_by`, same-tree, duplicate-head, or a `retirement_candidate` family disposition are evidence, not deletion authorization.
+Generated facts such as `covered_by`, same-tree, duplicate-head, or an `absorbed_provenance` disposition are evidence, not deletion authorization.
 
 Retire a non-canonical ref only after:
 
 1. live topology is refreshed;
 2. its branch family permits retirement;
-3. every migration item that cites unique behavior from it is resolved/rejected;
-4. PR/tree/semantic evidence accounts for its unique delta, including squash merges;
+3. every open migration item citing unique behavior is resolved/rejected;
+4. merged PR/tree evidence or accounted findings explain its unique delta, including squash merges;
 5. important provenance remains discoverable;
 6. no open PR/workflow/external test depends on the branch name;
 7. repository owner authorizes destructive cleanup.
@@ -161,7 +169,7 @@ main
   -> <future clean integration only when actually needed>
 
 small semantic migration queue
-legacy anchors / short-lived refs as shrinking provenance
+large but cheap-to-ignore provenance pool
 ```
 
-The repository may retain many historical refs temporarily without forcing agents to remember them. The system should accumulate memory in contracts, tests, semantic migration items, family rules and exact evidence—not in an ever-growing manual branch encyclopedia.
+The repository may temporarily retain many historical refs without forcing agents to remember them. The system should accumulate memory in contracts, tests, open semantic items, accounted findings, family accounting and exact evidence—not in an ever-growing manual branch encyclopedia.
