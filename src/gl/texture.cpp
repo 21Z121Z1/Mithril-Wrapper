@@ -2166,6 +2166,11 @@ void APIENTRY glCopyTexImage1D(GLenum target, GLint level,
     }
     GLuint id = ActiveBound(target);
     if (!id) return;
+    if (glCheckFramebufferStatus(GL_READ_FRAMEBUFFER) !=
+        GL_FRAMEBUFFER_COMPLETE) {
+        PUSH_ERROR(GL_INVALID_FRAMEBUFFER_OPERATION);
+        return;
+    }
     TexState& st = g_textures[id];
     st.width = (uint32_t)width;
     st.height = 1;
@@ -2191,6 +2196,11 @@ void APIENTRY glCopyTexImage2D(GLenum target, GLint level,
     if (width < 0 || height < 0 || level < 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
     GLuint id = ActiveBound(target);
     if (!id) return;
+    if (glCheckFramebufferStatus(GL_READ_FRAMEBUFFER) !=
+        GL_FRAMEBUFFER_COMPLETE) {
+        PUSH_ERROR(GL_INVALID_FRAMEBUFFER_OPERATION);
+        return;
+    }
     TexState& st = g_textures[id];
     uint32_t slice = face ? CubeFaceIndex(target) : 0;
     if (slice >= st.SliceCount()) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
@@ -2231,6 +2241,11 @@ void APIENTRY glCopyTexSubImage1D(GLenum target, GLint level, GLint xoffset,
     if (target != GL_TEXTURE_1D) { PUSH_ERROR(GL_INVALID_ENUM); return; }
     GLuint id = ActiveBound(target);
     if (!id) return;
+    if (glCheckFramebufferStatus(GL_READ_FRAMEBUFFER) !=
+        GL_FRAMEBUFFER_COMPLETE) {
+        PUSH_ERROR(GL_INVALID_FRAMEBUFFER_OPERATION);
+        return;
+    }
     TexState& st = g_textures[id];
     if (st.image_backend_format == v::TexelFormat::Depth32Float) {
         PUSH_ERROR(GL_INVALID_OPERATION);
@@ -2253,6 +2268,11 @@ void APIENTRY glCopyTexSubImage2D(GLenum target, GLint level, GLint xoffset,
     }
     GLuint id = ActiveBound(target);
     if (!id) return;
+    if (glCheckFramebufferStatus(GL_READ_FRAMEBUFFER) !=
+        GL_FRAMEBUFFER_COMPLETE) {
+        PUSH_ERROR(GL_INVALID_FRAMEBUFFER_OPERATION);
+        return;
+    }
     TexState& st = g_textures[id];
     if (st.image_backend_format == v::TexelFormat::Depth32Float) {
         PUSH_ERROR(GL_INVALID_OPERATION);
@@ -2293,6 +2313,11 @@ void APIENTRY glCopyTexSubImage3D(GLenum target, GLint level, GLint xoffset,
     if (zoffset < 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
     GLuint id = ActiveBound(target);
     if (!id) return;
+    if (glCheckFramebufferStatus(GL_READ_FRAMEBUFFER) !=
+        GL_FRAMEBUFFER_COMPLETE) {
+        PUSH_ERROR(GL_INVALID_FRAMEBUFFER_OPERATION);
+        return;
+    }
     TexState& st = g_textures[id];
     if (!st.has_image || st.mip.size() <= (size_t)level) {
         PUSH_ERROR(GL_INVALID_OPERATION); return;

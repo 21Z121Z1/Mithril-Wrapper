@@ -40,6 +40,15 @@ static void SetCap(GLenum cap, bool on) {
 }
 
 static bool SubmitClear(v::ClearParams clear) {
+    // OpenGL 4.6 section 9.4.4: rendering to an incomplete draw
+    // framebuffer generates GL_INVALID_FRAMEBUFFER_OPERATION and the command
+    // is ignored. Validate before conditional rendering or lazy backend init
+    // so invalid GL state never reaches a native render-target resolver.
+    if (glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) !=
+        GL_FRAMEBUFFER_COMPLETE) {
+        PUSH_ERROR(GL_INVALID_FRAMEBUFFER_OPERATION);
+        return false;
+    }
     if (!ConditionalRenderingAllowsCommands()) return true;
     if (!v::EnsureInit()) {
         PUSH_ERROR(GL_INVALID_OPERATION);
@@ -156,7 +165,15 @@ void APIENTRY glClearStencil(GLint sval) { s::GetState().clear_stencil = sval; }
 void APIENTRY glClear(GLbitfield mask) {
     const GLbitfield valid = GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT;
     if (mask & ~valid) { PUSH_ERROR(GL_INVALID_VALUE); return; }
-    if (!mask) return;
+    // Clear is a rendering command even when mask selects no buffers.
+    // Framebuffer completeness is therefore still observable in the zero-work
+    // case; do not let this early return bypass the OpenGL 9.4.4 error.
+    if (!mask) {
+        if (glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) !=
+            GL_FRAMEBUFFER_COMPLETE)
+            PUSH_ERROR(GL_INVALID_FRAMEBUFFER_OPERATION);
+        return;
+    }
     auto& st = s::GetState();
     v::ClearParams clear;
     clear.mask = mask;

@@ -186,7 +186,6 @@ int main(void) {
     fn_glGetVertexAttribiv getVertexAttrib  = (fn_glGetVertexAttribiv)dlsym(h, "glGetVertexAttribiv");
     fn_glMapBufferRange   mapBufferRange    = (fn_glMapBufferRange)dlsym(h, "glMapBufferRange");
     fn_glUnmapBuffer      unmapBuffer       = (fn_glUnmapBuffer)dlsym(h, "glUnmapBuffer");
-    fn_glBufferSubData    bufferSubData     = (fn_glBufferSubData)dlsym(h, "glBufferSubData");
     fn_glFinish            finish            = (fn_glFinish)dlsym(h, "glFinish");
     fn_glReadPixels        readPixels        = (fn_glReadPixels)dlsym(h, "glReadPixels");
     fn_glDeleteProgram     deleteProgram     = (fn_glDeleteProgram)dlsym(h, "glDeleteProgram");

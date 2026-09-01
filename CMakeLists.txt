@@ -99,11 +99,14 @@ function(mithril_configure_frontend_target target)
         ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
     target_include_directories(${target} PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    # glslang::SPIRV exposes glslang transitively. Do not add a second
+    # direct glslang edge: Apple ld warns and ignores that duplicate archive.
+    # SPIRV-Cross core is backend-specific below: spirv-cross-msl already
+    # carries core transitively for DirectMetal; the legacy target links core
+    # explicitly because it does not consume the MSL target.
     target_link_libraries(${target} PRIVATE
-        glslang::glslang
         glslang::SPIRV
-        glslang::glslang-default-resource-limits
-        spirv-cross-core)
+        glslang::glslang-default-resource-limits)
     set_target_properties(${target} PROPERTIES
         CXX_STANDARD 17
         CXX_STANDARD_REQUIRED ON
@@ -190,7 +193,7 @@ if(MITHRIL_BUILD_LEGACY)
         ${MITHRIL_FRONTEND_SOURCES}
         ${MITHRIL_VULKAN_SOURCES})
     mithril_configure_frontend_target(mithril_legacy)
-    target_link_libraries(mithril_legacy PRIVATE Vulkan::Headers)
+    target_link_libraries(mithril_legacy PRIVATE Vulkan::Headers spirv-cross-core)
     if(APPLE)
         set_target_properties(mithril_legacy PROPERTIES OUTPUT_NAME mithril-vulkan)
         if(MITHRIL_IOS AND MITHRIL_VULKAN_LIBRARY)
