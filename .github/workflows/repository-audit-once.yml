@@ -1,0 +1,54 @@
+name: repository-audit-once
+
+on:
+  push:
+    branches: [consolidation/repository-20260920]
+
+permissions:
+  contents: read
+
+jobs:
+  live-topology:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: false
+          persist-credentials: false
+
+      - name: Fetch all live fork branches
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --prune origin '+refs/heads/*:refs/remotes/origin/*'
+          while read -r name url; do
+            git remote add "$name" "$url"
+            git fetch --no-tags --prune --filter=blob:none "$name" "+refs/heads/*:refs/remotes/$name/*"
+            git remote set-head "$name" -a || true
+          done <<'REMOTES'
+          eternity https://github.com/EternityQwQ/Mithril-Wrapper.git
+          uniaball https://github.com/Uniaball/Mithril-Wrapper.git
+          dev https://github.com/MithrilWrapper-Dev/Mithril-Wrapper.git
+          herbrine https://github.com/herbrine8403/Mithril-Wrapper.git
+          REMOTES
+
+      - name: Generate live branch and fork evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p repository-audit
+          python3 scripts/audit-branches.py --fetch-graph > repository-audit/control-plane-branch-audit.json
+          python3 scripts/audit-branches.py --markdown > repository-audit/control-plane-branch-audit.md
+          python3 scripts/repository-audit-once.py
+          git submodule status > repository-audit/submodules.txt
+          git remote -v > repository-audit/remotes.txt
+
+      - name: Upload audit evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: repository-audit-${{ github.sha }}
+          path: repository-audit
+          if-no-files-found: error
+          retention-days: 7
