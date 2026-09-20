@@ -2,6 +2,10 @@ name: platform-runtime-validation
 
 on:
   workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/hosted-metal-gpu-probe.yml'
+      - '.github/ci/SimulatorSmokeSentinel.c'
 
 permissions:
   contents: read
@@ -92,11 +96,35 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          evidence="$RUNNER_TEMP/mithril-simulator-evidence"
+          mkdir -p "$evidence/tests"
+          {
+            echo "repository=$GITHUB_REPOSITORY"
+            echo "event=$GITHUB_EVENT_NAME"
+            echo "github_sha=$GITHUB_SHA"
+            echo "checked_out_sha=$(git rev-parse HEAD)"
+            echo "checked_out_tree=$(git rev-parse HEAD^{tree})"
+            echo "ref=$GITHUB_REF"
+            echo "head_ref=$GITHUB_HEAD_REF"
+            echo "base_ref=$GITHUB_BASE_REF"
+            echo "run_id=$GITHUB_RUN_ID"
+            echo "run_attempt=$GITHUB_RUN_ATTEMPT"
+            echo "runner_os=$RUNNER_OS"
+            echo "runner_arch=$RUNNER_ARCH"
+            uname -a
+            sw_vers
+            xcodebuild -version
+            xcrun --sdk iphonesimulator clang --version
+            echo "simulator_sdk=$(xcrun --sdk iphonesimulator --show-sdk-version)"
+          } > "$evidence/provenance.txt"
+          xcrun simctl list devices available -j > "$evidence/available-simulators.json"
           udid="$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(x["udid"] for runtime, devices in d["devices"].items() if "iOS" in runtime for x in devices if x.get("isAvailable") and x.get("name", "").startswith("iPhone")))')"
           test -n "$udid"
           echo "udid=$udid" >> "$GITHUB_OUTPUT"
           xcrun simctl boot "$udid" || true
           xcrun simctl bootstatus "$udid" -b
+          echo "simulator_udid=$udid" >> "$evidence/provenance.txt"
+          xcrun simctl list devices -j > "$evidence/simulator-state-after-boot.json"
 
       - name: Build DirectMetal for arm64 iOS Simulator
         id: build
@@ -120,9 +148,11 @@ jobs:
           artifact="$(find build-hosted-ios-sim/output -type f -name 'libmithril.dylib' -print -quit)"
           test -n "$artifact"
           echo "artifact=$artifact" >> "$GITHUB_OUTPUT"
-          file "$artifact"
-          xcrun vtool -show-build "$artifact" | tee "$RUNNER_TEMP/vtool-sim.txt"
-          grep -Eiq 'platform[[:space:]]+(IOSSIMULATOR|7)' "$RUNNER_TEMP/vtool-sim.txt"
+          evidence="$RUNNER_TEMP/mithril-simulator-evidence"
+          file "$artifact" | tee "$evidence/libmithril.file.txt"
+          shasum -a 256 "$artifact" | tee "$evidence/libmithril.sha256"
+          xcrun vtool -show-build "$artifact" | tee "$evidence/vtool-sim.txt"
+          grep -Eiq 'platform[[:space:]]+(IOSSIMULATOR|7)' "$evidence/vtool-sim.txt"
 
       - name: Compile simulator DirectMetal smoke executables
         shell: bash
@@ -130,6 +160,8 @@ jobs:
           set -euo pipefail
           sdk="$(xcrun --sdk iphonesimulator --show-sdk-path)"
           target_flags=(-target arm64-apple-ios16.0-simulator -isysroot "$sdk")
+          evidence="$RUNNER_TEMP/mithril-simulator-evidence"
+          : > "$evidence/smoke-executables.sha256"
           for test_name in draw_smoke provoking_vertex_smoke packed_vertex_attrib_smoke fbo_smoke directmetal_fbo_smoke layered_fbo_smoke stencil_persistence_smoke; do
             xcrun --sdk iphonesimulator clang "${target_flags[@]}" \
               -std=c11 -Wall -Wextra -Dmain=mithril_smoke_main \
@@ -137,6 +169,7 @@ jobs:
             xcrun --sdk iphonesimulator clang "${target_flags[@]}" \
               -std=c11 -Wall -Wextra .github/ci/SimulatorSmokeSentinel.c \
               "$RUNNER_TEMP/${test_name}.o" -o "$RUNNER_TEMP/${test_name}"
+            shasum -a 256 "$RUNNER_TEMP/$test_name" >> "$evidence/smoke-executables.sha256"
           done
 
       - name: Install and run DirectMetal smokes in Simulator
