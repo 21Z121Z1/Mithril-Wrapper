@@ -21,7 +21,7 @@ jobs:
       MITHRIL_BACKEND: metal
       MITHRIL_EXPECT_RENDERER: Mithril DirectMetal
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           submodules: false
           persist-credentials: false
@@ -75,7 +75,7 @@ jobs:
       MTL_DEBUG_LAYER: '1'
       MTL_SHADER_VALIDATION: '0'
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           submodules: false
           persist-credentials: false
