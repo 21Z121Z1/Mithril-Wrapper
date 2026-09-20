@@ -36,7 +36,8 @@ query、同步和删除语义。
 
 `src/shader` 负责 GLSL 重写、SPIR-V 生成、反射、uniform 与资源映射，以及已
 链接的 vertex-to-fragment 接口行为。后端使用链接结果，不得另行发明不同的
-着色器接口规则。
+着色器接口规则。着色器所有者为每个已链接阶段解析一次 loose uniform 的
+offset 和 stride。原生代码使用该布局，并选择自己的存储方式。
 
 ### 后端无关意图
 
@@ -72,6 +73,17 @@ vertex 与 index source、uniform source、采样资源、render-target 身份�
 语义测试可以使用 offscreen 或 default framebuffer 隔离规则。最终宿主行为还
 依赖真实 surface 和呈现路径。`tests/amethyst_egl_smoke.mm` 检查 CAMetalLayer
 边界。超出该边界的声明需要真实 Minecraft 或物理设备证据。
+
+## 实现限制
+
+实现使用一份全局 GL 状态，以及单个 EGL context 和 surface。线程局部的 EGL
+绑定不提供隔离的 GL context。不支持独立 context、共享 context 并发或同时
+使用多个 surface。
+
+Vulkan 参考后端没有宿主呈现路径。其 swap 操作只提交离屏工作。它拒绝用户
+uniform block 和 texture-buffer sampler。其测试标签覆盖 DirectMetal 行为的
+子集，不是全部 GL 规则的独立实现。共享前端的错误可能同时影响两个后端。
+仅有跨后端结果一致，不能证明符合规范。
 
 ## 放置规则
 

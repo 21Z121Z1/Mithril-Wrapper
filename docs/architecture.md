@@ -42,7 +42,8 @@ or an unsupported observable state combination.
 `src/shader` owns GLSL rewriting, SPIR-V generation, reflection, uniform and
 resource mapping, and linked vertex-to-fragment interface behavior. Backend
 code consumes the linked result. A backend must not invent a different shader
-interface rule.
+interface rule. The shader owner resolves loose-uniform offsets and strides
+once per linked stage. Native code consumes this layout and chooses its storage.
 
 ### Backend-neutral intent
 
@@ -82,6 +83,18 @@ A semantic test can use an offscreen or default framebuffer to isolate a rule.
 The final host behavior also depends on the real surface and presentation path.
 `tests/amethyst_egl_smoke.mm` exercises the CAMetalLayer seam. Real Minecraft or
 physical-device evidence is required for a claim that extends beyond this seam.
+
+## Implementation limits
+
+The implementation uses one global GL state and one EGL context and surface.
+Thread-local EGL bindings do not provide isolated GL contexts. Independent
+contexts, shared-context concurrency, and simultaneous surfaces are not supported.
+
+The Vulkan reference backend has no host presentation path. Its swap operation
+flushes offscreen work. It rejects user uniform blocks and texture-buffer
+samplers. Its test label covers a subset of DirectMetal behavior, not an
+independent implementation of all GL rules. Shared frontend bugs can affect both
+backends. Cross-backend agreement alone is not conformance evidence.
 
 ## Placement rules
 
