@@ -1,9 +1,10 @@
-/* DirectMetal typed interleaved vertex-buffer smoke.
+/* Shared typed interleaved vertex-buffer smoke.
  *
  * Proves one resident VBO can feed signed-short and unsigned-byte integer
  * shader inputs plus normalized unsigned-byte float colour without a per-draw
- * float repack. Buffer versioning and deletion after deferred draw are also
- * checked through framebuffer readback.
+ * float repack. It also proves that normalized signed and unsigned 32-bit
+ * attributes use the shared frontend float-conversion fallback. Buffer
+ * versioning and deletion after deferred draw are checked through readback.
  */
 
 #include <dlfcn.h>
@@ -19,7 +20,9 @@
 #define GL_ARRAY_BUFFER 0x8892
 #define GL_STATIC_DRAW 0x88E4
 #define GL_SHORT 0x1402
+#define GL_INT 0x1404
 #define GL_UNSIGNED_BYTE 0x1401
+#define GL_UNSIGNED_INT 0x1405
 #define GL_TRUE 1
 #define GL_FALSE 0
 #define GL_TRIANGLES 0x0004
@@ -76,6 +79,22 @@ struct __attribute__((packed)) PackedVertex {
     uint8_t color[4];
 };
 _Static_assert(sizeof(struct PackedVertex) == 12, "packed vertex ABI");
+
+struct __attribute__((packed)) WideSignedVertex {
+    int16_t position[2];
+    uint8_t tag[4];
+    int32_t color[4];
+};
+_Static_assert(sizeof(struct WideSignedVertex) == 24,
+               "wide signed vertex ABI");
+
+struct __attribute__((packed)) WideUnsignedVertex {
+    int16_t position[2];
+    uint8_t tag[4];
+    uint32_t color[4];
+};
+_Static_assert(sizeof(struct WideUnsignedVertex) == 24,
+               "wide unsigned vertex ABI");
 
 static int failures;
 
@@ -176,8 +195,10 @@ int main(void) {
     if (failures) return 1;
 
     const char* renderer = (const char*)getString(GL_RENDERER);
-    CHECK(renderer && strstr(renderer, "DirectMetal"),
-          "context is explicitly DirectMetal (%s)", renderer ? renderer : "null");
+    CHECK(renderer &&
+              (strcmp(renderer, "Mithril DirectMetal") == 0 ||
+               strcmp(renderer, "Mithril Vulkan reference backend") == 0),
+          "context uses a supported backend (%s)", renderer ? renderer : "null");
 
     GLuint vertex = createShader(GL_VERTEX_SHADER);
     GLuint fragment = createShader(GL_FRAGMENT_SHADER);
@@ -263,6 +284,51 @@ int main(void) {
     readPixels(256, 256, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
     CHECK(pixel_is(pixel, 255, 0, 0) && getError() == GL_NO_ERROR,
           "deferred typed draw retains VBO after GL name deletion");
+
+    struct WideSignedVertex signed_vertices[3] = {
+        {{-1, -1}, {200, 3, 17, 29}, {0, INT32_MAX, 0, INT32_MAX}},
+        {{ 1, -1}, {200, 3, 17, 29}, {0, INT32_MAX, 0, INT32_MAX}},
+        {{ 0,  1}, {200, 3, 17, 29}, {0, INT32_MAX, 0, INT32_MAX}},
+    };
+    GLuint fallback_buffer = 0;
+    genBuffers(1, &fallback_buffer);
+    bindBuffer(GL_ARRAY_BUFFER, fallback_buffer);
+    bufferData(GL_ARRAY_BUFFER, sizeof(signed_vertices), signed_vertices,
+               GL_STATIC_DRAW);
+    vertexAttribIPointer(0, 2, GL_SHORT, sizeof(struct WideSignedVertex),
+                         (const void*)0);
+    vertexAttribIPointer(1, 4, GL_UNSIGNED_BYTE,
+                         sizeof(struct WideSignedVertex), (const void*)4);
+    vertexAttribPointer(2, 4, GL_INT, GL_TRUE,
+                        sizeof(struct WideSignedVertex), (const void*)8);
+    clear(GL_COLOR_BUFFER_BIT);
+    drawArrays(GL_TRIANGLES, 0, 3);
+    readPixels(256, 256, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
+    CHECK(pixel_is(pixel, 0, 255, 0) && getError() == GL_NO_ERROR,
+          "normalized Int32 attributes use shared float fallback");
+
+    struct WideUnsignedVertex unsigned_vertices[3] = {
+        {{-1, -1}, {200, 3, 17, 29},
+         {UINT32_MAX, 0, 0, UINT32_MAX}},
+        {{ 1, -1}, {200, 3, 17, 29},
+         {UINT32_MAX, 0, 0, UINT32_MAX}},
+        {{ 0,  1}, {200, 3, 17, 29},
+         {UINT32_MAX, 0, 0, UINT32_MAX}},
+    };
+    bufferData(GL_ARRAY_BUFFER, sizeof(unsigned_vertices), unsigned_vertices,
+               GL_STATIC_DRAW);
+    vertexAttribIPointer(0, 2, GL_SHORT, sizeof(struct WideUnsignedVertex),
+                         (const void*)0);
+    vertexAttribIPointer(1, 4, GL_UNSIGNED_BYTE,
+                         sizeof(struct WideUnsignedVertex), (const void*)4);
+    vertexAttribPointer(2, 4, GL_UNSIGNED_INT, GL_TRUE,
+                        sizeof(struct WideUnsignedVertex), (const void*)8);
+    clear(GL_COLOR_BUFFER_BIT);
+    drawArrays(GL_TRIANGLES, 0, 3);
+    readPixels(256, 256, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
+    CHECK(pixel_is(pixel, 255, 0, 0) && getError() == GL_NO_ERROR,
+          "normalized UInt32 attributes use shared float fallback");
+    deleteBuffers(1, &fallback_buffer);
 
     dlclose(library);
     printf("\ntyped_vertex_smoke: %s (%d failure%s)\n",

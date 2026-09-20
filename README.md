@@ -1,142 +1,132 @@
 # Mithril-Wrapper
 
-Mithril-Wrapper 是面向 Minecraft Java / LWJGL 的 OpenGL compatibility system。目标不是“把 OpenGL 调用逐个翻译成另一套 API”，而是把 Minecraft 可观察到的 GL/EGL 语义解析成明确、可验证的中间意图，再由原生 GPU backend 高效执行。
+[中文说明](README.zh-CN.md)
 
-Apple 平台的 shipping path 是 **DirectMetal**。Vulkan 路径保留为隔离的 reference/fallback execution engine；在 Apple 上可借助 MoltenVK，在 Linux 上可用于独立回归。两条 backend 不应各自发明不同的 OpenGL 语义。
+Mithril-Wrapper is an EGL and OpenGL compatibility layer for Minecraft Java
+and LWJGL on Apple platforms. It resolves observable API behavior into explicit
+backend-neutral draw and resource intent. Native backends execute that intent.
 
-## 系统模型
+The Apple shipping target uses **DirectMetal**. The Vulkan target is a separate
+reference backend. Linux CI uses the Vulkan target for cross-backend regression.
+Apple builds can use it for explicit research, but it is not part of the
+DirectMetal shipping artifact.
+
+Mithril-Wrapper does not claim general OpenGL conformance. Exported symbols,
+accepted calls, focused tests, Minecraft acceptance, and conformance are
+different levels of evidence.
+
+## Architecture
 
 ```text
 Minecraft / LWJGL observable behavior
-              |
-              v
-EGL / host ABI and lifecycle
-              |
-              v
-OpenGL + shader observable semantics
-              |
-              v
-backend-neutral resolved intent
-(draw/resource/state + lifetime/version identity)
-              |
-        +-----+-----+
-        |           |
-        v           v
- DirectMetal      Vulkan
- shipping        reference
-        |           |
-        +-----+-----+
-              v
-platform / presentation seam
-              |
-              v
-exact-subject evidence -> promotion
+                 |
+                 v
+        EGL and host lifecycle
+                 |
+                 v
+ OpenGL state, objects, errors, shaders
+                 |
+                 v
+  resolved backend-neutral intent
+                 |
+          +------+------+
+          |             |
+          v             v
+     DirectMetal      Vulkan
+      shipping       reference
+          |             |
+          +------+------+
+                 v
+       platform presentation
 ```
 
-完整 ownership/invariant 定义见 `docs/system-model.md`。最重要的架构 seam 是 `src/backend/*`：mutable GL state 应在被观察时解析成显式 snapshot，native backend 只执行已经解析好的意图。
+The semantic owners are:
 
-## 分支不是架构
+- `src/egl`: EGL objects, lifecycle, and the host surface seam.
+- `src/gl` and `src/state`: OpenGL-visible state and object behavior.
+- `src/shader`: shader translation, reflection, and linked interfaces.
+- `src/backend`: immutable intent and resource identity for native execution.
+- `src/metal`: DirectMetal execution.
+- `src/vk`: Vulkan execution.
 
-仓库包含两个 Git history universe：
+A generic EGL, OpenGL, or shader rule must not have separate Metal and Vulkan
+interpretations. See [Architecture](docs/architecture.md).
 
-- clean shipping family：`main -> integration/directmetal-next`；
-- disconnected legacy/experimental family：以 `integration/directvulkan-reference`、`integration/legacy-capability-port` 及大量 `Mithril-Wrapper-cpp/*` 实验线为主要来源。
+## Build and test
 
-legacy family 的价值是语义、oracle 和 provenance，不是可整体合并的产品架构。跨 history universe 的正确动作是 **semantic transplant**：提炼 invariant -> 建 focused oracle -> 放入 clean owner -> exact-subject 验证。
+Clone the submodules before the first build.
 
-不要从 README 中猜当前 branch 状态。需要实时拓扑时运行：
+### Linux Vulkan reference
 
 ```bash
-python3 scripts/audit-branches.py --fetch-graph --markdown
-```
-
-## Agent 入口
-
-编码、审查或恢复历史工作前先读 `AGENTS.md`，不要 breadth-first 扫整个仓库。
-
-最小上下文入口：
-
-```bash
-python3 scripts/agent-context.py --task "describe the task"
-```
-
-它会给出当前 HEAD/tree、history universe、nearest anchor、ownership、boundary risk、最小读取集合和 proof plan。涉及 Minecraft 26.2 原始行为时：
-
-```bash
-SRC="$(bash scripts/minecraft-reference.sh --print-path)"
-```
-
-生成内容仅是本地分析输入，不进入 Git/CI artifact。
-
-## Clean-tree 目录
-
-```text
-src/egl       host/EGL 生命周期与 surface seam
-src/gl        OpenGL observable semantics
-src/state     GL 状态与错误模型
-src/shader    GLSL/SPIR-V translation + reflection contract
-src/backend   backend-neutral resolved intent
-src/metal     DirectMetal native execution
-src/vk        Vulkan reference/fallback execution
-include       public / diagnostic ABI
-tests         focused semantic and backend oracles
-cmake         shared test registration
-scripts       build, verification and agent tools
-```
-
-`Mithril-Wrapper-cpp/*` 属于 disconnected legacy history 中的迁移来源，不是 clean architecture 的第二棵长期产品树。
-
-## 构建与验证
-
-Linux / Vulkan reference：
-
-```bash
+git submodule update --init --recursive
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DMITHRIL_BUILD_LEGACY=ON -DMITHRIL_BUILD_DIRECT=OFF
 cmake --build build --parallel
 ctest --test-dir build -L vulkan --output-on-failure
 ```
 
-macOS / DirectMetal：
+### macOS DirectMetal
 
 ```bash
+git submodule update --init \
+  third_party/SPIRV-Cross third_party/SPIRV-Headers third_party/glslang
 cmake -S . -B build-direct -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DMITHRIL_BUILD_LEGACY=OFF -DMITHRIL_BUILD_DIRECT=ON \
-  -DMITHRIL_ENABLE_SHADER_TOOLCHAIN=ON
+  -DMITHRIL_OUTPUT_DIRECTORY="$PWD/build-direct/artifacts"
 cmake --build build-direct --parallel
 ctest --test-dir build-direct -L directmetal --output-on-failure
+scripts/verify_directmetal_artifact.sh \
+  build-direct/artifacts/libmithril.dylib \
+  build-direct/mithril_direct.boundary.json
 ```
 
-iPhoneOS shipping artifact 使用：
+Set `MITHRIL_OUTPUT_DIRECTORY` if the build must place the library outside the
+default `output` directory.
+
+### iPhoneOS DirectMetal package
+
+The package script requires Xcode and an iPhoneOS CMake toolchain file.
+GitHub Actions fetches the pinned `ios-cmake` toolchain before it runs the
+script.
 
 ```bash
-scripts/build_iphoneos.sh
+MITHRIL_IOS_TOOLCHAIN_FILE=/path/to/ios.toolchain.cmake \
+  scripts/build_iphoneos.sh
 ```
 
-正常 GitHub Actions gate 同时服务 `main` 与 `integration/directmetal-next`。PR 中 candidate source identity 与 GitHub synthetic merge/integration subject 是两个不同 proof subject；详见 `docs/evidence-model.md` 与 `docs/ci.md`。
+## Evidence
 
-## 什么是“已支持”
+The normal `build-mithril` workflow provides three independent gates on
+`main` and on pull requests to `main`:
 
-README 不维护函数级 capability snapshot，因为那会随实现快速过期。
+1. DirectMetal macOS semantics and the Vulkan-free artifact boundary.
+2. DirectMetal iPhoneOS arm64 packaging and ABI checks.
+3. Vulkan reference regression on Linux.
 
-- DirectMetal capability / exact-partial-unsupported 账本：`docs/directmetal-gl33-semantic-matrix.md`
-- GL 3.3 core symbol/domain inventory：`docs/gl33_core_list.md`
-- EGL symbol inventory：`docs/egl_list.md`
-- Amethyst/LWJGL host seam：`docs/contracts/amethyst-host-contract.md`
-- 当前 convergence checkpoint：`docs/agent/status.md`（明确是 dated snapshot）
+The manual `platform-runtime-validation` workflow provides hosted Apple Silicon Metal
+and iOS Simulator runtime evidence. Use it only when a platform-runtime claim
+needs that environment.
 
-任何 capability claim 的优先级都是：shipping source/tests + exact tree/binary evidence > stable contract docs > dated status/ledger > historical experiment prose。
+Focused CTest programs prove small semantic invariants. They do not by
+themselves prove a real Minecraft frame. Real Minecraft evidence does not
+replace a focused regression for the underlying rule. See
+[Validation](docs/validation.md).
 
-## 文档地图
+## Minecraft reference source
 
-从 `docs/README.md` 开始。核心文档：
+This helper downloads Mojang's client JAR, verifies published hashes, and
+creates a local decompiled source tree for investigation:
 
-- `AGENTS.md` — agent operating contract
-- `docs/system-model.md` — stable abstraction tower
-- `docs/evidence-model.md` — evidence/claim semantics
-- `docs/branches.md` — branch/history-universe policy
-- `docs/ci.md` — durable evidence-plane policy
-- `docs/agent/manifest.json` — machine-readable ownership/router
-- `docs/agent/status.md` — dated current frontier
+```bash
+SRC="$(bash scripts/minecraft-reference.sh --print-path)"
+```
 
-历史 milestone/checklist 已从默认入口移出；Git 历史及 `docs/history/` 保留 provenance。
+The generated `.minecraft-reference` directory is git-ignored. Do not commit
+or upload its contents.
+
+## Development
+
+Read [AGENTS.md](AGENTS.md) before a repository-wide change. Product work uses
+`main`. Historical `archive/*` refs are provenance only. Query GitHub for live
+branch, PR, and Actions state; do not infer current state from old prose.

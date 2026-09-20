@@ -22,6 +22,7 @@ set(_mithril_vulkan_smokes
     uniform_array_smoke
     uniform_type_smoke
     uniform_integer_getter_smoke
+    typed_vertex_smoke
     packed_vertex_attrib_smoke
     fbo_smoke
     3d_smoke

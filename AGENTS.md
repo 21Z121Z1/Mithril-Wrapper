@@ -1,175 +1,114 @@
-# Mithril-Wrapper agent operating contract
+# Mithril-Wrapper agent instructions
 
-This is the coding/review entry point. Do not begin breadth-first. The repository is intentionally designed so an agent can compile a small task-local world model, act on one owning seam, prove the result cheaply, and leave the next agent with less uncertainty than before.
+## Purpose
 
-## Bootstrap
+Mithril-Wrapper preserves the EGL and OpenGL behavior that Minecraft Java and
+LWJGL can observe. The Apple shipping target uses DirectMetal. The Vulkan
+target is a separate reference backend.
 
-Start with:
+Do not measure progress by exported symbol count. A symbol can exist while its
+behavior is partial or unsupported.
+
+## Read order
+
+Read only the material that the task needs:
+
+1. `README.md` for the project boundary and build commands.
+2. `docs/architecture.md` for semantic ownership.
+3. The target source files and their adjacent tests.
+4. `docs/validation.md` when the task changes a claim or proof obligation.
+5. Live Git and GitHub data when branch, PR, or CI state affects the decision.
+
+Do not use a Markdown branch table as live Git state.
+
+## Ownership
+
+- `src/egl`: EGL objects, host lifecycle, and surface integration.
+- `src/gl` and `src/state`: OpenGL state, object, error, query, framebuffer,
+  pixel-transfer, synchronization, and resource-lifetime semantics.
+- `src/shader`: GLSL translation, SPIR-V generation, reflection, and linked
+  shader-interface semantics.
+- `src/backend`: resolved backend-neutral draw and resource intent.
+- `src/metal`: DirectMetal execution only.
+- `src/vk`: Vulkan execution only.
+- `tests` and `cmake/MithrilSmokeTests.cmake`: executable behavior evidence.
+
+A rule that comes from EGL, OpenGL, or linked shader behavior belongs in the
+highest shared owner that can express it. Do not implement the same generic
+rule independently in `src/metal` and `src/vk`.
+
+## Change process
+
+1. Inspect the current Git subject and the target source path.
+2. Run the smallest relevant baseline test when the environment supports it.
+3. State the observable invariant that the change must preserve or add.
+4. Change the owning layer. Keep native backends free of duplicated GL policy.
+5. Add or update one focused regression when practical.
+6. Run the focused test, then the affected backend label.
+7. Run packaging or real-client evidence only when the claim requires it.
+8. Review the final diff for semantic duplication, lifetime errors, and stale
+   documentation.
+
+For shared EGL, GL, shader, or backend-neutral changes, validate both the
+DirectMetal and Vulkan test labels. For a native-backend-only change, validate
+that backend and any affected package boundary.
+
+## Commands
+
+Linux Vulkan reference:
 
 ```bash
-python3 scripts/agent-context.py --task "<task>"
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DMITHRIL_BUILD_LEGACY=ON -DMITHRIL_BUILD_DIRECT=OFF
+cmake --build build --parallel
+ctest --test-dir build -L vulkan --output-on-failure
 ```
 
-The capsule reports exact HEAD/tree identity, history universe/nearest anchor, changed-path or task-inferred ownership, semantic boundary risk, focused existing oracles, the smallest read set, and an ordered proof plan.
-
-Treat its epistemic labels literally:
-
-- `diff` ownership is stronger than task-text inference;
-- `task_inference` is a routing hypothesis, not a source fact;
-- unclassified paths are model gaps, not permission to guess;
-- `legacy_experimental` means semantic/oracle transplant only.
-
-If branch topology affects a decision, refresh the graph:
+macOS DirectMetal:
 
 ```bash
-python3 scripts/audit-branches.py --fetch-graph --markdown
+cmake -S . -B build-direct -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DMITHRIL_BUILD_LEGACY=OFF -DMITHRIL_BUILD_DIRECT=ON
+cmake --build build-direct --parallel
+ctest --test-dir build-direct -L directmetal --output-on-failure
 ```
 
-Only after those two projections should you read raw branch history or broad documentation.
+iPhoneOS package:
 
-## Stable mental model
-
-Read `docs/system-model.md` for the abstraction tower. In compressed form:
-
-```text
-Minecraft acceptance
-  -> host/EGL contract
-  -> observable GL + shader semantics
-  -> backend-neutral resolved intent
-  -> DirectMetal / Vulkan execution
-  -> platform presentation
-  -> evidence
-  -> convergence/release identity
+```bash
+scripts/build_iphoneos.sh
 ```
 
-Higher layers define meaning. Lower layers execute it.
-
-The long-term center of gravity is `src/backend/*`: queued native work should be understandable from explicit resolved draw/resource/state/lifetime identity without re-running the mutable GL state machine in a backend.
-
-## History model
-
-The repository contains two different Git reasoning modes.
-
-### Clean shipping universe
-
-`main -> integration/directmetal-next`
-
-Use normal Git ancestry plus semantic/evidence proof. Keep this relation simple; governance/control changes promoted to `main` should be converged into the active clean integration line rather than allowing two canonical clean refs to drift indefinitely.
-
-### Legacy/experimental universe
-
-`integration/directvulkan-reference`, `integration/legacy-capability-port`, `Mithril-Wrapper-cpp/*` and many experiment/replay/evidence refs belong to a disconnected historical family.
-
-They are valuable sources of invariants, tests and provenance. They are **not** wholesale merge targets for `src/*`.
-
-Before reusing a branch, establish:
-
-1. history universe and ancestry/no-common-ancestor state;
-2. unique semantic/test delta rather than commit count;
-3. exact current proof location for the behavior being retained.
-
-Squash merges mean ancestry alone is insufficient in either direction.
-
-## Ownership map
-
-Machine routing lives in `docs/agent/manifest.json`.
-
-Common owners:
-
-- EGL/host lifecycle: `src/egl/*`;
-- GL state/object/error/FBO/pixel-store/query/sync semantics: `src/gl/*`, `src/state/*`;
-- GLSL/SPIR-V/reflection/interface semantics: `src/shader/*`;
-- resolved draw/resource contract: `src/backend/*`;
-- DirectMetal execution only: `src/metal/*`;
-- Vulkan execution only: `src/vk/*`;
-- host/display seam: presentation tests + EGL/backend window seam;
-- validation: `tests/*`, `cmake/MithrilSmokeTests.cmake`;
-- agent/evidence control: `AGENTS.md`, `docs/agent/*`, `docs/ci.md`, `docs/evidence-model.md`, agent scripts and durable workflows.
-
-If the same generic GL rule appears necessary in both `src/metal/*` and `src/vk/*`, first test whether it belongs in GL/shader/lowering instead.
-
-## Investigation loop
-
-Use:
-
-`observable failure -> owning contract -> smallest falsifier -> implementation -> exact-subject proof -> broader acceptance`
-
-Do not start from a giant Minecraft log if a 50-line semantic oracle can distinguish the hypothesis. Conversely, do not claim a real host/device behavior from a headless oracle.
-
-For Minecraft 26.2 source behavior:
+Minecraft reference source for local investigation:
 
 ```bash
 SRC="$(bash scripts/minecraft-reference.sh --print-path)"
 ```
 
-The generated reference tree is local analysis input only and must never be committed or uploaded as an artifact.
+The generated Minecraft files are private local research input. Never commit
+or upload them.
 
-## Oracle routing
+## Repository rules
 
-`docs/agent/oracles.json` is a small search-cost index over stable tests. It does not replace test bodies. The context compiler uses it to surface likely focused oracles such as framebuffer, shader, texture, draw, sync or Amethyst-surface tests.
+- Use `main` for product work. Treat `archive/*` as provenance, not as a merge
+  base or a second product tree.
+- Do not copy a disconnected historical tree into `main`. Extract an
+  observable invariant, add a focused oracle, and implement it in the current
+  owner.
+- Do not add a permanent workflow for one bug. Put reusable logic in CTest,
+  source validators, or build scripts.
+- Do not weaken an oracle to make CI green.
+- A synthetic smoke test cannot prove real Minecraft presentation. A Minecraft
+  frame cannot replace a focused semantic test.
+- Do not commit generated binaries, logs, private fixtures, decompiled
+  Minecraft source, or transient investigation reports.
+- Keep human documentation stable. Put current SHAs, branch counts, run IDs,
+  and incident logs in GitHub history or the relevant PR, not in long-lived
+  documentation.
 
-If no indexed oracle distinguishes the bug, inspect the owning test slice and add a focused reusable oracle before implementation when practical.
+## Completion evidence
 
-Do not add an oracle-index entry for a one-off experiment.
-
-## Proof DAG
-
-`docs/agent/proof-graph.json` defines prerequisite order over proof profiles in the manifest.
-
-Key rules:
-
-- control validation precedes semantic proof;
-- focused semantic proof precedes backend suites;
-- shared EGL/GL/shader/lowering changes require both DirectMetal and Vulkan regressions;
-- hosted platform proof comes after DirectMetal semantic proof;
-- physical presentation and paired performance are terminal claim proofs, not debugging starting points;
-- a red cheaper prerequisite blocks escalation until explained.
-
-For pull requests, candidate HEAD and GitHub synthetic merge result are separate proof subjects. See `docs/ci.md` and `docs/evidence-model.md`.
-
-## Performance work
-
-Do not bypass the abstraction tower for speed.
-
-Preferred order:
-
-1. identify a measured or structurally repeated cost;
-2. locate the owner of redundant work;
-3. make identity/lifetime explicit;
-4. preserve the semantic oracle;
-5. use structural counters where they prove the intended shape;
-6. only then run matched performance measurement.
-
-Avoid optimizing through hidden ownership, mutable-state reachback, accidental lifetime extension or backend-specific semantic forks.
-
-## Knowledge accumulation
-
-Store knowledge at the narrowest durable level:
-
-- repeated semantic lesson -> test/type/contract;
-- ownership/routing rule -> manifest + validator;
-- proof dependency -> proof graph;
-- reusable falsifier -> oracle index + test;
-- stable architectural rationale -> ADR/system model;
-- current frontier -> dated status;
-- branch reconciliation -> live Git audit + dated ledger;
-- one experiment -> PR/commit/artifact provenance.
-
-Do not append incident history to README, CHECKLIST, AGENTS or stable architecture docs.
-
-The desired invariant is:
-
-> after a successful investigation, a future agent should need fewer tokens and fewer Git/test operations to reach the same understanding.
-
-## Completion
-
-Before declaring a task complete:
-
-- exact source/tree subject is known;
-- ownership layer is explicit;
-- smallest relevant oracle passed;
-- proof-DAG prerequisites for the claimed scope passed;
-- integration/device/performance claims are not inferred from weaker evidence;
-- legacy provenance is separated from clean implementation;
-- durable knowledge was distilled into the proper executable/stable layer;
-- remaining uncertainty is named rather than hidden.
+Report the exact commit that was tested, the commands or Actions jobs that ran,
+and each skipped proof with its reason. Separate verified behavior from
+partial or unverified claims. Never claim general OpenGL conformance from ABI
+coverage or Minecraft acceptance alone.
