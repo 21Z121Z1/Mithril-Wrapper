@@ -123,6 +123,7 @@ struct Program {
     VkShaderModule vs_mod = VK_NULL_HANDLE;
     VkShaderModule fs_mod = VK_NULL_HANDLE;
     std::vector<UboMember> members;
+    std::vector<uint32_t> member_value_indices;
     VkDeviceSize ubo_size = 0;
     bool has_ubo = false;
     // Sampler uniforms (descriptor binding mirrors the GLSL layout() we
@@ -218,6 +219,7 @@ struct DrawOp {
     VkDeviceMemory index_mem = VK_NULL_HANDLE;
     uint32_t vertex_count = 0;
     uint32_t index_count = 0;
+    VkIndexType index_type = VK_INDEX_TYPE_UINT32;
     bool primitive_restart = false;
     uint32_t instance_count = 1;
     VkDeviceSize vertex_offset = 0;

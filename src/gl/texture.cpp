@@ -81,7 +81,8 @@ bool DecodeRowRGBA8(const uint8_t* src, uint8_t* dst, GLsizei width,
                 return true;
             case GL_RED:
                 for (GLsizei i = 0; i < width; ++i) {
-                    dst[i * 4 + 0] = dst[i * 4 + 1] = dst[i * 4 + 2] = src[i];
+                    dst[i * 4 + 0] = src[i];
+                    dst[i * 4 + 1] = dst[i * 4 + 2] = 0;
                     dst[i * 4 + 3] = 255;
                 }
                 return true;
@@ -99,9 +100,12 @@ bool DecodeRowRGBA8(const uint8_t* src, uint8_t* dst, GLsizei width,
             uint32_t n = format == GL_RGBA ? 4 : 3;
             for (GLsizei i = 0; i < width; ++i) {
                 for (uint32_t c = 0; c < n; ++c) {
-                    float v = ((const float*)src)[i * n + c];
-                    dst[i * 4 + c] =
-                        (uint8_t)std::min<uint32_t>(255, (uint32_t)(v * 255.0f + 0.5f));
+                    float v;
+                    std::memcpy(&v, src + (i * n + c) * sizeof(v), sizeof(v));
+                    // Clamp before conversion. Non-positive values and NaNs
+                    // must not reach an out-of-range float-to-integer cast.
+                    v = v > 0.0f ? std::min(v, 1.0f) : 0.0f;
+                    dst[i * 4 + c] = static_cast<uint8_t>(v * 255.0f + 0.5f);
                 }
                 if (n == 3) dst[i * 4 + 3] = 255;
             }
@@ -255,15 +259,16 @@ bool ResolveUnpackSource(const void* pixels, uint32_t width, uint32_t height,
     }
 
     if (uses_pbo) {
-        const auto buffer = g_buffers.find(g_bound_pixel_unpack_buffer);
+        auto buffer = g_buffers.find(g_bound_pixel_unpack_buffer);
         const uint64_t offset = reinterpret_cast<uintptr_t>(pixels);
         if (buffer == g_buffers.end() || buffer->second.mapped ||
-            offset % type_bytes != 0 || offset > buffer->second.data.size() ||
-            base > buffer->second.data.size() - offset ||
-            span > buffer->second.data.size() - offset - base) {
+            offset % type_bytes != 0 || offset > buffer->second.Size() ||
+            base > buffer->second.Size() - offset ||
+            span > buffer->second.Size() - offset - base) {
             PUSH_ERROR(GL_INVALID_OPERATION);
             return false;
         }
+        buffer->second.EnsureMaterialized();
         output->data = buffer->second.data.empty()
             ? nullptr : buffer->second.data.data() + offset + base;
     } else {
@@ -287,14 +292,15 @@ bool ResolveUnpackBytes(const void* pointer, uint64_t byte_count,
         output->provided = pointer != nullptr;
         return true;
     }
-    const auto buffer = g_buffers.find(g_bound_pixel_unpack_buffer);
+    auto buffer = g_buffers.find(g_bound_pixel_unpack_buffer);
     const uint64_t offset = reinterpret_cast<uintptr_t>(pointer);
     if (buffer == g_buffers.end() || buffer->second.mapped ||
-        offset > buffer->second.data.size() ||
-        byte_count > buffer->second.data.size() - offset) {
+        offset > buffer->second.Size() ||
+        byte_count > buffer->second.Size() - offset) {
         PUSH_ERROR(GL_INVALID_OPERATION);
         return false;
     }
+    buffer->second.EnsureMaterialized();
     output->data = buffer->second.data.empty()
         ? nullptr : buffer->second.data.data() + offset;
     output->provided = true;
@@ -894,9 +900,10 @@ void SyncBufferTexture(TexState& texture, GLuint texture_id) {
         texture.tex_buffer_source_version == buffer->second.content_version)
         return;
 
+    buffer->second.EnsureMaterialized();
     const uint32_t bytes_per_texel = texture.tex_buffer_bytes_per_texel;
     const size_t available_texels = bytes_per_texel
-        ? buffer->second.data.size() / bytes_per_texel : 0;
+        ? buffer->second.Size() / bytes_per_texel : 0;
     texture.width = static_cast<uint32_t>(std::min<size_t>(
         available_texels, static_cast<size_t>(UINT32_MAX)));
     const size_t visible_bytes = static_cast<size_t>(texture.width) *
@@ -1651,9 +1658,15 @@ void APIENTRY glTexParameteri(GLenum target, GLenum pname, GLint param) {
     GLuint id = ActiveBound(target);
     if (id == 0) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
     TexState& st = g_textures[id];
-    if (pname == GL_TEXTURE_BASE_LEVEL || pname == GL_TEXTURE_MAX_LEVEL) {
-        // Image-level selection remains texture state. The CPU mirror already
-        // owns the complete explicit chain; level-window lowering is future.
+    if (pname == GL_TEXTURE_BASE_LEVEL) {
+        // Preserve the pre-existing level-zero-only frontend behavior here.
+        // Correct non-zero BASE_LEVEL lowering needs a rebased native texture
+        // view and is intentionally outside this Minecraft MAX_LEVEL fix.
+        return;
+    }
+    if (pname == GL_TEXTURE_MAX_LEVEL) {
+        if (param < 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
+        st.max_level = param;
         return;
     }
     GLenum error = GL_NO_ERROR;
@@ -1675,8 +1688,24 @@ void APIENTRY glTexParameterf(GLenum target, GLenum pname, GLfloat param) {
     GLuint id = ActiveBound(target);
     if (!id) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
     TexState& state = g_textures[id];
-    if (pname == GL_TEXTURE_BASE_LEVEL || pname == GL_TEXTURE_MAX_LEVEL)
+    if (pname == GL_TEXTURE_BASE_LEVEL) {
+        // Preserve the pre-existing level-zero-only frontend behavior; correct
+        // non-zero BASE_LEVEL lowering remains outside this Minecraft fix.
         return;
+    }
+    if (pname == GL_TEXTURE_MAX_LEVEL) {
+        if (param < 0.0f || param > static_cast<GLfloat>(INT32_MAX)) {
+            PUSH_ERROR(GL_INVALID_VALUE);
+            return;
+        }
+        const GLint level = static_cast<GLint>(param);
+        if (static_cast<GLfloat>(level) != param) {
+            PUSH_ERROR(GL_INVALID_VALUE);
+            return;
+        }
+        glTexParameteri(target, pname, level);
+        return;
+    }
     GLenum error = GL_NO_ERROR;
     const bool changed = SetSamplerScalar(state, pname, param, &error);
     if (error != GL_NO_ERROR) { PUSH_ERROR(error); return; }
@@ -1748,7 +1777,10 @@ void APIENTRY glGetTexParameterfv(GLenum target, GLenum pname, GLfloat* params) 
         return;
     }
     if (pname == GL_TEXTURE_BASE_LEVEL) { *params = 0.0f; return; }
-    if (pname == GL_TEXTURE_MAX_LEVEL) { *params = 1000.0f; return; }
+    if (pname == GL_TEXTURE_MAX_LEVEL) {
+        *params = static_cast<GLfloat>(state.max_level);
+        return;
+    }
     GLenum error = GL_NO_ERROR;
     *params = GetSamplerScalar(state, pname, &error);
     if (error != GL_NO_ERROR) PUSH_ERROR(error);
@@ -2138,6 +2170,11 @@ void APIENTRY glCopyTexImage1D(GLenum target, GLint level,
     }
     GLuint id = ActiveBound(target);
     if (!id) return;
+    if (glCheckFramebufferStatus(GL_READ_FRAMEBUFFER) !=
+        GL_FRAMEBUFFER_COMPLETE) {
+        PUSH_ERROR(GL_INVALID_FRAMEBUFFER_OPERATION);
+        return;
+    }
     TexState& st = g_textures[id];
     st.width = (uint32_t)width;
     st.height = 1;
@@ -2163,6 +2200,11 @@ void APIENTRY glCopyTexImage2D(GLenum target, GLint level,
     if (width < 0 || height < 0 || level < 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
     GLuint id = ActiveBound(target);
     if (!id) return;
+    if (glCheckFramebufferStatus(GL_READ_FRAMEBUFFER) !=
+        GL_FRAMEBUFFER_COMPLETE) {
+        PUSH_ERROR(GL_INVALID_FRAMEBUFFER_OPERATION);
+        return;
+    }
     TexState& st = g_textures[id];
     uint32_t slice = face ? CubeFaceIndex(target) : 0;
     if (slice >= st.SliceCount()) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
@@ -2203,6 +2245,11 @@ void APIENTRY glCopyTexSubImage1D(GLenum target, GLint level, GLint xoffset,
     if (target != GL_TEXTURE_1D) { PUSH_ERROR(GL_INVALID_ENUM); return; }
     GLuint id = ActiveBound(target);
     if (!id) return;
+    if (glCheckFramebufferStatus(GL_READ_FRAMEBUFFER) !=
+        GL_FRAMEBUFFER_COMPLETE) {
+        PUSH_ERROR(GL_INVALID_FRAMEBUFFER_OPERATION);
+        return;
+    }
     TexState& st = g_textures[id];
     if (st.image_backend_format == v::TexelFormat::Depth32Float) {
         PUSH_ERROR(GL_INVALID_OPERATION);
@@ -2225,6 +2272,11 @@ void APIENTRY glCopyTexSubImage2D(GLenum target, GLint level, GLint xoffset,
     }
     GLuint id = ActiveBound(target);
     if (!id) return;
+    if (glCheckFramebufferStatus(GL_READ_FRAMEBUFFER) !=
+        GL_FRAMEBUFFER_COMPLETE) {
+        PUSH_ERROR(GL_INVALID_FRAMEBUFFER_OPERATION);
+        return;
+    }
     TexState& st = g_textures[id];
     if (st.image_backend_format == v::TexelFormat::Depth32Float) {
         PUSH_ERROR(GL_INVALID_OPERATION);
@@ -2265,6 +2317,11 @@ void APIENTRY glCopyTexSubImage3D(GLenum target, GLint level, GLint xoffset,
     if (zoffset < 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
     GLuint id = ActiveBound(target);
     if (!id) return;
+    if (glCheckFramebufferStatus(GL_READ_FRAMEBUFFER) !=
+        GL_FRAMEBUFFER_COMPLETE) {
+        PUSH_ERROR(GL_INVALID_FRAMEBUFFER_OPERATION);
+        return;
+    }
     TexState& st = g_textures[id];
     if (!st.has_image || st.mip.size() <= (size_t)level) {
         PUSH_ERROR(GL_INVALID_OPERATION); return;

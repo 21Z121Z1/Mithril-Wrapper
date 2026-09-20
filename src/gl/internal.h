@@ -67,13 +67,38 @@ struct VAOData {
 };
 
 struct BufferData {
+    // GL storage size is independent from whether undefined CPU bytes have
+    // ever been materialized. glBufferData(NULL) therefore performs no eager
+    // memset/zero-fill; undefined bytes are created only if a later CPU-visible
+    // operation actually needs them.
     std::vector<uint8_t> data;
+    size_t storage_size = 0;
     uint64_t lifetime_id = 0;
     uint64_t content_version = 0;
+    uint64_t previous_content_version = 0;
+    size_t update_offset = 0;
+    size_t update_size = 0;
+    bool update_is_partial = false;
     bool defined = false;
     bool mapped = false;
     bool map_writable = false;
     size_t map_offset = 0;
+
+    size_t Size() const { return storage_size; }
+    bool IsMaterialized() const { return data.size() == storage_size; }
+    void EnsureMaterialized() {
+        // Contents after glBufferData(NULL) are undefined. Zero is simply a
+        // deterministic legal value when a later CPU read needs those bytes.
+        if (!IsMaterialized()) data.assign(storage_size, 0);
+    }
+
+    void RecordUpdate(size_t offset, size_t size, bool partial) {
+        previous_content_version = content_version;
+        ++content_version;
+        update_offset = offset;
+        update_size = size;
+        update_is_partial = partial;
+    }
 };
 
 // Storage lives in vertex.cpp; the draw path reads these through the header.
@@ -84,6 +109,8 @@ extern GLuint g_bound_vao;           // default VAO is 0
 extern GLuint g_bound_array_buffer;
 extern GLuint g_bound_element_buffer;
 extern GLuint g_bound_uniform_buffer;
+extern GLuint g_bound_copy_read_buffer;
+extern GLuint g_bound_copy_write_buffer;
 extern GLuint g_bound_pixel_pack_buffer;
 extern GLuint g_bound_pixel_unpack_buffer;
 
@@ -117,8 +144,13 @@ struct IndexedBufferBinding {
 extern std::array<IndexedBufferBinding, kMaxUniformBufferBindings>
     g_uniform_buffer_bindings;
 
-// GL program id -> selected-backend program handle (created on first draw).
+// GL program id -> selected-backend program handle. A linked program is
+// prewarmed when the backend already exists; first draw remains the fallback.
 extern std::unordered_map<GLuint, uint64_t> g_backend_programs;
+
+enum class BackendProgramCreateSite : uint8_t { Link = 0, Use, Draw };
+uint64_t EnsureBackendProgram(mithril::shader::Program* program,
+                              BackendProgramCreateSite site);
 
 // ---- shared texture state (texture.cpp owns the storage) ------------------
 
@@ -137,6 +169,7 @@ struct TexState {
     GLenum mag_filter = GL_LINEAR;
     GLenum wrap_s = GL_REPEAT, wrap_t = GL_REPEAT, wrap_r = GL_REPEAT;
     GLfloat min_lod = -1000.0f, max_lod = 1000.0f, lod_bias = 0.0f;
+    GLint max_level = 1000;               // GL_TEXTURE_MAX_LEVEL
     std::array<GLfloat, 4> border_color{0.f, 0.f, 0.f, 0.f};
     GLenum compare_mode = GL_NONE;
     GLenum compare_func = GL_LEQUAL;
@@ -187,7 +220,9 @@ struct SamplerData {
     GLenum min_filter = GL_NEAREST_MIPMAP_LINEAR;
     GLenum mag_filter = GL_LINEAR;
     GLenum wrap_s = GL_REPEAT, wrap_t = GL_REPEAT, wrap_r = GL_REPEAT;
-    GLfloat min_lod = -1000.0f, max_lod = 1000.0f, lod_bias = 0.0f;
+    GLfloat min_lod = -1000.0f;
+    GLfloat max_lod = 1000.0f;
+    GLfloat lod_bias = 0.0f;
     std::array<GLfloat, 4> border_color{0.f, 0.f, 0.f, 0.f};
     GLenum compare_mode = GL_NONE;
     GLenum compare_func = GL_LEQUAL;

@@ -34,6 +34,7 @@
 #define GL_TEXTURE_CUBE_MAP   0x8513
 #define GL_TEXTURE_CUBE_MAP_POSITIVE_X 0x8515
 #define GL_TEXTURE_BUFFER     0x8C2A
+#define GL_RED                0x1903
 #define GL_RGBA               0x1908
 #define GL_RGBA8              0x8058
 #define GL_RGB                0x1907
@@ -68,8 +69,8 @@ typedef unsigned int GLenum;
 typedef unsigned int GLsizei;
 typedef unsigned char GLboolean;
 typedef int GLint;
-typedef int GLsizeiptr;
-typedef int GLintptr;
+typedef intptr_t GLsizeiptr;
+typedef intptr_t GLintptr;
 typedef void* GLvoid;
 
 typedef void (*fn_glClearColor)(float, float, float, float);
@@ -326,6 +327,47 @@ int main(void) {
         CHECK(px_match(back, 255, 30, 0, 255),
               "glGetTexImage returns the level-0 pixels (r=%d g=%d b=%d)",
               back[0], back[1], back[2]);
+    }
+
+    /* Source components and normalized conversion belong to the GL frontend.
+       Check both the CPU image and native sampling of the same upload. */
+    {
+        GLuint conversion_tex = 0;
+        genTextures(1, &conversion_tex);
+        bindTexture(GL_TEXTURE_2D, conversion_tex);
+        texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        const unsigned char r = 129;
+        unsigned char back[4] = {0};
+        texImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RED,
+                   GL_UNSIGNED_BYTE, &r);
+        getTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, back);
+        CHECK(px_match(back, 129, 0, 0, 255),
+              "GL_RED expands to (R,0,0,1), not luminance (%u,%u,%u,%u)",
+              back[0], back[1], back[2], back[3]);
+        clear(GL_COLOR_BUFFER_BIT);
+        drawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        finish();
+        readPixels(256, 256, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        CHECK(px_match(px, 129, 0, 0, 255),
+              "native sampling preserves GL_RED components (%u,%u,%u,%u)",
+              px[0], px[1], px[2], px[3]);
+
+        const float rgba[4] = {-0.25f, 1.25f, 0.5f, -0.25f};
+        texSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 1, 1, GL_RGBA, GL_FLOAT, rgba);
+        getTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, back);
+        CHECK(px_match(back, 0, 255, 128, 0),
+              "RGBA8 conversion clamps floats before integer conversion (%u,%u,%u,%u)",
+              back[0], back[1], back[2], back[3]);
+        clear(GL_COLOR_BUFFER_BIT);
+        drawArrays(GL_TRIANGLE_STRIP, 0, 4);
+        finish();
+        readPixels(256, 256, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        CHECK(px_match(px, 0, 255, 128, 0),
+              "native sampling preserves clamped float upload (%u,%u,%u,%u)",
+              px[0], px[1], px[2], px[3]);
+        deleteTextures(1, &conversion_tex);
+        bindTexture(GL_TEXTURE_2D, tex);
     }
 
     /* -- PBO offset + UNPACK row/skip state -> resident texture ----- */

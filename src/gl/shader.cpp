@@ -12,8 +12,51 @@
 #include <unordered_map>
 
 #include <util/log.h>
+#include <mithril/program_diagnostics.h>
 
-extern "C" {
+namespace {
+
+MithrilProgramPrewarmStatsV1 EmptyProgramPrewarmStats() {
+    MithrilProgramPrewarmStatsV1 stats{};
+    stats.version = MITHRIL_PROGRAM_PREWARM_STATS_VERSION;
+    stats.struct_size = static_cast<uint32_t>(sizeof(stats));
+    return stats;
+}
+
+MithrilProgramPrewarmStatsV1 g_program_prewarm_stats = EmptyProgramPrewarmStats();
+
+} // namespace
+
+uint64_t EnsureBackendProgram(mithril::shader::Program* program,
+                              BackendProgramCreateSite site) {
+    if (!program || !program->linked) return 0;
+    auto cached = g_backend_programs.find(program->id);
+    if (cached != g_backend_programs.end()) return cached->second;
+
+    std::vector<std::string> uniform_names;
+    uniform_names.reserve(program->uniforms.size());
+    for (const auto& uniform : program->uniforms)
+        uniform_names.push_back(uniform.name);
+
+    const uint64_t handle = v::CreateProgram(
+        program->vertex_spirv, program->fragment_spirv, uniform_names,
+        program->vertex_loose_uniforms, program->fragment_loose_uniforms);
+    if (!handle) {
+        ++g_program_prewarm_stats.create_failures;
+        return 0;
+    }
+    g_backend_programs[program->id] = handle;
+    ++g_program_prewarm_stats.frontend_program_bindings;
+    switch (site) {
+        case BackendProgramCreateSite::Link:
+            ++g_program_prewarm_stats.link_prewarms; break;
+        case BackendProgramCreateSite::Use:
+            ++g_program_prewarm_stats.use_prewarms; break;
+        case BackendProgramCreateSite::Draw:
+            ++g_program_prewarm_stats.draw_fallbacks; break;
+    }
+    return handle;
+}
 
 // ---- shaders / programs / uniforms (S2) ------------------------------------
 
@@ -275,6 +318,8 @@ bool UniformSetterMatches(GLenum uniform_type, GLenum setter_type) {
 }
 } // namespace
 
+extern "C" {
+
 GLuint APIENTRY glCreateShader(GLenum type) {
     if (type != GL_VERTEX_SHADER && type != GL_FRAGMENT_SHADER &&
         type != GL_GEOMETRY_SHADER && type != GL_TESS_CONTROL_SHADER &&
@@ -522,6 +567,13 @@ void APIENTRY glLinkProgram(GLuint program) {
         ML_LOG_WARN("glLinkProgram(%u): %s", program, p->info_log.c_str());
         return;
     }
+    if (!sh::AlignStageInterfaceLocations(
+            p->vertex_spirv, p->fragment_spirv,
+            vertex_source, fragment_source, reflection_error)) {
+        p->info_log = "link failed: " + reflection_error;
+        ML_LOG_WARN("glLinkProgram(%u): %s", program, p->info_log.c_str());
+        return;
+    }
     if (!sh::ReflectProgram(*p, reflection_error)) {
         p->info_log = "link failed: " + reflection_error;
         ML_LOG_WARN("glLinkProgram(%u): %s", program, p->info_log.c_str());
@@ -532,6 +584,13 @@ void APIENTRY glLinkProgram(GLuint program) {
         v::DestroyProgram(native->second);
         g_backend_programs.erase(native);
     }
+    p->loose_uniform_views.resize(p->uniforms.size());
+    for (size_t i = 0; i < p->uniforms.size(); ++i) {
+        const auto& raw = p->uniforms[i].raw_value;
+        p->loose_uniform_views[i] = {
+            raw.empty() ? nullptr : raw.data(), static_cast<uint32_t>(raw.size())};
+    }
+    p->loose_uniform_version = 1;
     p->linked = true;
     for (auto& block : p->uniform_blocks) {
         const auto declaration = block_declarations.find(block.name);
@@ -551,6 +610,11 @@ void APIENTRY glLinkProgram(GLuint program) {
         }
     }
     RegisterUniformLocations(*p);
+    if (v::IsInitialized() &&
+        !EnsureBackendProgram(p, BackendProgramCreateSite::Link)) {
+        ML_LOG_WARN("glLinkProgram(%u): native program prewarm failed; "
+                    "draw will retry", program);
+    }
     ML_LOG_DEBUG("glLinkProgram(%u): VS=%zu FS=%zu words, %zu uniforms, "
                  "%zu uniform blocks",
                  program, p->vertex_spirv.size(), p->fragment_spirv.size(),
@@ -613,11 +677,17 @@ void APIENTRY glGetAttachedShaders(GLuint program, GLsizei maxCount, GLsizei* co
 }
 
 void APIENTRY glUseProgram(GLuint program) {
-    if (program != 0 && sh::GetProgram(program) == nullptr) {
+    sh::Program* linked = program ? sh::GetProgram(program) : nullptr;
+    if (program != 0 && linked == nullptr) {
         PUSH_ERROR(GL_INVALID_VALUE);
         return;
     }
     s::GetState().current_program = program;
+    if (linked && linked->linked && v::IsInitialized() &&
+        !EnsureBackendProgram(linked, BackendProgramCreateSite::Use)) {
+        ML_LOG_WARN("glUseProgram(%u): native program prewarm failed; "
+                    "draw will retry", program);
+    }
 }
 
 void APIENTRY glValidateProgram(GLuint program) {
@@ -907,6 +977,19 @@ sh::Program* CurrentProgramForUniform() {
     return id ? sh::GetProgram(id) : nullptr;
 }
 
+void CommitLooseUniformWrite(sh::Uniform* uniform) {
+    sh::Program* program = CurrentProgramForUniform();
+    if (!program || !uniform || program->uniforms.empty()) return;
+    const ptrdiff_t index = uniform - program->uniforms.data();
+    if (index < 0 || static_cast<size_t>(index) >= program->uniforms.size()) return;
+    if (program->loose_uniform_views.size() != program->uniforms.size())
+        program->loose_uniform_views.resize(program->uniforms.size());
+    const auto& raw = uniform->raw_value;
+    program->loose_uniform_views[static_cast<size_t>(index)] = {
+        raw.empty() ? nullptr : raw.data(), static_cast<uint32_t>(raw.size())};
+    if (!IsSamplerUniformType(uniform->type)) ++program->loose_uniform_version;
+}
+
 bool ResolveUniformWrite(GLenum setter_type, GLint location, GLsizei count,
                          int comps, sh::Uniform** uniform,
                          size_t* scalar_offset, GLsizei* effective_count) {
@@ -982,6 +1065,7 @@ void StoreUniform(GLenum type, GLint location, const GLfloat* v, GLsizei count,
     const size_t scalars = static_cast<size_t>(effective_count) * comps;
     if (IsBooleanUniformType(uniform->type)) {
         StoreBooleanScalars(uniform, scalar_offset, v, scalars, total_scalars);
+        CommitLooseUniformWrite(uniform);
         return;
     }
     if (uniform->value.size() < total_scalars)
@@ -992,6 +1076,7 @@ void StoreUniform(GLenum type, GLint location, const GLfloat* v, GLsizei count,
         uniform->raw_value.resize(total_bytes, 0);
     std::memcpy(uniform->raw_value.data() + scalar_offset * sizeof(*v), v,
                 scalars * sizeof(*v));
+    CommitLooseUniformWrite(uniform);
 }
 
 void StoreUniformInt(GLenum type, GLint location, const GLint* v,
@@ -1007,6 +1092,7 @@ void StoreUniformInt(GLenum type, GLint location, const GLint* v,
     const size_t scalars = static_cast<size_t>(effective_count) * comps;
     if (IsBooleanUniformType(uniform->type)) {
         StoreBooleanScalars(uniform, scalar_offset, v, scalars, total_scalars);
+        CommitLooseUniformWrite(uniform);
         return;
     }
     if (uniform->value.size() < total_scalars)
@@ -1018,6 +1104,7 @@ void StoreUniformInt(GLenum type, GLint location, const GLint* v,
         uniform->raw_value.resize(total_bytes, 0);
     std::memcpy(uniform->raw_value.data() + scalar_offset * sizeof(*v), v,
                 scalars * sizeof(*v));
+    CommitLooseUniformWrite(uniform);
 }
 
 void StoreUniformUInt(GLenum type, GLint location, const GLuint* v,
@@ -1033,6 +1120,7 @@ void StoreUniformUInt(GLenum type, GLint location, const GLuint* v,
     const size_t scalars = static_cast<size_t>(effective_count) * comps;
     if (IsBooleanUniformType(uniform->type)) {
         StoreBooleanScalars(uniform, scalar_offset, v, scalars, total_scalars);
+        CommitLooseUniformWrite(uniform);
         return;
     }
     if (uniform->value.size() < total_scalars)
@@ -1044,6 +1132,7 @@ void StoreUniformUInt(GLenum type, GLint location, const GLuint* v,
         uniform->raw_value.resize(total_bytes, 0);
     std::memcpy(uniform->raw_value.data() + scalar_offset * sizeof(*v), v,
                 scalars * sizeof(*v));
+    CommitLooseUniformWrite(uniform);
 }
 
 void StoreUniformMatrix(GLenum type, GLint location, GLsizei count,
@@ -1194,6 +1283,17 @@ void APIENTRY glUniformMatrix4x3fv(GLint location, GLsizei count, GLboolean tran
                                    const GLfloat* value) {
     StoreUniformMatrix(
         GL_FLOAT_MAT4x3, location, count, transpose, value, 4, 3);
+}
+
+void mithrilResetProgramPrewarmStats(void) {
+    g_program_prewarm_stats = EmptyProgramPrewarmStats();
+}
+
+int mithrilGetProgramPrewarmStatsV1(
+    MithrilProgramPrewarmStatsV1* output, size_t output_size) {
+    if (!output || output_size < sizeof(*output)) return 0;
+    *output = g_program_prewarm_stats;
+    return 1;
 }
 
 } // extern "C"

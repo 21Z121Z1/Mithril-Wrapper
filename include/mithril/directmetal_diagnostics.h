@@ -34,6 +34,82 @@ void mithrilResetDirectMetalBindingStats(void);
 int mithrilGetDirectMetalBindingStatsV1(
     MithrilDirectMetalBindingStatsV1* output, size_t output_size);
 
+#define MITHRIL_DIRECT_METAL_BUFFER_STATS_VERSION 1u
+
+typedef struct MithrilDirectMetalBufferStatsV1 {
+    uint32_t version;
+    uint32_t struct_size;
+    uint64_t resident_allocations;
+    uint64_t resident_reuses;
+    uint64_t full_cpu_upload_bytes;
+    uint64_t partial_cpu_upload_bytes;
+    uint64_t preserve_blit_bytes;
+} MithrilDirectMetalBufferStatsV1;
+
+void mithrilResetDirectMetalBufferStats(void);
+int mithrilGetDirectMetalBufferStatsV1(
+    MithrilDirectMetalBufferStatsV1* output, size_t output_size);
+
+#define MITHRIL_DIRECT_METAL_INDEX_STATS_VERSION 1u
+
+typedef struct MithrilDirectMetalIndexStatsV1 {
+    uint32_t version;
+    uint32_t struct_size;
+    uint64_t resident_index_draws;
+    uint64_t transient_index_draws;
+    uint64_t resident_index_bytes;
+    uint64_t transient_index_bytes;
+} MithrilDirectMetalIndexStatsV1;
+
+void mithrilResetDirectMetalIndexStats(void);
+int mithrilGetDirectMetalIndexStatsV1(
+    MithrilDirectMetalIndexStatsV1* output, size_t output_size);
+
+#define MITHRIL_DIRECT_METAL_UNIFORM_STATS_VERSION 1u
+
+typedef struct MithrilDirectMetalUniformStatsV1 {
+    uint32_t version;
+    uint32_t struct_size;
+    uint64_t snapshot_packs;
+    uint64_t snapshot_reuses;
+    uint64_t frame_uniform_uploads;
+    uint64_t packed_bytes;
+} MithrilDirectMetalUniformStatsV1;
+
+void mithrilResetDirectMetalUniformStats(void);
+int mithrilGetDirectMetalUniformStatsV1(
+    MithrilDirectMetalUniformStatsV1* output, size_t output_size);
+
+#define MITHRIL_DIRECT_METAL_PROGRAM_STATS_VERSION 1u
+
+typedef struct MithrilDirectMetalProgramStatsV1 {
+    uint32_t version;
+    uint32_t struct_size;
+    uint64_t program_compiles;
+    uint64_t program_cache_hits;
+} MithrilDirectMetalProgramStatsV1;
+
+void mithrilResetDirectMetalProgramStats(void);
+int mithrilGetDirectMetalProgramStatsV1(
+    MithrilDirectMetalProgramStatsV1* output, size_t output_size);
+
+#define MITHRIL_DIRECT_METAL_PIPELINE_STATS_VERSION 1u
+
+typedef struct MithrilDirectMetalPipelineStatsV1 {
+    uint32_t version;
+    uint32_t struct_size;
+    uint64_t async_requests;
+    uint64_t async_reuses;
+    uint64_t async_resolved;
+    uint64_t encode_waits;
+    uint64_t sync_fallbacks;
+    uint64_t pipeline_cache_hits;
+} MithrilDirectMetalPipelineStatsV1;
+
+void mithrilResetDirectMetalPipelineStats(void);
+int mithrilGetDirectMetalPipelineStatsV1(
+    MithrilDirectMetalPipelineStatsV1* output, size_t output_size);
+
 #ifdef __cplusplus
 }
 #endif

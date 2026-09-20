@@ -407,7 +407,10 @@ VkPipeline GetOrCreatePipeline(const Program& prog, const DrawOp& op) {
 }
 
 uint64_t CreateProgram(const std::vector<uint32_t>& vs,
-                       const std::vector<uint32_t>& fs) {
+                       const std::vector<uint32_t>& fs,
+                       const std::vector<std::string>& uniform_names,
+                       const backend::UniformBlockLayout& vertex_uniforms,
+                       const backend::UniformBlockLayout& fragment_uniforms) {
     if (!g.initialized || vs.empty() || fs.empty()) return 0;
 
     // The reference backend currently owns only binding 0 for Mithril's
@@ -471,60 +474,41 @@ uint64_t CreateProgram(const std::vector<uint32_t>& vs,
         return 0;
     }
 
-    // Reflect the UBO block from BOTH stages and merge members.
-    try {
-        auto reflect_stage = [&](const std::vector<uint32_t>& mod) {
-            spirv_cross::Compiler comp(mod.data(), mod.size());
-            auto res = comp.get_shader_resources();
-            for (auto& ub : res.uniform_buffers) {
-                const auto& t = comp.get_type(ub.base_type_id);
-                for (uint32_t i = 0; i < t.member_types.size(); ++i) {
-                    UboMember m;
-                    m.name = comp.get_member_name(ub.base_type_id, i);
-                    m.offset = comp.get_member_decoration(
-                        ub.base_type_id, i, spv::DecorationOffset);
-                    m.size = static_cast<uint32_t>(
-                        comp.get_declared_struct_member_size(t, i));
-                    const auto& member_type =
-                        comp.get_type(t.member_types[i]);
-                    m.vector_components = std::max(member_type.vecsize, 1u);
-                    m.matrix_columns = std::max(member_type.columns, 1u);
-                    m.array_elements = 1;
-                    for (uint32_t dimension : member_type.array)
-                        m.array_elements *= std::max(dimension, 1u);
-                    if (!member_type.array.empty())
-                        m.array_stride = static_cast<uint32_t>(
-                            comp.type_struct_member_array_stride(t, i));
-                    if (member_type.columns > 1)
-                        m.matrix_stride = static_cast<uint32_t>(
-                            comp.type_struct_member_matrix_stride(t, i));
-                    m.row_major = comp.has_member_decoration(
-                        ub.base_type_id, i, spv::DecorationRowMajor);
-                    p.members.push_back(std::move(m));
-                }
-                p.ubo_size = std::max<uint32_t>(p.ubo_size,
-                                                comp.get_declared_struct_size(t));
+    // Both stages use the shared shader owner's resolved layout. Vulkan
+    // chooses one descriptor allocation for the synthetic block.
+    p.ubo_size = std::max(vertex_uniforms.size, fragment_uniforms.size);
+    p.members = vertex_uniforms.members;
+    p.members.insert(p.members.end(), fragment_uniforms.members.begin(),
+                     fragment_uniforms.members.end());
+    p.has_ubo = !p.members.empty();
+    if (p.has_ubo) {
+        std::sort(p.members.begin(), p.members.end(),
+                  [](const UboMember& a, const UboMember& b) {
+                      return a.offset < b.offset;
+                  });
+        auto dup = std::unique(p.members.begin(), p.members.end(),
+                               [](const UboMember& a, const UboMember& b) {
+                                   return a.name == b.name;
+                               });
+        p.members.erase(dup, p.members.end());
+        p.member_value_indices.clear();
+        p.member_value_indices.reserve(p.members.size());
+        for (const auto& member : p.members) {
+            auto found = std::find(uniform_names.begin(), uniform_names.end(),
+                                   member.name);
+            if (found == uniform_names.end()) {
+                ML_LOG_ERROR("vk: reflected loose uniform '%s' has no frontend slot",
+                             member.name.c_str());
+                g.fn.DestroyShaderModule(g.device, p.vs_mod, nullptr);
+                g.fn.DestroyShaderModule(g.device, p.fs_mod, nullptr);
+                return 0;
             }
-        };
-        reflect_stage(vs);
-        reflect_stage(fs);
-        p.has_ubo = !p.members.empty();
-        if (p.has_ubo) {
-            std::sort(p.members.begin(), p.members.end(),
-                      [](const UboMember& a, const UboMember& b) {
-                          return a.offset < b.offset;
-                      });
-            auto dup = std::unique(p.members.begin(), p.members.end(),
-                                   [](const UboMember& a, const UboMember& b) {
-                                       return a.name == b.name;
-                                   });
-            p.members.erase(dup, p.members.end());
-            ML_LOG_DEBUG("vk: program %llu UBO %zu bytes (%zu members)",
-                         (unsigned long long)h, (size_t)p.ubo_size,
-                         p.members.size());
+            p.member_value_indices.push_back(
+                static_cast<uint32_t>(found - uniform_names.begin()));
         }
-    } catch (const std::exception& e) {
-        ML_LOG_WARN("vk: UBO reflection failed: %s", e.what());
+        ML_LOG_DEBUG("vk: program %llu UBO %zu bytes (%zu members)",
+                     (unsigned long long)h, (size_t)p.ubo_size,
+                     p.members.size());
     }
 
     g_programs.emplace(h, std::move(p));

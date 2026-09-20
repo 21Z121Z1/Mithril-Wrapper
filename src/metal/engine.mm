@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cassert>
 #include <cmath>
 #include <condition_variable>
 #include <cstring>
@@ -68,8 +69,15 @@ struct ShaderStage {
     id<MTLLibrary> library = nil;
     id<MTLFunction> function = nil;
     std::vector<UboMember> members;
+    std::vector<uint32_t> member_value_indices;
     uint32_t ubo_size = 0;
     bool uses_sampled_images = false;
+};
+
+struct PackedUniformSnapshot {
+    uint64_t version = 0;
+    std::vector<uint8_t> vertex;
+    std::vector<uint8_t> fragment;
 };
 
 struct Program {
@@ -77,6 +85,7 @@ struct Program {
     uint32_t references = 1;
     ShaderStage vertex;
     ShaderStage fragment;
+    std::shared_ptr<PackedUniformSnapshot> last_uniform_snapshot;
 };
 
 struct PipelineBundle {
@@ -96,6 +105,14 @@ struct ResidentBuffer {
     id<MTLBuffer> buffer = nil;
     uint64_t content_version = 0;
     size_t size = 0;
+};
+
+struct PendingResidentCopy {
+    id<MTLBuffer> source = nil;
+    id<MTLBuffer> destination = nil;
+    NSUInteger prefix_size = 0;
+    NSUInteger suffix_offset = 0;
+    NSUInteger suffix_size = 0;
 };
 
 struct ResidentTexture {
@@ -160,10 +177,40 @@ struct AttachmentSelection {
     bool uses_depth_plane = false;
 };
 
+// Small fixed-capacity sequence used in the per-draw render-target path.
+// DirectMetal exposes at most eight GL color attachments, so heap-backed
+// vectors here only add allocator traffic without adding representable state.
+template <typename T, size_t Capacity>
+class InlineList {
+public:
+    void push_back(const T& value) {
+        // ResolveTarget validates the frontend attachment count before
+        // populating these lists; keep this as a defensive invariant.
+        assert(size_ < Capacity);
+        values_[size_++] = value;
+    }
+    size_t size() const { return size_; }
+    bool empty() const { return size_ == 0; }
+    T& operator[](size_t index) { return values_[index]; }
+    const T& operator[](size_t index) const { return values_[index]; }
+    auto begin() { return values_.begin(); }
+    auto end() { return values_.begin() + static_cast<ptrdiff_t>(size_); }
+    auto begin() const { return values_.begin(); }
+    auto end() const { return values_.begin() + static_cast<ptrdiff_t>(size_); }
+private:
+    std::array<T, Capacity> values_{};
+    size_t size_ = 0;
+};
+
+constexpr size_t kMaxResolvedColorAttachments = 8;
+constexpr size_t kMaxPendingUniformBufferBindings =
+    shader::kMaxUserUniformBlocksPerStage * 2;
+constexpr size_t kMaxPendingTextureBindings = backend::kMaxTextureUnits * 2;
+
 struct ResolvedTarget {
-    std::vector<id<MTLTexture>> colors;
-    std::vector<id<MTLTexture>> resolve_colors;
-    std::vector<AttachmentSelection> color_selections;
+    InlineList<id<MTLTexture>, kMaxResolvedColorAttachments> colors;
+    InlineList<id<MTLTexture>, kMaxResolvedColorAttachments> resolve_colors;
+    InlineList<AttachmentSelection, kMaxResolvedColorAttachments> color_selections;
     id<MTLTexture> depth_stencil = nil;
     AttachmentSelection depth_selection;
     bool has_stencil = false;
@@ -173,14 +220,19 @@ struct ResolvedTarget {
 };
 
 struct OcclusionQueryState;
+struct PendingPipelineCompile;
 
 struct PendingDraw {
     backend::DrawParams params;
     // Strong references make GL deletion safe for already-recorded work.
     id<MTLBuffer> resident_vertex = nil;
     id<MTLBuffer> resident_instance = nil;
-    std::vector<BoundUniformBuffer> uniform_buffers;
-    std::vector<BoundTexture> textures;
+    id<MTLBuffer> resident_index = nil;
+    std::shared_ptr<PackedUniformSnapshot> uniform_snapshot;
+    std::shared_ptr<PendingPipelineCompile> pipeline_compile;
+    InlineList<BoundUniformBuffer, kMaxPendingUniformBufferBindings>
+        uniform_buffers;
+    InlineList<BoundTexture, kMaxPendingTextureBindings> textures;
     std::shared_ptr<OcclusionQueryState> occlusion;
 };
 
@@ -198,6 +250,11 @@ struct CommandCompletion {
     std::condition_variable condition;
     bool completed = false;
     bool success = false;
+};
+
+struct RetiredResidentBuffer {
+    id<MTLBuffer> buffer = nil;
+    std::shared_ptr<CommandCompletion> completion;
 };
 
 struct OcclusionSegment {
@@ -220,6 +277,94 @@ MithrilDirectMetalBindingStatsV1 EmptyBindingStats() {
     return stats;
 }
 
+MithrilDirectMetalBufferStatsV1 EmptyBufferStats() {
+    MithrilDirectMetalBufferStatsV1 stats{};
+    stats.version = MITHRIL_DIRECT_METAL_BUFFER_STATS_VERSION;
+    stats.struct_size = static_cast<uint32_t>(sizeof(stats));
+    return stats;
+}
+
+MithrilDirectMetalIndexStatsV1 EmptyIndexStats() {
+    MithrilDirectMetalIndexStatsV1 stats{};
+    stats.version = MITHRIL_DIRECT_METAL_INDEX_STATS_VERSION;
+    stats.struct_size = static_cast<uint32_t>(sizeof(stats));
+    return stats;
+}
+
+MithrilDirectMetalUniformStatsV1 EmptyUniformStats() {
+    MithrilDirectMetalUniformStatsV1 stats{};
+    stats.version = MITHRIL_DIRECT_METAL_UNIFORM_STATS_VERSION;
+    stats.struct_size = static_cast<uint32_t>(sizeof(stats));
+    return stats;
+}
+
+MithrilDirectMetalProgramStatsV1 EmptyProgramStats() {
+    MithrilDirectMetalProgramStatsV1 stats{};
+    stats.version = MITHRIL_DIRECT_METAL_PROGRAM_STATS_VERSION;
+    stats.struct_size = static_cast<uint32_t>(sizeof(stats));
+    return stats;
+}
+
+MithrilDirectMetalPipelineStatsV1 EmptyPipelineStats() {
+    MithrilDirectMetalPipelineStatsV1 stats{};
+    stats.version = MITHRIL_DIRECT_METAL_PIPELINE_STATS_VERSION;
+    stats.struct_size = static_cast<uint32_t>(sizeof(stats));
+    return stats;
+}
+
+template <size_t Capacity>
+struct FixedNumericKey {
+    std::array<uint64_t, Capacity> words{};
+    uint16_t count = 0;
+
+    bool Push(uint64_t value) {
+        if (count >= Capacity) return false;
+        words[count++] = value;
+        return true;
+    }
+
+    bool operator==(const FixedNumericKey& other) const {
+        if (count != other.count) return false;
+        for (uint16_t i = 0; i < count; ++i)
+            if (words[i] != other.words[i]) return false;
+        return true;
+    }
+};
+
+template <size_t Capacity>
+struct FixedNumericKeyHash {
+    size_t operator()(const FixedNumericKey<Capacity>& key) const noexcept {
+        uint64_t hash = 1469598103934665603ULL;
+        for (uint16_t i = 0; i < key.count; ++i) {
+            uint64_t value = key.words[i];
+            for (int byte = 0; byte < 8; ++byte) {
+                hash ^= static_cast<uint8_t>(value);
+                hash *= 1099511628211ULL;
+                value >>= 8;
+            }
+        }
+        hash ^= key.count;
+        hash *= 1099511628211ULL;
+        return static_cast<size_t>(hash);
+    }
+};
+
+using PipelineCacheKey = FixedNumericKey<96>;
+using PipelineCacheKeyHash = FixedNumericKeyHash<96>;
+using SamplerCacheKey = FixedNumericKey<24>;
+using SamplerCacheKeyHash = FixedNumericKeyHash<24>;
+
+struct PendingPipelineCompile {
+    PipelineCacheKey key;
+    std::mutex mutex;
+    std::condition_variable condition;
+    bool completed = false;
+    id<MTLRenderPipelineState> pipeline = nil;
+    id<MTLDepthStencilState> depth_stencil = nil;
+    uint64_t program = 0;
+    std::string error;
+};
+
 struct Engine {
     id<MTLDevice> device = nil;
     id<MTLCommandQueue> queue = nil;
@@ -233,11 +378,15 @@ struct Engine {
     NSUInteger width = kDefaultWidth;
     NSUInteger height = kDefaultHeight;
     std::unordered_map<uint64_t, Program> programs;
-    std::unordered_map<std::string, PipelineBundle> pipelines;
+    std::unordered_map<PipelineCacheKey, PipelineBundle, PipelineCacheKeyHash>
+        pipelines;
+    std::unordered_map<PipelineCacheKey, std::shared_ptr<PendingPipelineCompile>,
+                       PipelineCacheKeyHash> pending_pipelines;
     std::unordered_map<std::string, ClearPipeline> clear_pipelines;
     std::unordered_map<uint64_t, ResidentBuffer> resident_buffers;
     std::unordered_map<uint64_t, ResidentTexture> textures;
-    std::unordered_map<std::string, CachedSampler> samplers;
+    std::unordered_map<SamplerCacheKey, CachedSampler, SamplerCacheKeyHash>
+        samplers;
     std::unordered_map<uint64_t, Renderbuffer> renderbuffers;
     std::unordered_map<uint64_t, Framebuffer> framebuffers;
     std::unordered_map<uint64_t, std::shared_ptr<CommandCompletion>> fences;
@@ -248,6 +397,15 @@ struct Engine {
     uint64_t pipeline_clock = 0;
     uint64_t sampler_clock = 0;
     MithrilDirectMetalBindingStatsV1 binding_stats = EmptyBindingStats();
+    MithrilDirectMetalBufferStatsV1 buffer_stats = EmptyBufferStats();
+    MithrilDirectMetalIndexStatsV1 index_stats = EmptyIndexStats();
+    MithrilDirectMetalUniformStatsV1 uniform_stats = EmptyUniformStats();
+    MithrilDirectMetalProgramStatsV1 program_stats = EmptyProgramStats();
+    MithrilDirectMetalPipelineStatsV1 pipeline_stats = EmptyPipelineStats();
+    std::vector<PendingResidentCopy> pending_resident_copies;
+    std::vector<id<MTLBuffer>> resident_retire_on_submit;
+    std::vector<RetiredResidentBuffer> retired_resident_buffers;
+    std::vector<id<MTLBuffer>> resident_buffer_pool;
     std::vector<PendingDraw> draws;
     std::vector<uint8_t> readback_pixels;
     bool initialized = false;
@@ -268,40 +426,108 @@ Engine& GetEngine() {
 void WarnUnsupported(const char* feature);
 MTLCompareFunction CompareFunction(GLenum function);
 
+bool CompletionReady(const std::shared_ptr<CommandCompletion>& completion) {
+    if (!completion) return true;
+    std::lock_guard<std::mutex> lock(completion->mutex);
+    return completion->completed;
+}
+
+constexpr size_t kMaxResidentBufferPoolEntries = 32;
+
+void ReclaimResidentBuffers() {
+    auto& engine = GetEngine();
+    for (auto it = engine.retired_resident_buffers.begin();
+         it != engine.retired_resident_buffers.end();) {
+        if (!CompletionReady(it->completion)) {
+            ++it;
+            continue;
+        }
+        if (it->buffer &&
+            engine.resident_buffer_pool.size() < kMaxResidentBufferPoolEntries)
+            engine.resident_buffer_pool.push_back(it->buffer);
+        it = engine.retired_resident_buffers.erase(it);
+    }
+}
+
+id<MTLBuffer> AcquireResidentBuffer(size_t size) {
+    auto& engine = GetEngine();
+    ReclaimResidentBuffers();
+    for (size_t i = 0; i < engine.resident_buffer_pool.size(); ++i) {
+        id<MTLBuffer> candidate = engine.resident_buffer_pool[i];
+        if (candidate && [candidate length] == size) {
+            engine.resident_buffer_pool[i] = engine.resident_buffer_pool.back();
+            engine.resident_buffer_pool.pop_back();
+            ++engine.buffer_stats.resident_reuses;
+            return candidate;
+        }
+    }
+    id<MTLBuffer> buffer = [engine.device
+        newBufferWithLength:size options:MTLResourceStorageModeShared];
+    if (buffer) ++engine.buffer_stats.resident_allocations;
+    return buffer;
+}
+
 id<MTLBuffer> RetainResidentBytes(const uint8_t* source_data,
                                   size_t source_size,
                                   uint64_t lifetime_id,
-                                  uint64_t content_version) {
+                                  uint64_t content_version,
+                                  uint64_t previous_content_version,
+                                  size_t update_offset,
+                                  size_t update_size,
+                                  bool update_is_partial) {
     if (!source_data || !source_size || !lifetime_id) return nil;
     auto& engine = GetEngine();
     ResidentBuffer& resident = engine.resident_buffers[lifetime_id];
-    if (!resident.buffer || resident.content_version != content_version ||
-        resident.size != source_size) {
-        resident.buffer = [engine.device newBufferWithBytes:source_data
-                                                    length:source_size
-                                                   options:MTLResourceStorageModeShared];
-        if (!resident.buffer) {
-            engine.resident_buffers.erase(lifetime_id);
-            return nil;
-        }
-        resident.buffer.label = @"Mithril resident GL buffer";
-        resident.content_version = content_version;
-        resident.size = source_size;
-        static bool logged_resident_path = false;
-        if (!logged_resident_path) {
-            ML_LOG_INFO("metal: resident GL buffer path active "
-                        "(lifetime/version keyed)");
-            logged_resident_path = true;
-        }
+    if (resident.buffer && resident.content_version == content_version &&
+        resident.size == source_size)
+        return resident.buffer;
+
+    const bool valid_update_range = update_offset <= source_size &&
+        update_size <= source_size - update_offset;
+    const size_t update_end = valid_update_range ? update_offset + update_size : 0;
+    const bool can_preserve_with_blit =
+        resident.buffer && resident.size == source_size &&
+        resident.content_version == previous_content_version &&
+        update_is_partial && update_size != 0 && valid_update_range &&
+        source_size % 4 == 0 && update_offset % 4 == 0 &&
+        update_size % 4 == 0 && update_end % 4 == 0;
+
+    id<MTLBuffer> replacement = AcquireResidentBuffer(source_size);
+    if (!replacement) return nil;
+
+    if (can_preserve_with_blit) {
+        std::memcpy(static_cast<uint8_t*>(replacement.contents) + update_offset,
+                    source_data + update_offset, update_size);
+        engine.buffer_stats.partial_cpu_upload_bytes += update_size;
+        engine.buffer_stats.preserve_blit_bytes += source_size - update_size;
+        engine.pending_resident_copies.push_back({
+            resident.buffer, replacement,
+            static_cast<NSUInteger>(update_offset),
+            static_cast<NSUInteger>(update_end),
+            static_cast<NSUInteger>(source_size - update_end)});
+    } else {
+        std::memcpy(replacement.contents, source_data, source_size);
+        engine.buffer_stats.full_cpu_upload_bytes += source_size;
     }
+
+    if (resident.buffer)
+        engine.resident_retire_on_submit.push_back(resident.buffer);
+    resident.buffer = replacement;
+    resident.buffer.label = @"Mithril resident GL buffer";
+    resident.content_version = content_version;
+    resident.size = source_size;
     return resident.buffer;
 }
 
 id<MTLBuffer> RetainResidentBuffer(const backend::VertexStream& stream) {
     if (!stream.HasResidentSource()) return nil;
-    return RetainResidentBytes(stream.source_data, stream.source_size,
-                               stream.source_lifetime_id,
-                               stream.source_content_version);
+    return RetainResidentBytes(
+        stream.source_data, stream.source_size,
+        stream.source_lifetime_id, stream.source_content_version,
+        stream.source_previous_content_version,
+        static_cast<size_t>(stream.source_update_offset),
+        static_cast<size_t>(stream.source_update_size),
+        stream.source_update_is_partial);
 }
 
 MTLSamplerMinMagFilter SamplerFilter(backend::TexFilter filter) {
@@ -326,30 +552,41 @@ MTLSamplerMipFilter SamplerMipFilter(backend::TexMipFilter filter) {
     }
 }
 
-std::string SamplerCacheKey(const backend::TexSamplerInfo& info,
-                            NSUInteger levels) {
-    std::ostringstream key;
-    auto bits = [](float value) {
-        uint32_t output = 0;
-        static_assert(sizeof(output) == sizeof(value));
-        std::memcpy(&output, &value, sizeof(output));
-        return output;
-    };
-    key << static_cast<int>(info.mag) << ':' << static_cast<int>(info.min)
-        << ':' << static_cast<int>(info.mip) << ':' << info.wrap_s << ':'
-        << info.wrap_t << ':' << info.wrap_r << ':' << bits(info.lod_bias)
-        << ':' << info.compare_mode;
-    if (info.mip != backend::TexMipFilter::None)
-        key << ':' << bits(info.min_lod) << ':' << bits(info.max_lod)
-            << ':' << levels;
-    if (info.compare_mode != GL_NONE) key << ':' << info.compare_func;
-    if (info.wrap_s == GL_CLAMP_TO_BORDER ||
-        info.wrap_t == GL_CLAMP_TO_BORDER ||
-        info.wrap_r == GL_CLAMP_TO_BORDER)
-        for (float component : info.border_color) key << ':' << bits(component);
-    return key.str();
+uint32_t FloatBits(float value) {
+    uint32_t output = 0;
+    static_assert(sizeof(output) == sizeof(value));
+    std::memcpy(&output, &value, sizeof(output));
+    return output;
 }
 
+SamplerCacheKey BuildSamplerCacheKey(const backend::TexSamplerInfo& info,
+                                     NSUInteger levels) {
+    SamplerCacheKey key;
+    key.Push(static_cast<uint8_t>(info.mag));
+    key.Push(static_cast<uint8_t>(info.min));
+    key.Push(static_cast<uint8_t>(info.mip));
+    key.Push(info.wrap_s);
+    key.Push(info.wrap_t);
+    key.Push(info.wrap_r);
+    key.Push(FloatBits(info.lod_bias));
+    key.Push(info.compare_mode);
+
+    if (info.mip != backend::TexMipFilter::None) {
+        key.Push(FloatBits(info.min_lod));
+        key.Push(FloatBits(info.max_lod));
+        key.Push(levels);
+    } else {
+        key.Push(0); key.Push(0); key.Push(0);
+    }
+
+    key.Push(info.compare_mode != GL_NONE ? info.compare_func : 0);
+    const bool uses_border = info.wrap_s == GL_CLAMP_TO_BORDER ||
+                             info.wrap_t == GL_CLAMP_TO_BORDER ||
+                             info.wrap_r == GL_CLAMP_TO_BORDER;
+    for (float component : info.border_color)
+        key.Push(uses_border ? FloatBits(component) : 0);
+    return key;
+}
 bool ResolveMetalBorderColor(const backend::TexSamplerInfo& info,
                              MTLSamplerBorderColor* output) {
     const bool uses_border = info.wrap_s == GL_CLAMP_TO_BORDER ||
@@ -411,7 +648,7 @@ id<MTLSamplerState> CreateSampler(const backend::TexSamplerInfo& info,
 id<MTLSamplerState> GetOrCreateSampler(const backend::TexSamplerInfo& info,
                                        NSUInteger levels) {
     auto& engine = GetEngine();
-    const std::string key = SamplerCacheKey(info, levels);
+    const SamplerCacheKey key = BuildSamplerCacheKey(info, levels);
     auto cached = engine.samplers.find(key);
     if (cached != engine.samplers.end()) {
         cached->second.last_use = ++engine.sampler_clock;
@@ -469,18 +706,25 @@ bool TextureShapeMatches(const ResidentTexture& resident,
            resident.is_buffer == image.is_buffer && resident.format == image.format;
 }
 
-bool HasCompleteMipChain(const ResidentTexture& texture,
-                         const backend::TexSamplerInfo& sampler) {
-    if (texture.is_buffer || texture.is_multisample) return true;
-    if (sampler.mip == backend::TexMipFilter::None) return true;
+uint32_t AccessibleMipLevels(const ResidentTexture& texture,
+                             uint32_t max_level) {
+    if (texture.is_buffer || texture.is_multisample) return 1;
     uint32_t largest = std::max(texture.width, texture.height);
     if (texture.is_3d) largest = std::max(largest, texture.depth);
-    uint32_t expected = 1;
-    while (largest > 1) {
+    uint32_t levels = 1;
+    while (largest > 1 && levels <= max_level) {
         largest >>= 1;
-        ++expected;
+        ++levels;
     }
-    return texture.levels >= expected;
+    return levels;
+}
+
+bool HasCompleteMipChain(const ResidentTexture& texture,
+                         const backend::TexSamplerInfo& sampler,
+                         uint32_t max_level) {
+    if (texture.is_buffer || texture.is_multisample) return true;
+    if (sampler.mip == backend::TexMipFilter::None) return true;
+    return texture.levels >= AccessibleMipLevels(texture, max_level);
 }
 
 id<MTLTexture> CreateTexture(const backend::TexUpload& image,
@@ -687,6 +931,8 @@ bool ResolveTarget(uint64_t fbo_id, ResolvedTarget* target) {
     if (found == engine.framebuffers.end() || !found->second.spec.width ||
         !found->second.spec.height)
         return false;
+    if (found->second.spec.color.size() > kMaxResolvedColorAttachments)
+        return false;
     target->width = found->second.spec.width;
     target->height = found->second.spec.height;
     bool sample_count_set = false;
@@ -840,38 +1086,6 @@ bool TranslateStage(const std::vector<uint32_t>& words,
             remap.binding = binding;
             remap.msl_buffer = loose ? kUniformBufferIndex : binding;
             compiler.add_msl_resource_binding(remap);
-
-            if (loose) {
-                const auto& type = compiler.get_type(block.base_type_id);
-                output->ubo_size = static_cast<uint32_t>(
-                    compiler.get_declared_struct_size(type));
-                for (uint32_t i = 0; i < type.member_types.size(); ++i) {
-                    UboMember member;
-                    member.name = compiler.get_member_name(block.base_type_id, i);
-                    member.offset = compiler.get_member_decoration(
-                        block.base_type_id, i, spv::DecorationOffset);
-                    member.size = static_cast<uint32_t>(
-                        compiler.get_declared_struct_member_size(type, i));
-                    const auto& member_type =
-                        compiler.get_type(type.member_types[i]);
-                    member.vector_components =
-                        std::max(member_type.vecsize, 1u);
-                    member.matrix_columns =
-                        std::max(member_type.columns, 1u);
-                    member.array_elements = 1;
-                    for (uint32_t dimension : member_type.array)
-                        member.array_elements *= std::max(dimension, 1u);
-                    if (!member_type.array.empty())
-                        member.array_stride = static_cast<uint32_t>(
-                            compiler.type_struct_member_array_stride(type, i));
-                    if (member_type.columns > 1)
-                        member.matrix_stride = static_cast<uint32_t>(
-                            compiler.type_struct_member_matrix_stride(type, i));
-                    member.row_major = compiler.has_member_decoration(
-                        block.base_type_id, i, spv::DecorationRowMajor);
-                    output->members.push_back(std::move(member));
-                }
-            }
         }
 
         output->uses_sampled_images = !resources.sampled_images.empty();
@@ -1083,40 +1297,77 @@ MTLColorWriteMask ColorWriteMask(const backend::PipelineState& state) {
     return mask;
 }
 
-void AppendPipelineState(std::ostringstream& key,
-                         const backend::PipelineState& state) {
-    key << '|'
-        << state.depth_test << ':' << state.depth_func << ':' << (int)state.depth_write
-        << '|' << state.stencil_test << ':' << state.stencil_front_func << ':'
-        << state.stencil_back_func << ':' << state.stencil_front_read_mask << ':'
-        << state.stencil_back_read_mask << ':' << state.stencil_front_write_mask << ':'
-        << state.stencil_back_write_mask << ':' << state.stencil_front_op_fail << ':'
-        << state.stencil_front_op_zfail << ':' << state.stencil_front_op_zpass << ':'
-        << state.stencil_back_op_fail << ':' << state.stencil_back_op_zfail << ':'
-        << state.stencil_back_op_zpass
-        << '|' << state.blend_enable << ':' << state.blend_src_rgb << ':'
-        << state.blend_dst_rgb << ':' << state.blend_src_alpha << ':'
-        << state.blend_dst_alpha << ':' << state.blend_eq_rgb << ':'
-        << state.blend_eq_alpha
-        << '|' << (int)state.color_wmask_r << (int)state.color_wmask_g
-        << (int)state.color_wmask_b << (int)state.color_wmask_a;
+uint64_t PackVertexAttributeKey(const backend::VertexAttr& attr) {
+    return static_cast<uint64_t>(attr.location & 0x3fu) |
+           (static_cast<uint64_t>(attr.components & 0x7u) << 6) |
+           (static_cast<uint64_t>(static_cast<uint8_t>(attr.scalar_type) & 0xfu) << 9) |
+           (static_cast<uint64_t>(attr.normalized ? 1u : 0u) << 13) |
+           (static_cast<uint64_t>(attr.offset) << 16);
 }
 
-std::string PipelineKey(const backend::DrawParams& params) {
-    std::ostringstream key;
-    key << params.program << '|' << static_cast<int>(params.topology)
-        << "|v" << params.vertex_stream.stride;
-    for (const auto& attr : params.vertex_stream.attrs)
-        key << ':' << attr.location << '@' << attr.offset << '/' << attr.components
-            << ',' << static_cast<int>(attr.scalar_type) << ',' << attr.normalized;
-    key << "|i" << params.instance_stream.stride;
-    for (const auto& attr : params.instance_stream.attrs)
-        key << ':' << attr.location << '@' << attr.offset << '/' << attr.components
-            << ',' << static_cast<int>(attr.scalar_type) << ',' << attr.normalized;
-    AppendPipelineState(key, params.pipeline);
-    return key.str();
+bool AppendVertexStreamKey(PipelineCacheKey* key,
+                           const backend::VertexStream& stream) {
+    if (!key->Push(stream.stride) || !key->Push(stream.attrs.size())) return false;
+    for (const auto& attr : stream.attrs)
+        if (!key->Push(PackVertexAttributeKey(attr))) return false;
+    return true;
 }
 
+bool AppendPipelineStateKey(PipelineCacheKey* key,
+                            const backend::PipelineState& state) {
+    const uint64_t values[] = {
+        state.depth_test, state.depth_func, state.depth_write,
+        state.stencil_test, state.stencil_front_func, state.stencil_back_func,
+        state.stencil_front_read_mask, state.stencil_back_read_mask,
+        state.stencil_front_write_mask, state.stencil_back_write_mask,
+        state.stencil_front_op_fail, state.stencil_front_op_zfail,
+        state.stencil_front_op_zpass, state.stencil_back_op_fail,
+        state.stencil_back_op_zfail, state.stencil_back_op_zpass,
+        state.blend_enable, state.blend_src_rgb, state.blend_dst_rgb,
+        state.blend_src_alpha, state.blend_dst_alpha,
+        state.blend_eq_rgb, state.blend_eq_alpha,
+        state.color_wmask_r, state.color_wmask_g,
+        state.color_wmask_b, state.color_wmask_a,
+    };
+    for (uint64_t value : values)
+        if (!key->Push(value)) return false;
+    return true;
+}
+
+bool BuildPipelineCacheKey(const backend::DrawParams& params,
+                           const ResolvedTarget& target,
+                           const backend::FboSpec* fbo_spec,
+                           PipelineCacheKey* key) {
+    *key = {};
+    if (!key->Push(params.program) ||
+        !key->Push(static_cast<uint8_t>(params.topology)) ||
+        !AppendVertexStreamKey(key, params.vertex_stream) ||
+        !AppendVertexStreamKey(key, params.instance_stream) ||
+        !AppendPipelineStateKey(key, params.pipeline) ||
+        !key->Push(target.colors.size()))
+        return false;
+
+    uint64_t present_mask = 0;
+    uint64_t enabled_mask = 0;
+    for (NSUInteger i = 0; i < target.colors.size(); ++i) {
+        if (target.colors[i]) present_mask |= 1ULL << i;
+        bool enabled = true;
+        if (fbo_spec && !fbo_spec->draw_bufs.empty()) {
+            enabled = false;
+            for (GLenum draw_buffer : fbo_spec->draw_bufs)
+                if (draw_buffer == GL_COLOR_ATTACHMENT0 + i) enabled = true;
+        }
+        if (enabled) enabled_mask |= 1ULL << i;
+    }
+    if (!key->Push(present_mask) || !key->Push(enabled_mask) ||
+        !key->Push(target.depth_stencil != nil) ||
+        !key->Push(target.depth_stencil
+            ? static_cast<uint64_t>(target.depth_stencil.pixelFormat)
+            : static_cast<uint64_t>(MTLPixelFormatInvalid)) ||
+        !key->Push(target.has_stencil) || !key->Push(target.samples))
+        return false;
+    return true;
+}
 MTLStencilDescriptor* MakeStencilDescriptor(
     GLenum compare, GLenum fail, GLenum depth_fail, GLenum pass,
     GLuint read_mask, GLuint write_mask) {
@@ -1141,30 +1392,32 @@ void EvictOldPipelineIfNeeded() {
     if (oldest != engine.pipelines.end()) engine.pipelines.erase(oldest);
 }
 
-PipelineBundle* GetOrCreatePipeline(const backend::DrawParams& params) {
+struct PipelineBuildInputs {
+    PipelineCacheKey key;
+    MTLRenderPipelineDescriptor* descriptor = nil;
+    id<MTLDepthStencilState> depth_stencil = nil;
+    uint64_t program = 0;
+};
+
+const backend::FboSpec* BoundDrawFboSpec() {
     auto& engine = GetEngine();
-    ResolvedTarget target;
-    if (!ResolveTarget(engine.bound_draw_fbo, &target)) return nullptr;
-    std::ostringstream target_key;
-    target_key << PipelineKey(params) << "|rt:" << target.colors.size() << ':'
-               << (target.depth_stencil != nil)
-               << ':' << (target.depth_stencil
-                    ? target.depth_stencil.pixelFormat : MTLPixelFormatInvalid)
-               << ':' << target.has_stencil << ':' << target.samples;
-    if (engine.bound_draw_fbo) {
-        auto fbo = engine.framebuffers.find(engine.bound_draw_fbo);
-        if (fbo != engine.framebuffers.end())
-            for (GLenum draw_buffer : fbo->second.spec.draw_bufs)
-                target_key << ':' << draw_buffer;
+    if (!engine.bound_draw_fbo) return nullptr;
+    auto found = engine.framebuffers.find(engine.bound_draw_fbo);
+    return found == engine.framebuffers.end() ? nullptr : &found->second.spec;
+}
+
+bool BuildPipelineInputs(const backend::DrawParams& params,
+                         const ResolvedTarget& target,
+                         const backend::FboSpec* fbo_spec,
+                         PipelineBuildInputs* output) {
+    if (!output ||
+        !BuildPipelineCacheKey(params, target, fbo_spec, &output->key)) {
+        ML_LOG_ERROR("metal: pipeline key exceeds fixed hot-path capacity");
+        return false;
     }
-    const std::string key = target_key.str();
-    auto cached = engine.pipelines.find(key);
-    if (cached != engine.pipelines.end()) {
-        cached->second.last_use = ++engine.pipeline_clock;
-        return &cached->second;
-    }
+    auto& engine = GetEngine();
     auto program_it = engine.programs.find(params.program);
-    if (program_it == engine.programs.end()) return nullptr;
+    if (program_it == engine.programs.end()) return false;
 
     MTLVertexDescriptor* vertex_descriptor = [MTLVertexDescriptor vertexDescriptor];
     auto add_stream = [&](const backend::VertexStream& stream, NSUInteger buffer_index,
@@ -1192,7 +1445,7 @@ PipelineBundle* GetOrCreatePipeline(const backend::DrawParams& params) {
     if (!add_stream(params.vertex_stream, 0, MTLVertexStepFunctionPerVertex) ||
         !add_stream(params.instance_stream, 1, MTLVertexStepFunctionPerInstance)) {
         ML_LOG_ERROR("metal: invalid vertex stream description");
-        return nullptr;
+        return false;
     }
 
     MTLRenderPipelineDescriptor* descriptor = [MTLRenderPipelineDescriptor new];
@@ -1204,11 +1457,6 @@ PipelineBundle* GetOrCreatePipeline(const backend::DrawParams& params) {
         ? target.depth_stencil.pixelFormat : MTLPixelFormatInvalid;
     descriptor.stencilAttachmentPixelFormat = target.has_stencil
         ? target.depth_stencil.pixelFormat : MTLPixelFormatInvalid;
-    const backend::FboSpec* fbo_spec = nullptr;
-    if (engine.bound_draw_fbo) {
-        auto fbo = engine.framebuffers.find(engine.bound_draw_fbo);
-        if (fbo != engine.framebuffers.end()) fbo_spec = &fbo->second.spec;
-    }
     for (NSUInteger i = 0; i < target.colors.size(); ++i) {
         if (!target.colors[i]) continue;
         auto* color = descriptor.colorAttachments[i];
@@ -1228,15 +1476,6 @@ PipelineBundle* GetOrCreatePipeline(const backend::DrawParams& params) {
         color.destinationAlphaBlendFactor = BlendFactor(params.pipeline.blend_dst_alpha);
         color.rgbBlendOperation = BlendOperation(params.pipeline.blend_eq_rgb);
         color.alphaBlendOperation = BlendOperation(params.pipeline.blend_eq_alpha);
-    }
-
-    NSError* error = nil;
-    id<MTLRenderPipelineState> pipeline =
-        [engine.device newRenderPipelineStateWithDescriptor:descriptor error:&error];
-    if (!pipeline) {
-        ML_LOG_ERROR("metal: render pipeline creation failed: %s",
-                     error.localizedDescription.UTF8String ?: "unknown error");
-        return nullptr;
     }
 
     MTLDepthStencilDescriptor* depth_descriptor = [MTLDepthStencilDescriptor new];
@@ -1264,15 +1503,135 @@ PipelineBundle* GetOrCreatePipeline(const backend::DrawParams& params) {
     }
     id<MTLDepthStencilState> depth_state =
         [engine.device newDepthStencilStateWithDescriptor:depth_descriptor];
-    if (!depth_state) return nullptr;
+    if (!depth_state) return false;
+
+    output->descriptor = descriptor;
+    output->depth_stencil = depth_state;
+    output->program = params.program;
+    return true;
+}
+
+std::shared_ptr<PendingPipelineCompile> PreparePipelineCompile(
+    const backend::DrawParams& params, const ResolvedTarget& target,
+    const backend::FboSpec* fbo_spec) {
+    auto& engine = GetEngine();
+    PipelineCacheKey key;
+    if (!BuildPipelineCacheKey(params, target, fbo_spec, &key)) return nullptr;
+    if (engine.pipelines.find(key) != engine.pipelines.end()) {
+        ++engine.pipeline_stats.pipeline_cache_hits;
+        return nullptr;
+    }
+    auto pending = engine.pending_pipelines.find(key);
+    if (pending != engine.pending_pipelines.end()) {
+        ++engine.pipeline_stats.async_reuses;
+        return pending->second;
+    }
+    if (engine.pending_pipelines.size() >= kMaxPipelineCacheEntries)
+        return nullptr;
+
+    PipelineBuildInputs inputs;
+    if (!BuildPipelineInputs(params, target, fbo_spec, &inputs)) return nullptr;
+    auto future = std::make_shared<PendingPipelineCompile>();
+    future->key = inputs.key;
+    future->depth_stencil = inputs.depth_stencil;
+    future->program = inputs.program;
+    engine.pending_pipelines.emplace(future->key, future);
+    ++engine.pipeline_stats.async_requests;
+
+    [engine.device newRenderPipelineStateWithDescriptor:inputs.descriptor
+        completionHandler:^(id<MTLRenderPipelineState> pipeline, NSError* error) {
+            std::lock_guard<std::mutex> lock(future->mutex);
+            future->pipeline = pipeline;
+            if (!pipeline && error) {
+                const char* message = error.localizedDescription.UTF8String;
+                future->error = message ? message : "unknown error";
+            }
+            future->completed = true;
+            future->condition.notify_all();
+        }];
+    return future;
+}
+
+PipelineBundle* ResolvePreparedPipeline(
+    const PipelineCacheKey& key,
+    const std::shared_ptr<PendingPipelineCompile>& future) {
+    if (!future || !(future->key == key)) return nullptr;
+    auto& engine = GetEngine();
+    id<MTLRenderPipelineState> pipeline = nil;
+    id<MTLDepthStencilState> depth_state = nil;
+    uint64_t program = 0;
+    std::string error;
+    {
+        std::unique_lock<std::mutex> lock(future->mutex);
+        if (!future->completed) {
+            ++engine.pipeline_stats.encode_waits;
+            future->condition.wait(lock, [&future] { return future->completed; });
+        }
+        pipeline = future->pipeline;
+        depth_state = future->depth_stencil;
+        program = future->program;
+        error = future->error;
+    }
+    auto pending = engine.pending_pipelines.find(key);
+    if (pending != engine.pending_pipelines.end() && pending->second == future)
+        engine.pending_pipelines.erase(pending);
+    if (!pipeline || !depth_state) {
+        if (!error.empty())
+            ML_LOG_WARN("metal: async render pipeline compile failed: %s; "
+                        "retrying synchronously", error.c_str());
+        return nullptr;
+    }
 
     EvictOldPipelineIfNeeded();
     PipelineBundle bundle;
     bundle.pipeline = pipeline;
     bundle.depth_stencil = depth_state;
-    bundle.program = params.program;
+    bundle.program = program;
     bundle.last_use = ++engine.pipeline_clock;
     auto inserted = engine.pipelines.emplace(key, std::move(bundle));
+    ++engine.pipeline_stats.async_resolved;
+    return &inserted.first->second;
+}
+
+PipelineBundle* GetOrCreatePipeline(
+    const backend::DrawParams& params, const ResolvedTarget& target,
+    const backend::FboSpec* fbo_spec,
+    const std::shared_ptr<PendingPipelineCompile>& prepared) {
+    auto& engine = GetEngine();
+    PipelineCacheKey key;
+    if (!BuildPipelineCacheKey(params, target, fbo_spec, &key)) {
+        ML_LOG_ERROR("metal: pipeline key exceeds fixed hot-path capacity");
+        return nullptr;
+    }
+    auto cached = engine.pipelines.find(key);
+    if (cached != engine.pipelines.end()) {
+        cached->second.last_use = ++engine.pipeline_clock;
+        ++engine.pipeline_stats.pipeline_cache_hits;
+        return &cached->second;
+    }
+    if (PipelineBundle* resolved = ResolvePreparedPipeline(key, prepared))
+        return resolved;
+
+    ++engine.pipeline_stats.sync_fallbacks;
+    PipelineBuildInputs inputs;
+    if (!BuildPipelineInputs(params, target, fbo_spec, &inputs)) return nullptr;
+    NSError* error = nil;
+    id<MTLRenderPipelineState> pipeline =
+        [engine.device newRenderPipelineStateWithDescriptor:inputs.descriptor
+                                                       error:&error];
+    if (!pipeline) {
+        ML_LOG_ERROR("metal: render pipeline creation failed: %s",
+                     error.localizedDescription.UTF8String ?: "unknown error");
+        return nullptr;
+    }
+
+    EvictOldPipelineIfNeeded();
+    PipelineBundle bundle;
+    bundle.pipeline = pipeline;
+    bundle.depth_stencil = inputs.depth_stencil;
+    bundle.program = inputs.program;
+    bundle.last_use = ++engine.pipeline_clock;
+    auto inserted = engine.pipelines.emplace(inputs.key, std::move(bundle));
     return &inserted.first->second;
 }
 
@@ -1339,10 +1698,6 @@ FrameContext& AcquireFrame(NSUInteger upload_bytes, bool needs_readback,
     return frame;
 }
 
-NSUInteger UniformBytes(const ShaderStage& stage) {
-    return stage.ubo_size ? AlignUp(stage.ubo_size, 256) : 0;
-}
-
 NSUInteger RequiredUploadBytes() {
     auto& engine = GetEngine();
     NSUInteger cursor = 0;
@@ -1351,13 +1706,16 @@ NSUInteger RequiredUploadBytes() {
         cursor = AlignUp(cursor, 256);
         cursor += size;
     };
+    std::unordered_set<const PackedUniformSnapshot*> counted_uniform_snapshots;
     for (const auto& pending : engine.draws) {
         const auto& draw = pending.params;
         if (!pending.resident_vertex)
             add(draw.vertex_stream.data.size());
         if (!pending.resident_instance)
             add(draw.instance_stream.data.size());
-        if (draw.topology == backend::Topology::TriangleFan) {
+        if (pending.resident_index) {
+            // Native UInt16/UInt32 EBO is bound directly; no frame-arena copy.
+        } else if (draw.topology == backend::Topology::TriangleFan) {
             const NSUInteger source_count = draw.indices.empty()
                 ? (draw.vertex_stream.record_count
                     ? draw.vertex_stream.record_count
@@ -1368,10 +1726,11 @@ NSUInteger RequiredUploadBytes() {
         } else {
             add(draw.indices.size() * sizeof(uint32_t));
         }
-        auto program = engine.programs.find(draw.program);
-        if (program != engine.programs.end()) {
-            add(UniformBytes(program->second.vertex));
-            add(UniformBytes(program->second.fragment));
+        if (pending.uniform_snapshot &&
+            counted_uniform_snapshots.insert(pending.uniform_snapshot.get()).second) {
+            add(pending.uniform_snapshot->vertex.size());
+            if (pending.uniform_snapshot->fragment != pending.uniform_snapshot->vertex)
+                add(pending.uniform_snapshot->fragment.size());
         }
     }
     return cursor;
@@ -1390,32 +1749,96 @@ NSUInteger AllocateUpload(FrameContext& frame, NSUInteger* cursor,
     return offset;
 }
 
-NSUInteger PackUniforms(FrameContext& frame, NSUInteger* cursor,
-                        const ShaderStage& stage,
-                        const backend::DrawParams& draw,
-                        std::unordered_map<std::string, NSUInteger>* memo) {
-    if (!stage.ubo_size) return NSNotFound;
-    std::vector<uint8_t> packed(AlignUp(stage.ubo_size, 256), 0);
-    for (const auto& member : stage.members) {
-        auto value = draw.uniforms.find(member.name);
-        if (value == draw.uniforms.end() || value->second.empty()) continue;
-        if (!backend::PackUniformValue(
-                member, value->second, packed.data(), stage.ubo_size)) {
-            ML_LOG_ERROR("metal: invalid reflected layout for uniform '%s'",
+bool ResolveUniformMemberSlots(ShaderStage* stage,
+                               const std::vector<std::string>& uniform_names) {
+    stage->member_value_indices.clear();
+    stage->member_value_indices.reserve(stage->members.size());
+    for (const auto& member : stage->members) {
+        auto found = std::find(uniform_names.begin(), uniform_names.end(), member.name);
+        if (found == uniform_names.end()) {
+            ML_LOG_ERROR("metal: reflected loose uniform '%s' has no frontend slot",
                          member.name.c_str());
-            return NSNotFound;
+            return false;
+        }
+        stage->member_value_indices.push_back(
+            static_cast<uint32_t>(found - uniform_names.begin()));
+    }
+    return true;
+}
+
+bool PackUniformStage(const ShaderStage& stage,
+                      const backend::LooseUniformSource& source,
+                      std::vector<uint8_t>* packed) {
+    packed->clear();
+    if (!stage.ubo_size) return true;
+    packed->assign(AlignUp(stage.ubo_size, 256), 0);
+    if (stage.member_value_indices.size() != stage.members.size()) return false;
+    for (size_t i = 0; i < stage.members.size(); ++i) {
+        const uint32_t slot = stage.member_value_indices[i];
+        if (slot >= source.count || !source.values) return false;
+        const auto& value = source.values[slot];
+        if (!value.data || !value.size) continue;
+        if (!backend::PackUniformValue(stage.members[i], value.data, value.size,
+                                       packed->data(), stage.ubo_size)) {
+            ML_LOG_ERROR("metal: invalid reflected layout for uniform '%s'",
+                         stage.members[i].name.c_str());
+            return false;
         }
     }
-    // Exact byte identity is the only reuse criterion. The memo lives for one
-    // frame arena, so offsets can never escape into a recycled frame context.
-    std::string key(reinterpret_cast<const char*>(packed.data()), packed.size());
-    auto existing = memo->find(key);
+    return true;
+}
+
+std::shared_ptr<PackedUniformSnapshot> GetOrCreateUniformSnapshot(
+    Program* program, const backend::LooseUniformSource& source) {
+    if (!program->vertex.ubo_size && !program->fragment.ubo_size) return nullptr;
+    if (program->last_uniform_snapshot &&
+        program->last_uniform_snapshot->version == source.version) {
+        ++GetEngine().uniform_stats.snapshot_reuses;
+        return program->last_uniform_snapshot;
+    }
+    auto snapshot = std::make_shared<PackedUniformSnapshot>();
+    snapshot->version = source.version;
+    if (!PackUniformStage(program->vertex, source, &snapshot->vertex) ||
+        !PackUniformStage(program->fragment, source, &snapshot->fragment))
+        return nullptr;
+    auto& stats = GetEngine().uniform_stats;
+    ++stats.snapshot_packs;
+    stats.packed_bytes += snapshot->vertex.size() + snapshot->fragment.size();
+    program->last_uniform_snapshot = snapshot;
+    return snapshot;
+}
+
+struct UniformFrameOffsets {
+    NSUInteger vertex = NSNotFound;
+    NSUInteger fragment = NSNotFound;
+};
+
+UniformFrameOffsets UploadUniformSnapshot(
+    FrameContext& frame, NSUInteger* cursor,
+    const std::shared_ptr<PackedUniformSnapshot>& snapshot,
+    std::unordered_map<const PackedUniformSnapshot*, UniformFrameOffsets>* memo) {
+    if (!snapshot) return {};
+    auto existing = memo->find(snapshot.get());
     if (existing != memo->end()) return existing->second;
-    const NSUInteger offset = AllocateUpload(frame, cursor, packed.data(),
-                                              packed.size());
-    if (offset == NSNotFound) return NSNotFound;
-    memo->emplace(std::move(key), offset);
-    return offset;
+    UniformFrameOffsets offsets;
+    if (!snapshot->vertex.empty()) {
+        offsets.vertex = AllocateUpload(frame, cursor, snapshot->vertex.data(),
+                                        snapshot->vertex.size());
+        if (offsets.vertex == NSNotFound) return offsets;
+        ++GetEngine().uniform_stats.frame_uniform_uploads;
+    }
+    if (!snapshot->fragment.empty()) {
+        if (snapshot->fragment == snapshot->vertex && offsets.vertex != NSNotFound) {
+            offsets.fragment = offsets.vertex;
+        } else {
+            offsets.fragment = AllocateUpload(frame, cursor, snapshot->fragment.data(),
+                                              snapshot->fragment.size());
+            if (offsets.fragment == NSNotFound) return offsets;
+            ++GetEngine().uniform_stats.frame_uniform_uploads;
+        }
+    }
+    memo->emplace(snapshot.get(), offsets);
+    return offsets;
 }
 
 std::vector<uint32_t> ExpandTriangleFan(const backend::DrawParams& draw) {
@@ -1715,8 +2138,10 @@ bool EncodeDraws(
     auto& engine = GetEngine();
     ResolvedTarget target;
     if (!ResolveTarget(engine.bound_draw_fbo, &target)) return false;
+    const backend::FboSpec* fbo_spec = BoundDrawFboSpec();
     NSUInteger cursor = 0;
-    std::unordered_map<std::string, NSUInteger> uniform_memo;
+    std::unordered_map<const PackedUniformSnapshot*, UniformFrameOffsets>
+        uniform_memo;
     // Metal encoder state persists across draw calls in one render pass. Keep
     // a compact shadow per shader stage and only materialize changes. These
     // references are valid for the whole loop because PendingDraw owns the
@@ -1732,7 +2157,8 @@ bool EncodeDraws(
     OcclusionQueryState* active_occlusion = nullptr;
     for (const auto& pending : engine.draws) {
         const auto& draw = pending.params;
-        PipelineBundle* pipeline = GetOrCreatePipeline(draw);
+        PipelineBundle* pipeline = GetOrCreatePipeline(
+            draw, target, fbo_spec, pending.pipeline_compile);
         auto program = engine.programs.find(draw.program);
         if (!pipeline || program == engine.programs.end()) return false;
 
@@ -1760,21 +2186,43 @@ bool EncodeDraws(
 
         std::vector<uint32_t> fan_indices;
         const std::vector<uint32_t>* indices = &draw.indices;
-        if (draw.topology == backend::Topology::TriangleFan) {
-            fan_indices = ExpandTriangleFan(draw);
-            indices = &fan_indices;
-        }
+        id<MTLBuffer> index_buffer = pending.resident_index;
         NSUInteger index_offset = NSNotFound;
-        if (!indices->empty()) {
-            index_offset = AllocateUpload(frame, &cursor, indices->data(),
-                                           indices->size() * sizeof(uint32_t));
-            if (index_offset == NSNotFound) return false;
+        NSUInteger index_count = 0;
+        MTLIndexType index_type = MTLIndexTypeUInt32;
+        if (index_buffer) {
+            index_offset = static_cast<NSUInteger>(draw.resident_indices.binding_offset);
+            index_count = draw.resident_indices.count;
+            index_type = draw.resident_indices.scalar_type == backend::IndexScalarType::Uint16
+                ? MTLIndexTypeUInt16 : MTLIndexTypeUInt32;
+            ++engine.index_stats.resident_index_draws;
+            engine.index_stats.resident_index_bytes +=
+                static_cast<uint64_t>(index_count) * draw.resident_indices.ScalarBytes();
+        } else {
+            if (draw.topology == backend::Topology::TriangleFan) {
+                fan_indices = ExpandTriangleFan(draw);
+                indices = &fan_indices;
+            }
+            if (!indices->empty()) {
+                index_offset = AllocateUpload(frame, &cursor, indices->data(),
+                                               indices->size() * sizeof(uint32_t));
+                if (index_offset == NSNotFound) return false;
+                index_buffer = frame.upload;
+                index_count = indices->size();
+                ++engine.index_stats.transient_index_draws;
+                engine.index_stats.transient_index_bytes +=
+                    static_cast<uint64_t>(index_count) * sizeof(uint32_t);
+            }
         }
 
-        const NSUInteger vertex_ubo = PackUniforms(
-            frame, &cursor, program->second.vertex, draw, &uniform_memo);
-        const NSUInteger fragment_ubo = PackUniforms(
-            frame, &cursor, program->second.fragment, draw, &uniform_memo);
+        const UniformFrameOffsets uniform_offsets = UploadUniformSnapshot(
+            frame, &cursor, pending.uniform_snapshot, &uniform_memo);
+        if (pending.uniform_snapshot &&
+            ((!pending.uniform_snapshot->vertex.empty() &&
+              uniform_offsets.vertex == NSNotFound) ||
+             (!pending.uniform_snapshot->fragment.empty() &&
+              uniform_offsets.fragment == NSNotFound)))
+            return false;
 
         [encoder setRenderPipelineState:pipeline->pipeline];
         [encoder setDepthStencilState:pipeline->depth_stencil];
@@ -1783,11 +2231,11 @@ bool EncodeDraws(
         [encoder setVertexBuffer:vertex_buffer offset:vertex_offset atIndex:0];
         if (instance_offset != NSNotFound)
             [encoder setVertexBuffer:instance_buffer offset:instance_offset atIndex:1];
-        if (vertex_ubo != NSNotFound)
-            [encoder setVertexBuffer:frame.upload offset:vertex_ubo
+        if (uniform_offsets.vertex != NSNotFound)
+            [encoder setVertexBuffer:frame.upload offset:uniform_offsets.vertex
                              atIndex:kUniformBufferIndex];
-        if (fragment_ubo != NSNotFound)
-            [encoder setFragmentBuffer:frame.upload offset:fragment_ubo
+        if (uniform_offsets.fragment != NSNotFound)
+            [encoder setFragmentBuffer:frame.upload offset:uniform_offsets.fragment
                                atIndex:kUniformBufferIndex];
         for (const auto& binding : pending.uniform_buffers) {
             if (binding.vertex_stage)
@@ -1865,11 +2313,11 @@ bool EncodeDraws(
             }
             active_occlusion = desired_occlusion;
         }
-        if (index_offset != NSNotFound) {
+        if (index_buffer && index_offset != NSNotFound) {
             [encoder drawIndexedPrimitives:primitive
-                                indexCount:indices->size()
-                                 indexType:MTLIndexTypeUInt32
-                               indexBuffer:frame.upload
+                                indexCount:index_count
+                                 indexType:index_type
+                               indexBuffer:index_buffer
                          indexBufferOffset:index_offset
                              instanceCount:instance_count];
         } else {
@@ -1972,6 +2420,22 @@ bool SubmitInternal(bool wait_for_completion, bool copy_for_readback,
     id<MTLCommandBuffer> command = [engine.queue commandBuffer];
     if (!command) return false;
     command.label = @"Mithril DirectMetal frame";
+
+    if (!engine.pending_resident_copies.empty()) {
+        id<MTLBlitCommandEncoder> resident_blit = [command blitCommandEncoder];
+        if (!resident_blit) return false;
+        resident_blit.label = @"Mithril resident buffer preservation";
+        for (const auto& copy : engine.pending_resident_copies) {
+            if (copy.prefix_size)
+                [resident_blit copyFromBuffer:copy.source sourceOffset:0
+                    toBuffer:copy.destination destinationOffset:0 size:copy.prefix_size];
+            if (copy.suffix_size)
+                [resident_blit copyFromBuffer:copy.source
+                    sourceOffset:copy.suffix_offset toBuffer:copy.destination
+                    destinationOffset:copy.suffix_offset size:copy.suffix_size];
+        }
+        [resident_blit endEncoding];
+    }
 
     std::vector<std::shared_ptr<OcclusionQueryState>> query_states;
     std::unordered_map<OcclusionQueryState*, NSUInteger> query_offsets;
@@ -2122,6 +2586,10 @@ bool SubmitInternal(bool wait_for_completion, bool copy_for_readback,
 
     auto completion = CommitCommandBuffer(command);
     if (!completion) return false;
+    for (id<MTLBuffer> buffer : engine.resident_retire_on_submit)
+        engine.retired_resident_buffers.push_back({buffer, completion});
+    engine.resident_retire_on_submit.clear();
+    engine.pending_resident_copies.clear();
     for (const auto& query : query_states) {
         const NSUInteger offset = query_offsets.at(query.get());
         query->segments.push_back({query_results, offset, completion});
@@ -2314,22 +2782,33 @@ bool Clear(const backend::ClearParams& params) {
 }
 
 uint64_t CreateProgram(const std::vector<uint32_t>& vs,
-                       const std::vector<uint32_t>& fs) {
+                       const std::vector<uint32_t>& fs,
+                       const std::vector<std::string>& uniform_names,
+                       const backend::UniformBlockLayout& vertex_uniforms,
+                       const backend::UniformBlockLayout& fragment_uniforms) {
     if (!EnsureInit()) return 0;
     auto& engine = GetEngine();
     const uint64_t handle = HashWords(vs, fs);
     auto existing = engine.programs.find(handle);
     if (existing != engine.programs.end()) {
         ++existing->second.references;
+        ++engine.program_stats.program_cache_hits;
         return handle;
     }
     @autoreleasepool {
         Program program;
         program.handle = handle;
+        program.vertex.ubo_size = vertex_uniforms.size;
+        program.vertex.members = vertex_uniforms.members;
+        program.fragment.ubo_size = fragment_uniforms.size;
+        program.fragment.members = fragment_uniforms.members;
         if (!TranslateStage(vs, spv::ExecutionModelVertex, &program.vertex) ||
-            !TranslateStage(fs, spv::ExecutionModelFragment, &program.fragment))
+            !TranslateStage(fs, spv::ExecutionModelFragment, &program.fragment) ||
+            !ResolveUniformMemberSlots(&program.vertex, uniform_names) ||
+            !ResolveUniformMemberSlots(&program.fragment, uniform_names))
             return 0;
         engine.programs.emplace(handle, std::move(program));
+        ++engine.program_stats.program_compiles;
         ML_LOG_DEBUG("metal: created native program %llu",
                      (unsigned long long)handle);
         return handle;
@@ -2354,7 +2833,7 @@ void DestroyBuffer(uint64_t lifetime_id) {
     GetEngine().resident_buffers.erase(lifetime_id);
 }
 
-bool Draw(const backend::DrawParams& params) {
+bool Draw(backend::DrawParams params) {
     auto& engine = GetEngine();
     if (!engine.initialized || !params.program || !params.vertex_stream.HasStorage())
         return false;
@@ -2374,7 +2853,11 @@ bool Draw(const backend::DrawParams& params) {
         return false;
     }
     PendingDraw pending;
-    pending.params = params;
+    if (program->second.vertex.ubo_size || program->second.fragment.ubo_size) {
+        pending.uniform_snapshot = GetOrCreateUniformSnapshot(
+            &program->second, params.loose_uniforms);
+        if (!pending.uniform_snapshot) return false;
+    }
     if (params.occlusion_query) {
         auto query = engine.occlusion_queries.find(params.occlusion_query);
         if (query == engine.occlusion_queries.end() || query->second->ended) {
@@ -2386,14 +2869,25 @@ bool Draw(const backend::DrawParams& params) {
     if (params.vertex_stream.HasResidentSource()) {
         pending.resident_vertex = RetainResidentBuffer(params.vertex_stream);
         if (!pending.resident_vertex) return false;
-        pending.params.vertex_stream.source_data = nullptr;
-        pending.params.vertex_stream.source_size = 0;
     }
     if (params.instance_stream.HasResidentSource()) {
         pending.resident_instance = RetainResidentBuffer(params.instance_stream);
         if (!pending.resident_instance) return false;
-        pending.params.instance_stream.source_data = nullptr;
-        pending.params.instance_stream.source_size = 0;
+    }
+    if (params.resident_indices.HasResidentSource()) {
+        const auto& source = params.resident_indices;
+        const uint64_t bytes = static_cast<uint64_t>(source.count) * source.ScalarBytes();
+        if (source.binding_offset > source.source_size ||
+            bytes > source.source_size - source.binding_offset)
+            return false;
+        pending.resident_index = RetainResidentBytes(
+            source.source_data, source.source_size,
+            source.source_lifetime_id, source.source_content_version,
+            source.source_previous_content_version,
+            static_cast<size_t>(source.source_update_offset),
+            static_cast<size_t>(source.source_update_size),
+            source.source_update_is_partial);
+        if (!pending.resident_index) return false;
     }
     for (size_t i = 0; i < params.uniform_buffers.size(); ++i) {
         const auto& binding = params.uniform_buffers[i];
@@ -2408,14 +2902,20 @@ bool Draw(const backend::DrawParams& params) {
         }
         id<MTLBuffer> resident = RetainResidentBytes(
             binding.source_data, binding.source_size,
-            binding.source_lifetime_id, binding.source_content_version);
+            binding.source_lifetime_id, binding.source_content_version,
+            binding.source_previous_content_version,
+            static_cast<size_t>(binding.source_update_offset),
+            static_cast<size_t>(binding.source_update_size),
+            binding.source_update_is_partial);
         if (!resident) return false;
+        if (pending.uniform_buffers.size() >= kMaxPendingUniformBufferBindings) {
+            ML_LOG_ERROR("metal: resolved uniform-buffer bindings exceed fixed limit");
+            return false;
+        }
         pending.uniform_buffers.push_back({
             static_cast<NSUInteger>(binding.internal_binding),
             static_cast<NSUInteger>(binding.offset), resident,
             binding.vertex_stage, binding.fragment_stage});
-        pending.params.uniform_buffers[i].source_data = nullptr;
-        pending.params.uniform_buffers[i].source_size = 0;
     }
     for (const auto& bind : params.sampled_textures) {
         if (!bind.vertex_stage && !bind.fragment_stage) {
@@ -2433,16 +2933,25 @@ bool Draw(const backend::DrawParams& params) {
                          (unsigned long long)bind.texture, bind.binding);
             return false;
         }
-        if (!HasCompleteMipChain(texture->second, bind.sampler)) {
+        const backend::TexSamplerInfo& sampler_info = bind.sampler;
+        if (!HasCompleteMipChain(texture->second, sampler_info,
+                                 bind.max_level)) {
             ML_LOG_ERROR("metal: incomplete mip chain for sampled texture %llu",
                          (unsigned long long)bind.texture);
             return false;
         }
+        const NSUInteger accessible_levels = std::min<NSUInteger>(
+            texture->second.levels, AccessibleMipLevels(texture->second,
+                                                        bind.max_level));
         id<MTLSamplerState> sampler = GetOrCreateSampler(
-            bind.sampler, texture->second.levels);
+            sampler_info, accessible_levels);
         if (!sampler) {
             ML_LOG_ERROR("metal: sampler state is not representable for binding %u",
                          bind.binding);
+            return false;
+        }
+        if (pending.textures.size() >= kMaxPendingTextureBindings) {
+            ML_LOG_ERROR("metal: resolved sampled-image bindings exceed fixed limit");
             return false;
         }
         pending.textures.push_back({
@@ -2450,6 +2959,22 @@ bool Draw(const backend::DrawParams& params) {
             texture->second.backing_buffer,
             bind.vertex_stage, bind.fragment_stage});
     }
+    const backend::FboSpec* fbo_spec = BoundDrawFboSpec();
+    pending.pipeline_compile = PreparePipelineCompile(
+        params, draw_target, fbo_spec);
+    // All borrowed source pointers have been retained above. Move the
+    // rich frontend snapshot into deferred storage exactly once instead of
+    // deep-copying its vectors/maps at every draw.
+    pending.params = std::move(params);
+    pending.params.vertex_stream.source_data = nullptr;
+    pending.params.vertex_stream.source_size = 0;
+    pending.params.instance_stream.source_data = nullptr;
+    pending.params.instance_stream.source_size = 0;
+    pending.params.resident_indices.source_data = nullptr;
+    pending.params.resident_indices.source_size = 0;
+    pending.params.loose_uniforms = {};
+    pending.params.uniform_buffers = {};
+    pending.params.sampled_textures = {};
     if (pending.occlusion) ++pending.occlusion->pending_draws;
     engine.draws.push_back(std::move(pending));
     engine.frame_dirty = true;
@@ -2822,9 +3347,22 @@ void BlitFramebuffer(uint64_t src_id, uint64_t dst_id,
     if (engine.frame_dirty && !SubmitInternal(false, false, nullptr)) return;
 
     ResolvedTarget source;
+    if (!ResolveTarget(src_id, &source)) return;
+
+    // Minecraft renders into an application FBO before blitting to the EGL
+    // default framebuffer. The CAMetalLayer may still carry its bootstrap
+    // extent at the first real window-sized blit, so synchronize the default
+    // target before resolving the destination texture.
+    if (!dst_id && source.width > 0 && source.height > 0 &&
+        (source.width > engine.width || source.height > engine.height)) {
+        if (engine.layer)
+            engine.layer.drawableSize = CGSizeMake(source.width, source.height);
+        if (!SetTargetSize((uint32_t)source.width, (uint32_t)source.height))
+            return;
+    }
+
     ResolvedTarget destination;
-    if (!ResolveTarget(src_id, &source) || !ResolveTarget(dst_id, &destination))
-        return;
+    if (!ResolveTarget(dst_id, &destination)) return;
     if (source.samples != 1 || destination.samples != 1) {
         WarnUnsupported("multisample framebuffer blit");
         return;
@@ -2881,6 +3419,61 @@ extern "C" int mithrilGetDirectMetalBindingStatsV1(
     MithrilDirectMetalBindingStatsV1* output, size_t output_size) {
     if (!output || output_size < sizeof(*output)) return 0;
     *output = GetEngine().binding_stats;
+    return 1;
+}
+
+extern "C" void mithrilResetDirectMetalBufferStats(void) {
+    GetEngine().buffer_stats = EmptyBufferStats();
+}
+
+extern "C" int mithrilGetDirectMetalBufferStatsV1(
+    MithrilDirectMetalBufferStatsV1* output, size_t output_size) {
+    if (!output || output_size < sizeof(*output)) return 0;
+    *output = GetEngine().buffer_stats;
+    return 1;
+}
+
+extern "C" void mithrilResetDirectMetalIndexStats(void) {
+    GetEngine().index_stats = EmptyIndexStats();
+}
+
+extern "C" int mithrilGetDirectMetalIndexStatsV1(
+    MithrilDirectMetalIndexStatsV1* output, size_t output_size) {
+    if (!output || output_size < sizeof(*output)) return 0;
+    *output = GetEngine().index_stats;
+    return 1;
+}
+
+extern "C" void mithrilResetDirectMetalUniformStats(void) {
+    GetEngine().uniform_stats = EmptyUniformStats();
+}
+
+extern "C" int mithrilGetDirectMetalUniformStatsV1(
+    MithrilDirectMetalUniformStatsV1* output, size_t output_size) {
+    if (!output || output_size < sizeof(*output)) return 0;
+    *output = GetEngine().uniform_stats;
+    return 1;
+}
+
+extern "C" void mithrilResetDirectMetalProgramStats(void) {
+    GetEngine().program_stats = EmptyProgramStats();
+}
+
+extern "C" int mithrilGetDirectMetalProgramStatsV1(
+    MithrilDirectMetalProgramStatsV1* output, size_t output_size) {
+    if (!output || output_size < sizeof(*output)) return 0;
+    *output = GetEngine().program_stats;
+    return 1;
+}
+
+extern "C" void mithrilResetDirectMetalPipelineStats(void) {
+    GetEngine().pipeline_stats = EmptyPipelineStats();
+}
+
+extern "C" int mithrilGetDirectMetalPipelineStatsV1(
+    MithrilDirectMetalPipelineStatsV1* output, size_t output_size) {
+    if (!output || output_size < sizeof(*output)) return 0;
+    *output = GetEngine().pipeline_stats;
     return 1;
 }
 

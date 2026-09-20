@@ -4,7 +4,7 @@
  * perspective projection and a gluLookAt-style camera pitched DOWN at the
  * scene (camera above the cube, floor filling the lower half of the frame).
  * Verifies the readback through pixel assertions, then exports the
- * framebuffer to a PPM (use scripts/ppm_to_png.py to make a PNG).
+ * framebuffer to a PPM (use scripts/ppm_render.py to make a PNG).
  *
  * Build (from project root):
  *   gcc -o tests/render3d_smoke tests/render3d_smoke.c -ldl -lm

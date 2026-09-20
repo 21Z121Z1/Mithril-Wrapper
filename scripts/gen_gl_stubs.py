@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Regenerate src/gl/exports.cpp (GL 3.3 core stub exports).
+"""Regenerate src/gl/exports.cpp (OpenGL 3.3 core stub exports).
 
-Reads docs/gl33_core_list.md for the function set and real prototypes from
-third_party/GL/glcorearb.h. Functions listed in MGL_IMPL are implemented for
-real in src/gl/ and are skipped here.
+The Khronos glcorearb.h blocks for GL_VERSION_1_0 through GL_VERSION_3_3 are
+the symbol source. Functions listed in MGL_IMPL have real implementations in
+src/gl and are skipped here.
 
 Run: python3 scripts/gen_gl_stubs.py
 """
@@ -13,7 +13,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 HDR = ROOT / "third_party" / "GL" / "glcorearb.h"
-GL_LIST = ROOT / "docs" / "gl33_core_list.md"
 OUT = ROOT / "src" / "gl" / "exports.cpp"
 
 # Functions that have real implementations in src/gl/.
@@ -143,14 +142,25 @@ MGL_IMPL = frozenset({
 })
 
 
-def parse_list():
-    txt = GL_LIST.read_text()
-    names = set()
-    for line in txt.splitlines():
-        line = line.strip()
-        if line.startswith("gl"):
-            names.update(line.split())
-    return sorted(names)
+CORE_VERSIONS = (
+    "1_0", "1_1", "1_2", "1_3", "1_4", "1_5",
+    "2_0", "2_1", "3_0", "3_1", "3_2", "3_3",
+)
+
+
+def core_header_text(header_text):
+    blocks = []
+    for version in CORE_VERSIONS:
+        pattern = re.compile(
+            rf"#ifndef GL_VERSION_{version}\b.*?"
+            rf"#endif /\* GL_VERSION_{version} \*/",
+            re.S,
+        )
+        match = pattern.search(header_text)
+        if not match:
+            raise RuntimeError(f"missing GL_VERSION_{version} block in {HDR}")
+        blocks.append(match.group(0))
+    return "\n".join(blocks)
 
 
 def parse_decls(hdr_text):
@@ -183,8 +193,9 @@ def safe_expr(rtype):
 
 
 def main():
-    wanted = parse_list()
-    decls = parse_decls(HDR.read_text())
+    header_text = HDR.read_text()
+    decls = parse_decls(header_text)
+    wanted = sorted(parse_decls(core_header_text(header_text)))
     missing = set(wanted) - set(decls)
     if missing:
         print("missing prototypes:", sorted(missing))

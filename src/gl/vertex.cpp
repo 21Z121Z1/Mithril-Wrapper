@@ -22,6 +22,8 @@ GLuint g_bound_vao = 0;
 GLuint g_bound_array_buffer = 0;
 GLuint g_bound_element_buffer = 0;
 GLuint g_bound_uniform_buffer = 0;
+GLuint g_bound_copy_read_buffer = 0;
+GLuint g_bound_copy_write_buffer = 0;
 GLuint g_bound_pixel_pack_buffer = 0;
 GLuint g_bound_pixel_unpack_buffer = 0;
 std::array<IndexedBufferBinding, kMaxUniformBufferBindings>
@@ -117,12 +119,13 @@ bool ResolvePixelPackDestination(void* pointer, uint32_t width,
         const auto found = g_buffers.find(g_bound_pixel_pack_buffer);
         const uint64_t offset = reinterpret_cast<uintptr_t>(pointer);
         if (found == g_buffers.end() || found->second.mapped ||
-            offset % datum_bytes != 0 || offset > found->second.data.size() ||
-            base > found->second.data.size() - offset ||
-            span > found->second.data.size() - offset - base) {
+            offset % datum_bytes != 0 || offset > found->second.Size() ||
+            base > found->second.Size() - offset ||
+            span > found->second.Size() - offset - base) {
             PUSH_ERROR(GL_INVALID_OPERATION);
             return false;
         }
+        found->second.EnsureMaterialized();
         output->buffer = &found->second;
         output->data = found->second.data.empty()
             ? nullptr : found->second.data.data() + offset + base;
@@ -152,11 +155,12 @@ bool ResolvePixelPackBytes(void* pointer, size_t byte_count,
     const auto found = g_buffers.find(g_bound_pixel_pack_buffer);
     const uint64_t offset = reinterpret_cast<uintptr_t>(pointer);
     if (found == g_buffers.end() || found->second.mapped ||
-        offset > found->second.data.size() ||
-        byte_count > found->second.data.size() - offset) {
+        offset > found->second.Size() ||
+        byte_count > found->second.Size() - offset) {
         PUSH_ERROR(GL_INVALID_OPERATION);
         return false;
     }
+    found->second.EnsureMaterialized();
     output->buffer = &found->second;
     output->data = found->second.data.empty()
         ? nullptr : found->second.data.data() + offset;
@@ -166,7 +170,8 @@ bool ResolvePixelPackBytes(void* pointer, size_t byte_count,
 
 void CommitPixelPackDestination(PixelPackDestination* destination) {
     if (!destination || !destination->buffer) return;
-    ++destination->buffer->content_version;
+    destination->buffer->RecordUpdate(
+        0, destination->buffer->Size(), false);
     destination->buffer->defined = true;
 }
 
@@ -228,6 +233,8 @@ void APIENTRY glDeleteBuffers(GLsizei n, const GLuint* buffers) {
         if (g_bound_array_buffer == buffers[i]) g_bound_array_buffer = 0;
         if (g_bound_element_buffer == buffers[i]) g_bound_element_buffer = 0;
         if (g_bound_uniform_buffer == buffers[i]) g_bound_uniform_buffer = 0;
+        if (g_bound_copy_read_buffer == buffers[i]) g_bound_copy_read_buffer = 0;
+        if (g_bound_copy_write_buffer == buffers[i]) g_bound_copy_write_buffer = 0;
         if (g_bound_pixel_pack_buffer == buffers[i])
             g_bound_pixel_pack_buffer = 0;
         if (g_bound_pixel_unpack_buffer == buffers[i])
@@ -248,6 +255,8 @@ void APIENTRY glBindBuffer(GLenum target, GLuint buffer) {
         case GL_ARRAY_BUFFER: g_bound_array_buffer = buffer; break;
         case GL_ELEMENT_ARRAY_BUFFER: g_bound_element_buffer = buffer; break;
         case GL_UNIFORM_BUFFER: g_bound_uniform_buffer = buffer; break;
+        case GL_COPY_READ_BUFFER: g_bound_copy_read_buffer = buffer; break;
+        case GL_COPY_WRITE_BUFFER: g_bound_copy_write_buffer = buffer; break;
         case GL_PIXEL_PACK_BUFFER: g_bound_pixel_pack_buffer = buffer; break;
         case GL_PIXEL_UNPACK_BUFFER: g_bound_pixel_unpack_buffer = buffer; break;
         default:
@@ -263,6 +272,8 @@ void APIENTRY glBufferData(GLenum target, GLsizeiptr size, const void* data, GLe
         case GL_ARRAY_BUFFER: bound = &g_bound_array_buffer; break;
         case GL_ELEMENT_ARRAY_BUFFER: bound = &g_bound_element_buffer; break;
         case GL_UNIFORM_BUFFER: bound = &g_bound_uniform_buffer; break;
+        case GL_COPY_READ_BUFFER: bound = &g_bound_copy_read_buffer; break;
+        case GL_COPY_WRITE_BUFFER: bound = &g_bound_copy_write_buffer; break;
         case GL_PIXEL_PACK_BUFFER: bound = &g_bound_pixel_pack_buffer; break;
         case GL_PIXEL_UNPACK_BUFFER: bound = &g_bound_pixel_unpack_buffer; break;
         default: PUSH_ERROR(GL_INVALID_ENUM); return;
@@ -271,13 +282,15 @@ void APIENTRY glBufferData(GLenum target, GLsizeiptr size, const void* data, GLe
     if (size < 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
     auto it = g_buffers.find(*bound);
     if (it->second.mapped) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
+    BufferData& buffer = it->second;
+    buffer.storage_size = static_cast<size_t>(size);
     if (data) {
-        it->second.data.assign((const uint8_t*)data, (const uint8_t*)data + size);
+        buffer.data.assign((const uint8_t*)data, (const uint8_t*)data + size);
     } else {
-        it->second.data.assign((size_t)size, 0);
+        buffer.data.clear();
     }
-    ++it->second.content_version;
-    it->second.defined = data != nullptr;
+    buffer.RecordUpdate(0, buffer.Size(), false);
+    buffer.defined = data != nullptr;
 }
 
 void APIENTRY glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, const void* data) {
@@ -286,6 +299,8 @@ void APIENTRY glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, c
         case GL_ARRAY_BUFFER: bound = &g_bound_array_buffer; break;
         case GL_ELEMENT_ARRAY_BUFFER: bound = &g_bound_element_buffer; break;
         case GL_UNIFORM_BUFFER: bound = &g_bound_uniform_buffer; break;
+        case GL_COPY_READ_BUFFER: bound = &g_bound_copy_read_buffer; break;
+        case GL_COPY_WRITE_BUFFER: bound = &g_bound_copy_write_buffer; break;
         case GL_PIXEL_PACK_BUFFER: bound = &g_bound_pixel_pack_buffer; break;
         case GL_PIXEL_UNPACK_BUFFER: bound = &g_bound_pixel_unpack_buffer; break;
         default: PUSH_ERROR(GL_INVALID_ENUM); return;
@@ -294,17 +309,27 @@ void APIENTRY glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, c
     if (offset < 0 || size < 0) { PUSH_ERROR(GL_INVALID_VALUE); return; }
     auto it = g_buffers.find(*bound);
     if (it->second.mapped) { PUSH_ERROR(GL_INVALID_OPERATION); return; }
-    if (offset + size > (GLintptr)it->second.data.size()) {
+    BufferData& buffer = it->second;
+    const size_t write_offset = static_cast<size_t>(offset);
+    const size_t write_size = static_cast<size_t>(size);
+    if (write_offset > buffer.Size() || write_size > buffer.Size() - write_offset) {
         PUSH_ERROR(GL_INVALID_VALUE);
         return;
     }
-    if (it->second.defined && size > 0 &&
-        std::memcmp(it->second.data.data() + offset, data,
-                    static_cast<size_t>(size)) == 0)
-        return;
-    std::memcpy(it->second.data.data() + offset, data, size);
-    ++it->second.content_version;
-    it->second.defined = true;
+    if (!write_size) return;
+    const bool full_write = write_offset == 0 && write_size == buffer.Size();
+    if (!buffer.IsMaterialized() && full_write) {
+        buffer.data.assign((const uint8_t*)data,
+                           (const uint8_t*)data + write_size);
+    } else {
+        buffer.EnsureMaterialized();
+        if (buffer.defined &&
+            std::memcmp(buffer.data.data() + write_offset, data, write_size) == 0)
+            return;
+        std::memcpy(buffer.data.data() + write_offset, data, write_size);
+    }
+    buffer.RecordUpdate(write_offset, write_size, !full_write);
+    buffer.defined = true;
 }
 
 // ---- buffer queries / mapping (M3) -----------------------------------------
@@ -315,6 +340,8 @@ BufferData* BoundBufferForTarget(GLenum target, GLenum* error) {
         case GL_ARRAY_BUFFER: bound = &g_bound_array_buffer; break;
         case GL_ELEMENT_ARRAY_BUFFER: bound = &g_bound_element_buffer; break;
         case GL_UNIFORM_BUFFER: bound = &g_bound_uniform_buffer; break;
+        case GL_COPY_READ_BUFFER: bound = &g_bound_copy_read_buffer; break;
+        case GL_COPY_WRITE_BUFFER: bound = &g_bound_copy_write_buffer; break;
         case GL_PIXEL_PACK_BUFFER: bound = &g_bound_pixel_pack_buffer; break;
         case GL_PIXEL_UNPACK_BUFFER: bound = &g_bound_pixel_unpack_buffer; break;
         default: *error = GL_INVALID_ENUM; return nullptr;
@@ -359,8 +386,8 @@ void APIENTRY glBindBufferRange(GLenum target, GLuint index, GLuint buffer,
     }
     const uint64_t begin = static_cast<uint64_t>(offset);
     const uint64_t length = static_cast<uint64_t>(size);
-    if (begin > found->second.data.size() ||
-        length > found->second.data.size() - begin) {
+    if (begin > found->second.Size() ||
+        length > found->second.Size() - begin) {
         PUSH_ERROR(GL_INVALID_VALUE); return;
     }
     g_bound_uniform_buffer = buffer;
@@ -381,7 +408,7 @@ void APIENTRY glGetIntegeri_v(GLenum target, GLuint index, GLint* data) {
         case GL_UNIFORM_BUFFER_SIZE: {
             const auto found = g_buffers.find(binding.buffer);
             *data = binding.whole_buffer && found != g_buffers.end()
-                ? static_cast<GLint>(found->second.data.size())
+                ? static_cast<GLint>(found->second.Size())
                 : static_cast<GLint>(binding.size);
             return;
         }
@@ -403,7 +430,7 @@ void APIENTRY glGetInteger64i_v(GLenum target, GLuint index, GLint64* data) {
         case GL_UNIFORM_BUFFER_SIZE: {
             const auto found = g_buffers.find(binding.buffer);
             *data = binding.whole_buffer && found != g_buffers.end()
-                ? static_cast<GLint64>(found->second.data.size())
+                ? static_cast<GLint64>(found->second.Size())
                 : static_cast<GLint64>(binding.size);
             return;
         }
@@ -421,8 +448,8 @@ void APIENTRY glCopyBufferSubData(GLenum readtarget, GLenum writetarget,
     BufferData* dst = BoundBufferForTarget(writetarget, &err);
     if (err) { PUSH_ERROR(err); return; }
     if (readoffset < 0 || writeoffset < 0 || size < 0 ||
-        readoffset + size > (GLintptr)src->data.size() ||
-        writeoffset + size > (GLintptr)dst->data.size()) {
+        readoffset + size > (GLintptr)src->Size() ||
+        writeoffset + size > (GLintptr)dst->Size()) {
         PUSH_ERROR(GL_INVALID_VALUE);
         return;
     }
@@ -430,9 +457,19 @@ void APIENTRY glCopyBufferSubData(GLenum readtarget, GLenum writetarget,
         PUSH_ERROR(GL_INVALID_OPERATION);
         return;
     }
-    std::memmove(dst->data.data() + writeoffset, src->data.data() + readoffset,
-                 size);
-    ++dst->content_version;
+    const size_t copy_size = static_cast<size_t>(size);
+    if (!copy_size) return;
+    src->EnsureMaterialized();
+    const bool full_write = writeoffset == 0 && copy_size == dst->Size();
+    if (src != dst && full_write && !dst->IsMaterialized()) {
+        dst->data.assign(src->data.data() + readoffset,
+                         src->data.data() + readoffset + copy_size);
+    } else {
+        dst->EnsureMaterialized();
+        std::memmove(dst->data.data() + writeoffset,
+                     src->data.data() + readoffset, copy_size);
+    }
+    dst->RecordUpdate(static_cast<size_t>(writeoffset), copy_size, !full_write);
     dst->defined = true;
 }
 
@@ -441,7 +478,7 @@ void APIENTRY glGetBufferParameteriv(GLenum target, GLenum pname, GLint* params)
     BufferData* b = BoundBufferForTarget(target, &err);
     if (err) { PUSH_ERROR(err); return; }
     switch (pname) {
-        case GL_BUFFER_SIZE: *params = (GLint)b->data.size(); break;
+        case GL_BUFFER_SIZE: *params = (GLint)b->Size(); break;
         case GL_BUFFER_USAGE: *params = GL_STATIC_DRAW; break;
         case GL_BUFFER_ACCESS: *params = GL_WRITE_ONLY; break;
         case GL_BUFFER_MAPPED: *params = b->mapped ? GL_TRUE : GL_FALSE; break;
@@ -455,7 +492,7 @@ void APIENTRY glGetBufferParameteri64v(GLenum target, GLenum pname, GLint64* par
             GLenum err = GL_NO_ERROR;
             BufferData* b = BoundBufferForTarget(target, &err);
             if (err) { PUSH_ERROR(err); return; }
-            *params = (GLint64)b->data.size();
+            *params = (GLint64)b->Size();
             break;
         }
         default: PUSH_ERROR(GL_INVALID_ENUM);
@@ -475,10 +512,11 @@ void APIENTRY glGetBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size
     GLenum err = GL_NO_ERROR;
     BufferData* b = BoundBufferForTarget(target, &err);
     if (err) { PUSH_ERROR(err); return; }
-    if (offset < 0 || size < 0 || offset + size > (GLintptr)b->data.size()) {
+    if (offset < 0 || size < 0 || offset + size > (GLintptr)b->Size()) {
         PUSH_ERROR(GL_INVALID_VALUE);
         return;
     }
+    b->EnsureMaterialized();
     std::memcpy(data, b->data.data() + offset, size);
 }
 
@@ -491,12 +529,13 @@ void* APIENTRY glMapBuffer(GLenum target, GLenum access) {
     BufferData* b = BoundBufferForTarget(target, &err);
     if (err) { PUSH_ERROR(err); return nullptr; }
     if (b->mapped) { PUSH_ERROR(GL_INVALID_OPERATION); return nullptr; }
-    if (b->data.empty()) { PUSH_ERROR(GL_OUT_OF_MEMORY); return nullptr; }
+    if (!b->Size()) { PUSH_ERROR(GL_OUT_OF_MEMORY); return nullptr; }
+    b->EnsureMaterialized();
     b->mapped = true;
     b->map_offset = 0;
     b->map_writable = access != GL_READ_ONLY;
     if (b->map_writable) {
-        ++b->content_version;
+        b->RecordUpdate(0, b->Size(), false);
         b->defined = true;
     }
     return b->data.data();
@@ -509,12 +548,17 @@ void* APIENTRY glMapBufferRange(GLenum target, GLintptr offset, GLsizeiptr lengt
     BufferData* b = BoundBufferForTarget(target, &err);
     if (err) { PUSH_ERROR(err); return nullptr; }
     if (b->mapped) { PUSH_ERROR(GL_INVALID_OPERATION); return nullptr; }
-    if (offset + length > (GLintptr)b->data.size()) { PUSH_ERROR(GL_INVALID_VALUE); return nullptr; }
+    if (offset + length > (GLintptr)b->Size()) { PUSH_ERROR(GL_INVALID_VALUE); return nullptr; }
+    b->EnsureMaterialized();
     b->mapped = true;
     b->map_offset = static_cast<size_t>(offset);
     b->map_writable = access != GL_MAP_READ_BIT;
     if (b->map_writable) {
-        ++b->content_version;
+        const size_t map_offset = static_cast<size_t>(offset);
+        const size_t map_length = static_cast<size_t>(length);
+        const bool full_write = map_offset == 0 &&
+                                map_length == b->Size();
+        b->RecordUpdate(map_offset, map_length, !full_write);
         b->defined = true;
     }
     return b->data.data() + offset;
@@ -537,11 +581,11 @@ void APIENTRY glFlushMappedBufferRange(GLenum target, GLintptr offset,
     BufferData* b = BoundBufferForTarget(target, &err);
     if (err) { PUSH_ERROR(err); return; }
     if (offset < 0 || length < 0 ||
-        offset + length > (GLintptr)b->data.size()) {
+        offset + length > (GLintptr)b->Size()) {
         PUSH_ERROR(GL_INVALID_VALUE);
         return;
     }
-    ++b->content_version;
+    b->RecordUpdate(0, b->Size(), false);
     b->defined = true;
 }
 

@@ -85,6 +85,8 @@
 #define GL_DEPTH_STENCIL       0x84F9
 #define GL_DEPTH_ATTACHMENT    0x8D00
 #define GL_STENCIL_ATTACHMENT  0x8D20
+#define GL_DEPTH_STENCIL_ATTACHMENT 0x821A
+#define GL_DEPTH24_STENCIL8    0x88F0
 #define GL_MAX_DRAW_BUFFERS     0x8824
 #define GL_MAX_COLOR_TEXTURE_SAMPLES 0x910E
 #define GL_MAX_DUAL_SOURCE_DRAW_BUFFERS 0x88FC
@@ -1280,6 +1282,102 @@ int main(void) {
 
             deleteFramebuffers(1, &fbo);
             deleteTextures(1, &texture);
+        }
+    }
+
+    /* -- packed depth/stencil attachment identity ------------------------- */
+    {
+        if (direct_metal_marker > 0) {
+            GLuint color = 0, packed_a = 0, packed_b = 0, fbo = 0;
+            genTextures(1, &color);
+            bindTexture(GL_TEXTURE_2D, color);
+            texImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 32, 32, 0,
+         GL_RGBA, GL_UNSIGNED_BYTE, 0);
+            genRenderbuffers(1, &packed_a);
+            bindRenderbuffer(GL_RENDERBUFFER, packed_a);
+            renderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8,
+    32, 32);
+            genRenderbuffers(1, &packed_b);
+            bindRenderbuffer(GL_RENDERBUFFER, packed_b);
+            renderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8,
+    32, 32);
+            genFramebuffers(1, &fbo);
+            bindFramebuffer(GL_FRAMEBUFFER, fbo);
+            framebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+     GL_TEXTURE_2D, color, 0);
+            framebufferRenderbuffer(GL_FRAMEBUFFER,
+        GL_DEPTH_STENCIL_ATTACHMENT,
+        GL_RENDERBUFFER, packed_a);
+            CHECK(checkFramebufferStatus(GL_FRAMEBUFFER) ==
+        GL_FRAMEBUFFER_COMPLETE,
+    "packed depth/stencil attachment keeps independent GL slots");
+
+            /* Detaching only stencil must leave the depth attachment live. */
+            framebufferRenderbuffer(GL_FRAMEBUFFER, GL_STENCIL_ATTACHMENT,
+        GL_RENDERBUFFER, 0);
+            CHECK(checkFramebufferStatus(GL_FRAMEBUFFER) ==
+        GL_FRAMEBUFFER_COMPLETE,
+    "detaching stencil does not detach depth");
+            framebufferRenderbuffer(GL_FRAMEBUFFER, GL_STENCIL_ATTACHMENT,
+        GL_RENDERBUFFER, packed_a);
+            CHECK(checkFramebufferStatus(GL_FRAMEBUFFER) ==
+        GL_FRAMEBUFFER_COMPLETE,
+    "reattaching the same packed object restores stencil");
+
+            /* The backend has one packed native slot. Distinct depth and
+ stencil objects must fail closed rather than aliasing. */
+            framebufferRenderbuffer(GL_FRAMEBUFFER, GL_STENCIL_ATTACHMENT,
+        GL_RENDERBUFFER, packed_b);
+            CHECK(checkFramebufferStatus(GL_FRAMEBUFFER) !=
+        GL_FRAMEBUFFER_COMPLETE,
+    "distinct depth/stencil objects fail closed without aliasing");
+            framebufferRenderbuffer(GL_FRAMEBUFFER, GL_STENCIL_ATTACHMENT,
+        GL_RENDERBUFFER, packed_a);
+
+            useProgram(prog);
+            viewport(0, 0, 32, 32);
+            disable(GL_DEPTH_TEST);
+            enable(GL_STENCIL_TEST);
+            stencilMask(0xff);
+            stencilFunc(GL_ALWAYS, 7, 0xff);
+            stencilOp(GL_REPLACE, GL_REPLACE, GL_REPLACE);
+            const float red[3][7] = {
+  {-1, -1, 0.0f, 1, 0, 0, 1},
+  { 3, -1, 0.0f, 1, 0, 0, 1},
+  {-1,  3, 0.0f, 1, 0, 0, 1},
+            };
+            bufferData(GL_ARRAY_BUFFER, (GLsizeiptr)sizeof(red), red,
+         0x88E4);
+            clearColor(0, 0, 0, 1);
+            clear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT |
+    GL_STENCIL_BUFFER_BIT);
+            drawArrays(GL_TRIANGLES, 0, 3);
+
+            stencilMask(0);
+            stencilFunc(GL_EQUAL, 7, 0xff);
+            stencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
+            const float green[3][7] = {
+  {-1, -1, 0.0f, 0, 1, 0, 1},
+  { 3, -1, 0.0f, 0, 1, 0, 1},
+  {-1,  3, 0.0f, 0, 1, 0, 1},
+            };
+            bufferData(GL_ARRAY_BUFFER, (GLsizeiptr)sizeof(green), green,
+         0x88E4);
+            drawArrays(GL_TRIANGLES, 0, 3);
+            finish();
+            readPixels(16, 16, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px);
+            CHECK(px_match(px, 0, 255, 0, 255),
+    "shared packed attachment executes stencil writes/reads "
+    "(r=%d g=%d b=%d)", px[0], px[1], px[2]);
+
+            stencilMask(0xff);
+            disable(GL_STENCIL_TEST);
+            bindFramebuffer(GL_FRAMEBUFFER, 0);
+            viewport(0, 0, 512, 512);
+            deleteFramebuffers(1, &fbo);
+            deleteRenderbuffers(1, &packed_a);
+            deleteRenderbuffers(1, &packed_b);
+            deleteTextures(1, &color);
         }
     }
 

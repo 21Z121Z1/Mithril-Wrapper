@@ -18,6 +18,38 @@
 namespace mithril::backend {
 
 constexpr uint32_t kMaxTextureUnits = 16;
+constexpr size_t kMaxVertexAttributes = 16;
+
+// Fixed-capacity metadata storage for API-bounded hot state. push_back reports
+// overflow instead of reallocating; valid callers derive Capacity from the GL
+// or shader contract, so overflow is a violated renderer invariant rather than
+// a representable state that should spill to the heap.
+template <typename T, size_t Capacity>
+class FixedList {
+public:
+    bool push_back(const T& value) {
+        if (size_ >= Capacity) return false;
+        values_[size_++] = value;
+        return true;
+    }
+    void clear() { size_ = 0; }
+    void reserve(size_t requested) const { (void)requested; }
+    size_t size() const { return size_; }
+    bool empty() const { return size_ == 0; }
+    T* data() { return values_.data(); }
+    const T* data() const { return values_.data(); }
+    T& front() { return values_[0]; }
+    const T& front() const { return values_[0]; }
+    T& operator[](size_t index) { return values_[index]; }
+    const T& operator[](size_t index) const { return values_[index]; }
+    auto begin() { return values_.begin(); }
+    auto end() { return values_.begin() + static_cast<ptrdiff_t>(size_); }
+    auto begin() const { return values_.begin(); }
+    auto end() const { return values_.begin() + static_cast<ptrdiff_t>(size_); }
+private:
+    std::array<T, Capacity> values_{};
+    size_t size_ = 0;
+};
 
 enum class Topology {
     Triangles = 0,
@@ -73,7 +105,7 @@ struct VertexStream {
     // uint inputs with distinct shader ABIs.
     std::vector<uint8_t> data;
     uint32_t stride = 0;
-    std::vector<VertexAttr> attrs;
+    FixedList<VertexAttr, kMaxVertexAttributes> attrs;
 
     // Resident-source fast path. `source_data` is borrowed only for the
     // synchronous backend Draw() call. Backends retain/copy it before Draw
@@ -83,6 +115,10 @@ struct VertexStream {
     size_t source_size = 0;
     uint64_t source_lifetime_id = 0;
     uint64_t source_content_version = 0;
+    uint64_t source_previous_content_version = 0;
+    uint64_t source_update_offset = 0;
+    uint64_t source_update_size = 0;
+    bool source_update_is_partial = false;
     uint64_t binding_offset = 0;
     uint32_t record_count = 0;
 
@@ -90,6 +126,33 @@ struct VertexStream {
     bool HasResidentSource() const {
         return source_data != nullptr && source_size != 0 &&
                source_lifetime_id != 0;
+    }
+};
+
+enum class IndexScalarType : uint8_t {
+    Uint16 = 0,
+    Uint32 = 1,
+};
+
+struct ResidentIndexSource {
+    const uint8_t* source_data = nullptr;
+    size_t source_size = 0;
+    uint64_t source_lifetime_id = 0;
+    uint64_t source_content_version = 0;
+    uint64_t source_previous_content_version = 0;
+    uint64_t source_update_offset = 0;
+    uint64_t source_update_size = 0;
+    bool source_update_is_partial = false;
+    uint64_t binding_offset = 0;
+    uint32_t count = 0;
+    IndexScalarType scalar_type = IndexScalarType::Uint32;
+
+    uint32_t ScalarBytes() const {
+        return scalar_type == IndexScalarType::Uint16 ? 2u : 4u;
+    }
+    bool HasResidentSource() const {
+        return source_data != nullptr && source_size != 0 &&
+               source_lifetime_id != 0 && count != 0;
     }
 };
 
@@ -146,11 +209,43 @@ struct UniformBufferBinding {
     size_t source_size = 0;
     uint64_t source_lifetime_id = 0;
     uint64_t source_content_version = 0;
+    uint64_t source_previous_content_version = 0;
+    uint64_t source_update_offset = 0;
+    uint64_t source_update_size = 0;
+    bool source_update_is_partial = false;
     uint64_t offset = 0;
     uint64_t size = 0;
 };
 
-// Native shader reflection for one member of the synthetic loose-uniform
+struct UniformValueView {
+    const uint8_t* data = nullptr;
+    uint32_t size = 0;
+};
+
+struct LooseUniformSource {
+    const UniformValueView* values = nullptr;
+    uint32_t count = 0;
+    uint64_t version = 0;
+
+    bool HasValues() const { return values != nullptr && count != 0; }
+};
+
+// Non-owning array used by the hot draw contract. The GL frontend owns the
+// backing storage for the duration of the synchronous backend Draw() call.
+// Deferred backends must resolve/retain native state before Draw returns.
+template <typename T>
+struct ArrayView {
+    const T* data = nullptr;
+    size_t count = 0;
+
+    bool empty() const { return count == 0; }
+    size_t size() const { return count; }
+    const T* begin() const { return data; }
+    const T* end() const { return data ? data + count : nullptr; }
+    const T& operator[](size_t index) const { return data[index]; }
+};
+
+// Shared shader reflection for one member of the synthetic loose-uniform
 // block. GL setters expose tightly packed scalar sequences, while std140/MSL
 // layouts may add a stride between array elements or matrix rows/columns.
 struct UniformMemberLayout {
@@ -165,11 +260,23 @@ struct UniformMemberLayout {
     bool row_major = false;
 };
 
+// The shader owner resolves this layout once for each linked stage. Native
+// execution can choose separate storage for the two stages.
+struct UniformBlockLayout {
+    uint32_t size = 0;
+    std::vector<UniformMemberLayout> members;
+};
+
 // Copy one GL uniform snapshot into its reflected block layout. Values use
 // 32-bit GL scalar representations and matrices are normalized column-major.
 bool PackUniformValue(const UniformMemberLayout& layout,
-                      const std::vector<uint8_t>& value,
+                      const uint8_t* value_data, size_t value_size,
                       uint8_t* block, size_t block_size);
+inline bool PackUniformValue(const UniformMemberLayout& layout,
+                             const std::vector<uint8_t>& value,
+                             uint8_t* block, size_t block_size) {
+    return PackUniformValue(layout, value.data(), value.size(), block, block_size);
+}
 
 enum class TexFilter { Nearest = 0, Linear = 1 };
 enum class TexMipFilter { None = 0, Nearest = 1, Linear = 2 };
@@ -208,6 +315,10 @@ struct SampledTextureBinding {
     uint32_t binding = 0;
     uint64_t texture = 0;
     TexSamplerInfo sampler;
+    // Texture image-level accessibility is texture state, not sampler-object
+    // state. Carry MAX_LEVEL beside the resolved sampler snapshot so native
+    // backends can evaluate completeness and clamp accessible mip levels.
+    uint32_t max_level = 1000;
     bool vertex_stage = false;
     bool fragment_stage = false;
 };
@@ -233,6 +344,7 @@ struct DrawParams {
     VertexStream vertex_stream;
     VertexStream instance_stream;
     std::vector<uint32_t> indices;
+    ResidentIndexSource resident_indices;
     // Index values matching the GL restart index are normalized by the
     // frontend to UINT32_MAX. Metal consumes that sentinel natively; Vulkan
     // uses this flag to enable its matching input-assembly behavior.
@@ -242,12 +354,12 @@ struct DrawParams {
     uint64_t occlusion_query = 0;
     uint32_t instance_count = 1;
     Topology topology = Topology::Triangles;
-    // Exact bytes captured when the GL draw is issued. Integer uniforms must
-    // remain integer bit patterns; converting their values through float
-    // changes what SPIR-V/MSL reads from the synthetic uniform block.
-    std::unordered_map<std::string, std::vector<uint8_t>> uniforms;
-    std::vector<UniformBufferBinding> uniform_buffers;
-    std::vector<SampledTextureBinding> sampled_textures;
+    // Borrowed only for the synchronous backend Draw() call. Program-local
+    // setters own the byte arrays; deferred native backends must snapshot them
+    // before Draw returns.
+    LooseUniformSource loose_uniforms;
+    ArrayView<UniformBufferBinding> uniform_buffers;
+    ArrayView<SampledTextureBinding> sampled_textures;
     PipelineState pipeline;
     DynamicState dynamic;
 };

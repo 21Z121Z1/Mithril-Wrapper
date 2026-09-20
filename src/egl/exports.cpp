@@ -1,6 +1,5 @@
 // Mithril-Wrapper EGL entry points.
-// Export set: the 18 symbols Amethyst dlsyms + remaining EGL 1.5 core.
-// See docs/egl_list.md.
+// Export set: the Amethyst direct-lookup surface plus EGL 1.5 core.
 
 #include <EGL/egl.h>
 #include <EGL/eglext.h>

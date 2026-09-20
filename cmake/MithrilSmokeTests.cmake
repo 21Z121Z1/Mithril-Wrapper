@@ -22,17 +22,21 @@ set(_mithril_vulkan_smokes
     uniform_array_smoke
     uniform_type_smoke
     uniform_integer_getter_smoke
+    typed_vertex_smoke
     packed_vertex_attrib_smoke
     fbo_smoke
     3d_smoke
-    render3d_smoke)
+    render3d_smoke
+    lazy_buffer_storage_smoke)
 
 set(_mithril_directmetal_smokes
     state_smoke
+    unsupported_stub_smoke
     shader_smoke
     draw_smoke
     texture_smoke
     sampler_smoke
+    texture_level_window_smoke
     sampler_array_smoke
     matrix_uniform_smoke
     uniform_array_smoke
@@ -49,7 +53,17 @@ set(_mithril_directmetal_smokes
     3d_smoke
     render3d_smoke
     fbo_smoke
-    directmetal_fbo_smoke)
+    layered_fbo_smoke
+    directmetal_fbo_smoke
+    directmetal_incomplete_fbo_smoke
+    directmetal_buffer_streaming_smoke
+    directmetal_resident_index_smoke
+    directmetal_uniform_snapshot_smoke
+    directmetal_multidraw_lowering_smoke
+    directmetal_program_prewarm_smoke
+    directmetal_async_pso_smoke
+    minecraft26_link_smoke
+    lazy_buffer_storage_smoke)
 
 if(APPLE AND TARGET mithril_direct)
     set(_mithril_runtime_target mithril_direct)

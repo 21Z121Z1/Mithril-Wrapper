@@ -9,6 +9,7 @@
 #pragma once
 
 #include <GL/glcorearb.h>
+#include <backend/types.h>
 
 #include <cstdint>
 #include <string>
@@ -113,6 +114,10 @@ struct Program {
     bool linked = false;
     std::string info_log;
     std::vector<Uniform> uniforms;         // active uniforms (index == GL index)
+    backend::UniformBlockLayout vertex_loose_uniforms;
+    backend::UniformBlockLayout fragment_loose_uniforms;
+    std::vector<backend::UniformValueView> loose_uniform_views;
+    uint64_t loose_uniform_version = 1;
     std::unordered_map<std::string, GLint> uniform_by_name;    // name -> location
     std::unordered_map<GLint, size_t> uniform_by_location;     // location -> uniforms idx
     std::unordered_map<std::string, GLuint> active_uniform_by_name;
@@ -148,6 +153,16 @@ bool ApplyStageLocationBindings(
     std::vector<uint32_t>& spirv, GLenum stage, const std::string& source,
     const std::unordered_map<std::string, GLuint>& requested,
     uint32_t max_locations, std::string& error);
+
+// Reconcile the linked vertex-output / fragment-input interface after the two
+// stages have been compiled independently. Automatic locations match by GLSL
+// name; explicit layout(location=) declarations remain authoritative.
+bool AlignStageInterfaceLocations(
+    std::vector<uint32_t>& vertex_spirv,
+    std::vector<uint32_t>& fragment_spirv,
+    const std::string& vertex_source,
+    const std::string& fragment_source,
+    std::string& error);
 
 // Parse only source-level uniform-block names and optional layout(binding=N)
 // values. GLSL compilation uses a separate backend-neutral internal namespace.

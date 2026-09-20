@@ -6,8 +6,7 @@
 
 namespace mithril::state {
 
-// Single shared GL context (CHECKLIST section 4.1). One process-wide instance.
-// Object identity tables (VAO/VBO/Texture/Program/FBO) arrive later.
+// The current frontend has one process-wide GL state instance.
 
 constexpr uint32_t kMaxCaps = 64;
 constexpr uint32_t kErrStack = 16;

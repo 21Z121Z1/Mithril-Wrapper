@@ -1,6 +1,6 @@
 /* M1 GL state-machine smoke test: dlopen libmithril.so, then exercise the
- * implemented S1 family (clear/viewport/scissor/state/query) and assert the
- * behavior documented in CHECKLIST section 4.
+ * implemented state family (clear/viewport/scissor/state/query) and assert
+ * its observable behavior.
  *
  * Build (from project root):
  *   gcc -o tests/state_smoke tests/state_smoke.c -ldl

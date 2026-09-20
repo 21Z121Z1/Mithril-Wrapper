@@ -186,7 +186,6 @@ int main(void) {
     fn_glGetVertexAttribiv getVertexAttrib  = (fn_glGetVertexAttribiv)dlsym(h, "glGetVertexAttribiv");
     fn_glMapBufferRange   mapBufferRange    = (fn_glMapBufferRange)dlsym(h, "glMapBufferRange");
     fn_glUnmapBuffer      unmapBuffer       = (fn_glUnmapBuffer)dlsym(h, "glUnmapBuffer");
-    fn_glBufferSubData    bufferSubData     = (fn_glBufferSubData)dlsym(h, "glBufferSubData");
     fn_glFinish            finish            = (fn_glFinish)dlsym(h, "glFinish");
     fn_glReadPixels        readPixels        = (fn_glReadPixels)dlsym(h, "glReadPixels");
     fn_glDeleteProgram     deleteProgram     = (fn_glDeleteProgram)dlsym(h, "glDeleteProgram");
@@ -250,7 +249,10 @@ int main(void) {
     vertexAttribPtr(1, 4, GL_FLOAT, GL_FALSE, sizeof(struct Vertex),
                     (const GLvoid*)12);
 
-    /* -- draw ------------------------------------------------------- */
+    /* Two draws in one submission must use valid uniform storage. */
+    uniform4f(tint, 0.0f, 1.0f, 0.0f, 1.0f);
+    drawArrays(GL_TRIANGLES, 0, 3);
+    uniform4f(tint, 1.0f, 1.0f, 1.0f, 1.0f);
     drawArrays(GL_TRIANGLES, 0, 3);
     finish();
 

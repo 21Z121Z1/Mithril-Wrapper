@@ -66,6 +66,21 @@ bool StageStream(const VertexStream& stream, VkBuffer* buf,
                       VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, buf, mem);
 }
 
+void DestroyStagedDrawBuffers(const DrawOp& op) {
+    if (op.vertex_buffer)
+        g.fn.DestroyBuffer(g.device, op.vertex_buffer, nullptr);
+    if (op.vertex_mem)
+        g.fn.FreeMemory(g.device, op.vertex_mem, nullptr);
+    if (op.instance_buffer)
+        g.fn.DestroyBuffer(g.device, op.instance_buffer, nullptr);
+    if (op.instance_mem)
+        g.fn.FreeMemory(g.device, op.instance_mem, nullptr);
+    if (op.index_buffer)
+        g.fn.DestroyBuffer(g.device, op.index_buffer, nullptr);
+    if (op.index_mem)
+        g.fn.FreeMemory(g.device, op.index_mem, nullptr);
+}
+
 } // namespace
 
 void Draw(const DrawParams& params) {
@@ -122,9 +137,11 @@ void Draw(const DrawParams& params) {
     op.program = params.program;
     op.topology = (uint32_t)params.topology;
     op.v_stride = params.vertex_stream.stride;
-    op.v_attrs = params.vertex_stream.attrs;
+    op.v_attrs.assign(params.vertex_stream.attrs.begin(),
+                      params.vertex_stream.attrs.end());
     op.i_stride = params.instance_stream.stride;
-    op.i_attrs = params.instance_stream.attrs;
+    op.i_attrs.assign(params.instance_stream.attrs.begin(),
+                      params.instance_stream.attrs.end());
     op.instance_count = std::max<uint32_t>(params.instance_count, 1);
     const size_t vertex_bytes = params.vertex_stream.HasResidentSource()
         ? params.vertex_stream.source_size
@@ -134,7 +151,12 @@ void Draw(const DrawParams& params) {
         : (uint32_t)(vertex_bytes / op.v_stride);
     op.vertex_offset = params.vertex_stream.binding_offset;
     op.instance_offset = params.instance_stream.binding_offset;
-    op.index_count = (uint32_t)params.indices.size();
+    op.index_count = params.resident_indices.HasResidentSource()
+        ? params.resident_indices.count
+        : static_cast<uint32_t>(params.indices.size());
+    op.index_type = params.resident_indices.HasResidentSource() &&
+                    params.resident_indices.scalar_type == backend::IndexScalarType::Uint16
+        ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32;
     op.primitive_restart = params.primitive_restart;
     op.pipe = params.pipeline;
     op.dynamic = params.dynamic;
@@ -169,8 +191,16 @@ void Draw(const DrawParams& params) {
         g.fn.FreeMemory(g.device, op.vertex_mem, nullptr);
         return;
     }
+    const void* index_bytes = params.resident_indices.HasResidentSource()
+        ? static_cast<const void*>(params.resident_indices.source_data +
+                                  params.resident_indices.binding_offset)
+        : static_cast<const void*>(params.indices.data());
+    const size_t index_byte_count = params.resident_indices.HasResidentSource()
+        ? static_cast<size_t>(params.resident_indices.count) *
+              params.resident_indices.ScalarBytes()
+        : static_cast<size_t>(op.index_count) * sizeof(uint32_t);
     if (op.index_count &&
-        !StageBytes(params.indices.data(), op.index_count * sizeof(uint32_t),
+        !StageBytes(index_bytes, index_byte_count,
                     VK_BUFFER_USAGE_INDEX_BUFFER_BIT, &op.index_buffer,
                     &op.index_mem)) {
         g.fn.DestroyBuffer(g.device, op.vertex_buffer, nullptr);
@@ -184,22 +214,40 @@ void Draw(const DrawParams& params) {
 
     // Compose the UBO from the reflected members + current uniform values.
     VkDeviceSize range = prog.has_ubo ? prog.ubo_size : 16;
-    if (g.ubo_next + range > kUboPoolSize) {
+    if (range > kUboPoolSize) {
+        ML_LOG_ERROR("vk: uniform block exceeds the dynamic UBO pool");
+        DestroyStagedDrawBuffers(op);
+        return;
+    }
+    // Device alignment applies to each draw, including pool capacity checks.
+    VkDeviceSize offset = AlignUp(g.ubo_next, g.ubo_align);
+    if (offset > kUboPoolSize - range) {
         ML_LOG_WARN("vk: dynamic UBO exhausted; flushing and resetting");
         SubmitFlush();
+        offset = AlignUp(g.ubo_next, g.ubo_align);
     }
-    op.ubo_offset = AlignUp(g.ubo_next, 16);
+    op.ubo_offset = offset;
     op.ubo_range = range;
     g.ubo_next = op.ubo_offset + range;
     if (prog.has_ubo) {
-        std::vector<uint8_t> bytes((size_t)prog.ubo_size, 0);
-        for (const auto& m : prog.members) {
-            auto it = params.uniforms.find(m.name);
-            if (it == params.uniforms.end()) continue;
-            if (!backend::PackUniformValue(
-                    m, it->second, bytes.data(), bytes.size())) {
+        std::vector<uint8_t> bytes(prog.ubo_size, 0);
+        if (prog.member_value_indices.size() != prog.members.size()) {
+            DestroyStagedDrawBuffers(op);
+            return;
+        }
+        for (size_t i = 0; i < prog.members.size(); ++i) {
+            const uint32_t slot = prog.member_value_indices[i];
+            if (!params.loose_uniforms.values || slot >= params.loose_uniforms.count) {
+                DestroyStagedDrawBuffers(op);
+                return;
+            }
+            const auto& value = params.loose_uniforms.values[slot];
+            if (value.data && value.size &&
+                !backend::PackUniformValue(prog.members[i], value.data, value.size,
+                                           bytes.data(), bytes.size())) {
                 ML_LOG_ERROR("vk: invalid reflected layout for uniform '%s'",
-                             m.name.c_str());
+                             prog.members[i].name.c_str());
+                DestroyStagedDrawBuffers(op);
                 return;
             }
         }
@@ -511,7 +559,7 @@ void SubmitFlush() {
 
             if (op.index_count) {
                 g.fn.CmdBindIndexBuffer(g.cmd, op.index_buffer, 0,
-                                        VK_INDEX_TYPE_UINT32);
+                                        op.index_type);
             }
             uint32_t dyn = (uint32_t)op.ubo_offset;
             g.fn.CmdBindDescriptorSets(g.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
