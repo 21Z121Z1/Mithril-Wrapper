@@ -4,45 +4,23 @@ on:
     branches: [maintenance/apply-consolidation-20260920]
 permissions:
   contents: read
-  actions: read
-concurrency:
-  group: repository-reconstruction-once
-  cancel-in-progress: false
 jobs:
-  baseline:
+  local-runtime:
     if: github.repository == '21Z121Z1/Mithril-Wrapper'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: 0cdc5fcd5f89cddf590c3fba87e5bcd6b1808869
-          submodules: recursive
-          persist-credentials: false
-      - name: Capture pinned inputs and existing platform logs
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          mkdir -p /tmp/baseline
-          printf 'sha=%s\ntree=%s\n' "$(git rev-parse HEAD)" "$(git rev-parse HEAD^{tree})" | tee /tmp/baseline/subject.txt
-          git submodule status --recursive > /tmp/baseline/submodules.txt
-          tar --exclude=.git -czf /tmp/baseline/dependencies.tar.gz third_party
-          gh api repos/21Z121Z1/Mithril-Wrapper/actions/runs/35496070375/logs > /tmp/baseline/pr41-baseline-logs.zip
-      - name: Build and test exact candidate with Vulkan reference
+      - name: Download and verify Debian software Vulkan runtime
         shell: bash
         run: |
           set -euo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq libvulkan1 mesa-vulkan-drivers vulkan-tools
-          cmake -S . -B build-vulkan -G Ninja -DCMAKE_BUILD_TYPE=Release -DMITHRIL_BUILD_LEGACY=ON -DMITHRIL_BUILD_DIRECT=OFF -DMITHRIL_OUTPUT_DIRECTORY="$PWD/build-vulkan/artifacts" 2>&1 | tee /tmp/baseline/configure.txt
-          cmake --build build-vulkan --parallel 2>&1 | tee /tmp/baseline/build.txt
-          ctest --test-dir build-vulkan -L vulkan --output-on-failure 2>&1 | tee /tmp/baseline/ctest.txt
+          mkdir -p /tmp/runtime
+          cd /tmp/runtime
+          curl --fail --location --output mesa-vulkan-drivers.deb 'https://deb.debian.org/debian/pool/main/m/mesa/mesa-vulkan-drivers_25.0.7-2+deb13u1_amd64.deb'
+          printf '%s  %s\n' caf2f7d296b7522efe74e40a74bce762a3ce84c33b53b5e54e1248ac2e0a13a5 mesa-vulkan-drivers.deb | sha256sum --check --strict
       - uses: actions/upload-artifact@v7
-        if: always()
         with:
-          name: mithril-exact-head-baseline
-          path: /tmp/baseline
-          retention-days: 7
+          name: isolated-vulkan-runtime
+          path: /tmp/runtime
+          retention-days: 1
           if-no-files-found: error
