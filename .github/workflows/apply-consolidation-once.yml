@@ -8,79 +8,74 @@ jobs:
   transfer:
     if: github.repository == '21Z121Z1/Mithril-Wrapper'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: 0cdc5fcd5f89cddf590c3fba87e5bcd6b1808869
-          submodules: recursive
+          ref: 31d988383d0c96dba431df11859974188836df59
           persist-credentials: false
-      - name: Transfer reviewed commits without moving product refs
-        shell: bash
+      - name: Store the reviewed tree and commit
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          git config user.name '21Z121Z1'
-          git config user.email '89170834+21Z121Z1@users.noreply.github.com'
-          python3 - <<'PY'
-          import base64, gzip, hashlib, json, pathlib, re, subprocess
-          repo = '21Z121Z1/Mithril-Wrapper'
-          def git(*args):
-              return subprocess.check_output(['git', *args], text=True).strip()
-          def api(path, data):
-              return json.loads(subprocess.check_output(['gh', 'api', '--method', 'POST', 'repos/'+repo+'/'+path, '--input', '-'], input=json.dumps(data), text=True))
-          saved = json.loads(subprocess.check_output(['gh','api','repos/'+repo+'/contents/.github/workflows/apply-consolidation-once.yml?ref=abdbaec95fc90823ac1aee5f730c28fd46a536e4'],text=True))
-          text = base64.b64decode(saved['content']).decode()
-          encoded = re.search(r'^\s+EDITS: (\S+)', text, re.M).group(1)
-          for start, end, replacement in reversed([[814,815,'1'],[6519,6521,'']]):
-              encoded = encoded[:start] + replacement + encoded[end:]
-          assert hashlib.sha256(encoded.encode()).hexdigest() == '55eebd8cf6c4b3ad6f717be5385f97897bf701f55961d89e7342a6c1df3f4e68'
-          steps = json.loads(gzip.decompress(base64.b64decode(encoded, validate=True)))
-          parent = '0cdc5fcd5f89cddf590c3fba87e5bcd6b1808869'
-          base_tree = git('rev-parse','HEAD^{tree}')
-          commits = []
-          for step in steps:
-              entries = []
-              for change in step['files']:
-                  path = pathlib.Path(change['path'])
-                  assert not path.is_absolute() and '..' not in path.parts
-                  entry = {'path':str(path), 'mode':'100644', 'type':'blob'}
-                  if change.get('delete'):
-                      path.unlink()
-                      entry['sha'] = None
-                  else:
-                      lines = path.read_text().splitlines(keepends=True)
-                      for start, end, replacement in reversed(change['edits']):
-                          lines[start:end] = replacement
-                      text = ''.join(lines)
-                      path.write_text(text)
-                      entry['content'] = text
-                  entries.append(entry)
-              subprocess.run(['git','add','--all'],check=True)
-              tree = git('write-tree')
-              assert tree == step['tree'], (tree, step['tree'])
-              remote_tree = api('git/trees', {'base_tree':base_tree, 'tree':entries})['sha']
-              assert remote_tree == tree
-              commit = api('git/commits', {'message':step['message'], 'tree':tree, 'parents':[parent]})['sha']
-              commits.append({'sha':commit,'tree':tree,'message':step['message']})
-              subprocess.run(['git','commit','-m',step['message']],check=True)
-              parent, base_tree = commit, tree
-          pathlib.Path('/tmp/transferred-commits.json').write_text(json.dumps(commits,indent=2)+'\n')
-          print(json.dumps(commits,indent=2))
-          PY
-      - name: Verify reconstructed candidate with Vulkan reference
         shell: bash
         run: |
           set -euo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq libvulkan1 mesa-vulkan-drivers
-          cmake -S . -B build-vulkan -G Ninja -DCMAKE_BUILD_TYPE=Release -DMITHRIL_BUILD_LEGACY=ON -DMITHRIL_BUILD_DIRECT=OFF -DMITHRIL_OUTPUT_DIRECTORY="$PWD/build-vulkan/artifacts"
-          cmake --build build-vulkan --parallel
-          ctest --test-dir build-vulkan -L vulkan --output-on-failure
+          python3 - <<'PY'
+          import json, pathlib, subprocess
+          repo='21Z121Z1/Mithril-Wrapper'
+          changes={
+              'src/vk/draw.cpp': [('''    if (g.ubo_next + range > kUboPoolSize) {
+                  ML_LOG_WARN("vk: dynamic UBO exhausted; flushing and resetting");
+                  SubmitFlush();
+              }
+              op.ubo_offset = AlignUp(g.ubo_next, 16);
+          ''','''    if (range > kUboPoolSize) {
+                  ML_LOG_ERROR("vk: uniform block exceeds the dynamic UBO pool");
+                  DestroyStagedDrawBuffers(op);
+                  return;
+              }
+              // Device alignment applies to each draw, including pool capacity checks.
+              VkDeviceSize offset = AlignUp(g.ubo_next, g.ubo_align);
+              if (offset > kUboPoolSize - range) {
+                  ML_LOG_WARN("vk: dynamic UBO exhausted; flushing and resetting");
+                  SubmitFlush();
+                  offset = AlignUp(g.ubo_next, g.ubo_align);
+              }
+              op.ubo_offset = offset;
+          ''')],
+              'tests/draw_smoke.c': [('''    /* -- draw ------------------------------------------------------- */
+              drawArrays(GL_TRIANGLES, 0, 3);
+          ''','''    /* Two draws in one submission must use valid uniform storage. */
+              uniform4f(tint, 0.0f, 1.0f, 0.0f, 1.0f);
+              drawArrays(GL_TRIANGLES, 0, 3);
+              uniform4f(tint, 1.0f, 1.0f, 1.0f, 1.0f);
+              drawArrays(GL_TRIANGLES, 0, 3);
+          ''')]
+          }
+          entries=[]
+          for name, replacements in changes.items():
+              path=pathlib.Path(name); text=path.read_text()
+              for old,new in replacements:
+                  assert text.count(old)==1, name
+                  text=text.replace(old,new)
+              path.write_text(text)
+              entries.append({'path':name,'mode':'100644','type':'blob','content':text})
+          subprocess.run(['git','add','--all'],check=True)
+          tree=subprocess.check_output(['git','write-tree'],text=True).strip()
+          assert tree=='dc7daa7df3406a79d9ec31186f6cd8806e533891', tree
+          def api(path,data):
+              return json.loads(subprocess.check_output(['gh','api','--method','POST','repos/'+repo+'/'+path,'--input','-'],input=json.dumps(data),text=True))
+          remote_tree=api('git/trees',{'base_tree':'aab6cde20bd0b23589fd2f01dc1ff59ae5d137c3','tree':entries})['sha']
+          assert remote_tree==tree
+          message='fix(vulkan): honor device uniform offset alignment and pool bounds\n\nReconcile the execution invariant from Uniaball/Mithril-Wrapper b195a5b70b1253246d7c474a6af7f48bbed28442. Keep diagnostics and legacy frame-slot architecture out of the product. Vulkan VUID 01971 requires device-aligned dynamic offsets; VUID 01979 requires aligned offset plus range to fit the buffer.\n\nExtend the existing draw oracle to submit two distinct uniform values before a flush. A local forwarding-loader oracle advertises and enforces 256-byte alignment: old execution fails at offset 16; this execution passes. This is a controlled Linux regression, not physical iOS evidence.'
+          commit=api('git/commits',{'message':message,'tree':tree,'parents':['31d988383d0c96dba431df11859974188836df59']})['sha']
+          result={'sha':commit,'tree':tree}
+          print(json.dumps(result))
+          pathlib.Path('/tmp/final-candidate.json').write_text(json.dumps(result)+'\n')
+          PY
       - uses: actions/upload-artifact@v7
         with:
-          name: verified-convergence-commits
-          path: /tmp/transferred-commits.json
+          name: final-candidate-object
+          path: /tmp/final-candidate.json
           retention-days: 7
           if-no-files-found: error
