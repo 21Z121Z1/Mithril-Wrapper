@@ -3,30 +3,84 @@ on:
   push:
     branches: [maintenance/apply-consolidation-20260920]
 permissions:
-  contents: read
-  pull-requests: read
+  contents: write
 jobs:
-  evidence:
+  transfer:
     if: github.repository == '21Z121Z1/Mithril-Wrapper'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 20
     steps:
-      - name: Capture immutable transfer input and open review evidence
+      - uses: actions/checkout@v7
+        with:
+          ref: 0cdc5fcd5f89cddf590c3fba87e5bcd6b1808869
+          submodules: recursive
+          persist-credentials: false
+      - name: Transfer reviewed commits without moving product refs
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name '21Z121Z1'
+          git config user.email '89170834+21Z121Z1@users.noreply.github.com'
+          python3 - <<'PY'
+          import base64, gzip, hashlib, json, pathlib, re, subprocess
+          repo = '21Z121Z1/Mithril-Wrapper'
+          def git(*args):
+              return subprocess.check_output(['git', *args], text=True).strip()
+          def api(path, data):
+              return json.loads(subprocess.check_output(['gh', 'api', '--method', 'POST', 'repos/'+repo+'/'+path, '--input', '-'], input=json.dumps(data), text=True))
+          saved = json.loads(subprocess.check_output(['gh','api','repos/'+repo+'/contents/.github/workflows/apply-consolidation-once.yml?ref=abdbaec95fc90823ac1aee5f730c28fd46a536e4'],text=True))
+          text = base64.b64decode(saved['content']).decode()
+          encoded = re.search(r'^\s+EDITS: (\S+)', text, re.M).group(1)
+          for start, end, replacement in reversed([[814,815,'1'],[6519,6521,'']]):
+              encoded = encoded[:start] + replacement + encoded[end:]
+          assert hashlib.sha256(encoded.encode()).hexdigest() == '55eebd8cf6c4b3ad6f717be5385f97897bf701f55961d89e7342a6c1df3f4e68'
+          steps = json.loads(gzip.decompress(base64.b64decode(encoded, validate=True)))
+          parent = '0cdc5fcd5f89cddf590c3fba87e5bcd6b1808869'
+          base_tree = git('rev-parse','HEAD^{tree}')
+          commits = []
+          for step in steps:
+              entries = []
+              for change in step['files']:
+                  path = pathlib.Path(change['path'])
+                  assert not path.is_absolute() and '..' not in path.parts
+                  entry = {'path':str(path), 'mode':'100644', 'type':'blob'}
+                  if change.get('delete'):
+                      path.unlink()
+                      entry['sha'] = None
+                  else:
+                      lines = path.read_text().splitlines(keepends=True)
+                      for start, end, replacement in reversed(change['edits']):
+                          lines[start:end] = replacement
+                      text = ''.join(lines)
+                      path.write_text(text)
+                      entry['content'] = text
+                  entries.append(entry)
+              subprocess.run(['git','add','--all'],check=True)
+              tree = git('write-tree')
+              assert tree == step['tree'], (tree, step['tree'])
+              remote_tree = api('git/trees', {'base_tree':base_tree, 'tree':entries})['sha']
+              assert remote_tree == tree
+              commit = api('git/commits', {'message':step['message'], 'tree':tree, 'parents':[parent]})['sha']
+              commits.append({'sha':commit,'tree':tree,'message':step['message']})
+              subprocess.run(['git','commit','-m',step['message']],check=True)
+              parent, base_tree = commit, tree
+          pathlib.Path('/tmp/transferred-commits.json').write_text(json.dumps(commits,indent=2)+'\n')
+          print(json.dumps(commits,indent=2))
+          PY
+      - name: Verify reconstructed candidate with Vulkan reference
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p /tmp/evidence
-          gh api 'repos/21Z121Z1/Mithril-Wrapper/contents/.github/workflows/apply-consolidation-once.yml?ref=abdbaec95fc90823ac1aee5f730c28fd46a536e4' --jq .content | base64 --decode > /tmp/evidence/transfer.yml
-          for n in 16 17 18 19 21 33 36 40; do
-            gh api "repos/21Z121Z1/Mithril-Wrapper/pulls/$n/reviews?per_page=100" > "/tmp/evidence/pr-$n-reviews.json"
-            gh api "repos/21Z121Z1/Mithril-Wrapper/pulls/$n/comments?per_page=100" > "/tmp/evidence/pr-$n-comments.json"
-          done
-          gh api 'repos/21Z121Z1/Amethyst-iOS/branches?per_page=100' > /tmp/evidence/amethyst-branches.json
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libvulkan1 mesa-vulkan-drivers
+          cmake -S . -B build-vulkan -G Ninja -DCMAKE_BUILD_TYPE=Release -DMITHRIL_BUILD_LEGACY=ON -DMITHRIL_BUILD_DIRECT=OFF -DMITHRIL_OUTPUT_DIRECTORY="$PWD/build-vulkan/artifacts"
+          cmake --build build-vulkan --parallel
+          ctest --test-dir build-vulkan -L vulkan --output-on-failure
       - uses: actions/upload-artifact@v7
         with:
-          name: remaining-review-evidence
-          path: /tmp/evidence
+          name: verified-convergence-commits
+          path: /tmp/transferred-commits.json
           retention-days: 7
           if-no-files-found: error
