@@ -1,150 +1,113 @@
-name: apply-consolidation-once
-
+name: repository-reconstruction-once
 on:
   push:
     branches: [maintenance/apply-consolidation-20260920]
-
 permissions:
-  contents: write
-
+  contents: read
+  actions: read
+  pull-requests: read
 concurrency:
-  group: apply-consolidation-once
+  group: repository-reconstruction-once
   cancel-in-progress: false
-
 jobs:
-  apply-exact-tree:
+  snapshot:
+    if: github.repository == '21Z121Z1/Mithril-Wrapper'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - name: Checkout verified payload
-        uses: actions/checkout@v7
-        with:
-          path: payload
-          persist-credentials: false
-
-      - name: Checkout clean consolidation branch
-        uses: actions/checkout@v7
+      - uses: actions/checkout@v7
         with:
           ref: consolidation/main-20260920
           fetch-depth: 0
-          path: worktree
-
-      - name: Apply and verify the reviewed tree
+          persist-credentials: false
+      - name: Capture read-only repository and reference evidence
         shell: bash
         env:
-          EXPECTED_ARCHIVE_SHA256: f54ced0977155afe23346a0b4fd88f467593ec510112d843544c82bcdc7dcc27
-          EXPECTED_TREE: 4e7da5d494bdce42b42ca6e63683eec25a0a6967
-          EXPECTED_EXPORTS_SHA256: eb29af2d78dcb86defebd37a685c7a2daead8f4c43a5e23b520b5fdf6cab7828
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-
-          cat payload/.github/maintenance/consolidation.tar.gz.b64.* \
-            | tr -d '\n' \
-            | base64 --decode > /tmp/consolidation.tar.gz
-          printf '%s  %s\n' "$EXPECTED_ARCHIVE_SHA256" /tmp/consolidation.tar.gz \
-            | sha256sum --check --strict
-          tar -xzf /tmp/consolidation.tar.gz -C worktree
-
-          cd worktree
-          while IFS= read -r path; do
-            rm -rf -- "$path"
-          done <<'DELETE_PATHS'
-          .github/workflows/README.md
-          CHECKLIST.md
-          docs/README.md
-          docs/agent/branch-ledger.md
-          docs/agent/decisions/0001-resolved-intent-history-universes.md
-          docs/agent/manifest.json
-          docs/agent/oracles.json
-          docs/agent/proof-graph.json
-          docs/agent/status.md
-          docs/branches.md
-          docs/ci.md
-          docs/contracts/amethyst-host-contract.md
-          docs/directmetal-gl33-semantic-matrix.md
-          docs/egl_list.md
-          docs/evidence-model.md
-          docs/gl33_core_list.md
-          docs/history/implementation-checklist-2026-08.md
-          docs/minecraft-reference.md
-          docs/performance_hotpath.md
-          docs/system-model.md
-          scripts/agent-context.py
-          scripts/audit-branches.py
-          scripts/validate_agent_contract.py
-          DELETE_PATHS
-
-          test "$(git ls-tree HEAD third_party/SPIRV-Cross | awk '{print $3}')" = 9c3c8e2cefdd8194b193bb8ed2fdff4d5527e382
-          test "$(git ls-tree HEAD third_party/SPIRV-Headers | awk '{print $3}')" = 942fe4b988359a0750b79f0ae7ed735994d3147d
-          test "$(git ls-tree HEAD third_party/Vulkan-Headers | awk '{print $3}')" = f9973cd97e6f3584707e7ef1c425e336f1b92a5b
-          test "$(git ls-tree HEAD third_party/glslang | awk '{print $3}')" = 90afccfbd49dff0349d86a41762e9de24e1df811
-
-          before="$(sha256sum src/gl/exports.cpp | awk '{print $1}')"
-          test "$before" = "$EXPECTED_EXPORTS_SHA256"
-          python3 scripts/gen_gl_stubs.py
-          after="$(sha256sum src/gl/exports.cpp | awk '{print $1}')"
-          test "$after" = "$EXPECTED_EXPORTS_SHA256"
-
-          clang -std=c11 -Wall -Wextra -Werror -fsyntax-only tests/typed_vertex_smoke.c
-          while IFS= read -r -d '' script; do
-            bash -n "$script"
-          done < <(find scripts -maxdepth 1 -type f -name '*.sh' -print0)
-          python3 -m py_compile scripts/*.py
-          find scripts -type d -name __pycache__ -prune -exec rm -rf {} +
-          ruby -e 'require "yaml"; ARGV.each { |path| YAML.load_file(path) }' \
-            .github/workflows/build.yml \
-            .github/workflows/hosted-metal-gpu-probe.yml
-
+          mkdir -p /tmp/reconstruction/api
           python3 - <<'PY'
-          from pathlib import Path
-          import re
-
-          root = Path('.')
-          pairs = [
-              (root / 'README.md', root / 'README.zh-CN.md'),
-              (root / 'docs/architecture.md', root / 'docs/architecture.zh-CN.md'),
-              (root / 'docs/validation.md', root / 'docs/validation.zh-CN.md'),
-          ]
-          for english, chinese in pairs:
-              en_levels = [len(m.group(1)) for line in english.read_text().splitlines()
-                           if (m := re.match(r'^(#{1,6})\s+', line))]
-              zh_levels = [len(m.group(1)) for line in chinese.read_text().splitlines()
-                           if (m := re.match(r'^(#{1,6})\s+', line))]
-              if en_levels != zh_levels:
-                  raise SystemExit(f'heading structure mismatch: {english} / {chinese}')
-
-          link = re.compile(r'(?<!!)\[[^]]*\]\(([^)]+)\)')
-          for doc in root.rglob('*.md'):
-              for target in link.findall(doc.read_text()):
-                  target = target.split('#', 1)[0]
-                  if not target or '://' in target or target.startswith('mailto:'):
-                      continue
-                  resolved = (doc.parent / target).resolve()
-                  if not resolved.exists():
-                      raise SystemExit(f'broken link: {doc}: {target}')
+          import json, os, pathlib, subprocess, urllib.request, urllib.error
+          out = pathlib.Path('/tmp/reconstruction')
+          repo = '21Z121Z1/Mithril-Wrapper'
+          errors = []
+          def get(path, name, paginate=False):
+              result=[]
+              url='https://api.github.com/'+path
+              while url:
+                  req=urllib.request.Request(url, headers={
+                      'Authorization': 'Bearer '+os.environ['GH_TOKEN'],
+                      'Accept': 'application/vnd.github+json',
+                      'X-GitHub-Api-Version': '2022-11-28'})
+                  try:
+                      with urllib.request.urlopen(req, timeout=45) as response:
+                          data=json.load(response)
+                          result.append(data)
+                          links=response.headers.get('Link','')
+                  except urllib.error.HTTPError as exc:
+                      errors.append({'path':path,'status':exc.code})
+                      return None
+                  next_url=None
+                  if paginate:
+                      for link in links.split(','):
+                          if 'rel="next"' in link:
+                              next_url=link.split(';')[0].strip().strip('<>')
+                  url=next_url
+              data=result if paginate else result[0]
+              (out/'api'/name).write_text(json.dumps(data,indent=2)+'\n')
+              return data
+          info=get('repos/'+repo,'repository.json')
+          for endpoint,name,paged in [
+              ('branches?per_page=100','branches.json',True),
+              ('tags?per_page=100','tags.json',True),
+              ('pulls?state=all&per_page=100','pulls.json',True),
+              ('actions/workflows?per_page=100','workflows.json',False),
+              ('actions/runs?per_page=100','runs.json',False),
+              ('rulesets?per_page=100','rulesets.json',False),
+              ('branches/main/protection','protection.json',False)]:
+              get('repos/'+repo+'/'+endpoint,name,paged)
+          for number in (41,40,39,38,34):
+              for suffix in ('','/reviews','/comments','/commits'):
+                  get(f'repos/{repo}/pulls/{number}{suffix}',f'pr-{number}{suffix.replace("/","-") or "-info"}.json',suffix in ('/comments','/commits'))
+              get(f'repos/{repo}/issues/{number}/comments',f'pr-{number}-discussion.json',True)
+          refs={'MithrilWrapper-Dev/Mithril-Wrapper','Uniaball/Mithril-Wrapper',
+                'herbrine8403/Mithril-Wrapper','EternityQwQ/Mithril-Wrapper'}
+          for key in ('parent','source'):
+              if info and info.get(key): refs.add(info[key]['full_name'])
+          checked=set()
+          while refs-checked:
+              refrepo=sorted(refs-checked)[0]; checked.add(refrepo)
+              prefix=refrepo.replace('/','--')
+              data=get('repos/'+refrepo,prefix+'-repo.json')
+              if not data: continue
+              canonical=data['full_name']
+              for key in ('parent','source'):
+                  if data.get(key): refs.add(data[key]['full_name'])
+              forks=get('repos/'+canonical+'/forks?per_page=100',prefix+'-forks.json',True)
+              if forks:
+                  refs.update(f['full_name'] for page in forks for f in page if not f['private'])
+              get('repos/'+canonical+'/branches?per_page=100',prefix+'-branches.json',True)
+              get('repos/'+canonical+'/pulls?state=all&per_page=100',prefix+'-pulls.json',True)
+              if canonical == repo: continue
+              cmd=['git','fetch','--no-tags','https://github.com/'+canonical+'.git',
+                   '+refs/heads/*:refs/remotes/reference-'+prefix+'/*',
+                   '+refs/tags/*:refs/tags/reference-'+prefix+'/*']
+              run=subprocess.run(cmd,text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+              (out/(prefix+'-fetch.txt')).write_text(run.stdout)
+              if run.returncode: errors.append({'fetch':canonical,'status':run.returncode})
+          (out/'read-errors.json').write_text(json.dumps(errors,indent=2)+'\n')
           PY
-
-          git diff --check
-          stale_pattern='agent-context.py|audit-branches.py|validate_agent_contract.py|docs/agent/manifest.json|docs/evidence-model.md|docs/system-model.md|CHECKLIST.md'
-          if grep -R -n -E "$stale_pattern" \
-              --exclude-dir=.git --exclude-dir=third_party .; then
-            echo 'stale control-plane reference remains' >&2
-            exit 1
-          fi
-
-          # The Actions token cannot update workflow files. The GitHub connector
-          # applies these two already-validated files after this commit is pushed.
-          git checkout HEAD -- \
-            .github/workflows/build.yml \
-            .github/workflows/hosted-metal-gpu-probe.yml
-
-          git add -A
-          git diff --cached --stat
-          git config user.name github-actions[bot]
-          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          git commit -m 'refactor: converge repository around executable semantics'
-
-          actual_tree="$(git rev-parse HEAD^{tree})"
-          printf 'expected_tree=%s\nactual_tree=%s\n' "$EXPECTED_TREE" "$actual_tree"
-          test "$actual_tree" = "$EXPECTED_TREE"
-          git push origin HEAD:refs/heads/consolidation/main-20260920
+          git for-each-ref --format='%(refname) %(objectname)' > /tmp/reconstruction/refs.txt
+          git log --graph --all --decorate --oneline > /tmp/reconstruction/graph.txt
+          git ls-tree -r HEAD > /tmp/reconstruction/candidate-tree.txt
+          git bundle create /tmp/reconstruction/mithril.bundle --all
+          git bundle verify /tmp/reconstruction/mithril.bundle
+          printf 'candidate_sha=%s\ncandidate_tree=%s\n' "$(git rev-parse HEAD)" "$(git rev-parse HEAD^{tree})" | tee /tmp/reconstruction/subject.txt
+          du -sh /tmp/reconstruction
+      - uses: actions/upload-artifact@v7
+        with:
+          name: mithril-readonly-reconstruction
+          path: /tmp/reconstruction
+          retention-days: 7
+          if-no-files-found: error
