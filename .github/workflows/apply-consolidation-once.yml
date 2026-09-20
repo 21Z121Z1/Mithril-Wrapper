@@ -3,100 +3,184 @@ on:
   push:
     branches: [maintenance/apply-consolidation-20260920]
 permissions:
-  contents: read
-  actions: read
-  pull-requests: read
+  contents: write
+  actions: write
+  pull-requests: write
 jobs:
-  evidence:
+  retire:
     if: github.repository == '21Z121Z1/Mithril-Wrapper'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
         with:
           ref: a3cd8e2c07fece3f2440687d9fb3574abe7379d6
+          fetch-depth: 0
           persist-credentials: false
-      - name: Capture final jobs, raw logs, and complete workflow registry
+      - name: Preserve exact refs before closing and retiring work
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-        shell: bash
         run: |
           set -euo pipefail
-          mkdir -p /tmp/final-evidence
           python3 - <<'PY'
-          import json,pathlib,subprocess
-          repo='21Z121Z1/Mithril-Wrapper'; out=pathlib.Path('/tmp/final-evidence')
-          def read(path):
-              return json.loads(subprocess.check_output(['gh','api','repos/'+repo+'/'+path],text=True))
-          head='a3cd8e2c07fece3f2440687d9fb3574abe7379d6'
-          assert read('git/ref/heads/consolidation/main-20260920')['object']['sha']==head
-          workflows=[]; page=1
-          while True:
-              data=read('actions/workflows?per_page=100&page='+str(page)); workflows.extend(data['workflows'])
-              if len(workflows)>=data['total_count']: break
-              page+=1
-          (out/'all-workflows.json').write_text(json.dumps(workflows,indent=2)+'\n')
-          runs=read('actions/runs?head_sha='+head+'&per_page=20')['workflow_runs']
-          for run in runs:
-              rid=run['id']
-              for suffix in ('','/jobs','/artifacts'):
-                  data=read('actions/runs/'+str(rid)+suffix)
-                  (out/(str(rid)+(suffix.replace('/','-') or '-run')+'.json')).write_text(json.dumps(data,indent=2)+'\n')
-              for job in read('actions/runs/'+str(rid)+'/jobs')['jobs']:
-                  if job['status']=='completed':
-                      with (out/(str(job['id'])+'.log')).open('wb') as f:
-                          subprocess.run(['gh','api','--allow-escape-sequences','repos/'+repo+'/actions/jobs/'+str(job['id'])+'/logs'],stdout=f,check=True)
-          (out/'head.json').write_text(json.dumps(read('git/commits/'+head),indent=2)+'\n')
-          print('Captured runs:',[(r['id'],r['status'],r['conclusion']) for r in runs])
+          import hashlib, io, json, os, pathlib, re, subprocess, time, zipfile
+          REPO='21Z121Z1/Mithril-Wrapper'
+          MAIN='7f6d676f7dbfe5b10f7367cd429c7dae994954e7'
+          HEAD='a3cd8e2c07fece3f2440687d9fb3574abe7379d6'
+          CANDIDATE='consolidation/main-20260920'
+          MAINTENANCE='maintenance/apply-consolidation-20260920'
+          ARCHIVE='archive/repository-20260920'
+          KEEP={330805773:'.github/workflows/build.yml',331218737:'.github/workflows/hosted-metal-gpu-probe.yml',347063272:'dynamic/agents/copilot-pull-request-reviewer'}
+          OUT=pathlib.Path('/tmp/retirement-evidence')
+          def git(*args):
+              return subprocess.check_output(['git',*args],text=True).strip()
+          def api(path,data=None,method='GET'):
+              cmd=['gh','api','--method',method,'repos/'+REPO+'/'+path]
+              if data is not None:cmd+=['--input','-']
+              raw=subprocess.check_output(cmd,input=json.dumps(data) if data is not None else None,text=True)
+              return json.loads(raw) if raw.strip() else None
+          def page_list(path,key=None):
+              result=[]
+              for page in range(1,100):
+                  data=api(path+('&' if '?' in path else '?')+'per_page=100&page='+str(page))
+                  rows=data[key] if key else data
+                  result.extend(rows)
+                  if len(rows)<100:return result
+              raise RuntimeError('Unexpected pagination size')
+          def disposition(name,prs):
+              pr=next((p for p in prs if p['head']['ref']==name),None)
+              if name.startswith('perf/directmetal-') or name=='fix/minecraft26-directmetal-runtime-closure-20260819':
+                  assert pr and pr['merged_at'] and pr['merge_commit_sha']
+                  merge=pr['merge_commit_sha']
+                  assert subprocess.run(['git','merge-base','--is-ancestor',merge,HEAD]).returncode==0
+                  return 'DISCARD',f"Changed product files match merge {merge} in PR #{pr['number']}; the merge is in #41 ancestry. Retire the checkpoint, not the implementation."
+              specific={
+                  'architecture/agent-operating-model-20260901':('DISCARD','PR #41 preserves ownership and evidence rules without the second live-state database in PR #40. Review findings remain in #40.'),
+                  'consolidation/repository-20260920':('DISCARD','Parallel preparation tree. Keep #41 as the only product candidate; preserve this tip as provenance.'),
+                  'integration/directmetal-next':('DISCARD','The shipping lineage and incomplete-framebuffer fix are in #41 ancestry.'),
+                  'fix/directmetal-incomplete-fbo-20260819':('DISCARD','PR #34 fail-closed checks and tests are in merge be1b98883c392cfef01cf5b7feeae79f3f3d84d6. That merge also contains later runtime work; this is not whole-tree identity.'),
+                  'tooling/minecraft-reference-26.2':('DISCARD','PR #37 tooling remains in scripts/minecraft-reference.sh. Generated client sources are not archived.'),
+                  MAINTENANCE:('DISCARD','One-shot reconstruction, transfer, verification, and retirement runner. No product depends on this branch.'),
+                  'integration/directvulkan-reference':('ARCHIVE','Legacy Vulkan execution baseline. Current src/vk is a narrower reference path, not an equivalent legacy presentation implementation.'),
+                  'integration/legacy-capability-port':('ARCHIVE','Disconnected GL capability and semantic work. Non-common semantics are not all verified in the current product; do not merge the old architecture.'),
+                  'fix/gl-semantic-closure-20260816':('ARCHIVE','PR #18 GL object, FBO, uniform, and capability closure. Current tests prove selected cases, not all changes in this tree.'),
+                  'fix/mobilegl-style-mc262-startup-preflight':('ARCHIVE','PR #21 MobileGL-derived shader/startup and UBO work. Preserve old tests, not a second GL state machine.'),
+                  'fix/directvulkan-mc262-gui-closure':('ARCHIVE','PR #16 GUI and DirectVulkan lifetime closure. Current product has no matching real-client validation.'),
+                  'fix/dual-backend-metal-ios-ci':('ARCHIVE','PR #17 legacy iOS build work. Preserve provenance; the product ships an independent Vulkan-free DirectMetal package.'),
+                  'fix/ios-amethyst-runtime-isolation':('ARCHIVE','iOS symbol-provider and weak-symbol diagnostics. Current package and seam tests do not replace physical-host loading evidence.'),
+                  'fix/dvk-atlas-fbo-subresources-local-20260827':('ARCHIVE','Atlas, FBO, and subresource investigation. Preserve its native Vulkan invariants for focused current tests, not a wholesale merge.'),
+                  'fix/dvk-gui-text-render-20260829':('ARCHIVE','GUI text upload and orientation investigation. Physical presentation remains unverified for the current product.'),
+                  'fix/dvk-pixel-unpack-state-20260829':('ARCHIVE','Full unpack and PBO shadow lineage. Current shared pixel store owns these rules; old edge cases are not all migrated.'),
+                  'codex/dvk-a11-single-mvk-shader-oracle-20260831':('ARCHIVE','A11 single-MoltenVK loading, shader failure, and cubemap evidence. Host/runtime isolation is not generic GL policy.'),
+                  'codex/dvk-gui-production-20260830':('ARCHIVE','GUI-production lineage includes device checkpoint 7e1ff65c5e064a8e28a4c45af84e50ad91c84532. Preserve it without a current-device claim.'),
+                  'codex/dvk-ios-artifact-20260831':('ARCHIVE','Legacy iOS build/distribution evidence. Current packaging checks replace the shipping gate, not old runtime evidence.'),
+                  'codex/dvk-ios-fbo-orientation-20260831':('ARCHIVE','FBO orientation and physical-iOS experiments. Offscreen and Simulator tests do not prove absorption.'),
+                  'codex/dvk-rollout-replay-20260831':('ARCHIVE','Recovered rollout patches and provenance. Preserve the source without merging the legacy execution tree.')}
+              if name in specific:return specific[name]
+              if name.startswith('experiment/dvk-'):
+                  suffix=re.sub(r'-\d{8}$','',name[len('experiment/dvk-'):])
+                  extra=' Device UBO alignment was transplanted into a3cd8e2c; the old experiment remains provenance.' if 'ubo-alignment' in suffix else ''
+                  return 'ARCHIVE','Frozen '+suffix+' diagnostic/A-B checkpoint. Keep one archive ref, not a separate development branch. No current rendering or performance claim.'+extra
+              if name.startswith(('ci/minecraft-','validation/')):
+                  return 'ARCHIVE','Frozen client/performance harness with pinned inputs. It does not validate the current candidate or Minecraft 26.3.'
+              raise RuntimeError('Unreviewed branch: '+name)
+          assert os.environ['GITHUB_REPOSITORY']==REPO
+          assert os.environ['GITHUB_REF_NAME']==MAINTENANCE
+          OUT.mkdir(parents=True,exist_ok=True)
+          raw=subprocess.check_output(['gh','api','--allow-escape-sequences','repos/'+REPO+'/actions/artifacts/10601788039/zip'])
+          with zipfile.ZipFile(io.BytesIO(raw)) as z:
+              original={b['name']:b['commit']['sha'] for page in json.loads(z.read('api/branches.json')) for b in page}
+              prs=[p for page in json.loads(z.read('api/pulls.json')) for p in page]
+          digest=hashlib.sha256(json.dumps(original,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+          assert digest=='b3907df272236600e62af579d32115f8d70954bd129b1d4cd2e02a50d4f81d35'
+          expected=dict(original);expected[CANDIDATE]=HEAD;expected[MAINTENANCE]=os.environ['GITHUB_SHA']
+          current={b['name']:b['commit']['sha'] for b in page_list('branches')}
+          assert current==expected,'Branches changed since the reviewed snapshot'
+          assert current['main']==MAIN
+          assert api('git/commits/'+HEAD)['tree']['sha']=='dc7daa7df3406a79d9ec31186f6cd8806e533891'
+          run=api('actions/runs/35500930557')
+          assert run['head_sha']==HEAD and run['conclusion']=='success'
+          open_prs=page_list('pulls?state=open')
+          close_numbers={16,17,18,19,21,33,36,40}
+          assert {p['number'] for p in open_prs}==close_numbers|{41}
+          for p in open_prs:
+              assert p['head']['repo']['full_name']==REPO
+              assert p['head']['sha']==expected[p['head']['ref']]
+          workflows=page_list('actions/workflows','workflows')
+          assert len(workflows)==198
+          assert all(next(w['path'] for w in workflows if w['id']==wid)==path for wid,path in KEEP.items())
+          subprocess.run(['git','fetch','--no-tags','origin','+refs/heads/*:refs/remotes/origin/*'],check=True)
+          records=[]
+          for name,sha in sorted(expected.items()):
+              if name in ('main',CANDIDATE):continue
+              kind,reason=disposition(name,prs)
+              records.append({'name':name,'sha':sha,'disposition':kind,'reason':reason,'preservation':'refs/tags/'+ARCHIVE})
+          assert len(records)==57
+          for p in prs:
+              if not p['head']['ref'].startswith('perf/directmetal-'):continue
+              head=p['head']['sha'];merge=p['merge_commit_sha'];base=git('merge-base',head,merge)
+              changed=git('diff','--name-only',base,head,'--','src','include','tests','cmake','CMakeLists.txt').splitlines()
+              assert changed
+              assert not git('diff','--name-only',head,merge,'--',*changed),p['number']
+          tips=git('merge-base','--independent',*sorted({r['sha'] for r in records})).splitlines()
+          table='| Branch | Final SHA | Disposition | Reason |\n|---|---|---|---|\n'
+          table+=''.join(f"| `{r['name']}` | `{r['sha']}` | {r['disposition']} | {r['reason']} |\n" for r in records)
+          note=('# Frozen repository provenance\n\n'
+                'This tag preserves retired source histories. It is not a product tree or a merge source.\n'
+                'Every final SHA below is an ancestor of this archive commit. The candidate is PR #41.\n'
+                'DISCARD retires a redundant development ref. ARCHIVE retains unported or diagnostic knowledge.\n'
+                'The archive preserves Git content, not expired external artifacts or proof of current runtime behavior.\n'
+                'Recover a source with `git show <final-SHA>:<path>`. Extract invariants into current owners and tests.\n\n'
+                '此标签只保存已退役分支的 Git 历史，不是产品树或合并来源。下表每个 SHA 都可从此归档到达。\n'
+                'DISCARD 表示退役冗余开发引用；ARCHIVE 表示保留尚未迁移的知识或诊断记录。\n'
+                '归档不保存已经过期的外部 artifact，也不证明当前运行行为。使用上述命令读取原文件，再迁移到当前语义所有者和测试。\n\n'+table)
+          tree=api('git/trees',{'tree':[{'path':'README.md','mode':'100644','type':'blob','content':note}]},'POST')['sha']
+          archive=api('git/commits',{'message':'archive: preserve retired repository lineages\n\nProvenance only. Do not merge this commit into a product branch. Every retired final SHA is retained through the parent graph. No product ref is changed.','tree':tree,'parents':tips},'POST')['sha']
+          api('git/refs',{'ref':'refs/tags/'+ARCHIVE,'sha':archive},'POST')
+          subprocess.run(['git','fetch','--no-tags','origin','refs/tags/'+ARCHIVE+':refs/tags/'+ARCHIVE],check=True)
+          for r in records:
+              assert subprocess.run(['git','merge-base','--is-ancestor',r['sha'],archive]).returncode==0
+          archive_url='https://github.com/'+REPO+'/tree/'+ARCHIVE
+          comment=api('issues/41/comments',{'body':'## Branch retirement record\n\nArchive: ['+ARCHIVE+']('+archive_url+'), commit `'+archive+'`. Every final SHA is reachable from this one frozen ref. This record precedes branch deletion. No claim of complete semantic absorption is made for ARCHIVE rows.\n\n'+table},'POST')
+          (OUT/'retirement-records.json').write_text(json.dumps({'archive':archive,'archive_ref':ARCHIVE,'archive_parents':tips,'record_url':comment['html_url'],'branches':records},indent=2)+'\n')
+          for p in open_prs:
+              if p['number'] not in close_numbers:continue
+              r=next(r for r in records if r['name']==p['head']['ref'])
+              body=('Superseded as an active work line by #41. '+r['reason']+'\n\n'
+                    'Final head: `'+r['sha']+'`. Source history is preserved by ['+ARCHIVE+']('+archive_url+'). '
+                    'This closure does not mark unported legacy semantics as implemented. See the [retirement record]('+comment['html_url']+').')
+              api('issues/'+str(p['number'])+'/comments',{'body':body},'POST')
+              api('pulls/'+str(p['number']),{'state':'closed'},'PATCH')
+          (OUT/'workflows-before.json').write_text(json.dumps(workflows,indent=2)+'\n')
+          obsolete=[w for w in workflows if w['id'] not in KEEP]
+          assert len(obsolete)==195
+          obsolete.sort(key=lambda w:w['id']==362503845)
+          for w in obsolete:
+              assert w['path'].startswith('.github/workflows/')
+              if w['state']=='active':
+                  api('actions/workflows/'+str(w['id'])+'/disable',method='PUT')
+                  time.sleep(0.8)
+          after=page_list('actions/workflows','workflows')
+          assert {w['id'] for w in after if w['state']=='active'}==set(KEEP)
+          assert {b['name']:b['commit']['sha'] for b in page_list('branches')}==expected
+          assert {p['number'] for p in page_list('pulls?state=open')}=={41}
+          subprocess.run(['gh','auth','setup-git'],check=True)
+          command=['git','push','--atomic']
+          command+=['--force-with-lease=refs/heads/'+r['name']+':'+r['sha'] for r in records]
+          command+=['origin']+[':refs/heads/'+r['name'] for r in records]
+          subprocess.run(command,check=True)
+          final={b['name']:b['commit']['sha'] for b in page_list('branches')}
+          assert final=={'main':MAIN,CANDIDATE:HEAD}
+          summary={'main':MAIN,'candidate':HEAD,'branches':final,'closed_prs':sorted(close_numbers),'deleted_branches':len(records),'disabled_workflows':len(obsolete),'active_workflows':[{k:w[k] for k in ('id','name','path','state')} for w in after if w['state']=='active'],'archive':archive,'archive_ref':ARCHIVE,'record_url':comment['html_url']}
+          (OUT/'result.json').write_text(json.dumps(summary,indent=2)+'\n')
+          (OUT/'workflows-after.json').write_text(json.dumps(after,indent=2)+'\n')
+          print(json.dumps(summary,indent=2))
           PY
-      - name: Generate local-only Minecraft references and keep aggregate facts
-        shell: bash
-        env:
-          MINECRAFT_REFERENCE_DIR: ${{ runner.temp }}/minecraft-reference
-        run: |
-          set -euo pipefail
-          if [[ -n "${JAVA_HOME_25_X64:-}" ]]; then
-            export JAVA_HOME="$JAVA_HOME_25_X64"; export PATH="$JAVA_HOME/bin:$PATH"
-          elif [[ -n "${JAVA_HOME_21_X64:-}" ]]; then
-            export JAVA_HOME="$JAVA_HOME_21_X64"; export PATH="$JAVA_HOME/bin:$PATH"
-          fi
-          for version in 26.2 26.3; do
-            export MINECRAFT_REFERENCE_VERSION="$version"
-            if SRC="$(bash scripts/minecraft-reference.sh --print-path 2>"$RUNNER_TEMP/reference-$version.log")"; then
-              export SRC
-              python3 - <<'PY'
-          import collections,json,os,pathlib,re
-          version=os.environ['MINECRAFT_REFERENCE_VERSION']; root=pathlib.Path(os.environ['SRC'])
-          calls=collections.Counter(); imports=collections.Counter(); gl_files=0; vk_files=0; count=0
-          for path in root.rglob('*.java'):
-              count+=1; text=path.read_text(errors='replace')
-              gl_files+=('org.lwjgl.opengl.' in text); vk_files+=('org.lwjgl.vulkan.' in text)
-              qualifiers=[]
-              for package,name in re.findall(r'import\s+(org\.lwjgl\.(?:opengl|vulkan))\.([A-Za-z0-9_]+)\s*;',text):
-                  imports[package+'.'+name]+=1
-                  if package.endswith('opengl'): qualifiers.append(re.escape(name))
-              if qualifiers:
-                  calls.update(re.findall(r'\b(?:'+'|'.join(qualifiers)+r')\.(gl[A-Za-z0-9_]+)\s*\(',text))
-          info=dict(line.split('=',1) for line in (root.parent/'REFERENCE_INFO.txt').read_text().splitlines() if '=' in line)
-          info.pop('sources_dir',None)
-          result={'version':version,'status':'success','reference':info,'java_files':count,'gl_importing_files':gl_files,'vulkan_importing_files':vk_files,'qualified_gl_calls':dict(sorted(calls.items())),'lwjgl_imports':dict(sorted(imports.items())),'limitation':'Static qualified-call inventory only. It excludes external library implementation, reflection and runtime dispatch. It is not client execution or rendering evidence.'}
-          pathlib.Path('/tmp/final-evidence/minecraft-'+version+'.json').write_text(json.dumps(result,indent=2)+'\n')
-          print(version,':',count,'Java files;',len(calls),'distinct qualified GL call names; no source uploaded')
-          PY
-            else
-              VERSION="$version" python3 - <<'PY'
-          import json,os,pathlib
-          version=os.environ['VERSION']
-          pathlib.Path('/tmp/final-evidence/minecraft-'+version+'.json').write_text(json.dumps({'version':version,'status':'failed','limitation':'Reference generator failed. No source or decompiler log is uploaded.'})+'\n')
-          print('Reference generation failed for',version)
-          PY
-            fi
-          done
-          rm -rf "$MINECRAFT_REFERENCE_DIR"
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: final-reviewed-evidence
-          path: /tmp/final-evidence
-          retention-days: 7
+          name: repository-retirement-evidence
+          path: /tmp/retirement-evidence
+          retention-days: 30
           if-no-files-found: error
