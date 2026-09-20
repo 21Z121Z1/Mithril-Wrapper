@@ -16,7 +16,7 @@ jobs:
         with:
           ref: a3cd8e2c07fece3f2440687d9fb3574abe7379d6
           persist-credentials: false
-      - name: Capture exact commit checks and completed logs
+      - name: Capture final jobs, raw logs, and complete workflow registry
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -30,10 +30,10 @@ jobs:
               return json.loads(subprocess.check_output(['gh','api','repos/'+repo+'/'+path],text=True))
           head='a3cd8e2c07fece3f2440687d9fb3574abe7379d6'
           assert read('git/ref/heads/consolidation/main-20260920')['object']['sha']==head
-          workflows=[];page=1
+          workflows=[]; page=1
           while True:
               data=read('actions/workflows?per_page=100&page='+str(page)); workflows.extend(data['workflows'])
-              if len(workflows)>=data['total_count']:break
+              if len(workflows)>=data['total_count']: break
               page+=1
           (out/'all-workflows.json').write_text(json.dumps(workflows,indent=2)+'\n')
           runs=read('actions/runs?head_sha='+head+'&per_page=20')['workflow_runs']
@@ -42,11 +42,10 @@ jobs:
               for suffix in ('','/jobs','/artifacts'):
                   data=read('actions/runs/'+str(rid)+suffix)
                   (out/(str(rid)+(suffix.replace('/','-') or '-run')+'.json')).write_text(json.dumps(data,indent=2)+'\n')
-              jobs=read('actions/runs/'+str(rid)+'/jobs')['jobs']
-              for job in jobs:
+              for job in read('actions/runs/'+str(rid)+'/jobs')['jobs']:
                   if job['status']=='completed':
                       with (out/(str(job['id'])+'.log')).open('wb') as f:
-                          subprocess.run(['gh','api','repos/'+repo+'/actions/jobs/'+str(job['id'])+'/logs'],stdout=f,check=True)
+                          subprocess.run(['gh','api','--allow-escape-sequences','repos/'+repo+'/actions/jobs/'+str(job['id'])+'/logs'],stdout=f,check=True)
           (out/'head.json').write_text(json.dumps(read('git/commits/'+head),indent=2)+'\n')
           print('Captured runs:',[(r['id'],r['status'],r['conclusion']) for r in runs])
           PY
@@ -68,17 +67,16 @@ jobs:
               python3 - <<'PY'
           import collections,json,os,pathlib,re
           version=os.environ['MINECRAFT_REFERENCE_VERSION']; root=pathlib.Path(os.environ['SRC'])
-          calls=collections.Counter();imports=collections.Counter();gl_files=0;vk_files=0;count=0
+          calls=collections.Counter(); imports=collections.Counter(); gl_files=0; vk_files=0; count=0
           for path in root.rglob('*.java'):
-              count+=1;text=path.read_text(errors='replace')
-              gl_files+=('org.lwjgl.opengl.' in text);vk_files+=('org.lwjgl.vulkan.' in text)
+              count+=1; text=path.read_text(errors='replace')
+              gl_files+=('org.lwjgl.opengl.' in text); vk_files+=('org.lwjgl.vulkan.' in text)
               qualifiers=[]
               for package,name in re.findall(r'import\s+(org\.lwjgl\.(?:opengl|vulkan))\.([A-Za-z0-9_]+)\s*;',text):
                   imports[package+'.'+name]+=1
-                  if package.endswith('opengl'):qualifiers.append(re.escape(name))
+                  if package.endswith('opengl'): qualifiers.append(re.escape(name))
               if qualifiers:
-                  pattern=r'\b(?:'+ '|'.join(qualifiers)+r')\.(gl[A-Za-z0-9_]+)\s*\('
-                  calls.update(re.findall(pattern,text))
+                  calls.update(re.findall(r'\b(?:'+'|'.join(qualifiers)+r')\.(gl[A-Za-z0-9_]+)\s*\(',text))
           info=dict(line.split('=',1) for line in (root.parent/'REFERENCE_INFO.txt').read_text().splitlines() if '=' in line)
           info.pop('sources_dir',None)
           result={'version':version,'status':'success','reference':info,'java_files':count,'gl_importing_files':gl_files,'vulkan_importing_files':vk_files,'qualified_gl_calls':dict(sorted(calls.items())),'lwjgl_imports':dict(sorted(imports.items())),'limitation':'Static qualified-call inventory only. It excludes external library implementation, reflection and runtime dispatch. It is not client execution or rendering evidence.'}
