@@ -1,238 +1,71 @@
-# Mithril-Wrapper
+# Frozen repository provenance
 
-[![iOS build](https://github.com/MithrilWrapper-Dev/Mithril-Wrapper/actions/workflows/build.yml/badge.svg?branch=feat%2Fdual-backend-metal)](https://github.com/MithrilWrapper-Dev/Mithril-Wrapper/actions/workflows/build.yml?query=branch%3Afeat%2Fdual-backend-metal)
+This tag preserves retired source histories. It is not a product tree or a merge source.
+Every final SHA below is an ancestor of this archive commit. The candidate is PR #41.
+DISCARD retires a redundant development ref. ARCHIVE retains unported or diagnostic knowledge.
+The archive preserves Git content, not expired external artifacts or proof of current runtime behavior.
+Recover a source with `git show <final-SHA>:<path>`. Extract invariants into current owners and tests.
 
-Mithril-Wrapper 是面向 iOS / macOS 的 OpenGL 4.6 Core 兼容层。它导出可由
-LWJGL、PojavLauncher、Amethyst-iOS 等宿主加载的 OpenGL 与 EGL 1.5 入口，
-再把渲染命令交给同一个动态库内的两套 Apple GPU 后端：
+此标签只保存已退役分支的 Git 历史，不是产品树或合并来源。下表每个 SHA 都可从此归档到达。
+DISCARD 表示退役冗余开发引用；ARCHIVE 表示保留尚未迁移的知识或诊断记录。
+归档不保存已经过期的外部 artifact，也不证明当前运行行为。使用上述命令读取原文件，再迁移到当前语义所有者和测试。
 
-- **DirectMetal**：GL → SPIR-V → SPIRV-Cross → MSL → Metal，Apple 平台默认使用。
-- **Vulkan**：GL → SPIR-V → Vulkan 1.2 → MoltenVK → Metal，作为兼容与回退路径。
-
-Apple 构建默认同时包含两套后端。运行时可设置
-`MITHRIL_BACKEND=metal|vulkan` 强制选择；指定后端初始化失败时会尝试另一套
-后端并输出明确日志。非 Apple 构建仅提供 Vulkan 后端。
-
-```
-DirectMetal 路径:
-  GLSL 源码 ──glslang──▶ SPIR-V ──SPIRV-Cross──▶ MSL ──▶ MTLLibrary ──▶ Metal
-
-Vulkan 路径:
-  GLSL 源码 ──glslang──▶ SPIR-V ──vkCreateShaderModule──▶ [MoltenVK SPIR-V→MSL] ──▶ Metal
-```
-
-## 功能概览
-
-- 对外暴露一整套 `extern "C"` 的 OpenGL 4.6 Core 入口（`glDraw*`、
-  `glBindBuffer`、`glTexImage2D`、`glUniform*`、`glGetString*` 等，~850 个符号），
-  可作为动态库 `libmithril.dylib` 被 `dlopen` 注入。
-- `glGetString(GL_VERSION)` 返回
-  `4.6.0 §bMithril-Wrapper§r 1.0 (...)`，尾部会标明当前实际使用的
-  `Metal 3 (DirectMetal)` 或 `Vulkan 1.2 (MoltenVK)` 后端；
-  `glGetIntegerv(GL_MAJOR_VERSION/GL_MINOR_VERSION)` 返回 `4 / 6`，
-  `GL_CONTEXT_PROFILE_MASK` 返回 `GL_CONTEXT_CORE_PROFILE_BIT`。
-- **自带 EGL 1.5**：`egl/egl.cpp` 导出 ~44 个 `egl*` 入口
-  （EGL 1.5 全套：`eglGetDisplay` / `eglInitialize` / `eglChooseConfig` /
-  `eglCreateContext` / `eglCreateWindowSurface` / `eglMakeCurrent` /
-  `eglSwapBuffers` + EGL 1.5 Sync / Image / Platform Surface API …）。
-- **双后端架构**：
-  - **DirectMetal**（`MG_Backend/DirectMetal/`）— 直接创建 `MTLDevice`、
-    command queue、offscreen RGBA8 + depth/stencil target，执行
-    GLSL→SPIR-V→MSL→`MTLLibrary`/`MTLRenderPipelineState`，支持 clear、
-    triangle/line vertex/index/instance draw、自定义 primitive restart、
-    `glProvokingVertex`、`GL_SAMPLES_PASSED`/`GL_ANY_SAMPLES_PASSED`、
-    loose uniform、真实 GL uniform block、sampler、texture upload、
-    FBO render-to-texture + blit、MSAA resolve、compute dispatch。
-  - **Vulkan**（`MG_Backend/DirectVulkan/`）— Vulkan 1.2 + MoltenVK 后端，
-    使用 `VK_KHR_dynamic_rendering` 动态渲染通道、SPIRV-Cross 反射描述符布局。
-- 着色器转译（`MG_Impl/Shader.cpp`）：线程安全地调用 glslang 把 GLSL 4.60
-  编译成 Vulkan SPIR-V，并在预处理阶段注入 Z remap / Y flip（GLSL 源码层注入，
-  等价于 MobileGL 的 SPIRV-Tools `GlToVulkanPositionFixPass`）。
-
-## 最低硬件 / 系统要求
-
-| 项 | 要求 | 说明 |
-|---|---|---|
-| SoC | **Apple A11** 及以上 | iPhone 8 / 8 Plus / X 起步 |
-| 系统 | **iOS / iPadOS 15.0** 及以上 | CI 默认部署目标 `15.0` |
-| 架构 | **arm64** | CI 仅构建 `PLATFORM=OS64` |
-| Metal | **Metal 2.3**（MSL 2.3） | iOS 15 对应的 Metal Shading Language 版本 |
-| Vulkan | Vulkan 1.2（运行 Vulkan 后端时需要） | Apple 构建仍会打包 MoltenVK 作为回退后端 |
-
-## 架构分层
-
-### MG_Impl/ — OpenGL 4.6 Core Profile 入口点
-
-GL 调用的具体实现层。每个 `gl*` 函数通过 `MG_Backend/Backend.h` 定义的 C API
-调用后端。主要文件：
-
-- `gl.cpp` — 核心 GL 状态切换入口
-- `Buffer.cpp` — `glGenBuffers`、`glBindBuffer`、`glBufferData` 等
-- `Texture.cpp` — `glGenTextures`、`glTexImage2D`、`glTexParameter` 等
-- `Drawing.cpp` — `glDrawArrays`、`glDrawElements`、`glClear` 等
-- `Program.cpp` — `glCreateProgram`、`glLinkProgram`、`glUseProgram` 等
-- `Shader.cpp` — `glCreateShader`、`glShaderSource`、`glCompileShader`（含 GLSL→SPIR-V）
-- `Framebuffer.cpp` — `glGenFramebuffers`、`glFramebufferTexture2D` 等
-- `VertexArray.cpp` — `glGenVertexArrays`、`glVertexAttribPointer` 等
-- `Getter.cpp` / `Getter_gpu.mm` — `glGetString`、`glGetIntegerv` 等查询
-- `GL46_Compat.cpp` — OpenGL 4.3-4.6 Core Profile DSA / packed vertex / indexed getter
-- `Stubs.cpp` — 废弃 GL 1.x-2.x 入口桩（符号存在性）
-- `lookup.cpp` — `glXGetProcAddress` 入口查找
-
-### MG_State/ — GL 状态机
-
-`GLState` 结构体持有所有 GL 状态、对象表（buffer、texture、shader、program、
-framebuffer、VAO），以及 EGL 默认帧缓冲的附件。每个 `EGLContext`
-拥有独立的 `GLState`，`eglMakeCurrent` 切换 `mithril::g_state` 全局指针。
-
-### MG_Backend/DirectMetal/ — DirectMetal 后端
-
-直接 Metal 后端，不经过 Vulkan/MoltenVK：
-
-- `MetalDevice.{h,mm}` — `MTLDevice` / command queue / UBO arena / 设备限制查询
-- `MetalPipeline.{h,mm}` — SPIR-V→MSL（SPIRV-Cross）+ `MTLRenderPipelineState` 缓存
-- `MetalCommandStream.{h,mm}` — render pass 编排 + draw call 调度
-- `MetalResources.{h,mm}` — `MTLBuffer` / `MTLTexture` / `MTLSamplerState` 管理
-- `MetalFormat.{h,mm}` — VkFormat→MTLPixelFormat / GL→MTLVertexFormat 映射
-- `MetalSwapchain.{h,mm}` — `CAMetalLayer` drawable 管理
-- `MetalQueries.{h,mm}` — occlusion query / timer query
-- `MetalBackend.mm` — C API 入口（`dmt_*` 函数，对接 Backend.h 契约）
-
-### MG_Backend/DirectVulkan/ — Vulkan 1.2 + MoltenVK 后端
-
-- `Device.{h,cpp}` — `VkInstance`/`VkDevice`/`VkQueue`/`VkCommandPool` 生命周期
-- `Resources.{h,cpp}` — `VkBuffer`/`VkImage`/`VkImageView`/`VkSampler` 管理
-- `Pipeline.{h,cpp}` — `VkShaderModule` 构建 + `VkPipeline` 哈希缓存
-- `CommandStream.{h,cpp}` — `VK_KHR_dynamic_rendering` 动态渲染通道编排
-- `DescriptorSet.{h,cpp}` — SPIRV-Cross 反射 UBO/sampler 绑定
-- `SwapchainCommon.cpp` / `SwapchainMetal.mm` — swapchain 逻辑
-- `FormatMap.{h,cpp}` — GL internalFormat → VkFormat 映射
-- `Std140.{h,cpp}` — std140 UBO 打包（与 DirectMetal 共享）
-- `Reflect.{h,cpp}` — SPIR-V 反射辅助（与 DirectMetal 共享）
-
-### egl/ — EGL 1.5 实现
-
-- `egl.cpp` — 跨平台 EGL 1.5 核心（~44 个 `egl*` 入口）
-- `SurfaceMetal.mm` — Apple `CAMetalLayer` surface 创建
-
-## 后端选择
-
-Apple 构建默认启用双后端。当前 CMake 只提供 DirectMetal 的编译开关；
-Vulkan 后端始终参与构建：
-
-```bash
-# 默认：DirectMetal + Vulkan，运行时默认 DirectMetal
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-
-# Vulkan-only：不编译 DirectMetal
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DMITHRIL_METAL_BACKEND=OFF
-```
-
-运行时通过环境变量选择：
-
-```bash
-export MITHRIL_BACKEND=metal   # DirectMetal（默认）
-export MITHRIL_BACKEND=vulkan  # Vulkan + MoltenVK
-```
-
-## 目录结构
-
-```
-.
-├── CMakeLists.txt                 # 顶层构建脚本
-├── .github/workflows/build.yml    # CI：iOS 交叉编译 + macOS 冒烟测试
-├── Mithril-Wrapper-cpp/
-│   ├── MG_Impl/                   # OpenGL 4.6 Core Profile 实现
-│   ├── MG_State/                  # GL 状态机
-│   ├── MG_Backend/
-│   │   ├── Backend.h              # 后端抽象 C API 契约
-│   │   ├── BackendTypes.h         # 共享类型 / 限制常量
-│   │   ├── DirectMetal/           # DirectMetal 后端（SPIR-V→MSL→Metal）
-│   │   └── DirectVulkan/          # Vulkan 1.2 + MoltenVK 后端
-│   ├── egl/                       # EGL 1.5 实现
-│   ├── include/                   # 对外公共头
-│   └── 3rdparty/                  # Git 子模块（glslang、SPIRV-Cross、SPIRV-Headers）
-```
-
-## 依赖
-
-- **CMake ≥ 3.22**
-- **C++20** 编译器（clang / Apple clang）
-- **Metal 框架**（DirectMetal 后端）— 直接使用 `MTLDevice` / `MTLCommandQueue` 等
-- **MoltenVK.xcframework + Vulkan headers** — 当前 Apple 构建始终包含 Vulkan
-  回退后端，因此即使默认运行 DirectMetal，构建时仍需要 MoltenVK；CI 自动下载 v1.4.2
-- Git 子模块：glslang、SPIRV-Cross、SPIRV-Headers
-
-## 本地构建
-
-### 1. 克隆（带子模块）
-
-```bash
-git clone --recursive https://github.com/MithrilWrapper-Dev/Mithril-Wrapper.git
-cd Mithril-Wrapper
-```
-
-### 2. 准备 MoltenVK
-
-iOS 交叉编译需要把 MoltenVK 的静态 xcframework 与 headers 放在仓库根目录：
-
-```bash
-MOLTENVK_TAG="v1.4.2"
-curl -fsSL -o MoltenVK-ios.tar \
-  "https://github.com/KhronosGroup/MoltenVK/releases/download/${MOLTENVK_TAG}/MoltenVK-ios.tar"
-tar -xf MoltenVK-ios.tar
-mv MoltenVK/MoltenVK/static/MoltenVK.xcframework ./MoltenVK.xcframework
-mv MoltenVK/MoltenVK/include ./MoltenVK-Headers
-```
-
-### 3. 配置 & 构建（macOS 原生，默认双后端）
-
-```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j
-# 产物：build/libmithril.dylib
-```
-
-### 4. 交叉编译 iOS arm64
-
-```bash
-curl -fsSL -o ios.toolchain.cmake \
-  https://raw.githubusercontent.com/leetal/ios-cmake/master/ios.toolchain.cmake
-
-cmake -S . -B build-ios \
-  -DCMAKE_TOOLCHAIN_FILE=ios.toolchain.cmake \
-  -DPLATFORM=OS64 \
-  -DDEPLOYMENT_TARGET=15.0 \
-  -DCMAKE_BUILD_TYPE=Release
-
-cmake --build build-ios -j
-# 产物：build-ios/libmithril.dylib（arm64 iOS）
-```
-
-## CI
-
-GitHub Actions 工作流 [`.github/workflows/build.yml`](.github/workflows/build.yml)
-在 `macos-latest` runner 上：
-
-1. 交叉编译 iOS arm64 `libmithril.dylib`（部署目标 15.0）
-2. macOS 原生构建 + dlopen 冒烟测试（`tests/gl_smoke.c` + `tests/render_smoke.c`）
-
-## 致谢
-
-- [MobileGlues](https://github.com/MobileGL-Dev/MobileGlues) — 目录结构与 GL 状态管理参考
-- [MobileGL](https://github.com/MobileGL-Dev/MobileGL) — Vulkan 渲染器架构参考
-- [KhronosGroup/MoltenVK](https://github.com/KhronosGroup/MoltenVK) — Vulkan 1.2 over Metal（Vulkan 后端）
-- [KhronosGroup/glslang](https://github.com/KhronosGroup/glslang) — GLSL→SPIR-V 编译器前端
-- [KhronosGroup/SPIRV-Cross](https://github.com/KhronosGroup/SPIRV-Cross) — SPIR-V 反射 + MSL 翻译（DirectMetal 后端）
-- [KhronosGroup/SPIRV-Headers](https://github.com/KhronosGroup/SPIRV-Headers) — SPIR-V 头文件
-- [leetal/ios-cmake](https://github.com/leetal/ios-cmake) — iOS CMake 工具链
-
-## 开发者
-
-- **EternityQwQ**
-- **yitenchen123**
-- **Uniaball**
-
-## 许可
-
-详见 [LICENSE](LICENSE)。
+| Branch | Final SHA | Disposition | Reason |
+|---|---|---|---|
+| `architecture/agent-operating-model-20260901` | `5d63b066901c922e4958edee554682b1051539ea` | DISCARD | PR #41 preserves ownership and evidence rules without the second live-state database in PR #40. Review findings remain in #40. |
+| `ci/minecraft-on-mithril-e2e-20260815` | `88d0ceb3a924e3feaee4a6aa97d5dc4f8fd26624` | ARCHIVE | Frozen client/performance harness with pinned inputs. It does not validate the current candidate or Minecraft 26.3. |
+| `ci/minecraft-on-mithril-e2e-vulkan-20260826` | `6d2354c05593ba3c5ce8d24cd9029f4c4a64cfe3` | ARCHIVE | Frozen client/performance harness with pinned inputs. It does not validate the current candidate or Minecraft 26.3. |
+| `ci/minecraft-on-mithril-e2e-vulkan-a11-oracle-20260831` | `3c21cbf4928c7e3b10e29529b3059530db8acb5e` | ARCHIVE | Frozen client/performance harness with pinned inputs. It does not validate the current candidate or Minecraft 26.3. |
+| `codex/dvk-a11-single-mvk-shader-oracle-20260831` | `473a040fb4fb950f42d554acb0bef1c6cfc58a96` | ARCHIVE | A11 single-MoltenVK loading, shader failure, and cubemap evidence. Host/runtime isolation is not generic GL policy. |
+| `codex/dvk-gui-production-20260830` | `cd89c481a0c4f0b91db996f926ce3a8db68dae34` | ARCHIVE | GUI-production lineage includes device checkpoint 7e1ff65c5e064a8e28a4c45af84e50ad91c84532. Preserve it without a current-device claim. |
+| `codex/dvk-ios-artifact-20260831` | `eb269a871cfe897c3d7faf41ea582deb3c661fa5` | ARCHIVE | Legacy iOS build/distribution evidence. Current packaging checks replace the shipping gate, not old runtime evidence. |
+| `codex/dvk-ios-fbo-orientation-20260831` | `fc36aae0b65a581f4ed1caf93b1cef1751caaa55` | ARCHIVE | FBO orientation and physical-iOS experiments. Offscreen and Simulator tests do not prove absorption. |
+| `codex/dvk-rollout-replay-20260831` | `dd358d9580d1bffc481c087752f0abf8866e92c5` | ARCHIVE | Recovered rollout patches and provenance. Preserve the source without merging the legacy execution tree. |
+| `consolidation/repository-20260920` | `a63e18f78f7d4ef98b6797ca8cc740c65c341486` | DISCARD | Parallel preparation tree. Keep #41 as the only product candidate; preserve this tip as provenance. |
+| `experiment/dvk-atlas-fbo-probe-20260827` | `e4b0e144931dd5e122d9749947a22632a60afa59` | ARCHIVE | Frozen atlas-fbo-probe diagnostic/A-B checkpoint. Keep one archive ref, not a separate development branch. No current rendering or performance claim. |
+| `experiment/dvk-atlas-upload-probe-20260827` | `b6ac74dfe1d5429dc59299eaf2899f458e485cbe` | ARCHIVE | Frozen atlas-upload-probe diagnostic/A-B checkpoint. Keep one archive ref, not a separate development branch. No current rendering or performance claim. |
+| `experiment/dvk-atlas-upload-trace-20260827` | `0e2f9d28d1c33419ec205b2d6cb0c6ce1d7cae68` | ARCHIVE | Frozen atlas-upload-trace diagnostic/A-B checkpoint. Keep one archive ref, not a separate development branch. No current rendering or performance claim. |
+| `experiment/dvk-buffer-always-busy-20260827` | `00ec9af32e192c2d4dd152547b27768990d1edc5` | ARCHIVE | Frozen buffer-always-busy diagnostic/A-B checkpoint. Keep one archive ref, not a separate development branch. No current rendering or performance claim. |
+| `experiment/dvk-descriptor-pool-types-20260827` | `eaeaa0ff78ddab89bee84dec9f96eefd52d4e0c4` | ARCHIVE | Frozen descriptor-pool-types diagnostic/A-B checkpoint. Keep one archive ref, not a separate development branch. No current rendering or performance claim. |
+| `experiment/dvk-fresh-descriptors-20260827` | `693974862ff27d3bc52d951fc97d6176f4d520f4` | ARCHIVE | Frozen fresh-descriptors diagnostic/A-B checkpoint. Keep one archive ref, not a separate development branch. No current rendering or performance claim. |
+| `experiment/dvk-full-unpack-combined-20260829` | `b6bc7b04ccb3d92a859e1a80959a044a77d62e4d` | ARCHIVE | Frozen full-unpack-combined diagnostic/A-B checkpoint. Keep one archive ref, not a separate development branch. No current rendering or performance claim. |
+| `experiment/dvk-gui-text-ab-20260829` | `7e1ff65c5e064a8e28a4c45af84e50ad91c84532` | ARCHIVE | Frozen gui-text-ab diagnostic/A-B checkpoint. Keep one archive ref, not a separate development branch. No current rendering or performance claim. |
+| `experiment/dvk-index-stream-probe-20260827` | `8edaf0fe58c53fe4e59fd0c83a63c79b13ab4332` | ARCHIVE | Frozen index-stream-probe diagnostic/A-B checkpoint. Keep one archive ref, not a separate development branch. No current rendering or performance claim. |
+| `experiment/dvk-nondynamic-ubo-20260826` | `bd9ca5a3bf2b87094908906c87fc02fb8bba8d62` | ARCHIVE | Frozen nondynamic-ubo diagnostic/A-B checkpoint. Keep one archive ref, not a separate development branch. No current rendering or performance claim. |
+| `experiment/dvk-nondynamic-ubo-current-20260827` | `9ed94896d35b04009a640d3fdc91aeabccb93a14` | ARCHIVE | Frozen nondynamic-ubo-current diagnostic/A-B checkpoint. Keep one archive ref, not a separate development branch. No current rendering or performance claim. |
+| `experiment/dvk-pbo-full-unpack-20260827` | `1fcb4dca1009c9c23ab199927e33f58c77f2c320` | ARCHIVE | Frozen pbo-full-unpack diagnostic/A-B checkpoint. Keep one archive ref, not a separate development branch. No current rendering or performance claim. |
+| `experiment/dvk-pbo-shadow-source-20260827` | `27fae14445a76f27e6c6f6189b77d1ece4e82967` | ARCHIVE | Frozen pbo-shadow-source diagnostic/A-B checkpoint. Keep one archive ref, not a separate development branch. No current rendering or performance claim. |
+| `experiment/dvk-persistent-map-direct-20260827` | `beded2a3367e633e54f880677d15b8a20093e738` | ARCHIVE | Frozen persistent-map-direct diagnostic/A-B checkpoint. Keep one archive ref, not a separate development branch. No current rendering or performance claim. |
+| `experiment/dvk-real-ubo-alignment-20260827` | `1ad20c03f80a1c348e92a42e43a0efde4afac81d` | ARCHIVE | Frozen real-ubo-alignment diagnostic/A-B checkpoint. Keep one archive ref, not a separate development branch. No current rendering or performance claim. Device UBO alignment was transplanted into a3cd8e2c; the old experiment remains provenance. |
+| `experiment/dvk-sampler-default-zero-20260827` | `950a5b9beade6181694959611c0be03755703c9b` | ARCHIVE | Frozen sampler-default-zero diagnostic/A-B checkpoint. Keep one archive ref, not a separate development branch. No current rendering or performance claim. |
+| `experiment/dvk-stage-app-ubos-20260827` | `05ec7c0783209c606396b06f49aa82107ddbdd0c` | ARCHIVE | Frozen stage-app-ubos diagnostic/A-B checkpoint. Keep one archive ref, not a separate development branch. No current rendering or performance claim. |
+| `experiment/dvk-uv-input-probe-20260827` | `4ac474b1952ca9e2be231c983d7a6b96e63cee09` | ARCHIVE | Frozen uv-input-probe diagnostic/A-B checkpoint. Keep one archive ref, not a separate development branch. No current rendering or performance claim. |
+| `experiment/dvk-vertex-interface-probe-20260827` | `8bb563d9773732b9e330098a40ebb6e3f013f14d` | ARCHIVE | Frozen vertex-interface-probe diagnostic/A-B checkpoint. Keep one archive ref, not a separate development branch. No current rendering or performance claim. |
+| `fix/directmetal-incomplete-fbo-20260819` | `a09c8227be9ba599bab0747326f199770f8ebd91` | DISCARD | PR #34 fail-closed checks and tests are in merge be1b98883c392cfef01cf5b7feeae79f3f3d84d6. That merge also contains later runtime work; this is not whole-tree identity. |
+| `fix/directvulkan-mc262-gui-closure` | `7e1035e693281b2e7e2b2d99d7a7e60bf8ab193c` | ARCHIVE | PR #16 GUI and DirectVulkan lifetime closure. Current product has no matching real-client validation. |
+| `fix/dual-backend-metal-ios-ci` | `c0ad351cc16cc736a90d863db1598ff0f702254e` | ARCHIVE | PR #17 legacy iOS build work. Preserve provenance; the product ships an independent Vulkan-free DirectMetal package. |
+| `fix/dvk-atlas-fbo-subresources-local-20260827` | `e99cd0d54ad42227723e920acbab4c51314aa068` | ARCHIVE | Atlas, FBO, and subresource investigation. Preserve its native Vulkan invariants for focused current tests, not a wholesale merge. |
+| `fix/dvk-gui-text-render-20260829` | `54da349b1377f3b272bada4c9d63e46b650548e5` | ARCHIVE | GUI text upload and orientation investigation. Physical presentation remains unverified for the current product. |
+| `fix/dvk-pixel-unpack-state-20260829` | `b6bc7b04ccb3d92a859e1a80959a044a77d62e4d` | ARCHIVE | Full unpack and PBO shadow lineage. Current shared pixel store owns these rules; old edge cases are not all migrated. |
+| `fix/gl-semantic-closure-20260816` | `becdb9caa40842e970916cae8f8db17753af7973` | ARCHIVE | PR #18 GL object, FBO, uniform, and capability closure. Current tests prove selected cases, not all changes in this tree. |
+| `fix/ios-amethyst-runtime-isolation` | `15ba6e9c5c1e7812683890eaa69914effa6ce5c4` | ARCHIVE | iOS symbol-provider and weak-symbol diagnostics. Current package and seam tests do not replace physical-host loading evidence. |
+| `fix/minecraft26-directmetal-runtime-closure-20260819` | `3937f25dae40a10682591c0d17e25d542e617581` | DISCARD | Changed product files match merge 296ee3b14ef2753e4abe8d4853baae38b84a6cb2 in PR #35; the merge is in #41 ancestry. Retire the checkpoint, not the implementation. |
+| `fix/mobilegl-style-mc262-startup-preflight` | `616689317ac8b505ebed3a8978be25e96b3ff85a` | ARCHIVE | PR #21 MobileGL-derived shader/startup and UBO work. Preserve old tests, not a second GL state machine. |
+| `integration/directmetal-next` | `be1b98883c392cfef01cf5b7feeae79f3f3d84d6` | DISCARD | The shipping lineage and incomplete-framebuffer fix are in #41 ancestry. |
+| `integration/directvulkan-reference` | `c54927fd8e17a702fa6517c4c1074635de68285a` | ARCHIVE | Legacy Vulkan execution baseline. Current src/vk is a narrower reference path, not an equivalent legacy presentation implementation. |
+| `integration/legacy-capability-port` | `5993dc7c689a26a704fda45c8ada7fb40effa60e` | ARCHIVE | Disconnected GL capability and semantic work. Non-common semantics are not all verified in the current product; do not merge the old architecture. |
+| `maintenance/apply-consolidation-20260920` | `c5cf65b0705872b95a0a71809db1cca29a9fb2a3` | DISCARD | One-shot reconstruction, transfer, verification, and retirement runner. No product depends on this branch. |
+| `perf/directmetal-async-pso-precompile-20260818` | `b9894620ee5b6d1f1d4e4f33d00104bf5e582174` | DISCARD | Changed product files match merge 094e8a6f7f47d10c9211f7ffd513511804f42993 in PR #32; the merge is in #41 ancestry. Retire the checkpoint, not the implementation. |
+| `perf/directmetal-borrowed-draw-metadata-20260818` | `e96a410b7749c781e8f0b266e8e0677e4a77d7e2` | DISCARD | Changed product files match merge 32b36709e1c255ae43d1554d710e726bb5f44269 in PR #29; the merge is in #41 ancestry. Retire the checkpoint, not the implementation. |
+| `perf/directmetal-buffer-streaming-20260817` | `a8b90cd8bdde4c8ae8b94e11d59796a575c21131` | DISCARD | Changed product files match merge 060f0fdc0a7ede7c1b1a55260b8165bf6866df05 in PR #23; the merge is in #41 ancestry. Retire the checkpoint, not the implementation. |
+| `perf/directmetal-fixed-hot-metadata-20260818` | `56c1ebc779a601d9baa3c88ba8ab5459fc86c3b9` | DISCARD | Changed product files match merge f011b987a737842287caafc8cce8f99aeb6f7215 in PR #30; the merge is in #41 ancestry. Retire the checkpoint, not the implementation. |
+| `perf/directmetal-hotpath-phase1-20260817` | `3faf1bb42c0f7ebcd8b136e8be592ebad60d7255` | DISCARD | Changed product files match merge 62dfc31b0caf8c496a7e810def531de2c3dc19dd in PR #22; the merge is in #41 ancestry. Retire the checkpoint, not the implementation. |
+| `perf/directmetal-lazy-buffer-storage-20260817` | `ec66214b79d0b9344e603bf1f4ad1d059c69ecbb` | DISCARD | Changed product files match merge 3a611859f19e6d88705f28dca4a2a4ccbe695041 in PR #24; the merge is in #41 ancestry. Retire the checkpoint, not the implementation. |
+| `perf/directmetal-multidraw-lowering-20260818` | `e0dc9a294e46f69bd19066de6001d035a88e7521` | DISCARD | Changed product files match merge e8bd7df3583173e784f10ec7089c46c3979a105d in PR #28; the merge is in #41 ancestry. Retire the checkpoint, not the implementation. |
+| `perf/directmetal-numeric-cache-keys-20260817` | `7f517ea282215f4f4ed375862fea0c548b1306c5` | DISCARD | Changed product files match merge 367e740b142195585025651e8a9a0ad1aab5123b in PR #25; the merge is in #41 ancestry. Retire the checkpoint, not the implementation. |
+| `perf/directmetal-program-prewarm-20260818` | `8189a8528e9a7112ded6bbd961c27e362d41c3a1` | DISCARD | Changed product files match merge 983098f9ada0a892bfd91647d53513a0c0523215 in PR #31; the merge is in #41 ancestry. Retire the checkpoint, not the implementation. |
+| `perf/directmetal-resident-index-20260817` | `33320b4e880e94558360fe4bc77b8de4be290eab` | DISCARD | Changed product files match merge ed8dadc4292b96fcd0ec2fd985f8d409eb0b8379 in PR #26; the merge is in #41 ancestry. Retire the checkpoint, not the implementation. |
+| `perf/directmetal-uniform-snapshots-20260817` | `039b86fb8016ce3521ddd6fd59a6f6c54f7ba5ab` | DISCARD | Changed product files match merge 8dbc2edaac1b7176859bb2b46e0372d0c8efe203 in PR #27; the merge is in #41 ancestry. Retire the checkpoint, not the implementation. |
+| `tooling/minecraft-reference-26.2` | `5e5a36be3708b290d2f1578dfdc6c3fcf599dc1f` | DISCARD | PR #37 tooling remains in scripts/minecraft-reference.sh. Generated client sources are not archived. |
+| `validation/directmetal-performance-e2e-20260818` | `a4c76f20b8d3adfbbd5ec41e588810f6754772c2` | ARCHIVE | Frozen client/performance harness with pinned inputs. It does not validate the current candidate or Minecraft 26.3. |
+| `validation/final-minecraft-macos15-20260819` | `4f743cd8a8b66f9b804a8e1a90de9b7919dd508d` | ARCHIVE | Frozen client/performance harness with pinned inputs. It does not validate the current candidate or Minecraft 26.3. |
