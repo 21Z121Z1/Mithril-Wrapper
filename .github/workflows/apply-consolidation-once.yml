@@ -3,24 +3,79 @@ on:
   push:
     branches: [maintenance/apply-consolidation-20260920]
 permissions:
-  contents: read
+  contents: write
 jobs:
-  local-runtime:
+  transfer:
     if: github.repository == '21Z121Z1/Mithril-Wrapper'
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 20
     steps:
-      - name: Download and verify Debian software Vulkan runtime
+      - uses: actions/checkout@v7
+        with:
+          ref: 0cdc5fcd5f89cddf590c3fba87e5bcd6b1808869
+          submodules: recursive
+          persist-credentials: false
+      - name: Reconstruct reviewed edits and verify every tree
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EDITS: 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
+        run: |
+          set -euo pipefail
+          git config user.name '21Z121Z1'
+          git config user.email '89170834+21Z121Z1@users.noreply.github.com'
+          python3 - <<'PY'
+          import base64, gzip, json, os, pathlib, subprocess
+          repo = '21Z121Z1/Mithril-Wrapper'
+          def git(*args):
+              return subprocess.check_output(['git', *args], text=True).strip()
+          def api(path, data):
+              return json.loads(subprocess.check_output(['gh', 'api', '--method', 'POST', 'repos/'+repo+'/'+path, '--input', '-'], input=json.dumps(data), text=True))
+          parent = '0cdc5fcd5f89cddf590c3fba87e5bcd6b1808869'
+          base_tree = git('rev-parse','HEAD^{tree}')
+          commits = []
+          steps = json.loads(gzip.decompress(base64.b64decode(os.environ['EDITS'])))
+          for step in steps:
+              entries = []
+              for change in step['files']:
+                  path = pathlib.Path(change['path'])
+                  assert not path.is_absolute() and '..' not in path.parts
+                  entry = {'path':str(path), 'mode':'100644', 'type':'blob'}
+                  if change.get('delete'):
+                      path.unlink()
+                      entry['sha'] = None
+                  else:
+                      lines = path.read_text().splitlines(keepends=True)
+                      for start, end, replacement in reversed(change['edits']):
+                          lines[start:end] = replacement
+                      text = ''.join(lines)
+                      path.write_text(text)
+                      entry['content'] = text
+                  entries.append(entry)
+              subprocess.run(['git','add','--all'],check=True)
+              tree = git('write-tree')
+              assert tree == step['tree'], (tree, step['tree'])
+              remote_tree = api('git/trees', {'base_tree':base_tree, 'tree':entries})['sha']
+              assert remote_tree == tree
+              commit = api('git/commits', {'message':step['message'], 'tree':tree, 'parents':[parent]})['sha']
+              commits.append({'sha':commit,'tree':tree,'message':step['message']})
+              subprocess.run(['git','commit','-m',step['message']],check=True)
+              parent, base_tree = commit, tree
+          pathlib.Path('/tmp/transferred-commits.json').write_text(json.dumps(commits,indent=2)+'\n')
+          print(json.dumps(commits,indent=2))
+          PY
+      - name: Verify reconstructed candidate with Vulkan reference
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p /tmp/runtime
-          cd /tmp/runtime
-          curl --fail --location --output mesa-vulkan-drivers.deb 'https://deb.debian.org/debian/pool/main/m/mesa/mesa-vulkan-drivers_25.0.7-2+deb13u1_amd64.deb'
-          printf '%s  %s\n' caf2f7d296b7522efe74e40a74bce762a3ce84c33b53b5e54e1248ac2e0a13a5 mesa-vulkan-drivers.deb | sha256sum --check --strict
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libvulkan1 mesa-vulkan-drivers
+          cmake -S . -B build-vulkan -G Ninja -DCMAKE_BUILD_TYPE=Release -DMITHRIL_BUILD_LEGACY=ON -DMITHRIL_BUILD_DIRECT=OFF -DMITHRIL_OUTPUT_DIRECTORY="$PWD/build-vulkan/artifacts"
+          cmake --build build-vulkan --parallel
+          ctest --test-dir build-vulkan -L vulkan --output-on-failure
       - uses: actions/upload-artifact@v7
         with:
-          name: isolated-vulkan-runtime
-          path: /tmp/runtime
-          retention-days: 1
+          name: verified-convergence-commits
+          path: /tmp/transferred-commits.json
+          retention-days: 7
           if-no-files-found: error
