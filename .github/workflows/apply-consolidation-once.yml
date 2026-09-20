@@ -33,7 +33,7 @@ jobs:
         shell: bash
         env:
           EXPECTED_ARCHIVE_SHA256: f54ced0977155afe23346a0b4fd88f467593ec510112d843544c82bcdc7dcc27
-          EXPECTED_TREE: fd1e07b5220f11b96bfde36c25b90e06eafbbb80
+          EXPECTED_TREE: 4e7da5d494bdce42b42ca6e63683eec25a0a6967
           EXPECTED_EXPORTS_SHA256: eb29af2d78dcb86defebd37a685c7a2daead8f4c43a5e23b520b5fdf6cab7828
         run: |
           set -euo pipefail
@@ -131,6 +131,12 @@ jobs:
             echo 'stale control-plane reference remains' >&2
             exit 1
           fi
+
+          # The Actions token cannot update workflow files. The GitHub connector
+          # applies these two already-validated files after this commit is pushed.
+          git checkout HEAD -- \
+            .github/workflows/build.yml \
+            .github/workflows/hosted-metal-gpu-probe.yml
 
           git add -A
           git diff --cached --stat
