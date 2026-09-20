@@ -109,6 +109,8 @@ jobs:
             echo "base_ref=$GITHUB_BASE_REF"
             echo "run_id=$GITHUB_RUN_ID"
             echo "run_attempt=$GITHUB_RUN_ATTEMPT"
+            echo "workflow_ref=${GITHUB_WORKFLOW_REF:-}"
+            echo "workflow_sha=${GITHUB_WORKFLOW_SHA:-}"
             echo "runner_os=$RUNNER_OS"
             echo "runner_arch=$RUNNER_ARCH"
             uname -a
@@ -117,6 +119,7 @@ jobs:
             xcrun --sdk iphonesimulator clang --version
             echo "simulator_sdk=$(xcrun --sdk iphonesimulator --show-sdk-version)"
           } > "$evidence/provenance.txt"
+          python3 -c 'import json,os; d=json.load(open(os.environ["GITHUB_EVENT_PATH"])); pr=d.get("pull_request") or {}; print("event_head_sha="+pr.get("head",{}).get("sha","")); print("event_base_sha="+pr.get("base",{}).get("sha",""))' >> "$evidence/provenance.txt"
           xcrun simctl list devices available -j > "$evidence/available-simulators.json"
           udid="$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(x["udid"] for runtime, devices in d["devices"].items() if "iOS" in runtime for x in devices if x.get("isAvailable") and x.get("name", "").startswith("iPhone")))')"
           test -n "$udid"
@@ -229,7 +232,12 @@ jobs:
             rm -f "$sentinel"
 
             set +e
-            SIMCTL_CHILD_MITHRIL_LIBRARY='@executable_path/libmithril.dylib'               SIMCTL_CHILD_MITHRIL_BACKEND=metal               SIMCTL_CHILD_MITHRIL_EXPECT_RENDERER='Mithril DirectMetal'               SIMCTL_CHILD_MITHRIL_SIMULATOR_SUCCESS_MARKER="$expected"               xcrun simctl launch --console "$udid" "$bundle" > "$test_evidence/launch.log" 2>&1
+            env \
+              SIMCTL_CHILD_MITHRIL_LIBRARY='@executable_path/libmithril.dylib' \
+              SIMCTL_CHILD_MITHRIL_BACKEND=metal \
+              SIMCTL_CHILD_MITHRIL_EXPECT_RENDERER='Mithril DirectMetal' \
+              SIMCTL_CHILD_MITHRIL_SIMULATOR_SUCCESS_MARKER="$expected" \
+              xcrun simctl launch --console "$udid" "$bundle" > "$test_evidence/launch.log" 2>&1
             launch_rc=$?
             set -e
             printf '%s\n' "$launch_rc" > "$test_evidence/launch.rc"
