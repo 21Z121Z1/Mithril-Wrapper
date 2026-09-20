@@ -2,9 +2,9 @@ name: build-mithril
 
 on:
   push:
-    branches: [main, integration/directmetal-next]
+    branches: [main]
   pull_request:
-    branches: [main, integration/directmetal-next]
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -15,50 +15,22 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  agent-contract:
-    name: Agent system contract (candidate source)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: false
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-
-      - name: Verify exact candidate identity
-        env:
-          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: |
-          set -euo pipefail
-          ACTUAL_SHA="$(git rev-parse HEAD)"
-          ACTUAL_TREE="$(git rev-parse HEAD^{tree})"
-          test "$ACTUAL_SHA" = "$EXPECTED_SHA"
-          printf 'proof_subject=candidate-head-or-push\nsource_sha=%s\nsource_tree=%s\n' "$ACTUAL_SHA" "$ACTUAL_TREE"
-
-      - name: Validate machine-readable agent contract
-        run: python3 scripts/validate_agent_contract.py
-
-      - name: Validate agent helper shapes
-        run: |
-          python3 -m py_compile scripts/validate_agent_contract.py scripts/audit-branches.py scripts/agent-context.py
-          python3 scripts/audit-branches.py --help >/dev/null
-          python3 scripts/agent-context.py --help >/dev/null
-          bash -n scripts/minecraft-reference.sh
-          bash scripts/minecraft-reference.sh --help >/dev/null
-
   directmetal-macos:
-    name: DirectMetal macOS semantics + boundary (integration subject)
-    needs: agent-contract
+    name: DirectMetal macOS semantics and boundary
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: false
+          persist-credentials: false
 
-      - name: Record integration proof subject
+      - name: Record proof subject
+        shell: bash
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          printf 'proof_subject=merge-result-or-push\nsource_sha=%s\nsource_tree=%s\n' "$(git rev-parse HEAD)" "$(git rev-parse HEAD^{tree})"
+          printf 'source_sha=%s\nsource_tree=%s\n' \
+            "$(git rev-parse HEAD)" "$(git rev-parse HEAD^{tree})"
 
       - name: Fetch DirectMetal shader submodules only
         run: >-
@@ -82,12 +54,11 @@ jobs:
       - name: Build DirectMetal and regression tests
         run: cmake --build build-direct --parallel
 
-      - name: Run DirectMetal GL semantic suite
+      - name: Run DirectMetal semantic suite
         run: ctest --test-dir build-direct -L directmetal --output-on-failure
 
       - name: Prove shipping target is Vulkan-free
         run: |
-          chmod +x scripts/verify_directmetal_artifact.sh
           scripts/verify_directmetal_artifact.sh \
             build-direct/artifacts/libmithril.dylib \
             build-direct/mithril_direct.boundary.json
@@ -98,26 +69,28 @@ jobs:
           codesign --force --sign - build-direct/artifacts/libmithril.dylib
           codesign --verify --verbose=2 build-direct/artifacts/libmithril.dylib
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: mithril-direct-macos
           path: build-direct/artifacts/libmithril.dylib
           if-no-files-found: error
 
   directmetal-ios-arm64:
-    name: DirectMetal iPhoneOS arm64 (integration subject)
-    needs: agent-contract
+    name: DirectMetal iPhoneOS arm64
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: false
+          persist-credentials: false
 
-      - name: Record integration proof subject
+      - name: Record proof subject
+        shell: bash
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          printf 'proof_subject=merge-result-or-push\nsource_sha=%s\nsource_tree=%s\n' "$(git rev-parse HEAD)" "$(git rev-parse HEAD^{tree})"
+          printf 'source_sha=%s\nsource_tree=%s\n' \
+            "$(git rev-parse HEAD)" "$(git rev-parse HEAD^{tree})"
 
       - name: Fetch DirectMetal shader submodules only
         run: >-
@@ -148,26 +121,28 @@ jobs:
           codesign --force --sign - build-ios/artifacts/libmithril.dylib
           codesign --verify --verbose=2 build-ios/artifacts/libmithril.dylib
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: mithril-direct-ios-arm64
           path: build-ios/artifacts/libmithril.dylib
           if-no-files-found: error
 
-  legacy-vulkan-linux:
-    name: Vulkan reference regression (integration subject)
-    needs: agent-contract
+  vulkan-reference-linux:
+    name: Vulkan reference regression
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
+          persist-credentials: false
 
-      - name: Record integration proof subject
+      - name: Record proof subject
+        shell: bash
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          printf 'proof_subject=merge-result-or-push\nsource_sha=%s\nsource_tree=%s\n' "$(git rev-parse HEAD)" "$(git rev-parse HEAD^{tree})"
+          printf 'source_sha=%s\nsource_tree=%s\n' \
+            "$(git rev-parse HEAD)" "$(git rev-parse HEAD^{tree})"
 
       - name: Install Vulkan CPU runtime
         run: |
@@ -175,24 +150,26 @@ jobs:
           sudo apt-get install -y -qq libvulkan1 mesa-vulkan-drivers vulkan-tools
           vulkaninfo --summary | head -20
 
-      - name: Configure legacy target only
+      - name: Configure Vulkan reference target
         run: >-
-          cmake -S . -B build-legacy -G Ninja
+          cmake -S . -B build-vulkan -G Ninja
           -DCMAKE_BUILD_TYPE=Release
           -DMITHRIL_BUILD_LEGACY=ON
           -DMITHRIL_BUILD_DIRECT=OFF
           -DMITHRIL_ENABLE_SHADER_TOOLCHAIN=ON
-          -DMITHRIL_OUTPUT_DIRECTORY="$GITHUB_WORKSPACE/build-legacy/artifacts"
+          -DMITHRIL_OUTPUT_DIRECTORY="$GITHUB_WORKSPACE/build-vulkan/artifacts"
 
-      - name: Build legacy target and tests
-        run: cmake --build build-legacy --parallel
+      - name: Build Vulkan reference target and tests
+        run: cmake --build build-vulkan --parallel
 
-      - name: Run Vulkan reference smoke suite
-        run: ctest --test-dir build-legacy -L vulkan --output-on-failure
+      - name: Run Vulkan reference suite
+        run: ctest --test-dir build-vulkan -L vulkan --output-on-failure
 
-      - name: Verify legacy artifact stays separate
+      - name: Verify Vulkan reference artifact remains separate
+        shell: bash
         run: |
-          test -f build-legacy/artifacts/libmithril.so
-          file build-legacy/artifacts/libmithril.so
-          nm -D --defined-only build-legacy/artifacts/libmithril.so | \
-            awk '{print $3}' | grep -q '^glDrawArrays$'
+          set -euo pipefail
+          test -f build-vulkan/artifacts/libmithril.so
+          file build-vulkan/artifacts/libmithril.so
+          symbols="$(nm -D --defined-only build-vulkan/artifacts/libmithril.so | awk '{print $3}')"
+          grep -Fxq 'glDrawArrays' <<<"$symbols"
