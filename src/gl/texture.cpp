@@ -81,7 +81,8 @@ bool DecodeRowRGBA8(const uint8_t* src, uint8_t* dst, GLsizei width,
                 return true;
             case GL_RED:
                 for (GLsizei i = 0; i < width; ++i) {
-                    dst[i * 4 + 0] = dst[i * 4 + 1] = dst[i * 4 + 2] = src[i];
+                    dst[i * 4 + 0] = src[i];
+                    dst[i * 4 + 1] = dst[i * 4 + 2] = 0;
                     dst[i * 4 + 3] = 255;
                 }
                 return true;
@@ -99,9 +100,12 @@ bool DecodeRowRGBA8(const uint8_t* src, uint8_t* dst, GLsizei width,
             uint32_t n = format == GL_RGBA ? 4 : 3;
             for (GLsizei i = 0; i < width; ++i) {
                 for (uint32_t c = 0; c < n; ++c) {
-                    float v = ((const float*)src)[i * n + c];
-                    dst[i * 4 + c] =
-                        (uint8_t)std::min<uint32_t>(255, (uint32_t)(v * 255.0f + 0.5f));
+                    float v;
+                    std::memcpy(&v, src + (i * n + c) * sizeof(v), sizeof(v));
+                    // Clamp before conversion. Non-positive values and NaNs
+                    // must not reach an out-of-range float-to-integer cast.
+                    v = v > 0.0f ? std::min(v, 1.0f) : 0.0f;
+                    dst[i * 4 + c] = static_cast<uint8_t>(v * 255.0f + 0.5f);
                 }
                 if (n == 3) dst[i * 4 + 3] = 255;
             }
