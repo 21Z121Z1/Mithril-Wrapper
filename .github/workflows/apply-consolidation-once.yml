@@ -3,79 +3,52 @@ on:
   push:
     branches: [maintenance/apply-consolidation-20260920]
 permissions:
-  contents: write
+  contents: read
+  actions: write
+  pull-requests: read
 jobs:
-  transfer:
+  platform-gate:
     if: github.repository == '21Z121Z1/Mithril-Wrapper'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: 31d988383d0c96dba431df11859974188836df59
-          persist-credentials: false
-      - name: Store the reviewed tree and commit
+      - name: Check exact product refs and dispatch existing runtime gate
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
+          mkdir -p /tmp/final-evidence
           python3 - <<'PY'
-          import json, pathlib, subprocess
-          repo='21Z121Z1/Mithril-Wrapper'
-          changes={
-              'src/vk/draw.cpp': [('''    if (g.ubo_next + range > kUboPoolSize) {
-                  ML_LOG_WARN("vk: dynamic UBO exhausted; flushing and resetting");
-                  SubmitFlush();
-              }
-              op.ubo_offset = AlignUp(g.ubo_next, 16);
-          ''','''    if (range > kUboPoolSize) {
-                  ML_LOG_ERROR("vk: uniform block exceeds the dynamic UBO pool");
-                  DestroyStagedDrawBuffers(op);
-                  return;
-              }
-              // Device alignment applies to each draw, including pool capacity checks.
-              VkDeviceSize offset = AlignUp(g.ubo_next, g.ubo_align);
-              if (offset > kUboPoolSize - range) {
-                  ML_LOG_WARN("vk: dynamic UBO exhausted; flushing and resetting");
-                  SubmitFlush();
-                  offset = AlignUp(g.ubo_next, g.ubo_align);
-              }
-              op.ubo_offset = offset;
-          ''')],
-              'tests/draw_smoke.c': [('''    /* -- draw ------------------------------------------------------- */
-              drawArrays(GL_TRIANGLES, 0, 3);
-          ''','''    /* Two draws in one submission must use valid uniform storage. */
-              uniform4f(tint, 0.0f, 1.0f, 0.0f, 1.0f);
-              drawArrays(GL_TRIANGLES, 0, 3);
-              uniform4f(tint, 1.0f, 1.0f, 1.0f, 1.0f);
-              drawArrays(GL_TRIANGLES, 0, 3);
-          ''')]
-          }
-          entries=[]
-          for name, replacements in changes.items():
-              path=pathlib.Path(name); text=path.read_text()
-              for old,new in replacements:
-                  assert text.count(old)==1, name
-                  text=text.replace(old,new)
-              path.write_text(text)
-              entries.append({'path':name,'mode':'100644','type':'blob','content':text})
-          subprocess.run(['git','add','--all'],check=True)
-          tree=subprocess.check_output(['git','write-tree'],text=True).strip()
-          assert tree=='dc7daa7df3406a79d9ec31186f6cd8806e533891', tree
-          def api(path,data):
-              return json.loads(subprocess.check_output(['gh','api','--method','POST','repos/'+repo+'/'+path,'--input','-'],input=json.dumps(data),text=True))
-          remote_tree=api('git/trees',{'base_tree':'aab6cde20bd0b23589fd2f01dc1ff59ae5d137c3','tree':entries})['sha']
-          assert remote_tree==tree
-          message='fix(vulkan): honor device uniform offset alignment and pool bounds\n\nReconcile the execution invariant from Uniaball/Mithril-Wrapper b195a5b70b1253246d7c474a6af7f48bbed28442. Keep diagnostics and legacy frame-slot architecture out of the product. Vulkan VUID 01971 requires device-aligned dynamic offsets; VUID 01979 requires aligned offset plus range to fit the buffer.\n\nExtend the existing draw oracle to submit two distinct uniform values before a flush. A local forwarding-loader oracle advertises and enforces 256-byte alignment: old execution fails at offset 16; this execution passes. This is a controlled Linux regression, not physical iOS evidence.'
-          commit=api('git/commits',{'message':message,'tree':tree,'parents':['31d988383d0c96dba431df11859974188836df59']})['sha']
-          result={'sha':commit,'tree':tree}
-          print(json.dumps(result))
-          pathlib.Path('/tmp/final-candidate.json').write_text(json.dumps(result)+'\n')
+          import json,pathlib,subprocess
+          repo='21Z121Z1/Mithril-Wrapper'; out=pathlib.Path('/tmp/final-evidence')
+          def read(path):
+              return json.loads(subprocess.check_output(['gh','api','repos/'+repo+'/'+path],text=True))
+          head=read('git/ref/heads/consolidation/main-20260920')['object']['sha']
+          main=read('git/ref/heads/main')['object']['sha']
+          assert head=='a3cd8e2c07fece3f2440687d9fb3574abe7379d6'
+          assert main=='7f6d676f7dbfe5b10f7367cd429c7dae994954e7'
+          tree=read('git/commits/'+head)['tree']['sha']
+          assert tree=='dc7daa7df3406a79d9ec31186f6cd8806e533891'
+          (out/'subject.json').write_text(json.dumps({'head':head,'tree':tree,'main':main},indent=2)+'\n')
+          workflows=[]
+          page=1
+          while True:
+              data=read('actions/workflows?per_page=100&page='+str(page))
+              workflows.extend(data['workflows'])
+              if len(workflows)>=data['total_count']: break
+              page+=1
+          (out/'all-workflows.json').write_text(json.dumps(workflows,indent=2)+'\n')
+          print('Workflow definitions:',len(workflows))
+          (out/'build-runs.json').write_text(json.dumps(read('actions/runs?head_sha='+head+'&per_page=20'),indent=2)+'\n')
+          (out/'branches.json').write_text(json.dumps(read('branches?per_page=100'),indent=2)+'\n')
+          (out/'open-prs.json').write_text(json.dumps(read('pulls?state=open&per_page=100'),indent=2)+'\n')
+          subprocess.run(['gh','api','--method','POST','repos/'+repo+'/actions/workflows/hosted-metal-gpu-probe.yml/dispatches','-f','ref=consolidation/main-20260920'],check=True)
+          print('Dispatched existing runtime gate for',head)
           PY
       - uses: actions/upload-artifact@v7
         with:
-          name: final-candidate-object
-          path: /tmp/final-candidate.json
+          name: final-platform-dispatch
+          path: /tmp/final-evidence
           retention-days: 7
           if-no-files-found: error
