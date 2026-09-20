@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
           submodules: false
@@ -44,11 +44,20 @@ jobs:
           python3 scripts/repository-audit-once.py
           git submodule status > repository-audit/submodules.txt
           git remote -v > repository-audit/remotes.txt
+          git archive --format=tar.gz --output=repository-source.tar.gz HEAD
 
       - name: Upload audit evidence
         uses: actions/upload-artifact@v4
         with:
           name: repository-audit-${{ github.sha }}
           path: repository-audit
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload source snapshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: repository-source-${{ github.sha }}
+          path: repository-source.tar.gz
           if-no-files-found: error
           retention-days: 7
