@@ -249,7 +249,10 @@ int main(void) {
     vertexAttribPtr(1, 4, GL_FLOAT, GL_FALSE, sizeof(struct Vertex),
                     (const GLvoid*)12);
 
-    /* -- draw ------------------------------------------------------- */
+    /* Two draws in one submission must use valid uniform storage. */
+    uniform4f(tint, 0.0f, 1.0f, 0.0f, 1.0f);
+    drawArrays(GL_TRIANGLES, 0, 3);
+    uniform4f(tint, 1.0f, 1.0f, 1.0f, 1.0f);
     drawArrays(GL_TRIANGLES, 0, 3);
     finish();
 

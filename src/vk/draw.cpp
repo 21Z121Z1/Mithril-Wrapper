@@ -214,11 +214,19 @@ void Draw(const DrawParams& params) {
 
     // Compose the UBO from the reflected members + current uniform values.
     VkDeviceSize range = prog.has_ubo ? prog.ubo_size : 16;
-    if (g.ubo_next + range > kUboPoolSize) {
+    if (range > kUboPoolSize) {
+        ML_LOG_ERROR("vk: uniform block exceeds the dynamic UBO pool");
+        DestroyStagedDrawBuffers(op);
+        return;
+    }
+    // Device alignment applies to each draw, including pool capacity checks.
+    VkDeviceSize offset = AlignUp(g.ubo_next, g.ubo_align);
+    if (offset > kUboPoolSize - range) {
         ML_LOG_WARN("vk: dynamic UBO exhausted; flushing and resetting");
         SubmitFlush();
+        offset = AlignUp(g.ubo_next, g.ubo_align);
     }
-    op.ubo_offset = AlignUp(g.ubo_next, 16);
+    op.ubo_offset = offset;
     op.ubo_range = range;
     g.ubo_next = op.ubo_offset + range;
     if (prog.has_ubo) {
