@@ -136,7 +136,8 @@ GLint ArraySize(const spirv_cross::SPIRType& type) {
 
 Uniform ReflectMember(spirv_cross::Compiler& compiler,
                       const spirv_cross::SPIRType& block_type,
-                      uint32_t member, const std::string& visible_name) {
+                      uint32_t member, const std::string& visible_name,
+                      backend::UniformMemberLayout* storage = nullptr) {
     Uniform uniform;
     uniform.name = visible_name;
     const auto& member_type = compiler.get_type(block_type.member_types[member]);
@@ -152,6 +153,18 @@ Uniform ReflectMember(spirv_cross::Compiler& compiler,
             compiler.type_struct_member_matrix_stride(block_type, member));
     uniform.row_major = compiler.has_member_decoration(
         block_type.self, member, spv::DecorationRowMajor) ? GL_TRUE : GL_FALSE;
+    if (storage) {
+        storage->name = visible_name;
+        storage->offset = static_cast<uint32_t>(uniform.offset);
+        storage->size = static_cast<uint32_t>(
+            compiler.get_declared_struct_member_size(block_type, member));
+        storage->vector_components = std::max(member_type.vecsize, 1u);
+        storage->matrix_columns = std::max(member_type.columns, 1u);
+        storage->array_elements = static_cast<uint32_t>(uniform.size);
+        storage->array_stride = static_cast<uint32_t>(uniform.array_stride);
+        storage->matrix_stride = static_cast<uint32_t>(uniform.matrix_stride);
+        storage->row_major = uniform.row_major == GL_TRUE;
+    }
     return uniform;
 }
 
@@ -532,6 +545,8 @@ bool AlignStageInterfaceLocations(
 
 bool ReflectProgram(Program& prog, std::string& error) {
     prog.uniforms.clear();
+    prog.vertex_loose_uniforms = {};
+    prog.fragment_loose_uniforms = {};
     prog.uniform_by_name.clear();
     prog.uniform_by_location.clear();
     prog.active_uniform_by_name.clear();
@@ -572,12 +587,21 @@ bool ReflectProgram(Program& prog, std::string& error) {
                     resource.id, spv::DecorationBinding);
                 if (type_name == "mithril_GlobalBlock" ||
                     internal_binding == kLooseUniformBinding) {
+                    auto& layout = vertex_stage ? prog.vertex_loose_uniforms
+                                                : prog.fragment_loose_uniforms;
+                    layout.size = static_cast<uint32_t>(
+                        compiler.get_declared_struct_size(type));
                     for (uint32_t i = 0; i < type.member_types.size(); ++i) {
                         std::string name = compiler.get_member_name(
                             resource.base_type_id, i);
-                        if (name.empty()) continue;
+                        if (name.empty()) {
+                            fail("unnamed member in synthetic uniform block");
+                            continue;
+                        }
+                        backend::UniformMemberLayout storage;
                         Uniform reflected = ReflectMember(
-                            compiler, type, i, name);
+                            compiler, type, i, name, &storage);
+                        layout.members.push_back(std::move(storage));
                         const auto declared_type =
                             declared_boolean_uniforms.find(name);
                         if (declared_type != declared_boolean_uniforms.end())

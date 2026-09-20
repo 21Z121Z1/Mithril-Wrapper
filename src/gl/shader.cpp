@@ -39,7 +39,8 @@ uint64_t EnsureBackendProgram(mithril::shader::Program* program,
         uniform_names.push_back(uniform.name);
 
     const uint64_t handle = v::CreateProgram(
-        program->vertex_spirv, program->fragment_spirv, uniform_names);
+        program->vertex_spirv, program->fragment_spirv, uniform_names,
+        program->vertex_loose_uniforms, program->fragment_loose_uniforms);
     if (!handle) {
         ++g_program_prewarm_stats.create_failures;
         return 0;

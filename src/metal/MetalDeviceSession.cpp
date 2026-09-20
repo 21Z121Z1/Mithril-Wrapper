@@ -29,8 +29,11 @@ bool MetalDeviceSession::Clear(const backend::ClearParams& params) { return meta
 
 uint64_t MetalDeviceSession::CreateProgram(
     const std::vector<uint32_t>& vs, const std::vector<uint32_t>& fs,
-    const std::vector<std::string>& uniform_names) {
-    return metal::CreateProgram(vs, fs, uniform_names);
+    const std::vector<std::string>& uniform_names,
+    const backend::UniformBlockLayout& vertex_uniforms,
+    const backend::UniformBlockLayout& fragment_uniforms) {
+    return metal::CreateProgram(vs, fs, uniform_names,
+                                vertex_uniforms, fragment_uniforms);
 }
 void MetalDeviceSession::DestroyProgram(uint64_t program) { metal::DestroyProgram(program); }
 bool MetalDeviceSession::Draw(backend::DrawParams params) { return metal::Draw(std::move(params)); }

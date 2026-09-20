@@ -33,7 +33,9 @@ uint32_t MaxFramebufferSamples();
 bool Clear(const ClearParams& params);
 uint64_t CreateProgram(const std::vector<uint32_t>& vs,
                        const std::vector<uint32_t>& fs,
-                       const std::vector<std::string>& uniform_names);
+                       const std::vector<std::string>& uniform_names,
+                       const backend::UniformBlockLayout& vertex_uniforms,
+                       const backend::UniformBlockLayout& fragment_uniforms);
 void DestroyProgram(uint64_t program);
 void Draw(const DrawParams& params);
 void SubmitFlush();

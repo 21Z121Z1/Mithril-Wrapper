@@ -265,8 +265,11 @@ bool SupportsDepthTextures() {
 bool Clear(const ClearParams& params) { DISPATCH_RET(Clear, false, params); }
 uint64_t CreateProgram(const std::vector<uint32_t>& vs,
                        const std::vector<uint32_t>& fs,
-                       const std::vector<std::string>& uniform_names) {
-    DISPATCH_RET(CreateProgram, 0, vs, fs, uniform_names);
+                       const std::vector<std::string>& uniform_names,
+                       const UniformBlockLayout& vertex_uniforms,
+                       const UniformBlockLayout& fragment_uniforms) {
+    DISPATCH_RET(CreateProgram, 0, vs, fs, uniform_names,
+                 vertex_uniforms, fragment_uniforms);
 }
 void DestroyProgram(uint64_t program) { DISPATCH_VOID(DestroyProgram, program); }
 

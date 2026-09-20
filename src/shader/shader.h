@@ -114,6 +114,8 @@ struct Program {
     bool linked = false;
     std::string info_log;
     std::vector<Uniform> uniforms;         // active uniforms (index == GL index)
+    backend::UniformBlockLayout vertex_loose_uniforms;
+    backend::UniformBlockLayout fragment_loose_uniforms;
     std::vector<backend::UniformValueView> loose_uniform_views;
     uint64_t loose_uniform_version = 1;
     std::unordered_map<std::string, GLint> uniform_by_name;    // name -> location

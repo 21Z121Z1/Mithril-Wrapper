@@ -1086,38 +1086,6 @@ bool TranslateStage(const std::vector<uint32_t>& words,
             remap.binding = binding;
             remap.msl_buffer = loose ? kUniformBufferIndex : binding;
             compiler.add_msl_resource_binding(remap);
-
-            if (loose) {
-                const auto& type = compiler.get_type(block.base_type_id);
-                output->ubo_size = static_cast<uint32_t>(
-                    compiler.get_declared_struct_size(type));
-                for (uint32_t i = 0; i < type.member_types.size(); ++i) {
-                    UboMember member;
-                    member.name = compiler.get_member_name(block.base_type_id, i);
-                    member.offset = compiler.get_member_decoration(
-                        block.base_type_id, i, spv::DecorationOffset);
-                    member.size = static_cast<uint32_t>(
-                        compiler.get_declared_struct_member_size(type, i));
-                    const auto& member_type =
-                        compiler.get_type(type.member_types[i]);
-                    member.vector_components =
-                        std::max(member_type.vecsize, 1u);
-                    member.matrix_columns =
-                        std::max(member_type.columns, 1u);
-                    member.array_elements = 1;
-                    for (uint32_t dimension : member_type.array)
-                        member.array_elements *= std::max(dimension, 1u);
-                    if (!member_type.array.empty())
-                        member.array_stride = static_cast<uint32_t>(
-                            compiler.type_struct_member_array_stride(type, i));
-                    if (member_type.columns > 1)
-                        member.matrix_stride = static_cast<uint32_t>(
-                            compiler.type_struct_member_matrix_stride(type, i));
-                    member.row_major = compiler.has_member_decoration(
-                        block.base_type_id, i, spv::DecorationRowMajor);
-                    output->members.push_back(std::move(member));
-                }
-            }
         }
 
         output->uses_sampled_images = !resources.sampled_images.empty();
@@ -2815,7 +2783,9 @@ bool Clear(const backend::ClearParams& params) {
 
 uint64_t CreateProgram(const std::vector<uint32_t>& vs,
                        const std::vector<uint32_t>& fs,
-                       const std::vector<std::string>& uniform_names) {
+                       const std::vector<std::string>& uniform_names,
+                       const backend::UniformBlockLayout& vertex_uniforms,
+                       const backend::UniformBlockLayout& fragment_uniforms) {
     if (!EnsureInit()) return 0;
     auto& engine = GetEngine();
     const uint64_t handle = HashWords(vs, fs);
@@ -2828,6 +2798,10 @@ uint64_t CreateProgram(const std::vector<uint32_t>& vs,
     @autoreleasepool {
         Program program;
         program.handle = handle;
+        program.vertex.ubo_size = vertex_uniforms.size;
+        program.vertex.members = vertex_uniforms.members;
+        program.fragment.ubo_size = fragment_uniforms.size;
+        program.fragment.members = fragment_uniforms.members;
         if (!TranslateStage(vs, spv::ExecutionModelVertex, &program.vertex) ||
             !TranslateStage(fs, spv::ExecutionModelFragment, &program.fragment) ||
             !ResolveUniformMemberSlots(&program.vertex, uniform_names) ||

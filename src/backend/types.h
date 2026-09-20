@@ -245,7 +245,7 @@ struct ArrayView {
     const T& operator[](size_t index) const { return data[index]; }
 };
 
-// Native shader reflection for one member of the synthetic loose-uniform
+// Shared shader reflection for one member of the synthetic loose-uniform
 // block. GL setters expose tightly packed scalar sequences, while std140/MSL
 // layouts may add a stride between array elements or matrix rows/columns.
 struct UniformMemberLayout {
@@ -258,6 +258,13 @@ struct UniformMemberLayout {
     uint32_t array_stride = 0;
     uint32_t matrix_stride = 0;
     bool row_major = false;
+};
+
+// The shader owner resolves this layout once for each linked stage. Native
+// execution can choose separate storage for the two stages.
+struct UniformBlockLayout {
+    uint32_t size = 0;
+    std::vector<UniformMemberLayout> members;
 };
 
 // Copy one GL uniform snapshot into its reflected block layout. Values use
