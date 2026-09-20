@@ -33,7 +33,7 @@ jobs:
         shell: bash
         env:
           EXPECTED_ARCHIVE_SHA256: f54ced0977155afe23346a0b4fd88f467593ec510112d843544c82bcdc7dcc27
-          EXPECTED_TREE: 92e1be92d38e8179a30ab4f01f90e7bf945a3aee
+          EXPECTED_TREE: fd1e07b5220f11b96bfde36c25b90e06eafbbb80
           EXPECTED_EXPORTS_SHA256: eb29af2d78dcb86defebd37a685c7a2daead8f4c43a5e23b520b5fdf6cab7828
         run: |
           set -euo pipefail
@@ -73,6 +73,11 @@ jobs:
           scripts/audit-branches.py
           scripts/validate_agent_contract.py
           DELETE_PATHS
+
+          test "$(git ls-tree HEAD third_party/SPIRV-Cross | awk '{print $3}')" = 9c3c8e2cefdd8194b193bb8ed2fdff4d5527e382
+          test "$(git ls-tree HEAD third_party/SPIRV-Headers | awk '{print $3}')" = 942fe4b988359a0750b79f0ae7ed735994d3147d
+          test "$(git ls-tree HEAD third_party/Vulkan-Headers | awk '{print $3}')" = f9973cd97e6f3584707e7ef1c425e336f1b92a5b
+          test "$(git ls-tree HEAD third_party/glslang | awk '{print $3}')" = 90afccfbd49dff0349d86a41762e9de24e1df811
 
           before="$(sha256sum src/gl/exports.cpp | awk '{print $1}')"
           test "$before" = "$EXPECTED_EXPORTS_SHA256"
