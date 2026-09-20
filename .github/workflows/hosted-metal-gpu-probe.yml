@@ -2,6 +2,10 @@ name: platform-runtime-validation
 
 on:
   workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/hosted-metal-gpu-probe.yml'
+      - '.github/ci/SimulatorSmokeSentinel.c'
 
 permissions:
   contents: read
@@ -92,11 +96,38 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          evidence="$RUNNER_TEMP/mithril-simulator-evidence"
+          mkdir -p "$evidence/tests"
+          {
+            echo "repository=$GITHUB_REPOSITORY"
+            echo "event=$GITHUB_EVENT_NAME"
+            echo "github_sha=$GITHUB_SHA"
+            echo "checked_out_sha=$(git rev-parse HEAD)"
+            echo "checked_out_tree=$(git rev-parse HEAD^{tree})"
+            echo "ref=$GITHUB_REF"
+            echo "head_ref=$GITHUB_HEAD_REF"
+            echo "base_ref=$GITHUB_BASE_REF"
+            echo "run_id=$GITHUB_RUN_ID"
+            echo "run_attempt=$GITHUB_RUN_ATTEMPT"
+            echo "workflow_ref=${GITHUB_WORKFLOW_REF:-}"
+            echo "workflow_sha=${GITHUB_WORKFLOW_SHA:-}"
+            echo "runner_os=$RUNNER_OS"
+            echo "runner_arch=$RUNNER_ARCH"
+            uname -a
+            sw_vers
+            xcodebuild -version
+            xcrun --sdk iphonesimulator clang --version
+            echo "simulator_sdk=$(xcrun --sdk iphonesimulator --show-sdk-version)"
+          } > "$evidence/provenance.txt"
+          python3 -c 'import json,os; d=json.load(open(os.environ["GITHUB_EVENT_PATH"])); pr=d.get("pull_request") or {}; print("event_head_sha="+pr.get("head",{}).get("sha","")); print("event_base_sha="+pr.get("base",{}).get("sha",""))' >> "$evidence/provenance.txt"
+          xcrun simctl list devices available -j > "$evidence/available-simulators.json"
           udid="$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(x["udid"] for runtime, devices in d["devices"].items() if "iOS" in runtime for x in devices if x.get("isAvailable") and x.get("name", "").startswith("iPhone")))')"
           test -n "$udid"
           echo "udid=$udid" >> "$GITHUB_OUTPUT"
           xcrun simctl boot "$udid" || true
           xcrun simctl bootstatus "$udid" -b
+          echo "simulator_udid=$udid" >> "$evidence/provenance.txt"
+          xcrun simctl list devices -j > "$evidence/simulator-state-after-boot.json"
 
       - name: Build DirectMetal for arm64 iOS Simulator
         id: build
@@ -120,9 +151,11 @@ jobs:
           artifact="$(find build-hosted-ios-sim/output -type f -name 'libmithril.dylib' -print -quit)"
           test -n "$artifact"
           echo "artifact=$artifact" >> "$GITHUB_OUTPUT"
-          file "$artifact"
-          xcrun vtool -show-build "$artifact" | tee "$RUNNER_TEMP/vtool-sim.txt"
-          grep -Eiq 'platform[[:space:]]+(IOSSIMULATOR|7)' "$RUNNER_TEMP/vtool-sim.txt"
+          evidence="$RUNNER_TEMP/mithril-simulator-evidence"
+          file "$artifact" | tee "$evidence/libmithril.file.txt"
+          shasum -a 256 "$artifact" | tee "$evidence/libmithril.sha256"
+          xcrun vtool -show-build "$artifact" | tee "$evidence/vtool-sim.txt"
+          grep -Eiq 'platform[[:space:]]+(IOSSIMULATOR|7)' "$evidence/vtool-sim.txt"
 
       - name: Compile simulator DirectMetal smoke executables
         shell: bash
@@ -130,6 +163,8 @@ jobs:
           set -euo pipefail
           sdk="$(xcrun --sdk iphonesimulator --show-sdk-path)"
           target_flags=(-target arm64-apple-ios16.0-simulator -isysroot "$sdk")
+          evidence="$RUNNER_TEMP/mithril-simulator-evidence"
+          : > "$evidence/smoke-executables.sha256"
           for test_name in draw_smoke provoking_vertex_smoke packed_vertex_attrib_smoke fbo_smoke directmetal_fbo_smoke layered_fbo_smoke stencil_persistence_smoke; do
             xcrun --sdk iphonesimulator clang "${target_flags[@]}" \
               -std=c11 -Wall -Wextra -Dmain=mithril_smoke_main \
@@ -137,6 +172,7 @@ jobs:
             xcrun --sdk iphonesimulator clang "${target_flags[@]}" \
               -std=c11 -Wall -Wextra .github/ci/SimulatorSmokeSentinel.c \
               "$RUNNER_TEMP/${test_name}.o" -o "$RUNNER_TEMP/${test_name}"
+            shasum -a 256 "$RUNNER_TEMP/$test_name" >> "$evidence/smoke-executables.sha256"
           done
 
       - name: Install and run DirectMetal smokes in Simulator
@@ -145,19 +181,23 @@ jobs:
           set -euo pipefail
           udid="${{ steps.simulator.outputs.udid }}"
           dylib="${{ steps.build.outputs.artifact }}"
+          evidence="$RUNNER_TEMP/mithril-simulator-evidence"
+          printf 'test\tbundle\tlaunch_rc\tverdict\n' > "$evidence/results.tsv"
+
           run_app() {
             local test_name="$1" bundle="$2" expected="$3"
-            local app="$RUNNER_TEMP/${test_name}.app"
-            mkdir -p "$app"
-            cp "$RUNNER_TEMP/${test_name}" "$app/${test_name}"
+            local app="$RUNNER_TEMP/$test_name.app"
+            local test_evidence="$evidence/tests/$test_name"
+            mkdir -p "$app" "$test_evidence"
+            cp "$RUNNER_TEMP/$test_name" "$app/$test_name"
             cp "$dylib" "$app/libmithril.dylib"
             cat > "$app/Info.plist" <<PLIST
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0"><dict>
-          <key>CFBundleExecutable</key><string>${test_name}</string>
-          <key>CFBundleIdentifier</key><string>${bundle}</string>
-          <key>CFBundleName</key><string>${test_name}</string>
+          <key>CFBundleExecutable</key><string>$test_name</string>
+          <key>CFBundleIdentifier</key><string>$bundle</string>
+          <key>CFBundleName</key><string>$test_name</string>
           <key>CFBundlePackageType</key><string>APPL</string>
           <key>CFBundleShortVersionString</key><string>1.0</string>
           <key>CFBundleVersion</key><string>1</string>
@@ -168,31 +208,67 @@ jobs:
           PLIST
             codesign --force --sign - --timestamp=none "$app/libmithril.dylib"
             codesign --force --sign - --timestamp=none "$app"
-            xcrun simctl install "$udid" "$app"
+            cp "$app/Info.plist" "$test_evidence/Info.plist"
+            shasum -a 256 "$app/$test_name" "$app/libmithril.dylib" > "$test_evidence/app.sha256"
+            printf '%s\n' "$bundle" > "$test_evidence/bundle.txt"
+            printf '%s\n' "$expected" > "$test_evidence/expected-sentinel.txt"
 
-            local container sentinel output rc actual
+            xcrun simctl uninstall "$udid" "$bundle" >/dev/null 2>&1 || true
+            set +e
+            xcrun simctl install "$udid" "$app" > "$test_evidence/install.log" 2>&1
+            local install_rc=$?
+            set -e
+            cat "$test_evidence/install.log"
+            printf '%s\n' "$install_rc" > "$test_evidence/install.rc"
+            if [[ "$install_rc" -ne 0 ]]; then
+              printf '%s\t%s\t-\tINSTALL_FAILED\n' "$test_name" "$bundle" >> "$evidence/results.tsv"
+              return 1
+            fi
+
+            local container sentinel launch_rc actual
             container="$(xcrun simctl get_app_container "$udid" "$bundle" data)"
+            printf '%s\n' "$container" > "$test_evidence/data-container.txt"
             sentinel="$container/tmp/mithril-ci-result.txt"
             rm -f "$sentinel"
+
             set +e
-            output="$(SIMCTL_CHILD_MITHRIL_LIBRARY='@executable_path/libmithril.dylib' \
+            env \
+              SIMCTL_CHILD_MITHRIL_LIBRARY='@executable_path/libmithril.dylib' \
               SIMCTL_CHILD_MITHRIL_BACKEND=metal \
               SIMCTL_CHILD_MITHRIL_EXPECT_RENDERER='Mithril DirectMetal' \
               SIMCTL_CHILD_MITHRIL_SIMULATOR_SUCCESS_MARKER="$expected" \
-              xcrun simctl launch --console "$udid" "$bundle" 2>&1)"
-            rc=$?
+              xcrun simctl launch --console "$udid" "$bundle" > "$test_evidence/launch.log" 2>&1
+            launch_rc=$?
             set -e
-            printf '%s\n' "$output"
-            test "$rc" -eq 0
+            printf '%s\n' "$launch_rc" > "$test_evidence/launch.rc"
+            cat "$test_evidence/launch.log"
+
             for _ in $(seq 1 30); do
               [[ -f "$sentinel" ]] && break
               sleep 1
             done
-            test -f "$sentinel"
+            if [[ ! -f "$sentinel" ]]; then
+              printf '%s\t%s\t%s\tMISSING_SENTINEL\n' "$test_name" "$bundle" "$launch_rc" >> "$evidence/results.tsv"
+              xcrun simctl listapps "$udid" > "$test_evidence/listapps.txt" 2>&1 || true
+              echo "$test_name: no fresh success sentinel; launch rc=$launch_rc" >&2
+              return 1
+            fi
+
+            cp "$sentinel" "$test_evidence/sentinel.txt"
             actual="$(tr -d '\r\n' < "$sentinel")"
-            test "$actual" = "$expected"
-            echo "${test_name}: verified sandbox sentinel '${actual}'"
+            if [[ "$actual" != "$expected" ]]; then
+              printf '%s\t%s\t%s\tSENTINEL_MISMATCH\n' "$test_name" "$bundle" "$launch_rc" >> "$evidence/results.tsv"
+              echo "$test_name: sentinel mismatch: expected '$expected', got '$actual'" >&2
+              return 1
+            fi
+
+            printf '%s\t%s\t%s\tPASS\n' "$test_name" "$bundle" "$launch_rc" >> "$evidence/results.tsv"
+            if [[ "$launch_rc" -ne 0 ]]; then
+              echo "::notice title=CoreSimulator launch status::$test_name returned $launch_rc after writing the exact success sentinel"
+            fi
+            echo "$test_name: verified fresh sandbox sentinel '$actual' (simctl launch rc=$launch_rc)"
           }
+
           run_app draw_smoke com.mithril.ci.draw 'DRAW SMOKE ALL PASSED'
           run_app provoking_vertex_smoke com.mithril.ci.provoking 'provoking_vertex_smoke: PASS'
           run_app packed_vertex_attrib_smoke com.mithril.ci.packedattrib 'packed_vertex_attrib_smoke: PASS'
@@ -200,6 +276,14 @@ jobs:
           run_app directmetal_fbo_smoke com.mithril.ci.fbo 'directmetal_fbo_smoke: PASS'
           run_app layered_fbo_smoke com.mithril.ci.layeredfbo 'layered_fbo_smoke: PASS'
           run_app stencil_persistence_smoke com.mithril.ci.stencil 'stencil_persistence_smoke: PASS'
+
+      - name: Upload iOS Simulator evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ios-simulator-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/mithril-simulator-evidence
+          if-no-files-found: error
 
       - name: Shutdown Simulator
         if: always()
