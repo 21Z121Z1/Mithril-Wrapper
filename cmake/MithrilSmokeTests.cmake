@@ -54,6 +54,7 @@ set(_mithril_directmetal_smokes
     fbo_smoke
     layered_fbo_smoke
     directmetal_fbo_smoke
+    directmetal_incomplete_fbo_smoke
     directmetal_buffer_streaming_smoke
     directmetal_resident_index_smoke
     directmetal_uniform_snapshot_smoke
