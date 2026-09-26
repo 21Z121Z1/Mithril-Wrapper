@@ -659,6 +659,23 @@ EGLBoolean eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
         if (!pending && depth != VK_NULL_HANDLE)
             pending = backend_has_pending_clear_for_view(depth) != 0;
         if (pending && (n > 0 || depth != VK_NULL_HANDLE)) {
+            if (g_state->currentDrawFBO != 0) {
+                GLuint colorTexIds[8] = {0};
+                GLuint depthTexId = 0;
+                mithril::Framebuffer* fbo =
+                    mithril::state_get_framebuffer(g_state->currentDrawFBO);
+                if (fbo) {
+                    for (int i = 0; i < n && i < 8; ++i) {
+                        GLenum db = (i < fbo->drawBufferCount) ? fbo->drawBuffers[i] : GL_NONE;
+                        if (db >= GL_COLOR_ATTACHMENT0 &&
+                            db < GL_COLOR_ATTACHMENT0 + mithril::kMaxColorAttachments) {
+                            colorTexIds[i] = fbo->colors[db - GL_COLOR_ATTACHMENT0].texture;
+                        }
+                    }
+                    depthTexId = fbo->depth.texture;
+                }
+                backend_set_fbo_attachment_tex_ids(colorTexIds, n, depthTexId);
+            }
             backend_begin_render_pass(colors, n, depth, w, h, 1);
             backend_end_render_pass();
         }
