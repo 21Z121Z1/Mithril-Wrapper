@@ -1210,6 +1210,16 @@ bool glsl_to_spirv(GLenum gl_stage, const std::string& src,
                 info += program2.getInfoDebugLog();
                 return false;
             }
+            // Device-proven archive semantics: setAutoMapLocations/Bindings are
+            // materialized by mapIO(), not merely by link(). The current
+            // cross-stage SPIR-V reconciliation remains authoritative after
+            // per-stage compilation and resolves separately auto-mapped varyings.
+            if (!program2.mapIO()) {
+                info = "glslang mapIO failed: ";
+                info += program2.getInfoLog();
+                info += program2.getInfoDebugLog();
+                return false;
+            }
             glslang::TIntermediate* inter2 = program2.getIntermediate(stage);
             if (!inter2) { info = "no intermediate after link (unwrapped retry)"; return false; }
             glslang::SpvOptions spv_opts2;
@@ -1225,6 +1235,16 @@ bool glsl_to_spirv(GLenum gl_stage, const std::string& src,
     program.addShader(&shader);
     if (!program.link(messages)) {
         info = program.getInfoLog();
+        info += program.getInfoDebugLog();
+        return false;
+    }
+    // Required by glslang for setAutoMapLocations/setAutoMapBindings. This was
+    // present in the last device-proven DirectVulkan tree (e10d9c / legacy
+    // archive) and complements, rather than replaces, Program.cpp's cross-stage
+    // SPIR-V interface reconciliation.
+    if (!program.mapIO()) {
+        info = "glslang mapIO failed: ";
+        info += program.getInfoLog();
         info += program.getInfoDebugLog();
         return false;
     }
