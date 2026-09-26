@@ -24,6 +24,55 @@
 #define GL_STENCIL 0x1802
 #endif
 
+namespace {
+
+bool materialize_pending_clear_for_current_draw_fbo() {
+    VkImageView colors[8] = {VK_NULL_HANDLE};
+    VkImageView depth = VK_NULL_HANDLE;
+    int w = 0, h = 0;
+    int n = mithril::collect_draw_fbo_attachments(colors, &depth, &w, &h);
+
+    bool pending = false;
+    for (int i = 0; i < n && i < 8; ++i) {
+        if (colors[i] != VK_NULL_HANDLE &&
+            backend_has_pending_clear_for_view(colors[i])) {
+            pending = true;
+            break;
+        }
+    }
+    if (!pending && depth != VK_NULL_HANDLE)
+        pending = backend_has_pending_clear_for_view(depth) != 0;
+    if (!pending || (n == 0 && depth == VK_NULL_HANDLE)) return false;
+
+    // User-FBO layout transitions need the GL texture names backing the views.
+    // The hot draw path already registers them; explicit flush/finish can run
+    // with no draw at all, so do the same registration here before opening the
+    // tiny clear pass.
+    if (g_state->currentDrawFBO != 0) {
+        GLuint colorTexIds[8] = {0};
+        GLuint depthTexId = 0;
+        mithril::Framebuffer* fbo =
+            mithril::state_get_framebuffer(g_state->currentDrawFBO);
+        if (fbo) {
+            for (int i = 0; i < n && i < 8; ++i) {
+                GLenum db = (i < fbo->drawBufferCount) ? fbo->drawBuffers[i] : GL_NONE;
+                if (db >= GL_COLOR_ATTACHMENT0 &&
+                    db < GL_COLOR_ATTACHMENT0 + mithril::kMaxColorAttachments) {
+                    colorTexIds[i] = fbo->colors[db - GL_COLOR_ATTACHMENT0].texture;
+                }
+            }
+            depthTexId = fbo->depth.texture;
+        }
+        backend_set_fbo_attachment_tex_ids(colorTexIds, n, depthTexId);
+    }
+
+    backend_begin_render_pass(colors, n, depth, w, h, 1);
+    backend_end_render_pass();
+    return true;
+}
+
+} // namespace
+
 extern "C" {
 
 /* ---- Clear ---- */
@@ -614,12 +663,14 @@ void glActiveTexture(GLenum texture) {
 /* ---- Flush / finish ---- */
 void glFlush(void) {
     MITHRIL_ENSURE_INIT();
+    materialize_pending_clear_for_current_draw_fbo();
     backend_end_render_pass();
     backend_commit();
 }
 
 void glFinish(void) {
     MITHRIL_ENSURE_INIT();
+    materialize_pending_clear_for_current_draw_fbo();
     backend_end_render_pass();
     backend_commit();
     // GL requires glFinish to return only after all prior effects are
