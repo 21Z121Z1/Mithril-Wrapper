@@ -419,17 +419,22 @@ void glLinkProgram(GLuint program) {
                     u.blockBinding = (GLint)db.binding;
                     u.type = GL_SAMPLER_2D;
                     u.size = 1;
+                    // OpenGL initializes active uniform values to zero after a
+                    // successful link. For a sampler that means texture unit 0
+                    // even if the application never calls glUniform1i().
+                    // Keeping Uniform::value empty while the descriptor map was
+                    // initialized to -1 made glGetUniformiv report 0 but the
+                    // Vulkan draw path bind the fallback texture: two different
+                    // observable states for the same uniform.
+                    u.value = {0.0f};
                     p->uniforms[db.name] = u;
                     p->uniformByLocation[u.location] = db.name;
                 }
-                p->samplerUnitMap[(GLuint)db.binding] = -1;
-                // 同步初始化 samplerUnitForBinding（DescriptorSet.cpp 读这个 map）。
-                // 之前只写 samplerUnitMap 不写 samplerUnitForBinding，靠
-                // `unit = db.binding` 的 legacy fallback 碰巧工作（binding 0~31
-                // == texture unit 0~31）。现在 inject_opaque_bindings 给 FS 的
-                // sampler binding 加了 64 偏移，fallback 会取 texture unit 65 越界。
-                // 在 link 时用 -1 初始化，glUniform1i 时再写入真实 unit。
-                p->samplerUnitForBinding[(GLuint)db.binding] = -1;
+                p->samplerUnitMap[(GLuint)db.binding] = 0;
+                // Descriptor binding -> GL texture unit follows the same GL
+                // default value. glUniform1i() overwrites this when the app
+                // assigns another unit.
+                p->samplerUnitForBinding[(GLuint)db.binding] = 0;
             }
         }
     } catch (const std::exception& e) {
