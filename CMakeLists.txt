@@ -49,20 +49,21 @@ endif()
 
 # ---------------------------------------------------------------------------
 # MoltenVK: Vulkan 1.2 implementation backed by Metal 2.
-# Linked dynamically via libMoltenVK.dylib (v1.2.9, from Amethyst).
-# Lives at Mithril-Wrapper-cpp/3rdparty/MoltenVK/libMoltenVK.dylib.
-# Post-build patches the install_name reference to match Amethyst's layout.
-# Vulkan headers come from MoltenVK-Headers (extracted from the CI tarball
-# or from the MoltenVK.xcframework/Headers fallback).
+#
+# Match MobileGL/Amethyst's iOS deployment model: libmithril.dylib links the
+# libMoltenVK.dylib already bundled by the host application instead of
+# embedding a second MoltenVK copy from the static xcframework.
+# MITHRIL_VULKAN_LIBRARY lets the host build pass that exact dylib path.
+# If it is omitted, iOS falls back to the vendored Amethyst dylib while native
+# macOS builds fall back to Homebrew. Vulkan headers remain a build-time input.
 # ---------------------------------------------------------------------------
+set(MITHRIL_VULKAN_LIBRARY "" CACHE FILEPATH
+    "Vulkan loader/MoltenVK dylib to link on Apple builds")
+
 if(APPLE)
-    # NOTE: NO_CMAKE_FIND_ROOT_PATH is required here. leetal/ios-cmake sets
-    # CMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY, which re-roots every search path
-    # under the iOS sysroot. MoltenVK is staged at the REPO ROOT by the CI
-    # workflow (MoltenVK-Headers/, MoltenVK.xcframework/...), NOT inside the
-    # sysroot, so without this flag find_path would look for
-    # <sysroot>/.../MoltenVK-Headers and fail with REQUIRED. This mirrors the
-    # NO_CMAKE_FIND_ROOT_PATH already present on the find_library call below.
+    # ios-cmake re-roots include searches under the SDK by default, while the
+    # downloaded MoltenVK headers live in the checkout. Keep this search
+    # explicitly outside CMAKE_FIND_ROOT_PATH.
     find_path(MOLTENVK_INCLUDE_DIR
         NAMES vulkan/vulkan.h
         PATHS
@@ -75,12 +76,6 @@ if(APPLE)
             "${CMAKE_SOURCE_DIR}/Mithril-Wrapper-cpp/3rdparty/MoltenVK/MoltenVK.xcframework/Headers"
             "${CMAKE_SOURCE_DIR}/MoltenVK.xcframework/ios-arm64/Headers"
             "${CMAKE_SOURCE_DIR}/MoltenVK.xcframework/ios-arm64_x86_64-simulator/Headers"
-            # --- native macOS host build (CI E2E / local smoke) -------------
-            # `brew install molten-vk vulkan-headers` stages the Vulkan headers
-            # under <prefix>/include/MoltenVK (MoltenVK ships the Vulkan
-            # headers it was built against) and/or <prefix>/include. Without
-            # these fallbacks a host (non-iOS) configure cannot find
-            # vulkan/vulkan.h and CMake stops at REQUIRED.
             /opt/homebrew/opt/molten-vk/include/MoltenVK
             /usr/local/opt/molten-vk/include/MoltenVK
             /opt/homebrew/opt/molten-vk/include
@@ -96,29 +91,33 @@ if(APPLE)
     )
     message(STATUS "MoltenVK headers: ${MOLTENVK_INCLUDE_DIR}")
 
-    # Link against the MoltenVK static library. The CI workflow downloads the
-    # MoltenVK iOS tarball and stages it at the REPO ROOT as
-    #   MoltenVK.xcframework/ios-arm64/libMoltenVK.a   (static lib)
-    #   MoltenVK-Headers/vulkan/vulkan.h               (headers)
-    # (see .github/workflows/build.yml "Download MoltenVK" step). The legacy
-    # Mithril-Wrapper-cpp/3rdparty/MoltenVK location is kept only as a fallback
-    # for local checkouts that vendor the dylib there. NAMES covers both
-    # libMoltenVK.a (CI) and a bare MoltenVK.framework (local).
-    find_library(MOLTENVK_LIBRARY
-        NAMES MoltenVK libMoltenVK
-        PATHS
-            "${CMAKE_SOURCE_DIR}/MoltenVK.xcframework/ios-arm64"
-            "${CMAKE_SOURCE_DIR}/MoltenVK.xcframework"
-            "${CMAKE_SOURCE_DIR}/Mithril-Wrapper-cpp/3rdparty/MoltenVK"
-            # --- native macOS host build (CI E2E / local smoke) -------------
-            # Homebrew installs libMoltenVK.dylib into <prefix>/lib.
-            /opt/homebrew/opt/molten-vk/lib
-            /usr/local/opt/molten-vk/lib
-            /opt/homebrew/lib
-            /usr/local/lib
-        NO_CMAKE_FIND_ROOT_PATH
-        REQUIRED
-    )
+    if(MITHRIL_VULKAN_LIBRARY)
+        get_filename_component(MOLTENVK_LIBRARY
+            "${MITHRIL_VULKAN_LIBRARY}" ABSOLUTE
+            BASE_DIR "${CMAKE_SOURCE_DIR}")
+        if(NOT EXISTS "${MOLTENVK_LIBRARY}")
+            message(FATAL_ERROR
+                "MITHRIL_VULKAN_LIBRARY does not exist: ${MOLTENVK_LIBRARY}")
+        endif()
+    elseif(IOS AND EXISTS
+            "${CMAKE_SOURCE_DIR}/Mithril-Wrapper-cpp/3rdparty/MoltenVK/libMoltenVK.dylib")
+        set(MOLTENVK_LIBRARY
+            "${CMAKE_SOURCE_DIR}/Mithril-Wrapper-cpp/3rdparty/MoltenVK/libMoltenVK.dylib")
+    else()
+        # Native macOS smoke builds use the Homebrew dylib. The vendored dylib
+        # remains a fallback for Apple builds that do not pass an explicit path.
+        find_library(MOLTENVK_LIBRARY
+            NAMES MoltenVK libMoltenVK
+            PATHS
+                "${CMAKE_SOURCE_DIR}/Mithril-Wrapper-cpp/3rdparty/MoltenVK"
+                /opt/homebrew/opt/molten-vk/lib
+                /usr/local/opt/molten-vk/lib
+                /opt/homebrew/lib
+                /usr/local/lib
+            NO_CMAKE_FIND_ROOT_PATH
+            REQUIRED
+        )
+    endif()
     message(STATUS "MoltenVK library: ${MOLTENVK_LIBRARY}")
 endif()
 
@@ -300,29 +299,9 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 )
 
 if(APPLE)
-    # MoltenVK static framework + Vulkan headers. The framework transitively
-    # links Metal.framework / QuartzCore.framework / Foundation.framework, but
-    # we still list them explicitly to satisfy -framework lookup when the
-    # static link strips MoltenVK's lazy references. UIKit is required because
-    # libMoltenVK.a references UIScreen / UIView (iOS surface/scale handling).
-    #
-    # -force_load: forces the linker to load ALL object files from the MoltenVK
-    # static archive, including C++ static initializers that register Vulkan
-    # instance extensions (VK_EXT_metal_surface, VK_KHR_surface, etc.) at
-    # library load time. Without this flag, the linker may strip object files
-    # whose symbols are not directly referenced — even with -ObjC, which only
-    # preserves Objective-C classes/categories but NOT pure C++ global
-    # constructors. When those initializers are missing,
-    # vkEnumerateInstanceExtensionProperties returns 0 extensions,
-    # VK_EXT_metal_surface is never enabled at instance creation,
-    # vkCreateMetalSurfaceEXT resolves to null, and swapchain creation fails.
-    #
-    # -ObjC: forces the linker to load all Objective-C class/category symbols
-    # from static archives. MoltenVK's libMoltenVK.a contains ObjC++ code
-    # (Metal interop); without this flag, categories may be stripped and cause
-    # runtime "unrecognized selector" crashes. Standard Apple recommendation
-    # for static libraries containing Objective-C. This flag COMBINED with
-    # -force_load above ensures both ObjC and C++ initializers are loaded.
+    # Keep MoltenVK as a runtime dependency, matching MobileGL's Amethyst
+    # integration. This avoids embedding a second MoltenVK implementation in
+    # libmithril.dylib when the host already ships libMoltenVK.dylib.
     target_include_directories(${PROJECT_NAME} PRIVATE ${MOLTENVK_INCLUDE_DIR})
     target_link_libraries(${PROJECT_NAME} PRIVATE
         "${MOLTENVK_LIBRARY}"
@@ -332,28 +311,18 @@ if(APPLE)
         "-framework CoreGraphics"
         "-framework IOSurface"
     )
-    # UIKit is an iOS-only framework (absent on macOS). libMoltenVK.a references
-    # UIScreen / UIView for iOS surface/scale handling, so it is required on iOS
-    # but must NOT be linked on a native macOS build (test-macos-smoke) or the
-    # linker fails with "framework 'UIKit' not found". The iOS toolchain
-    # (ios.toolchain.cmake) defines the CMake IOS variable; a native macOS build
-    # does not.
+
     if(IOS)
         target_link_libraries(${PROJECT_NAME} PRIVATE "-framework UIKit")
-    endif()
-    # The bundled libMoltenVK.dylib has install name
-    # "@rpath/MoltenVK.framework/MoltenVK", but it's a raw dylib, not a
-    # framework bundle. Patch the load reference so libmithril.dylib looks
-    # for "@rpath/libMoltenVK.dylib" instead — which is where Amethyst
-    # places it at runtime.
-    #
-    # Only relevant on iOS: the iOS MoltenVK ships as a .framework bundle with
-    # that install name. A native macOS build (test-macos-smoke) links the
-    # Homebrew libMoltenVK.dylib, whose load reference is already the real
-    # dylib path — patching it to @rpath/libMoltenVK.dylib would break dyld
-    # resolution. install_name_tool -change would silently no-op (old string
-    # absent) but we keep the guard explicit so macOS keeps the true path.
-    if(IOS)
+
+        # Amethyst places libmithril.dylib and libMoltenVK.dylib in the same
+        # Frameworks directory. Emit only a relocatable @loader_path rpath and
+        # normalize MoltenVK's framework install name to that host layout.
+        set_target_properties(${PROJECT_NAME} PROPERTIES
+            BUILD_RPATH "@loader_path"
+            INSTALL_RPATH "@loader_path"
+            BUILD_WITH_INSTALL_RPATH TRUE
+        )
         add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
             COMMAND install_name_tool -change
                 "@rpath/MoltenVK.framework/MoltenVK"
@@ -362,8 +331,11 @@ if(APPLE)
             COMMENT "Patching MoltenVK load path: @rpath/MoltenVK.framework/MoltenVK → @rpath/libMoltenVK.dylib"
         )
     endif()
+
     target_compile_definitions(${PROJECT_NAME} PRIVATE MITHRIL_VULKAN=1)
 else()
+    target_link_libraries(${PROJECT_NAME} PRIVATE ${CMAKE_DL_LIBS})
+endif()else()
     target_link_libraries(${PROJECT_NAME} PRIVATE ${CMAKE_DL_LIBS})
 endif()
 

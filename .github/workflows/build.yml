@@ -31,72 +31,39 @@ jobs:
           echo "Toolchain downloaded:"
           ls -l ios.toolchain.cmake
 
-      - name: Download MoltenVK (static framework + Vulkan headers)
+      - name: Prepare MoltenVK dylib + Vulkan headers
         run: |
-          # Pull a tagged MoltenVK release tarball (iOS-only). The tarball
-          # layout (v1.4.x) is:
-          #
-          #   MoltenVK/MoltenVK/
-          #     ├── include/vulkan/vulkan.h        ← Vulkan headers (SEPARATE
-          #     │                                    from the xcframework!)
-          #     ├── static/MoltenVK.xcframework/   ← static framework
-          #     │     ├── Info.plist
-          #     │     └── ios-arm64/libMoltenVK.a
-          #     └── dynamic/MoltenVK.xcframework/  ← dynamic framework (unused)
-          #
-          # The static xcframework does NOT bundle headers — they live in the
-          # sibling `include/` directory. We move both into place at the repo
-          # root so CMakeLists.txt's find_path (MoltenVK-Headers) and
-          # find_library (MoltenVK.xcframework) resolve them.
-          #
-          # MoltenVK v1.4.x requires iOS 15.0+ (raised minimum target).
-          set -uo pipefail
+          set -euo pipefail
+
+          # Use the same MoltenVK binary Amethyst bundles at runtime. This file
+          # is intentionally a dylib, not the static MoltenVK.xcframework.
+          MOLTENVK_DYLIB="Mithril-Wrapper-cpp/3rdparty/MoltenVK/libMoltenVK.dylib"
+          test -f "${MOLTENVK_DYLIB}"
+          echo "=== Host-compatible MoltenVK dylib ==="
+          file "${MOLTENVK_DYLIB}"
+          echo "git blob: $(git hash-object "${MOLTENVK_DYLIB}")"
+
+          # Headers are only a build-time dependency. Keep using a tagged
+          # Khronos release so the CI input is reproducible.
           MOLTENVK_TAG="v1.4.2"
           TARBALL="MoltenVK-ios.tar"
-          echo "Fetching MoltenVK ${MOLTENVK_TAG} (iOS)..."
           curl -fsSL -o "${TARBALL}" \
             "https://github.com/KhronosGroup/MoltenVK/releases/download/${MOLTENVK_TAG}/${TARBALL}"
-          ls -lh "${TARBALL}"
-          # Extract to a staging dir to inspect the layout.
+
           mkdir -p moltenvk-staging
           tar -xf "${TARBALL}" -C moltenvk-staging
-          echo "=== Tarball top-level contents ==="
-          ls -la moltenvk-staging/
-          echo "=== Searching for STATIC MoltenVK.xcframework ==="
-          # Prefer the static framework (the dynamic framework's headers live
-          # inside per-platform slices, and we want static linking anyway).
-          FOUND=$(find moltenvk-staging -type d -name "MoltenVK.xcframework" -path "*static*" | head -1)
-          if [ -z "${FOUND}" ]; then
-            # Fallback: any MoltenVK.xcframework (older tarballs may not split static/dynamic)
-            FOUND=$(find moltenvk-staging -type d -name "MoltenVK.xcframework" | head -1)
-          fi
-          if [ -z "${FOUND}" ]; then
-            echo "::error::MoltenVK.xcframework not found in tarball. Contents:"
-            find moltenvk-staging -maxdepth 4 -type d | head -40
-            exit 1
-          fi
-          echo "Found xcframework at: ${FOUND}"
-          mv "${FOUND}" ./MoltenVK.xcframework
-          echo "=== Searching for Vulkan headers (include/) ==="
-          # The headers are in a sibling `include/` directory next to the
-          # static/dynamic framework dirs: MoltenVK/MoltenVK/include/vulkan/vulkan.h
           HDRS=$(find moltenvk-staging -type d -name "vulkan" -path "*/include/vulkan" | head -1)
           if [ -z "${HDRS}" ]; then
-            echo "::error::Vulkan headers (include/vulkan/) not found in tarball."
-            find moltenvk-staging -maxdepth 4 -type d | head -40
+            echo "::error::Vulkan headers (include/vulkan/) not found in MoltenVK release."
             exit 1
           fi
-          HDR_ROOT=$(dirname "${HDRS}")   # .../include
-          echo "Found headers at: ${HDR_ROOT}"
+          HDR_ROOT=$(dirname "${HDRS}")
           mv "${HDR_ROOT}" ./MoltenVK-Headers
           rm -rf moltenvk-staging
-          echo "=== Verify layout ==="
-          ls -ld MoltenVK.xcframework
+
+          echo "=== Vulkan headers ==="
           ls -l MoltenVK-Headers/vulkan/vulkan.h
           ls -l MoltenVK-Headers/vulkan/vulkan_metal.h || true
-          ls -l MoltenVK.xcframework/ios-arm64/libMoltenVK.a
-          echo "=== xcframework contents ==="
-          ls -l MoltenVK.xcframework/ || true
 
       - name: Configure (iOS arm64)
         run: |
@@ -106,6 +73,7 @@ jobs:
             -DDEPLOYMENT_TARGET=15.0 \
             -DENABLE_BITCODE=OFF \
             -DENABLE_ARC=OFF \
+            -DMITHRIL_VULKAN_LIBRARY="${GITHUB_WORKSPACE}/Mithril-Wrapper-cpp/3rdparty/MoltenVK/libMoltenVK.dylib" \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DCMAKE_C_FLAGS="-Wno-error=implicit-function-declaration" \
             -DCMAKE_CXX_FLAGS="-Wno-error"
@@ -174,17 +142,37 @@ jobs:
             exit 1
           fi
 
-      - name: Verify Vulkan backend symbols
+      - name: Verify Vulkan backend + MobileGL-style MoltenVK linkage
         run: |
+          set -euo pipefail
           DYLIB="${{ steps.locate.outputs.path }}"
           NM_OUT=$(nm -gU "$DYLIB")
           echo "=== Vulkan backend C API symbols (sample) ==="
           echo "$NM_OUT" | grep -Ei ' [Tt] _?(backend_init|backend_available|backend_create_swapchain|backend_get_or_create_pipeline)' | head
-          echo "=== Vulkan loader symbols (resolved by static MoltenVK link) ==="
-          # vkCreateInstance / vkCreateDevice etc. are NOT exported by libmithril
-          # (they are interior to the backend), so we just confirm the dylib
-          # contains MoltenVK-linked code by checking for an indirect symbol.
-          otool -L "$DYLIB" | head -20
+
+          echo "=== Mach-O dependencies ==="
+          DEPS=$(otool -L "$DYLIB")
+          echo "$DEPS"
+          if ! echo "$DEPS" | grep -Fq "@rpath/libMoltenVK.dylib"; then
+            echo "::error::libmithril.dylib does not dynamically depend on @rpath/libMoltenVK.dylib"
+            exit 1
+          fi
+          if echo "$DEPS" | grep -Fq "@rpath/MoltenVK.framework/MoltenVK"; then
+            echo "::error::framework-style MoltenVK install name leaked into libmithril.dylib"
+            exit 1
+          fi
+          if echo "$DEPS" | grep -Fq "${GITHUB_WORKSPACE}"; then
+            echo "::error::checkout-local absolute path leaked into Mach-O dependencies"
+            exit 1
+          fi
+
+          echo "=== LC_RPATH entries ==="
+          RPATHS=$(otool -l "$DYLIB" | awk '/cmd LC_RPATH/{getline; getline; print $2}')
+          printf '%s\n' "$RPATHS"
+          if ! printf '%s\n' "$RPATHS" | grep -Fxq "@loader_path"; then
+            echo "::error::libmithril.dylib is missing LC_RPATH @loader_path"
+            exit 1
+          fi
 
       - name: Compile-check + contract-check GL smoke tests (gl_smoke.c + render_smoke.c)
         run: |

@@ -1,7 +1,7 @@
 // Mithril-Wrapper - MG_Backend/DirectVulkan/Device.cpp
 // Vulkan 1.2 instance / physical-device / device / queue / command pool init.
-// MoltenVK is statically linked, so vkCreateInstance etc. resolve at link time
-// (no loader, no VK_ICD_FILENAMES).
+// MoltenVK is linked directly from the host-bundled dylib, so Vulkan entry
+// points still resolve at link time (no Vulkan loader or VK_ICD_FILENAMES).
 
 // VK_EXT_metal_surface extension-name macro. The canonical definition lives in
 // vulkan_metal.h, which vulkan.h only pulls in when VK_USE_PLATFORM_METAL_EXT

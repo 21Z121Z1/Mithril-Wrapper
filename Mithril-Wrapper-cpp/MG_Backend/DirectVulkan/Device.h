@@ -9,7 +9,8 @@
 //     VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR
 //   * VK_KHR_portability_subset device extension (always enabled alongside
 //     VK_KHR_swapchain)
-// MoltenVK is statically linked, so there is no Vulkan loader / ICD file.
+// MoltenVK is linked directly from the host-bundled dylib; there is no
+// separate Vulkan loader / ICD file.
 #ifndef MITHRIL_DIRECTVULKAN_DEVICE_H
 #define MITHRIL_DIRECTVULKAN_DEVICE_H
 
