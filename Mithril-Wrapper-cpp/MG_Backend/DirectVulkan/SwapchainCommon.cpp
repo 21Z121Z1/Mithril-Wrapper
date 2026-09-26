@@ -16,6 +16,7 @@
 //     must call vkDestroySurfaceKHR(b->instance, surface, nullptr) itself.
 #include "Swapchain.h"
 #include "Device.h"
+#include "CommandStream.h"
 #include "Resources.h"
 #include "../../MG_Impl/Log.h"
 

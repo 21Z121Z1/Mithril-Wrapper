@@ -685,8 +685,8 @@ bool init_device() {
     setenv("MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS", "0", 1);
     setenv("MVK_CONFIG_RESUME_LOST_DEVICE", "1", 1);
     setenv("MVK_CONFIG_SHADER_CONVERSION_FLIP_VERTEX_Y", "0", 1);
-    setenv("MVK_CONFIG_SUBMIT_COMMAND_BUFFERS_PER_QUEUE", "2", 1);
-    // MVK_CONFIG_VK_SEMAPHORE_SUPPORT_STYLE=1 (根因 E，深度参考 MoltenVK):
+    setenv("MVK_CONFIG_MAX_ACTIVE_METAL_COMMAND_BUFFERS_PER_QUEUE", "2", 1);
+    // MVK_CONFIG_VK_SEMAPHORE_SUPPORT_STYLE=2 (根因 E，深度参考 MoltenVK):
     //   强制使用 Metal 信号量（真实 GPU 侧同步）。Mithril 的同步设计完全
     //   依赖 Vulkan semaphore（imageAvailable: acquire→render；renderFinished:
     //   render→present）。MoltenVK 默认 VK_SEMAPHORE_SUPPORT_STYLE_METAL_EVENTS_WHERE_SAFE
@@ -694,9 +694,9 @@ bool init_device() {
     //   SingleQueue 模式，此时 vkQueueSubmit 的 semaphore wait/signal 全是 no-op
     //   （MVKSync.mm:87-101），GPU 侧无真实同步 → 渲染读取 stale image / present
     //   读取未完成像素 → 黑屏有声音。
-    //   显式设为 1（METAL_SEMAPHORE）强制所有平台使用真实 Metal 信号量，
+    //   显式设为 2（METAL_EVENTS_WHERE_AVAILABLE）优先使用 MTLEvent，
     //   消除跨 MoltenVK 版本/平台的不确定性。参考 MoltenVK MVKDevice.mm:3621-3627。
-    setenv("MVK_CONFIG_VK_SEMAPHORE_SUPPORT_STYLE", "1", 1);
+    setenv("MVK_CONFIG_VK_SEMAPHORE_SUPPORT_STYLE", "2", 1);
 
     // ---- Instance ----
     std::vector<VkExtensionProperties> instExtProps;
