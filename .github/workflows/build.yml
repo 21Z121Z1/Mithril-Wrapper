@@ -52,7 +52,7 @@ jobs:
 
           mkdir -p moltenvk-staging
           tar -xf "${TARBALL}" -C moltenvk-staging
-          HDRS=$(find moltenvk-staging -type d -name "vulkan" -path "*/include/vulkan" | head -1)
+          HDRS=$(find moltenvk-staging -type d -name "vulkan" -path "*/include/vulkan" -print -quit)
           if [ -z "${HDRS}" ]; then
             echo "::error::Vulkan headers (include/vulkan/) not found in MoltenVK release."
             exit 1
@@ -148,7 +148,7 @@ jobs:
           DYLIB="${{ steps.locate.outputs.path }}"
           NM_OUT=$(nm -gU "$DYLIB")
           echo "=== Vulkan backend C API symbols (sample) ==="
-          echo "$NM_OUT" | grep -Ei ' [Tt] _?(backend_init|backend_available|backend_create_swapchain|backend_get_or_create_pipeline)' | head
+          echo "$NM_OUT" | grep -Ei ' [Tt] _?(backend_init|backend_available|backend_create_swapchain|backend_get_or_create_pipeline)'
 
           echo "=== Mach-O dependencies ==="
           DEPS=$(otool -L "$DYLIB")

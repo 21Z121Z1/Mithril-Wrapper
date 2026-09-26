@@ -335,8 +335,6 @@ if(APPLE)
     target_compile_definitions(${PROJECT_NAME} PRIVATE MITHRIL_VULKAN=1)
 else()
     target_link_libraries(${PROJECT_NAME} PRIVATE ${CMAKE_DL_LIBS})
-endif()else()
-    target_link_libraries(${PROJECT_NAME} PRIVATE ${CMAKE_DL_LIBS})
 endif()
 
 # VK_ENABLE_BETA_EXTENSIONS: vulkan_core.h only includes vulkan_beta.h (which
