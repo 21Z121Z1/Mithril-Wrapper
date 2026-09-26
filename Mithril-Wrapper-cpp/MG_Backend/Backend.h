@@ -62,6 +62,7 @@ void backend_set_load_load(void);
 /* Defer glClear per attachment view until the pass targeting that view begins. */
 void backend_set_pending_clear_for_views(VkImageView* color_views, int color_count,
                                          VkImageView depth_view, unsigned int mask);
+int backend_has_pending_clear_for_view(VkImageView view);
 
 /*
  * Clear specific aspects of the current framebuffer's attachments using
