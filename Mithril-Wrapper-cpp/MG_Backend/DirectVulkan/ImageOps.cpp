@@ -17,6 +17,7 @@
 // Each path allocates a transient VkCommandBuffer from the backend's pool,
 // records + submits + waits on a dedicated fence, then frees the buffer.
 #include "Device.h"
+#include "CommandStream.h"
 #include "Resources.h"
 #include "../Backend.h"
 #include "../../MG_State/State.h"
