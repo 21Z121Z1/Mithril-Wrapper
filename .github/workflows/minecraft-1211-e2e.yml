@@ -291,6 +291,30 @@ jobs:
             exit 1
           fi
 
+          # Diagnostic split: capture one frame immediately after the renderer
+          # has demonstrated 20 presents. This tells us whether the default-FBO
+          # readback path is already black before resource loading finishes, or
+          # only becomes black during the final offscreen->default composition.
+          printf '%s\n' "early" > "$E2E_ROOT/render/prepresent-request.txt"
+          early_meta=""
+          early_deadline=$(( $(date +%s) + 45 ))
+          while [ "$(date +%s)" -lt "$early_deadline" ]; do
+            for f in "$E2E_ROOT"/render/prepresent-frame-*.meta; do
+              if [ -f "$f" ]; then early_meta="$f"; break; fi
+            done
+            [ -n "$early_meta" ] && break
+            kill -0 "$gradle_pid" 2>/dev/null || break
+            sleep 1
+          done
+          if [ -n "$early_meta" ]; then
+            early_raw="${early_meta%.meta}.rgba"
+            mv "$early_meta" "$E2E_ROOT/render/early-prepresent.meta"
+            [ -f "$early_raw" ] && mv "$early_raw" "$E2E_ROOT/render/early-prepresent.rgba"
+            echo "[mithril-e2e] early capture completed" >> "$E2E_ROOT/minecraft-client-run.log"
+          else
+            echo "[mithril-e2e] early capture unavailable" >> "$E2E_ROOT/minecraft-client-run.log"
+          fi
+
           # 2) Let it finish loading and settle on the main menu so the capture
           #    sees real GUI content rather than the transient loading screen.
           sleep 120
