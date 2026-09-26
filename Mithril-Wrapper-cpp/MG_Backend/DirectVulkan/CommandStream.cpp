@@ -116,6 +116,7 @@ struct EncoderState {
     // Read by eglSwapBuffers' B1 present log to distinguish "draws dropped"
     // (count 0) from "draws recorded but fragments not visible" (count > 0).
     uint32_t drawCount = 0;
+    uint64_t lifetimeDrawCount = 0;
 
     // ---- Root cause Y (CRITICAL): user-FBO attachment layout transitions ----
     // VK_KHR_dynamic_rendering's vkCmdBeginRendering does NOT auto-transition
@@ -408,6 +409,7 @@ bool draw_recording_allowed(const char* who) {
     }
     // B1 first-frame diagnostic: a real draw was recorded this frame.
     e.drawCount++;
+    e.lifetimeDrawCount++;
     return true;
 }
 
@@ -434,6 +436,7 @@ void set_clear_stencil(int s)  { encoder().clearStencil = s; }
 void set_load_clear(bool clear){ encoder().loadClear = clear; }
 
 unsigned int backend_get_recorded_draws() { return encoder().drawCount; }
+uint64_t backend_get_lifetime_recorded_draws() { return encoder().lifetimeDrawCount; }
 
 // GL 4.3 ARB_invalidate_subdata: mark attachments for discard (storeOp=DONT_CARE)
 // in the next begin_render_pass. One-shot: cleared after begin_render_pass applies.
