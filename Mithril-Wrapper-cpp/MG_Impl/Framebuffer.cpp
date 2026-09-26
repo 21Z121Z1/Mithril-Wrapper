@@ -1006,4 +1006,59 @@ int collect_draw_fbo_attachments(VkImageView out_color[8], VkImageView* out_dept
     return count;
 }
 
+int collect_read_fbo_attachments(VkImageView out_color[8], VkImageView* out_depth,
+                                 int* out_w, int* out_h,
+                                 GLuint* out_color_tex_id, GLuint* out_depth_tex_id) {
+    for (int i = 0; i < 8; ++i) out_color[i] = VK_NULL_HANDLE;
+    if (out_depth) *out_depth = VK_NULL_HANDLE;
+    if (out_color_tex_id) *out_color_tex_id = 0;
+    if (out_depth_tex_id) *out_depth_tex_id = 0;
+    if (out_w) *out_w = g_state->viewportW;
+    if (out_h) *out_h = g_state->viewportH;
+
+    if (g_state->currentReadFBO == 0) {
+        if (g_state->eglDefaultColor != VK_NULL_HANDLE) out_color[0] = g_state->eglDefaultColor;
+        if (out_depth && g_state->eglDefaultDepth != VK_NULL_HANDLE) *out_depth = g_state->eglDefaultDepth;
+        if (out_w && g_state->eglDefaultWidth > 0) *out_w = g_state->eglDefaultWidth;
+        if (out_h && g_state->eglDefaultHeight > 0) *out_h = g_state->eglDefaultHeight;
+        return out_color[0] != VK_NULL_HANDLE ? 1 : 0;
+    }
+
+    Framebuffer* fbo = state_get_framebuffer(g_state->currentReadFBO);
+    if (!fbo) return 0;
+
+    GLuint colorTex = 0;
+    if (fbo->readBuffer >= GL_COLOR_ATTACHMENT0 &&
+        fbo->readBuffer < GL_COLOR_ATTACHMENT0 + kMaxColorAttachments) {
+        colorTex = fbo->colors[fbo->readBuffer - GL_COLOR_ATTACHMENT0].texture;
+    } else if (fbo->readBuffer != GL_NONE) {
+        colorTex = fbo->colors[0].texture;
+    }
+
+    int count = 0;
+    if (colorTex != 0) {
+        out_color[0] = backend_get_texture_view(colorTex);
+        if (out_color[0] != VK_NULL_HANDLE) count = 1;
+        if (out_color_tex_id) *out_color_tex_id = colorTex;
+        Texture* color = state_get_texture(colorTex);
+        if (color) {
+            if (out_w) *out_w = color->width;
+            if (out_h) *out_h = color->height;
+        }
+    }
+
+    if (fbo->depth.texture != 0) {
+        if (out_depth) *out_depth = backend_get_texture_view(fbo->depth.texture);
+        if (out_depth_tex_id) *out_depth_tex_id = fbo->depth.texture;
+        if (count == 0) {
+            Texture* depth = state_get_texture(fbo->depth.texture);
+            if (depth) {
+                if (out_w) *out_w = depth->width;
+                if (out_h) *out_h = depth->height;
+            }
+        }
+    }
+    return count;
+}
+
 } // namespace mithril
