@@ -281,6 +281,28 @@ static bool prepare_draw(GLenum mode) {
     // call — see the root cause AI comment on this function. Note that the
     // render pass has NOT been begun at this point (that happens below), so
     // a draw issued here would be recorded outside any render-pass instance.
+    static uint64_t diag_default_fbo_draws = 0;
+    static uint64_t diag_user_fbo_draws = 0;
+    if (is_default_fbo) {
+        ++diag_default_fbo_draws;
+        if (diag_default_fbo_draws <= 5 || (diag_default_fbo_draws % 1000) == 0) {
+            MITHRIL_LOG_WARN("vk-diag",
+                "prepare_draw accepted default-FBO draw #%llu (user-FBO accepted=%llu program=%u)",
+                (unsigned long long)diag_default_fbo_draws,
+                (unsigned long long)diag_user_fbo_draws,
+                prog->id);
+        }
+    } else {
+        ++diag_user_fbo_draws;
+        if (diag_user_fbo_draws <= 5 || (diag_user_fbo_draws % 5000) == 0) {
+            MITHRIL_LOG_WARN("vk-diag",
+                "prepare_draw accepted user-FBO draw #%llu (default-FBO accepted=%llu program=%u)",
+                (unsigned long long)diag_user_fbo_draws,
+                (unsigned long long)diag_default_fbo_draws,
+                prog->id);
+        }
+    }
+
     if (pipeline == VK_NULL_HANDLE) {
         if (first_frame_diag()) {
             MITHRIL_LOG_ERROR("vk-diag", "B1 draw skipped: pipeline creation FAILED "
