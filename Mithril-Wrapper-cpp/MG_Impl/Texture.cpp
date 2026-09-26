@@ -903,6 +903,36 @@ void glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height,
                   GLenum format, GLenum type, void* pixels) {
     MITHRIL_ENSURE_INIT();
     if (!pixels || width <= 0 || height <= 0) return;
+    // Materialize an attachment-keyed deferred glClear before a synchronous
+    // read. glReadPixels must observe all prior GL commands. The deferred-clear
+    // path intentionally avoids a submit at glClear time, so a clear followed
+    // immediately by glReadPixels needs this tiny render pass to make the clear
+    // visible first. Resolve the READ FBO rather than assuming draw==read.
+    VkImageView readColors[8] = {VK_NULL_HANDLE};
+    VkImageView readDepth = VK_NULL_HANDLE;
+    int readW = 0, readH = 0;
+    GLuint readColorTex = 0, readDepthTex = 0;
+    int readColorCount = mithril::collect_read_fbo_attachments(
+        readColors, &readDepth, &readW, &readH, &readColorTex, &readDepthTex);
+    bool pendingClear = false;
+    for (int i = 0; i < readColorCount; ++i) {
+        if (backend_has_pending_clear_for_view(readColors[i])) {
+            pendingClear = true;
+            break;
+        }
+    }
+    if (!pendingClear && readDepth != VK_NULL_HANDLE)
+        pendingClear = backend_has_pending_clear_for_view(readDepth) != 0;
+    if (pendingClear && (readColorCount > 0 || readDepth != VK_NULL_HANDLE)) {
+        if (g_state->currentReadFBO != 0) {
+            GLuint colorTexIds[8] = {0};
+            colorTexIds[0] = readColorTex;
+            backend_set_fbo_attachment_tex_ids(colorTexIds, readColorCount, readDepthTex);
+        }
+        backend_begin_render_pass(readColors, readColorCount, readDepth, readW, readH, 1);
+        backend_end_render_pass();
+    }
+
     // Delegate to the backend: it resolves the current colour attachment
     // (EGL default framebuffer or the user FBO's GL_COLOR_ATTACHMENT0),
     // transitions it to TRANSFER_SRC_OPTIMAL, copies into a host-visible
