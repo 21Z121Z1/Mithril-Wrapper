@@ -147,13 +147,25 @@ extern "C" void mithril_e2e_capture_before_present(int width, int height, void* 
     // itself had never reported a failure. Draining first means the error we
     // inspect afterwards can only come from this call.
     int drained = 0;
+    char error_codes[256] = {0};
+    size_t error_off = 0;
     for (int i = 0; i < 64; ++i) {
-        if (getError() == GL_NO_ERROR) break;
+        GLenum stale = getError();
+        if (stale == GL_NO_ERROR) break;
         ++drained;
+        if (error_off + 12 < sizeof(error_codes)) {
+            int n = std::snprintf(error_codes + error_off,
+                                  sizeof(error_codes) - error_off,
+                                  "%s0x%04x", error_off ? "," : "",
+                                  (unsigned)stale);
+            if (n > 0) error_off += static_cast<size_t>(n);
+        }
     }
     if (drained > 0) {
-        char detail[96];
-        std::snprintf(detail, sizeof(detail), "drained %d stale GL error(s)", drained);
+        char detail[384];
+        std::snprintf(detail, sizeof(detail),
+                      "drained %d stale GL error(s): [%s]",
+                      drained, error_codes);
         append_event(root, "capture_drained_stale_errors", frame, detail);
     }
 
