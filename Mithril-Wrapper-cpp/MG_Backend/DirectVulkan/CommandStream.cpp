@@ -136,6 +136,10 @@ struct EncoderState {
         return true;
     }
 
+    bool has_pending_clear_for_view(VkImageView view) const {
+        return view != VK_NULL_HANDLE && pendingClears.find(view) != pendingClears.end();
+    }
+
     bool is_attachment_rendered(VkImageView view) const {
         if (view == VK_NULL_HANDLE) return false;
         auto it = renderedThisFrame.find(view);
@@ -2044,6 +2048,10 @@ void backend_set_pending_clear_for_views(VkImageView* color_views, int color_cou
     }
     if (depth_view != VK_NULL_HANDLE)
         e.set_pending_clear_for_view(depth_view, mask, e.clearColor, e.clearDepth, e.clearStencil);
+}
+
+int backend_has_pending_clear_for_view(VkImageView view) {
+    return mithril::vk::encoder().has_pending_clear_for_view(view) ? 1 : 0;
 }
 
 void backend_set_invalidate_attachments(uint32_t color_mask, bool depth, bool stencil) {
