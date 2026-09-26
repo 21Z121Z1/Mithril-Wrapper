@@ -316,6 +316,16 @@ static bool prepare_draw(GLenum mode) {
                         (unsigned)backend_get_texture_layout(tex));
                 }
             }
+            for (const auto& mapping : prog->samplerUnitForBinding) {
+                const GLint unit = mapping.second;
+                const GLuint tex = (unit >= 0 && unit < mithril::kMaxTextureUnits)
+                    ? g_state->boundTextures[unit] : 0;
+                MITHRIL_LOG_WARN("vk-diag",
+                    "default-FBO draw #%llu sampler binding=%u -> unit=%d tex=%u layout=%u",
+                    (unsigned long long)diag_default_fbo_draws,
+                    mapping.first, unit, tex,
+                    tex ? (unsigned)backend_get_texture_layout(tex) : 0u);
+            }
         }
     } else {
         ++diag_user_fbo_draws;
