@@ -371,7 +371,10 @@ int main(int argc, char** argv) {
     genBuffers(1, &vbo);
     bindBuffer(GL_ARRAY_BUFFER, vbo);
     bufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_STATIC_DRAW);
-    vertexAttribPtr(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(GLfloat), (const void*)0);
+    /* Regression: GL stride=0 means tightly packed (2 floats here), not Vulkan
+       binding stride 0. The archived iOS device line carried this fix in
+       1d6b9fe3; keeping this draw at stride=0 makes the real-GPU smoke prove it. */
+    vertexAttribPtr(0, 2, GL_FLOAT, GL_FALSE, 0, (const void*)0);
     enableAttrib(0);
     CHECK(getError() == GL_NO_ERROR, "VAO/VBO setup leaves no error");
 
