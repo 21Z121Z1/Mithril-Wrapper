@@ -50,10 +50,12 @@ struct Swapchain {
     // Index of the currently-acquired image. -1 when none acquired.
     int             currentImage = -1;
 
-    // Semaphore signaled by vkAcquireNextImageKHR; the next vkQueueSubmit
-    // waits on it (at COLOR_ATTACHMENT_OUTPUT stage) before the recorded
-    // layout-transition barrier + draw commands execute.
-    VkSemaphore     imageAvailable = VK_NULL_HANDLE;
+    // Acquire semaphores are indexed by the in-flight frame slot. Vulkan
+    // requires an acquire semaphore to have no uncompleted signal/wait
+    // operations when reused. The slot fence is waited before that slot's
+    // semaphore is handed to vkAcquireNextImageKHR again.
+    std::vector<VkSemaphore> imageAvailablePerFrame;
+    int             imageAvailableFrameSlot = -1;
 
     // Per-swapchain-image render-finished semaphores. vkQueueSubmit signals
     // renderFinishedPerImage[currentImage] when the frame's command buffer
@@ -80,7 +82,8 @@ struct Swapchain {
     // consumes the signal.
     std::vector<bool> renderFinishedSignaledPerImage;
 
-    // Tracks whether imageAvailable has been consumed by a vkQueueSubmit wait
+    // Tracks whether the current frame-slot acquire semaphore has been consumed
+    // by a vkQueueSubmit wait
     // this frame. vkAcquireNextImageKHR signals imageAvailable; the FIRST
     // vkQueueSubmit of the frame MUST wait on it (at COLOR_ATTACHMENT_OUTPUT
     // stage) so the GPU does not start writing to the swapchain image before
