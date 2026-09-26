@@ -815,7 +815,11 @@ int main(int argc, char** argv) {
             useProgram(toProg);
             activeTexture(GL_TEXTURE0);
             bindTexture(GL_TEXTURE_2D, sampTex);
-            if (toLoc >= 0) uniform1i(toLoc, 0);
+            /* Deliberately do NOT call glUniform1i here. GL initializes sampler
+             * uniforms to zero after link, so uTex must sample texture unit 0
+             * by default. Other discriminants below exercise explicit
+             * glUniform1i mapping. */
+            (void)toLoc;
             bindVertexArray(texVao);
             clearColor(0.0f, 0.0f, 0.0f, 0.0f);
             clear(GL_COLOR_BUFFER_BIT);
@@ -825,7 +829,7 @@ int main(int argc, char** argv) {
             readPixels(R / 2, C / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, topx);
             /* 全白纹理 → 期望 r,g,b≥200, a=255 */
             CHECK(topx[0] >= 200 && topx[1] >= 200 && topx[2] >= 200 && topx[3] > 128,
-                  "texture-only path: white 2x2 sampled readback=(%d,%d,%d,%d)",
+                  "texture-only default sampler unit0: white 2x2 sampled readback=(%d,%d,%d,%d)",
                   topx[0], topx[1], topx[2], topx[3]);
         }
 
