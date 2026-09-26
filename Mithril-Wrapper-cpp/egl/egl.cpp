@@ -644,6 +644,26 @@ EGLBoolean eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
         }
     }
 
+    // Preserve deferred glClear even for clear-only frames. The archive's
+    // device-proven path keyed pending clears by attachment view and forced a
+    // tiny pass at swap if no draw had consumed them.
+    if (!backend_render_pass_active()) {
+        VkImageView colors[8] = {VK_NULL_HANDLE};
+        VkImageView depth = VK_NULL_HANDLE;
+        int w = 0, h = 0;
+        int n = mithril::collect_draw_fbo_attachments(colors, &depth, &w, &h);
+        bool pending = false;
+        for (int i = 0; i < n && i < 8; ++i) {
+            if (backend_has_pending_clear_for_view(colors[i])) { pending = true; break; }
+        }
+        if (!pending && depth != VK_NULL_HANDLE)
+            pending = backend_has_pending_clear_for_view(depth) != 0;
+        if (pending && (n > 0 || depth != VK_NULL_HANDLE)) {
+            backend_begin_render_pass(colors, n, depth, w, h, 1);
+            backend_end_render_pass();
+        }
+    }
+
     // Flush any pending Vulkan work into the current swapchain image view.
     // swapchain_flush_and_commit() = backend_end_render_pass() + backend_commit():
     // end the active render pass and submit the command buffer, so the encoded
