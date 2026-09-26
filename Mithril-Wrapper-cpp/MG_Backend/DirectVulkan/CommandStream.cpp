@@ -2111,6 +2111,7 @@ void backend_set_fbo_attachment_tex_ids(GLuint* color_tex_ids, int color_count,
 }
 
 void backend_end_render_pass(void) { mithril::vk::end_render_pass(); }
+int backend_render_pass_active(void) { return mithril::vk::render_pass_active() ? 1 : 0; }
 void backend_commit(void)          { mithril::vk::commit_frame(); }
 
 void backend_set_active_swapchain(void* swapchain_state) {
