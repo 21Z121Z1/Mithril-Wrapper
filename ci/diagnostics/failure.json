@@ -1,0 +1,9 @@
+{
+  "failure_id": "WRAPPER_IDENTITY_OR_RED_SCREEN_FAILED",
+  "message": "Mithril identity / GL 3.3 caps / red-screen gate failed",
+  "phase": "runtime_identity",
+  "recorded_at": "2026-09-26T17:33:06.440292Z",
+  "retryable": false,
+  "schema_version": "1.0",
+  "status": "failed"
+}
