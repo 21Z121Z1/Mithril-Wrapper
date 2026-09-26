@@ -42,6 +42,7 @@ void set_load_clear(bool clear);   // true = CLEAR (glClear), false = LOAD
 // >0 => draws were recorded but fragments may still be invisible (depth/
 // viewport/shader). Read by eglSwapBuffers' B1 present log.
 unsigned int backend_get_recorded_draws();
+uint64_t backend_get_lifetime_recorded_draws();
 
 /*
  * Register the swapchain whose currently-acquired image is the render target
