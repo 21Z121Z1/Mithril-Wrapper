@@ -556,9 +556,6 @@ void set_fbo_attachment_tex_ids(GLuint* color_tex_ids, int color_count,
     for (int i = 0; i < 8; ++i) e.fboColorTexIds[i] = 0;
     e.fboColorTexCount = 0;
     e.fboDepthTexId = 0;
-    e.pendingClears.clear();
-    e.pendingInlineClears.clear();
-    e.renderedThisFrame.clear();
 
     int n = color_count > 8 ? 8 : (color_count < 0 ? 0 : color_count);
     for (int i = 0; i < n; ++i) {
@@ -2016,6 +2013,9 @@ void reset_encoder_state() {
     for (int i = 0; i < 8; ++i) e.fboColorTexIds[i] = 0;
     e.fboColorTexCount = 0;
     e.fboDepthTexId = 0;
+    e.pendingClears.clear();
+    e.pendingInlineClears.clear();
+    e.renderedThisFrame.clear();
     // Clear commandBufferRecording so the next ensure_command_buffer_recording()
     // lazily resets+begins the current slot's buffer rather than trusting a
     // stale recording flag left over from the pre-deviceLost frame.
