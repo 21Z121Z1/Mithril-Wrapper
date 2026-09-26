@@ -405,13 +405,10 @@ static bool prepare_draw(GLenum mode) {
             vk_cull = 3;  // VK_CULL_MODE_FRONT_AND_BACK
         }
         backend_set_cull_mode(vk_cull);
-        // A positive-height Vulkan viewport reverses GL window-space winding
-        // on the iOS MoltenVK path, including user FBOs. The physical-device
-        // Minecraft 26.2 run exposed this on offscreen passes.
+        // Only the default framebuffer selects the Y-flipped vertex SPIR-V.
+        // User FBOs use the non-flipped variant, so their GL winding must not
+        // receive a second, iOS-wide front-face inversion.
         bool invert_front_face = is_default_fbo;
-#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
-        invert_front_face = true;
-#endif
         backend_set_front_face(
             invert_front_face ?
                 (g_state->frontFace == GL_CCW ? 0 /*CW*/ : 1 /*CCW*/) :
