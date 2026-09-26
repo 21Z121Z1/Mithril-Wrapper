@@ -92,6 +92,29 @@ void glDisableVertexAttribArray(GLuint index) {
     vao->attribs[index].enabled = false;
 }
 
+// GL stride==0 means tightly packed; Vulkan stride==0 means every vertex
+// reads the same element. Preserve desktop GL semantics before the state reaches
+// the Vulkan pipeline. This is device-proven behaviour from
+// archive/pre-mithrilwrapper-dev-upstream-20260926 (1d6b9fe3).
+static int attrib_element_bytes(GLenum type) {
+    switch (type) {
+        case GL_BYTE:
+        case GL_UNSIGNED_BYTE: return 1;
+        case GL_SHORT:
+        case GL_UNSIGNED_SHORT:
+        case GL_HALF_FLOAT: return 2;
+        case GL_INT:
+        case GL_UNSIGNED_INT:
+        case GL_FLOAT:
+        case GL_FIXED:
+        case GL_INT_2_10_10_10_REV:
+        case GL_UNSIGNED_INT_2_10_10_10_REV:
+        case GL_UNSIGNED_INT_10F_11F_11F_REV: return 4;
+        case GL_DOUBLE: return 8;
+        default: return 4;
+    }
+}
+
 void glVertexAttribPointer(GLuint index, GLint size, GLenum type,
                            GLboolean normalized, GLsizei stride, const void* pointer) {
     MITHRIL_ENSURE_INIT();
@@ -106,7 +129,7 @@ void glVertexAttribPointer(GLuint index, GLint size, GLenum type,
     a.type         = type;
     a.normalized   = (normalized != 0);
     a.integer      = false;
-    a.stride       = stride;
+    a.stride       = (stride > 0) ? stride : (size * attrib_element_bytes(type));
     a.pointer      = pointer;
     a.boundBuffer  = g_state->bufferBindings[(int)mithril::BufferTarget::Array].name;
 }
