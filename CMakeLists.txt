@@ -104,12 +104,12 @@ if(APPLE)
         set(MOLTENVK_LIBRARY
             "${CMAKE_SOURCE_DIR}/Mithril-Wrapper-cpp/3rdparty/MoltenVK/libMoltenVK.dylib")
     else()
-        # Native macOS smoke builds use the Homebrew dylib. The vendored dylib
-        # remains a fallback for Apple builds that do not pass an explicit path.
+        # Native macOS smoke builds must use a macOS MoltenVK dylib. Do not
+        # consider the vendored Amethyst binary here: it is the iOS runtime
+        # payload and cannot be linked into a native macOS test executable.
         find_library(MOLTENVK_LIBRARY
             NAMES MoltenVK libMoltenVK
             PATHS
-                "${CMAKE_SOURCE_DIR}/Mithril-Wrapper-cpp/3rdparty/MoltenVK"
                 /opt/homebrew/opt/molten-vk/lib
                 /usr/local/opt/molten-vk/lib
                 /opt/homebrew/lib

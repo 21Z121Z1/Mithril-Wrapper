@@ -1,7 +1,8 @@
 // Mithril-Wrapper - MG_Backend/DirectVulkan/Device.cpp
 // Vulkan 1.2 instance / physical-device / device / queue / command pool init.
-// MoltenVK is linked directly from the host-bundled dylib, so Vulkan entry
-// points still resolve at link time (no Vulkan loader or VK_ICD_FILENAMES).
+// On Apple builds MoltenVK is linked as a dylib (host-bundled on iOS,
+// Homebrew on macOS), so Vulkan entry points resolve at link time without a
+// separate Vulkan loader or VK_ICD_FILENAMES.
 
 // VK_EXT_metal_surface extension-name macro. The canonical definition lives in
 // vulkan_metal.h, which vulkan.h only pulls in when VK_USE_PLATFORM_METAL_EXT

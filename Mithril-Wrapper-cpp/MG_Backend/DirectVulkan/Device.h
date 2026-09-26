@@ -9,8 +9,8 @@
 //     VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR
 //   * VK_KHR_portability_subset device extension (always enabled alongside
 //     VK_KHR_swapchain)
-// MoltenVK is linked directly from the host-bundled dylib; there is no
-// separate Vulkan loader / ICD file.
+// Apple builds link MoltenVK directly as a dylib (host-bundled on iOS,
+// Homebrew on macOS); there is no separate Vulkan loader / ICD file.
 #ifndef MITHRIL_DIRECTVULKAN_DEVICE_H
 #define MITHRIL_DIRECTVULKAN_DEVICE_H
 
