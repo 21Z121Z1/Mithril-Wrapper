@@ -281,28 +281,6 @@ static bool prepare_draw(GLenum mode) {
     // call — see the root cause AI comment on this function. Note that the
     // render pass has NOT been begun at this point (that happens below), so
     // a draw issued here would be recorded outside any render-pass instance.
-    static uint64_t diag_default_fbo_draws = 0;
-    static uint64_t diag_user_fbo_draws = 0;
-    if (is_default_fbo) {
-        ++diag_default_fbo_draws;
-        if (diag_default_fbo_draws <= 5 || (diag_default_fbo_draws % 1000) == 0) {
-            MITHRIL_LOG_WARN("vk-diag",
-                "prepare_draw accepted default-FBO draw #%llu (user-FBO accepted=%llu program=%u)",
-                (unsigned long long)diag_default_fbo_draws,
-                (unsigned long long)diag_user_fbo_draws,
-                prog->id);
-        }
-    } else {
-        ++diag_user_fbo_draws;
-        if (diag_user_fbo_draws <= 5 || (diag_user_fbo_draws % 5000) == 0) {
-            MITHRIL_LOG_WARN("vk-diag",
-                "prepare_draw accepted user-FBO draw #%llu (default-FBO accepted=%llu program=%u)",
-                (unsigned long long)diag_user_fbo_draws,
-                (unsigned long long)diag_default_fbo_draws,
-                prog->id);
-        }
-    }
-
     if (pipeline == VK_NULL_HANDLE) {
         if (first_frame_diag()) {
             MITHRIL_LOG_ERROR("vk-diag", "B1 draw skipped: pipeline creation FAILED "
@@ -311,6 +289,42 @@ static bool prepare_draw(GLenum mode) {
             diag_log_formats(color_formats, color_count, depth_format);
         }
         return false;
+    }
+
+    static uint64_t diag_default_fbo_draws = 0;
+    static uint64_t diag_user_fbo_draws = 0;
+    if (is_default_fbo) {
+        ++diag_default_fbo_draws;
+        if (diag_default_fbo_draws <= 8 || (diag_default_fbo_draws % 1000) == 0) {
+            MITHRIL_LOG_WARN("vk-diag",
+                "default-FBO draw #%llu user=%llu program=%u viewport=%d,%d %dx%d "
+                "scissorTest=%d scissor=%d,%d %dx%d colorMask=%d%d%d%d depth=%d cull=%d attribs=%d colors=%d",
+                (unsigned long long)diag_default_fbo_draws,
+                (unsigned long long)diag_user_fbo_draws, prog->id,
+                g_state->viewportX, g_state->viewportY, g_state->viewportW, g_state->viewportH,
+                (int)g_state->scissorTest, g_state->scissorX, g_state->scissorY,
+                g_state->scissorW, g_state->scissorH,
+                (int)g_state->colorMask[0][0], (int)g_state->colorMask[0][1],
+                (int)g_state->colorMask[0][2], (int)g_state->colorMask[0][3],
+                (int)g_state->depthTest, (int)g_state->cullFace, attrib_count, color_count);
+            for (int unit = 0; unit < mithril::kMaxTextureUnits; ++unit) {
+                const GLuint tex = g_state->boundTextures[unit];
+                if (tex) {
+                    MITHRIL_LOG_WARN("vk-diag",
+                        "default-FBO draw #%llu tex[%d]=%u layout=%u",
+                        (unsigned long long)diag_default_fbo_draws, unit, tex,
+                        (unsigned)backend_get_texture_layout(tex));
+                }
+            }
+        }
+    } else {
+        ++diag_user_fbo_draws;
+        if (diag_user_fbo_draws <= 5 || (diag_user_fbo_draws % 5000) == 0) {
+            MITHRIL_LOG_WARN("vk-diag",
+                "user-FBO draw #%llu default=%llu program=%u",
+                (unsigned long long)diag_user_fbo_draws,
+                (unsigned long long)diag_default_fbo_draws, prog->id);
+        }
     }
 
     // FIX (root cause Y, CRITICAL): Register user-FBO attachment tex_ids so
