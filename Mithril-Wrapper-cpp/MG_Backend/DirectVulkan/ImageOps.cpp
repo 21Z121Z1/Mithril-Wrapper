@@ -1123,6 +1123,49 @@ void blit_texture(GLuint src_name, GLuint dst_name,
  * memory barriers without needing to know whether each image is a swapchain
  * drawable (COLOR_ATTACHMENT_OPTIMAL) or a user texture (SHADER_READ_ONLY).
  */
+static VkAccessFlags access_for_layout(VkImageLayout layout, bool destination) {
+    switch (layout) {
+        case VK_IMAGE_LAYOUT_UNDEFINED:
+        case VK_IMAGE_LAYOUT_PRESENT_SRC_KHR:
+            return 0;
+        case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:
+            return VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
+                   VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
+        case VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL:
+            return VK_ACCESS_SHADER_READ_BIT;
+        case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
+            return VK_ACCESS_TRANSFER_READ_BIT;
+        case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
+            return VK_ACCESS_TRANSFER_WRITE_BIT;
+        case VK_IMAGE_LAYOUT_GENERAL:
+            return destination ? VK_ACCESS_MEMORY_WRITE_BIT :
+                                 VK_ACCESS_MEMORY_READ_BIT;
+        default:
+            return destination ? VK_ACCESS_MEMORY_WRITE_BIT :
+                                 VK_ACCESS_MEMORY_READ_BIT;
+    }
+}
+
+static VkPipelineStageFlags stage_for_layout(VkImageLayout layout) {
+    switch (layout) {
+        case VK_IMAGE_LAYOUT_UNDEFINED:
+            return VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+        case VK_IMAGE_LAYOUT_PRESENT_SRC_KHR:
+            return VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
+        case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:
+            return VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
+        case VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL:
+            return VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
+        case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
+            return VK_PIPELINE_STAGE_TRANSFER_BIT;
+        default:
+            return VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+    }
+}
+
 void blit_images_impl(VkImage src_image, VkFormat src_format,
                       VkImageLayout src_initial, VkImageLayout src_final,
                       VkImage dst_image, VkFormat dst_format,
@@ -1172,9 +1215,7 @@ void blit_images_impl(VkImage src_image, VkFormat src_format,
     // Transition source to TRANSFER_SRC_OPTIMAL.
     VkImageMemoryBarrier sb{};
     sb.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    sb.srcAccessMask = (src_initial == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
-                        ? VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
-                        : VK_ACCESS_SHADER_READ_BIT;
+    sb.srcAccessMask = access_for_layout(src_initial, false);
     sb.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
     sb.oldLayout = src_initial;
     sb.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
@@ -1186,9 +1227,7 @@ void blit_images_impl(VkImage src_image, VkFormat src_format,
     sb.subresourceRange.levelCount = 1;
     sb.subresourceRange.baseArrayLayer = 0;
     sb.subresourceRange.layerCount = 1;
-    VkPipelineStageFlags srcStage = (src_initial == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
-                        ? VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
-                        : VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    VkPipelineStageFlags srcStage = stage_for_layout(src_initial);
     vkCmdPipelineBarrier(c.cmd, srcStage,
                          VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
                          0, nullptr, 0, nullptr, 1, &sb);
@@ -1196,9 +1235,7 @@ void blit_images_impl(VkImage src_image, VkFormat src_format,
     // Transition destination to TRANSFER_DST_OPTIMAL.
     VkImageMemoryBarrier db{};
     db.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    db.srcAccessMask = (dst_initial == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
-                        ? VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
-                        : VK_ACCESS_SHADER_READ_BIT;
+    db.srcAccessMask = access_for_layout(dst_initial, true);
     db.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
     db.oldLayout = dst_initial;
     db.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
@@ -1210,9 +1247,7 @@ void blit_images_impl(VkImage src_image, VkFormat src_format,
     db.subresourceRange.levelCount = 1;
     db.subresourceRange.baseArrayLayer = 0;
     db.subresourceRange.layerCount = 1;
-    VkPipelineStageFlags dstStage = (dst_initial == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
-                        ? VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
-                        : VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    VkPipelineStageFlags dstStage = stage_for_layout(dst_initial);
     vkCmdPipelineBarrier(c.cmd, dstStage,
                          VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
                          0, nullptr, 0, nullptr, 1, &db);
@@ -1239,27 +1274,19 @@ void blit_images_impl(VkImage src_image, VkFormat src_format,
 
     // Transition both images back to their final layouts.
     sb.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-    sb.dstAccessMask = (src_final == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
-                        ? (VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT)
-                        : VK_ACCESS_SHADER_READ_BIT;
+    sb.dstAccessMask = access_for_layout(src_final, true);
     sb.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
     sb.newLayout = src_final;
-    VkPipelineStageFlags srcFinalStage = (src_final == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
-                        ? VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
-                        : VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    VkPipelineStageFlags srcFinalStage = stage_for_layout(src_final);
     vkCmdPipelineBarrier(c.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
                          srcFinalStage, 0,
                          0, nullptr, 0, nullptr, 1, &sb);
 
     db.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    db.dstAccessMask = (dst_final == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
-                        ? (VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT)
-                        : VK_ACCESS_SHADER_READ_BIT;
+    db.dstAccessMask = access_for_layout(dst_final, true);
     db.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     db.newLayout = dst_final;
-    VkPipelineStageFlags dstFinalStage = (dst_final == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
-                        ? VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
-                        : VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    VkPipelineStageFlags dstFinalStage = stage_for_layout(dst_final);
     vkCmdPipelineBarrier(c.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
                          dstFinalStage, 0,
                          0, nullptr, 0, nullptr, 1, &db);
@@ -1300,20 +1327,44 @@ void backend_blit_images(VkImage src_image, VkFormat src_format,
                          int dstX0, int dstY0, int dstX1, int dstY1,
                          GLbitfield mask, GLenum filter,
                          int is_dst_default_fbo, int dst_height) {
-    // Both images are assumed to be in a sampling or attachment layout before
-    // the blit. The swapchain color image is in COLOR_ATTACHMENT_OPTIMAL
-    // (it was just rendered into, or will be rendered into next frame); user
-    // FBO textures are in SHADER_READ_ONLY_OPTIMAL (after an upload or a
-    // previous blit). We transition them back to those same layouts after the
-    // blit so subsequent rendering / sampling continues to work.
-    //
-    // Heuristic: if the format is a color format (not depth/stencil), assume
-    // COLOR_ATTACHMENT_OPTIMAL for the initial/final layout. This matches the
-    // common glBlitFramebuffer case (blitting between render targets that are
-    // actively being rendered into). For depth/stencil formats we would use
-    // DEPTH_STENCIL_ATTACHMENT_OPTIMAL, but depth blits are not yet supported.
-    VkImageLayout src_layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    VkImageLayout dst_layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    // Device-proven archive invariant: barriers must use the image's REAL
+    // tracked layout. The previous code documented that user-FBO textures are
+    // normally SHADER_READ_ONLY_OPTIMAL after a flush, then immediately
+    // hardcoded COLOR_ATTACHMENT_OPTIMAL for both sides. On MoltenVK this
+    // makes the transition a spec-invalid oldLayout mismatch and can turn the
+    // final offscreen->default blit into a silent black frame.
+    auto tracked_layout_for_image = [](VkImage image, bool default_fbo) {
+        if (image == VK_NULL_HANDLE) return VK_IMAGE_LAYOUT_UNDEFINED;
+        if (default_fbo) {
+            VkImageLayout l = backend_active_swapchain_color_layout();
+            return l == VK_IMAGE_LAYOUT_UNDEFINED
+                ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : l;
+        }
+        auto& tbl = mithril::vk::texture_table();
+        for (const auto& kv : tbl) {
+            if (kv.second.image == image) {
+                VkImageLayout l = kv.second.currentLayout;
+                return l == VK_IMAGE_LAYOUT_UNDEFINED
+                    ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : l;
+            }
+        }
+        // A raw image not present in the GL texture table is most commonly the
+        // swapchain image (source-default blit). Use its tracked layout rather
+        // than inventing COLOR_ATTACHMENT_OPTIMAL.
+        VkImageLayout l = backend_active_swapchain_color_layout();
+        return l == VK_IMAGE_LAYOUT_UNDEFINED
+            ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : l;
+    };
+
+    const VkImageLayout src_layout =
+        tracked_layout_for_image(src_image, false);
+    const VkImageLayout dst_layout =
+        tracked_layout_for_image(dst_image, is_dst_default_fbo != 0);
+
+    MITHRIL_LOG_DEBUG("vk",
+        "blit_images: srcLayout=%u dstLayout=%u dstDefault=%d",
+        (unsigned)src_layout, (unsigned)dst_layout, is_dst_default_fbo);
+
     mithril::vk::blit_images_impl(src_image, src_format, src_layout, src_layout,
                                   dst_image, dst_format, dst_layout, dst_layout,
                                   srcX0, srcY0, srcX1, srcY1,
