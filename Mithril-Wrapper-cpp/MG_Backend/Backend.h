@@ -59,6 +59,10 @@ void backend_set_clear_stencil(int s);
 void backend_set_load_clear(void);
 void backend_set_load_load(void);
 
+/* Defer glClear per attachment view until the pass targeting that view begins. */
+void backend_set_pending_clear_for_views(VkImageView* color_views, int color_count,
+                                         VkImageView depth_view, unsigned int mask);
+
 /*
  * Clear specific aspects of the current framebuffer's attachments using
  * vkCmdClearAttachments. MUST be called inside a render pass (after
