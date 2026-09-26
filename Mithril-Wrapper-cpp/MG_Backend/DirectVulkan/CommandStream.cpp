@@ -16,6 +16,7 @@
 
 #include <cstring>
 #include <vector>
+#include <unordered_map>
 
 // glMemoryBarrier bit tested by backend_memory_barrier. The bundled
 // GL/glcorearb.h in include/ predates ARB_shader_image_load_store's token
@@ -70,6 +71,19 @@ bool format_has_alpha(VkFormat fmt) {
     }
 }
 
+// Deferred glClear request keyed by attachment VkImageView. This preserves
+// the archive/pre-mithrilwrapper-dev-upstream-20260926 invariant that a clear
+// is consumed only by the pass targeting that exact attachment, rather than
+// leaking across FBO switches.
+struct ClearRequest {
+    unsigned int mask = 0;
+    float color[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    double depth = 1.0;
+    int stencil = 0;
+};
+
+using InlineClearRequest = VkClearAttachment;
+
 // Encoder state carried between begin_render_pass() and the draw calls.
 struct EncoderState {
     bool passActive = false;
@@ -81,11 +95,56 @@ struct EncoderState {
     // red geometry, and on A11 can fault the GPU at the next submit.
     bool descriptorsBound = false;
 
-    // Pending clear values (applied to the load op of the next pass).
+    // Current GL clear values. glClear snapshots these into a per-view
+    // ClearRequest when no compatible render pass is active.
     float clearColor[4] = {0, 0, 0, 0};
     double clearDepth = 1.0;
     GLint clearStencil = 0;
-    bool loadClear = false;   // true = CLEAR (glClear), false = LOAD (draw pass)
+
+    std::unordered_map<VkImageView, ClearRequest> pendingClears;
+    std::unordered_map<VkImageView, bool> renderedThisFrame;
+    std::vector<InlineClearRequest> pendingInlineClears;
+
+    void set_pending_clear_for_view(VkImageView view, unsigned int mask,
+                                    const float color[4], double depth, int stencil) {
+        if (view == VK_NULL_HANDLE) return;
+        auto it = pendingClears.find(view);
+        if (it == pendingClears.end()) {
+            ClearRequest req;
+            req.mask = mask;
+            req.color[0] = color[0]; req.color[1] = color[1];
+            req.color[2] = color[2]; req.color[3] = color[3];
+            req.depth = depth; req.stencil = stencil;
+            pendingClears.emplace(view, req);
+            return;
+        }
+        it->second.mask |= mask;
+        if (mask & 0x4000u) {
+            it->second.color[0] = color[0]; it->second.color[1] = color[1];
+            it->second.color[2] = color[2]; it->second.color[3] = color[3];
+        }
+        if (mask & 0x0100u) it->second.depth = depth;
+        if (mask & 0x0400u) it->second.stencil = stencil;
+    }
+
+    bool consume_pending_clear_for_view(VkImageView view, ClearRequest* out) {
+        if (view == VK_NULL_HANDLE) return false;
+        auto it = pendingClears.find(view);
+        if (it == pendingClears.end()) return false;
+        if (out) *out = it->second;
+        pendingClears.erase(it);
+        return true;
+    }
+
+    bool is_attachment_rendered(VkImageView view) const {
+        if (view == VK_NULL_HANDLE) return false;
+        auto it = renderedThisFrame.find(view);
+        return it != renderedThisFrame.end() && it->second;
+    }
+    void mark_attachment_rendered(VkImageView view) {
+        if (view != VK_NULL_HANDLE) renderedThisFrame[view] = true;
+    }
+    void clear_rendered_this_frame() { renderedThisFrame.clear(); }
 
     // Color/depth attachment views for the active pass.
     VkImageView colorViews[8] = {};
@@ -433,7 +492,7 @@ void set_clear_color(float r, float g, float b, float a) {
 }
 void set_clear_depth(double d) { encoder().clearDepth = d; }
 void set_clear_stencil(int s)  { encoder().clearStencil = s; }
-void set_load_clear(bool clear){ encoder().loadClear = clear; }
+void set_load_clear(bool clear){ (void)clear; }
 
 unsigned int backend_get_recorded_draws() { return encoder().drawCount; }
 uint64_t backend_get_lifetime_recorded_draws() { return encoder().lifetimeDrawCount; }
@@ -493,6 +552,9 @@ void set_fbo_attachment_tex_ids(GLuint* color_tex_ids, int color_count,
     for (int i = 0; i < 8; ++i) e.fboColorTexIds[i] = 0;
     e.fboColorTexCount = 0;
     e.fboDepthTexId = 0;
+    e.pendingClears.clear();
+    e.pendingInlineClears.clear();
+    e.renderedThisFrame.clear();
 
     int n = color_count > 8 ? 8 : (color_count < 0 ? 0 : color_count);
     for (int i = 0; i < n; ++i) {
@@ -911,15 +973,28 @@ void begin_render_pass(VkImageView* color_views, int color_count,
         colorAttachs[i].sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR;
         colorAttachs[i].imageView = e.colorViews[i];
         colorAttachs[i].imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-        // Color loadOp (MobileGL VkRenderPassManager.cpp:713,776-780):
-        //   hasClear -> CLEAR; !hasClear && UNDEFINED -> DONT_CARE; else LOAD.
-        // swapchainColorWasUndefined covers the swapchain image on its first
-        // pass of the frame (currentColorLayout was UNDEFINED before the
-        // acquire->attachment barrier). Subsequent passes in the same frame
-        // see COLOR_ATTACHMENT_OPTIMAL and correctly use LOAD to preserve the
-        // first pass's output.
-        if (e.loadClear) {
-            colorAttachs[i].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+
+        ClearRequest viewClear;
+        const bool hasViewClear = e.consume_pending_clear_for_view(e.colorViews[i], &viewClear);
+        const bool alreadyRendered = e.is_attachment_rendered(e.colorViews[i]);
+        if (hasViewClear && (viewClear.mask & 0x4000u)) {
+            if (alreadyRendered) {
+                colorAttachs[i].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+                InlineClearRequest req{};
+                req.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+                req.colorAttachment = (uint32_t)i;
+                req.clearValue.color.float32[0] = viewClear.color[0];
+                req.clearValue.color.float32[1] = viewClear.color[1];
+                req.clearValue.color.float32[2] = viewClear.color[2];
+                req.clearValue.color.float32[3] = viewClear.color[3];
+                e.pendingInlineClears.push_back(req);
+            } else {
+                colorAttachs[i].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+                colorAttachs[i].clearValue.color.float32[0] = viewClear.color[0];
+                colorAttachs[i].clearValue.color.float32[1] = viewClear.color[1];
+                colorAttachs[i].clearValue.color.float32[2] = viewClear.color[2];
+                colorAttachs[i].clearValue.color.float32[3] = viewClear.color[3];
+            }
         } else if (swapchainColorWasUndefined &&
                    e.activeSwapchain &&
                    e.colorViews[i] == e.activeSwapchain->views[e.activeSwapchain->currentImage]) {
@@ -930,17 +1005,17 @@ void begin_render_pass(VkImageView* color_views, int color_count,
         colorAttachs[i].storeOp = (e.invalidateColorMask & (1u << i))
                                   ? VK_ATTACHMENT_STORE_OP_DONT_CARE
                                   : VK_ATTACHMENT_STORE_OP_STORE;
-        colorAttachs[i].clearValue.color.float32[0] = e.clearColor[0];
-        colorAttachs[i].clearValue.color.float32[1] = e.clearColor[1];
-        colorAttachs[i].clearValue.color.float32[2] = e.clearColor[2];
-        // 根因 G: 若该 attachment 是 swapchain image 且格式无 alpha，强制 alpha=1.0
-        // （对标 MobileGL ResolveColorClearAlpha），防止合成器视窗口透明 → 黑屏。
-        bool attachHasAlpha = true;
-        if (e.activeSwapchain &&
-            e.colorViews[i] == e.activeSwapchain->views[e.activeSwapchain->currentImage]) {
-            attachHasAlpha = format_has_alpha(e.activeSwapchain->format);
+        if (!hasViewClear || !(viewClear.mask & 0x4000u)) {
+            colorAttachs[i].clearValue.color.float32[0] = e.clearColor[0];
+            colorAttachs[i].clearValue.color.float32[1] = e.clearColor[1];
+            colorAttachs[i].clearValue.color.float32[2] = e.clearColor[2];
+            bool attachHasAlpha = true;
+            if (e.activeSwapchain &&
+                e.colorViews[i] == e.activeSwapchain->views[e.activeSwapchain->currentImage]) {
+                attachHasAlpha = format_has_alpha(e.activeSwapchain->format);
+            }
+            colorAttachs[i].clearValue.color.float32[3] = attachHasAlpha ? e.clearColor[3] : 1.0f;
         }
-        colorAttachs[i].clearValue.color.float32[3] = attachHasAlpha ? e.clearColor[3] : 1.0f;
     }
     // Depth/stencil loadOp (MobileGL ResolveDepthStencilAttachmentLoadInfo,
     // VkRenderPassManager.cpp:140-155). Same priority: hasClear -> CLEAR;
@@ -985,12 +1060,34 @@ void begin_render_pass(VkImageView* color_views, int color_count,
         depthAttach.clearValue.depthStencil.depth = 1.0f;
         depthAttach.clearValue.depthStencil.stencil = 0u;
     }
-    if (e.loadClear) {
-        depthAttach.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    } else if (depthWasUndefined) {
-        depthAttach.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    } else {
-        depthAttach.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    {
+        ClearRequest depthClear;
+        const bool hasDepthClear = e.consume_pending_clear_for_view(e.depthView, &depthClear);
+        const bool alreadyRendered = e.is_attachment_rendered(e.depthView);
+        if (hasDepthClear && (depthClear.mask & (0x0100u | 0x0400u))) {
+            if (alreadyRendered) {
+                depthAttach.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+                InlineClearRequest req{};
+                req.aspectMask = 0;
+                if (depthClear.mask & 0x0100u) req.aspectMask |= VK_IMAGE_ASPECT_DEPTH_BIT;
+                if ((depthClear.mask & 0x0400u) && format_has_stencil(e.depthFormat))
+                    req.aspectMask |= VK_IMAGE_ASPECT_STENCIL_BIT;
+                req.colorAttachment = 0;
+                req.clearValue.depthStencil.depth = (float)depthClear.depth;
+                req.clearValue.depthStencil.stencil = (uint32_t)depthClear.stencil;
+                if (req.aspectMask) e.pendingInlineClears.push_back(req);
+            } else {
+                depthAttach.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+                if (depthClear.mask & 0x0100u)
+                    depthAttach.clearValue.depthStencil.depth = (float)depthClear.depth;
+                if (depthClear.mask & 0x0400u)
+                    depthAttach.clearValue.depthStencil.stencil = (uint32_t)depthClear.stencil;
+            }
+        } else if (depthWasUndefined) {
+            depthAttach.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        } else {
+            depthAttach.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+        }
     }
     depthAttach.storeOp = (e.invalidateDepth || e.invalidateStencil)
                           ? VK_ATTACHMENT_STORE_OP_DONT_CARE
@@ -1034,7 +1131,21 @@ void begin_render_pass(VkImageView* color_views, int color_count,
 
     e.passActive = true;
     e.hasCommands = true;  // begin_render_pass recorded real commands
-    e.loadClear = false;  // subsequent passes within the frame use LOAD
+
+    for (int i = 0; i < e.colorCount; ++i) e.mark_attachment_rendered(e.colorViews[i]);
+    if (e.depthView != VK_NULL_HANDLE) e.mark_attachment_rendered(e.depthView);
+
+    if (!e.pendingInlineClears.empty() && b->commandBuffer && b->commandBufferRecording) {
+        VkClearRect rect{};
+        rect.rect.offset = {0, 0};
+        rect.rect.extent = {(uint32_t)e.width, (uint32_t)e.height};
+        rect.baseArrayLayer = 0;
+        rect.layerCount = 1;
+        vkCmdClearAttachments(b->commandBuffer,
+                              (uint32_t)e.pendingInlineClears.size(),
+                              e.pendingInlineClears.data(), 1, &rect);
+        e.pendingInlineClears.clear();
+    }
     // GL 4.3 ARB_invalidate_subdata: invalidation is one-shot — clear after
     // applying so the next pass uses default STORE (unless re-invalidated).
     e.invalidateColorMask = 0;
@@ -1777,6 +1888,7 @@ void commit_frame() {
     // each generation (see DescriptorSet.cpp), so this must advance every frame
     // regardless of the cycling currentFrame value.
     b->frameGeneration++;
+    e.clear_rendered_this_frame();
 
     e.hasCommands = false;  // fresh command buffer, no commands yet
 
@@ -1922,6 +2034,17 @@ void backend_set_clear_depth(double d) { mithril::vk::set_clear_depth(d); }
 void backend_set_clear_stencil(int s)  { mithril::vk::set_clear_stencil(s); }
 void backend_set_load_clear(void)      { mithril::vk::set_load_clear(true); }
 void backend_set_load_load(void)       { mithril::vk::set_load_clear(false); }
+
+void backend_set_pending_clear_for_views(VkImageView* color_views, int color_count,
+                                         VkImageView depth_view, unsigned int mask) {
+    auto& e = mithril::vk::encoder();
+    for (int i = 0; i < color_count && i < 8; ++i) {
+        if (color_views && color_views[i] != VK_NULL_HANDLE)
+            e.set_pending_clear_for_view(color_views[i], mask, e.clearColor, e.clearDepth, e.clearStencil);
+    }
+    if (depth_view != VK_NULL_HANDLE)
+        e.set_pending_clear_for_view(depth_view, mask, e.clearColor, e.clearDepth, e.clearStencil);
+}
 
 void backend_set_invalidate_attachments(uint32_t color_mask, bool depth, bool stencil) {
     mithril::vk::set_invalidate_attachments(color_mask, depth, stencil);
