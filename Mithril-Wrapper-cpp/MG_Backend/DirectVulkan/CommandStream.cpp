@@ -450,6 +450,10 @@ void set_active_swapchain(Swapchain* sc) {
     encoder().activeSwapchain = sc;
 }
 
+Swapchain* active_swapchain() {
+    return encoder().activeSwapchain;
+}
+
 /*
  * Root cause Y (CRITICAL): register the GL texture names backing the upcoming
  * user-FBO render pass's color/depth attachments. The GL draw path
@@ -1556,11 +1560,18 @@ void commit_frame() {
     // (FrameContext.cpp:191-193).
     VkSemaphore waitSemaphore = VK_NULL_HANDLE;
     VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    if (sc && sc->imageAvailable != VK_NULL_HANDLE && !sc->imageAvailableConsumed) {
-        waitSemaphore = sc->imageAvailable;
-        si.waitSemaphoreCount = 1;
-        si.pWaitSemaphores = &waitSemaphore;
-        si.pWaitDstStageMask = &waitStage;
+    if (sc && !sc->imageAvailableConsumed) {
+        const int slot = sc->imageAvailableFrameSlot;
+        if (slot >= 0 && slot < (int)sc->imageAvailablePerFrame.size() &&
+            sc->imageAvailablePerFrame[slot] != VK_NULL_HANDLE) {
+            waitSemaphore = sc->imageAvailablePerFrame[slot];
+            si.waitSemaphoreCount = 1;
+            si.pWaitSemaphores = &waitSemaphore;
+            si.pWaitDstStageMask = &waitStage;
+        } else {
+            MITHRIL_LOG_ERROR("vk", "commit_frame: acquired swapchain image has no valid acquire semaphore");
+            sc->needsRebuild = true;
+        }
     }
 
     // ---- Signal renderFinished so present can wait on it ----

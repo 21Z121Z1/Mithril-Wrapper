@@ -20,6 +20,7 @@
 #include "Device.h"
 #include "Resources.h"
 #include "CommandStream.h"  // end_render_pass, ensure_command_buffer_recording, render_pass_active
+#include "Swapchain.h"      // acquire semaphore edge for out-of-band submits
 #include "Pipeline.h"     // clear_all_pipeline_caches() for deviceLost recovery
 #include "DescriptorSet.h"  // reset_all_descriptor_pools() for swapchain rebuild recovery
 #include "UniformArena.h"  // ubo_arena_shutdown() — transient UBO arena teardown
@@ -102,6 +103,29 @@ void safe_device_wait_idle() {
             si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
             si.commandBufferCount = 1;
             si.pCommandBuffers = &b->commandBuffer;
+
+            // If this out-of-band flush contains work targeting the currently
+            // acquired swapchain image, it is still the FIRST queue submit
+            // that must consume vkAcquireNextImageKHR's binary semaphore.
+            // Submitting without this wait races rendering against the
+            // presentation engine; reusing the semaphore later is also invalid.
+            Swapchain* sc = active_swapchain();
+            VkSemaphore acquireWait = VK_NULL_HANDLE;
+            VkPipelineStageFlags acquireStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+            if (sc && sc->currentImage >= 0 && !sc->imageAvailableConsumed) {
+                const int slot = sc->imageAvailableFrameSlot;
+                if (slot >= 0 && slot < (int)sc->imageAvailablePerFrame.size() &&
+                    sc->imageAvailablePerFrame[slot] != VK_NULL_HANDLE) {
+                    acquireWait = sc->imageAvailablePerFrame[slot];
+                    si.waitSemaphoreCount = 1;
+                    si.pWaitSemaphores = &acquireWait;
+                    si.pWaitDstStageMask = &acquireStage;
+                } else {
+                    MITHRIL_LOG_ERROR("vk", "safe_device_wait_idle: acquired image has no valid acquire semaphore");
+                    sc->needsRebuild = true;
+                }
+            }
+
             VkFence fence = b->frameFences[b->currentFrame];
             // FIX: fence 可能在 signaled 状态（ensure_command_buffer_recording
             // 的 vkWaitForFences 不 reset fence，或上一次 safe_device_wait_idle
@@ -111,6 +135,9 @@ void safe_device_wait_idle() {
             VkResult submitRc = vkQueueSubmit(b->graphicsQueue, 1, &si, fence);
             if (submitRc == VK_SUCCESS) {
                 b->fencePending[b->currentFrame] = true;
+                if (sc && acquireWait != VK_NULL_HANDLE) {
+                    sc->imageAvailableConsumed = true;
+                }
             }
             // 提交失败（OOM/deviceLost）时不设置 fencePending，后续的
             // vkDeviceWaitIdle 仍会等待其他 pending 工作。
@@ -626,9 +653,10 @@ bool init_device() {
     //   commit_frame 中的 dummy render pass（CommandStream.cpp:706-768）
     //   和 imageAvailable semaphore 等待解决，不再依赖 prefill。
     //
-    // MVK_CONFIG_RESUME_LOST_DEVICE=1: Automatically attempt to recover from
-    //   VK_ERROR_DEVICE_LOST by re-creating the VkDevice. Without this, a
-    //   single GPU error permanently kills rendering (black screen forever).
+    // MVK_CONFIG_RESUME_LOST_DEVICE=1: allow MoltenVK to continue using a Metal
+    //   device after a recoverable loss when the underlying physical device
+    //   remains usable. It does NOT recreate VkDevice; Mithril owns rebuild.
+    //   Keeping this enabled avoids needlessly making recoverable faults sticky.
     //
     // MVK_CONFIG_SHADER_CONVERSION_FLIP_VERTEX_Y=0: MoltenVK's global vertex Y
     //   flip is DISABLED. Y flipping is now handled at the shader-translation
@@ -641,7 +669,7 @@ bool init_device() {
     //   Deep reference: MobileGL GetShaderTransformFlags applies PositionYFlip
     //   only when currentDrawFBO->IsDefaultFramebuffer(), never globally.
     //
-    // MVK_CONFIG_SUBMIT_COMMAND_BUFFERS_PER_QUEUE=2 (深度参考 MobileGL 缺口):
+    // MVK_CONFIG_MAX_ACTIVE_METAL_COMMAND_BUFFERS_PER_QUEUE=2 (深度参考 MobileGL 缺口):
     //   限制每个 queue 同时未完成的 command buffer 数量。MoltenVK 默认
     //   是 64（即允许 64 个 command buffer 并发编码），每个 command buffer
     //   都会预分配 Metal 资源（编码器、IOSurface 引用等）。在 iPhone SE 3
@@ -1595,6 +1623,17 @@ int backend_device_limit(int which, int fallback) {
         case MITHRIL_LIMIT_MAX_COMPUTE_WG_SIZE_X:     return clamp_i(L.maxComputeWorkGroupSize[0]);
         default:                                      return fallback;
     }
+}
+
+float backend_device_max_sampler_anisotropy(float fallback) {
+    mithril::vk::Backend* b = mithril::vk::backend();
+    if (!b || !b->initialized) return fallback;
+
+    // VkPhysicalDeviceLimits is the authoritative device limit. A value below
+    // one is not a legal GL anisotropy limit; retain the no-anisotropy floor
+    // until Vulkan supplies a usable value.
+    const float value = b->props.limits.maxSamplerAnisotropy;
+    return value >= 1.0f ? value : fallback;
 }
 
 } // extern "C"
