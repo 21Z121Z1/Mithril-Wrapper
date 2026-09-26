@@ -486,6 +486,10 @@ void stage_and_copy_image(TextureEntry& tex, int level, int x, int y, int z,
                           bool is_full_upload) {
     Backend* b = backend();
     if (!b->commandBuffer) return;
+    // Vulkan transfer/barrier commands are illegal inside dynamic rendering.
+    // Preserve the final DirectVulkan device invariant from 889a10b: uploads
+    // split the active pass first; the next draw lazily reopens it.
+    if (render_pass_active()) end_render_pass();
     // With per-slot command buffers, the alias b->commandBuffer may point at
     // a just-submitted (pending) buffer after commit_frame advanced the slot.
     // ensure_command_buffer_recording() lazily switches to the current slot's
@@ -1726,6 +1730,9 @@ void backend_texture_upload_compressed(GLuint name, int level, int x, int y, int
     TextureEntry& tex = it->second;
     Backend* b = backend();
     if (!b->commandBuffer) return;
+    // Same invariant as the uncompressed upload path: no transfer/barrier
+    // command may be recorded while a dynamic-rendering instance is active.
+    if (render_pass_active()) end_render_pass();
     if (!ensure_command_buffer_recording()) return;
 
     // Transition image to TRANSFER_DST_OPTIMAL if needed.
