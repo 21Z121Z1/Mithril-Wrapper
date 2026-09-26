@@ -156,6 +156,7 @@ void backend_set_invalidate_attachments(uint32_t color_mask, bool depth, bool st
 
 /* End + commit the active render pass / command buffer. */
 void backend_end_render_pass(void);
+int backend_render_pass_active(void);
 void backend_commit(void);
 
 /*
