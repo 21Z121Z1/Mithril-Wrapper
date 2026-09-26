@@ -22,6 +22,15 @@ namespace mithril {
 int collect_draw_fbo_attachments(VkImageView out_color[8], VkImageView* out_depth,
                                  int* out_w, int* out_h);
 
+/* Resolve the current READ framebuffer for synchronous readback/clear visibility.
+ * For a user FBO, only the glReadBuffer-selected color attachment is returned
+ * at slot 0. out_color_tex_id receives the backing GL texture name (0 for the
+ * default framebuffer), allowing the backend to register layout tracking
+ * before materializing a deferred clear. */
+int collect_read_fbo_attachments(VkImageView out_color[8], VkImageView* out_depth,
+                                 int* out_w, int* out_h,
+                                 GLuint* out_color_tex_id, GLuint* out_depth_tex_id);
+
 } // namespace mithril
 
 #endif // MITHRIL_FRAMEBUFFER_H
