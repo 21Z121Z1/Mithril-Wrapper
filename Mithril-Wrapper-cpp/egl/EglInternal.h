@@ -46,6 +46,7 @@
 // size cannot be determined.
 extern "C" void* surface_create(void* native_window, int* out_w, int* out_h);
 extern "C" bool  surface_get_size(void* native_window, int* out_w, int* out_h);
+extern "C" void  surface_destroy(void* native_window);
 
 namespace mithril {
 namespace egl {
@@ -93,14 +94,14 @@ struct EglContext {
     std::atomic<int>    refcount{1};
 };
 
-// EGL 1.5 sync object (shadow implementation: always signaled, no real GPU
-// fence). Backed by a process-local handle so eglClientWaitSync/eglWaitSync
-// can validate the handle without touching the Vulkan backend.
+// EGL 1.5 fence sync. The object records the DirectVulkan queue-submit
+// serial containing all client commands that preceded eglCreateSync.
 struct EglSync {
     EGLDisplay dpy       = EGL_NO_DISPLAY;
     EGLenum    type      = 0;
     EGLenum    condition = 0;
-    EGLenum    status    = EGL_SIGNALED;
+    EGLenum    status    = EGL_UNSIGNALED;
+    uint64_t   submitSerial = 0;
 };
 
 // EGL 1.5 image object (shadow implementation: records target + buffer only,
