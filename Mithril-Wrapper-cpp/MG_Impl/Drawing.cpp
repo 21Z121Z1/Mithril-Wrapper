@@ -49,6 +49,7 @@
 #include "includes.h"
 #include "Framebuffer.h"
 #include "../MG_Backend/DirectVulkan/Device.h"
+#include "../MG_Backend/DirectVulkan/Resources.h"
 
 #if defined(__APPLE__)
 #include <TargetConditionals.h>
@@ -291,6 +292,13 @@ static bool prepare_draw(GLenum mode) {
         return false;
     }
 
+    auto diag_texture_layout = [](GLuint tex) -> VkImageLayout {
+        if (!tex) return VK_IMAGE_LAYOUT_UNDEFINED;
+        auto& tbl = mithril::vk::texture_table();
+        auto it = tbl.find(tex);
+        return it == tbl.end() ? VK_IMAGE_LAYOUT_UNDEFINED
+                               : it->second.currentLayout;
+    };
     static uint64_t diag_default_fbo_draws = 0;
     static uint64_t diag_user_fbo_draws = 0;
     if (is_default_fbo) {
@@ -308,23 +316,23 @@ static bool prepare_draw(GLenum mode) {
                 (int)g_state->colorMask[0][2], (int)g_state->colorMask[0][3],
                 (int)g_state->depthTest, (int)g_state->cullFace, attrib_count, color_count);
             for (int unit = 0; unit < mithril::kMaxTextureUnits; ++unit) {
-                const GLuint tex = g_state->boundTextures[unit];
+                const GLuint tex = g_state->boundTextureForUnit((GLuint)unit);
                 if (tex) {
                     MITHRIL_LOG_WARN("vk-diag",
                         "default-FBO draw #%llu tex[%d]=%u layout=%u",
                         (unsigned long long)diag_default_fbo_draws, unit, tex,
-                        (unsigned)backend_get_texture_layout(tex));
+                        (unsigned)diag_texture_layout(tex));
                 }
             }
             for (const auto& mapping : prog->samplerUnitForBinding) {
                 const GLint unit = mapping.second;
                 const GLuint tex = (unit >= 0 && unit < mithril::kMaxTextureUnits)
-                    ? g_state->boundTextures[unit] : 0;
+                    ? g_state->boundTextureForUnit((GLuint)unit) : 0;
                 MITHRIL_LOG_WARN("vk-diag",
                     "default-FBO draw #%llu sampler binding=%u -> unit=%d tex=%u layout=%u",
                     (unsigned long long)diag_default_fbo_draws,
                     mapping.first, unit, tex,
-                    tex ? (unsigned)backend_get_texture_layout(tex) : 0u);
+                    tex ? (unsigned)diag_texture_layout(tex) : 0u);
             }
         }
     } else {
