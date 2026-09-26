@@ -393,11 +393,11 @@ uint64_t backend_frame_serial_advance(int frameSlot);
 // Latest queue-submit serial. Exposed for GL/EGL fence synchronization.
 extern "C" uint64_t backend_current_submit_serial();
 // Returns the highest serial whose GPU submission has definitely completed.
-uint64_t backend_last_completed_serial();
+extern "C" uint64_t backend_last_completed_serial();
 // Block (or, with timeout==0, poll) until the submission bearing `serial` has
 // completed. Returns true if completed, false if still pending (timeout==0) or
 // the wait failed.
-bool     backend_wait_serial(uint64_t serial, uint64_t timeout_ns);
+extern "C" bool backend_wait_serial(uint64_t serial, uint64_t timeout_ns);
 
 // FIX (显存耗尽根因 - 主动式 GC，深度参考 MobileGL):
 //
