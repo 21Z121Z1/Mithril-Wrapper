@@ -1026,10 +1026,19 @@ void apply_stage_binding_shift(glslang::TShader& sh, EShLanguage stage) {
     sh.setShiftBinding(glslang::EResSsbo,    base);
 }
 
+// The pinned glslang build owns process-global parser/IO state. Minecraft
+// compiles shaders from multiple executor threads during resource loading, so
+// one complete parse/link/SPIR-V transaction must be serialized.
+std::mutex& glslang_compile_mutex() {
+    static std::mutex m;
+    return m;
+}
+
 bool glsl_to_spirv(GLenum gl_stage, const std::string& src,
                    std::vector<uint32_t>& spirv, std::string& info,
                    const std::unordered_map<std::string, GLuint>* attrib_bindings,
                    bool flip_y) {
+    std::lock_guard<std::mutex> glslang_lock(glslang_compile_mutex());
     glslang_init();
     EShLanguage stage = to_esh_stage(gl_stage);
     if (stage == EShLangCount) { info = "unsupported shader stage"; return false; }
