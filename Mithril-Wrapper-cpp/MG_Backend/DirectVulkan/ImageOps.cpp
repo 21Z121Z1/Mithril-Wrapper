@@ -834,6 +834,13 @@ int read_pixels(int x, int y, int w, int h, GLenum format, GLenum type, void* ou
         return 0;
     }
 
+    // E2E diagnostic: distinguish a genuinely draw-less frame from a
+    // framebuffer/readback problem. This is monotonic across command-buffer
+    // boundaries, unlike the per-frame counter that is reset by commit/flush.
+    MITHRIL_LOG_WARN("vk-diag", "read_pixels: lifetimeRecordedDraws=%llu readFbo=%u srcImage=%p layout=%u",
+                     (unsigned long long)backend_get_lifetime_recorded_draws(),
+                     readFboName, (void*)src_image, (unsigned)src_layout);
+
     // Flush any pending rendering into the colour attachment so the readback
     // sees the latest pixels.
     backend_end_render_pass();
