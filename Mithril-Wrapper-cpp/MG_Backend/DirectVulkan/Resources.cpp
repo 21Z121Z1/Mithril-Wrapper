@@ -1902,7 +1902,8 @@ VkSampler backend_get_or_create_sampler(GLuint name, GLint min_filter, GLint mag
                                         GLint wrap_s, GLint wrap_t, GLint wrap_r,
                                         const float* border_color,
                                         GLint compare_enable, GLint compare_op,
-                                        GLfloat min_lod, GLfloat lod_bias) {
+                                        GLfloat min_lod, GLfloat lod_bias,
+                                        GLint texture_max_level) {
     mithril::vk::Backend* b = mithril::vk::backend();
     if (!b->initialized) return VK_NULL_HANDLE;
 
@@ -1957,6 +1958,9 @@ VkSampler backend_get_or_create_sampler(GLuint name, GLint min_filter, GLint mag
     mix(compare_enable ? (uint64_t)(uint32_t)compare_op : 0ull);
     mix((uint64_t)(uint32_t)(min_lod  * 1000.0f));
     mix((uint64_t)(uint32_t)(lod_bias * 1000.0f));
+    // GL_TEXTURE_MAX_LEVEL is texture state and changes the accessible mip
+    // window even when the VkImage still owns a larger physical chain.
+    mix((uint64_t)(uint32_t)std::max(0, texture_max_level));
 
     auto& tbl = mithril::vk::sampler_table();
     mithril::vk::SamplerEntry& entry = tbl[name];
@@ -2007,29 +2011,23 @@ VkSampler backend_get_or_create_sampler(GLuint name, GLint min_filter, GLint mag
         if (tit != tex_tbl.end()) actualLevels = tit->second.levels;
     }
     sci.mipLodBias = lod_bias;
+    const int accessibleMaxLevel = std::max(
+        0, std::min(std::max(0, actualLevels - 1), std::max(0, texture_max_level)));
     if (!mipmapped) {
         sci.minLod = 0.0f;
         sci.maxLod = 0.0f;
     } else {
-        sci.minLod = min_lod;
-        // FIX (加载界面即纯红 + GPU page fault 根因 - 单层 view + LINEAR mipmap):
-        // 深度对照 MobileGL VkSamplerManager (ResolveSingleLevelMaxLod + BuildSamplerKey
-        // 注释 :177-185)：当纹理当前只有 1 层 mip 时，若采样器仍用
-        // VK_SAMPLER_MIPMAP_MODE_LINEAR，纹理单元在 A11/MoltenVK 上可能对单层 view
-        // 发起 level+1 的取数，读进未初始化的越界页 → 静默 kIOGPUCommandBuffer
-        // CallbackErrorPageFault。这正是「加载界面/Mojang logo 采 gui.png-atlas 时
-        // 首帧即纯红 + page fault」的触发点：图集 base level 刚上传（tex.levels=1）
-        // 就被加载界面用 GL_LINEAR_MIPMAP_LINEAR 采样。
-        // 修复（与 MobileGL 完全一致）：actualLevels==1 时强制
-        //   - mipmapMode = NEAREST（放弃对不存在的第 1 层的线性插值）
-        //   - maxLod = 0.0f（只允许采第 0 层）
-        // 保证单层 view 绝不请求 level+1。mip 链生成后 tex.levels 更新，keyLevels
-        // 变化 → 重新取采样器得到正确的 LINEAR + 完整 maxLod。
-        if (actualLevels <= 1) {
+        // Clamp the native sampler to the GL texture's accessible mip window.
+        // This is distinct from how many mip levels physically exist in the
+        // VkImage: GL_TEXTURE_MAX_LEVEL may intentionally hide higher levels.
+        sci.minLod = std::min(min_lod, (GLfloat)accessibleMaxLevel);
+        if (accessibleMaxLevel == 0) {
+            // Avoid linear interpolation touching level 1 when GL exposes only
+            // the base level, matching the single-level safety path.
             sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
             sci.maxLod = 0.0f;
         } else {
-            sci.maxLod = (float)std::max(0, actualLevels - 1);
+            sci.maxLod = (float)accessibleMaxLevel;
         }
     }
     sci.unnormalizedCoordinates = VK_FALSE;

@@ -587,6 +587,31 @@ int main(int argc, char** argv) {
             CHECK(fb[0] > 200 && fb[1] > 200 && fb[2] > 200 && fb[3] > 128,
                   "disc-F(B) CASCADE non-rebuild mipmap level1 is WHITE "
                   "(r=%d g=%d b=%d a=%d) — cross-buffer sync + blit OK", fb[0], fb[1], fb[2], fb[3]);
+
+            /* MAX_LEVEL is texture state, not just a query value. Make level 1
+             * observably blue, prove it can be sampled, then hide it with
+             * GL_TEXTURE_MAX_LEVEL=0; textureLod(...,1) must clamp to white
+             * level 0 through the native VkSampler maxLod. */
+            const GLubyte stblue[4] = { 0, 0, 255, 255 };
+            texSubImage2D(GL_TEXTURE_2D, 1, 0, 0, 1, 1,
+                          GL_RGBA, GL_UNSIGNED_BYTE, stblue);
+            finish();
+            drawArrays(GL_TRIANGLES, 0, 3);
+            finish();
+            unsigned char fblue[4] = {0,0,0,0};
+            readPixels(R / 2, C / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, fblue);
+            CHECK(fblue[2] > 200 && fblue[0] < 40 && fblue[1] < 40,
+                  "disc-F(C) level1 is BLUE before MAX_LEVEL clamp "
+                  "(r=%d g=%d b=%d a=%d)", fblue[0], fblue[1], fblue[2], fblue[3]);
+
+            texParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 0);
+            drawArrays(GL_TRIANGLES, 0, 3);
+            finish();
+            unsigned char fmax[4] = {0,0,0,0};
+            readPixels(R / 2, C / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, fmax);
+            CHECK(fmax[0] > 200 && fmax[1] > 200 && fmax[2] > 200 && fmax[3] > 128,
+                  "disc-F(D) GL_TEXTURE_MAX_LEVEL=0 clamps explicit LOD1 to WHITE level0 "
+                  "(r=%d g=%d b=%d a=%d)", fmax[0], fmax[1], fmax[2], fmax[3]);
             deleteProgram(fprogA);
             deleteProgram(fprogB);
             /* stTex 走 defer_destroy（后端持有跨帧存活），此处不手动删除 */

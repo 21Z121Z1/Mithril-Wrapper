@@ -478,7 +478,8 @@ VkSampler backend_get_or_create_sampler(GLuint name, GLint min_filter, GLint mag
                                         GLint wrap_s, GLint wrap_t, GLint wrap_r,
                                         const float* border_color,
                                         GLint compare_enable, GLint compare_op,
-                                        GLfloat min_lod, GLfloat lod_bias);
+                                        GLfloat min_lod, GLfloat lod_bias,
+                                        GLint texture_max_level);
 
 /* ---- Format helpers ----
  * Map a GL internal format to the matching VkFormat. Returns VK_FORMAT_UNDEFINED

@@ -1021,7 +1021,8 @@ void bind_program_descriptors(GLuint program, VkPipelineBindPoint bindPoint) {
                 }
                 samp = backend_get_or_create_sampler(
                     tex_id, minF, magF, wrapS, wrapT, wrapR, nullptr,
-                    cmpEnable, cmpOp, sMinLod, sLodBias);
+                    cmpEnable, cmpOp, sMinLod, sLodBias,
+                    tex ? tex->maxLevel : 1000);
             }
             // FIX (root cause L): if no texture is bound (or the bound texture
             // has no view/sampler), use the process-wide default 1x1 black
@@ -1268,7 +1269,8 @@ void bind_program_descriptors(GLuint program, VkPipelineBindPoint bindPoint) {
                 }
                 samp = backend_get_or_create_sampler(
                     tex_id, minF, magF, wrapS, wrapT, wrapR, nullptr,
-                    cmpEnable, cmpOp, sMinLod, sLodBias);
+                    cmpEnable, cmpOp, sMinLod, sLodBias,
+                    tex ? tex->maxLevel : 1000);
             }
             // A storage image ignores the sampler, but the descriptor write
             // still needs a view. With no image bound, fall back to the same
