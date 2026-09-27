@@ -341,69 +341,58 @@ static bool prepare_draw(GLenum mode) {
         }
     }
 
-    // E2E convergence diagnostic: once Minecraft has reached a stable frame,
-    // inspect the texture sampled by the final default-FBO composite before
-    // that composite is recorded. This cleanly separates "source FBO is black"
-    // from "source has content but the swapchain composite loses it".
+    // E2E convergence diagnostic: source FBO has already been proven non-black.
+    // Inspect the final composite's frontend uniform state without recording
+    // any extra Vulkan work, so this diagnostic cannot perturb the frame.
     if (is_default_fbo && prog->id == 1 && g_state->presentedFrames >= 1000) {
-        static bool sampledSourceChecked = false;
-        if (!sampledSourceChecked) {
-            sampledSourceChecked = true;
-            GLuint sampledTex = g_state->boundTextureForUnit(
-                0, mithril::TextureTarget::_2D);
-            GLuint sampledFbo = 0;
-            for (const auto& item : g_state->framebuffers) {
-                for (int ci = 0; ci < 8; ++ci) {
-                    if (item.second.colors[ci].texture == sampledTex && sampledTex != 0) {
-                        sampledFbo = item.first;
-                        break;
-                    }
+        static bool finalUniformStateLogged = false;
+        if (!finalUniformStateLogged) {
+            finalUniformStateLogged = true;
+            MITHRIL_LOG_WARN(
+                "vk-diag",
+                "final-uniform-state prog=1 uniforms=%zu uboStores=%zu "
+                "cull=%d cullMode=0x%x frontFace=0x%x blend=%d "
+                "blendRGB=(0x%x,0x%x) blendA=(0x%x,0x%x) colorMask=%d%d%d%d",
+                prog->uniforms.size(), prog->uboBackingStore.size(),
+                (int)g_state->cullFace, (unsigned)g_state->cullMode,
+                (unsigned)g_state->frontFace, (int)g_state->blends[0].enabled,
+                (unsigned)g_state->blends[0].srcRGB, (unsigned)g_state->blends[0].dstRGB,
+                (unsigned)g_state->blends[0].srcA, (unsigned)g_state->blends[0].dstA,
+                (int)g_state->colorMask[0][0], (int)g_state->colorMask[0][1],
+                (int)g_state->colorMask[0][2], (int)g_state->colorMask[0][3]);
+
+            for (const auto& item : prog->uniforms) {
+                const auto& u = item.second;
+                char values[256] = {};
+                int off = 0;
+                const size_t n = std::min<size_t>(u.value.size(), 16);
+                for (size_t i = 0; i < n && off < (int)sizeof(values) - 24; ++i) {
+                    off += std::snprintf(values + off, sizeof(values) - (size_t)off,
+                                         "%s%.6g", i ? "," : "", (double)u.value[i]);
                 }
-                if (sampledFbo != 0) break;
+                MITHRIL_LOG_WARN(
+                    "vk-diag",
+                    "final-uniform name='%s' loc=%d type=0x%x blockBinding=%d "
+                    "offset=%d logicalCount=%zu values=[%s]",
+                    item.first.c_str(), u.location, (unsigned)u.type,
+                    u.blockBinding, u.offset, u.value.size(), values);
             }
 
-            mithril::Texture* sampledState = mithril::state_get_texture(sampledTex);
-            if (sampledFbo != 0 && sampledState &&
-                sampledState->width > 0 && sampledState->height > 0) {
-                const int sw = std::min(64, (int)sampledState->width);
-                const int sh = std::min(64, (int)sampledState->height);
-                const int sx = std::max(0, ((int)sampledState->width - sw) / 2);
-                const int sy = std::max(0, ((int)sampledState->height - sh) / 2);
-                std::vector<unsigned char> sample((size_t)sw * (size_t)sh * 4u);
-                const GLuint savedReadFbo = g_state->currentReadFBO;
-                g_state->currentReadFBO = sampledFbo;
-                const int ok = backend_read_pixels(
-                    sx, sy, sw, sh, GL_RGBA, GL_UNSIGNED_BYTE, sample.data());
-                g_state->currentReadFBO = savedReadFbo;
-
-                unsigned long long sumR = 0, sumG = 0, sumB = 0;
-                size_t nonblack = 0;
-                const size_t pixels = (size_t)sw * (size_t)sh;
-                if (ok) {
-                    for (size_t i = 0; i < pixels; ++i) {
-                        const unsigned r = sample[i * 4 + 0];
-                        const unsigned g = sample[i * 4 + 1];
-                        const unsigned b = sample[i * 4 + 2];
-                        sumR += r; sumG += g; sumB += b;
-                        if (r > 4 || g > 4 || b > 4) ++nonblack;
-                    }
+            for (const auto& storeItem : prog->uboBackingStore) {
+                const auto& bytes = storeItem.second;
+                char values[320] = {};
+                int off = 0;
+                const size_t nf = std::min<size_t>(bytes.size() / sizeof(float), 20);
+                for (size_t i = 0; i < nf && off < (int)sizeof(values) - 24; ++i) {
+                    float v = 0.0f;
+                    std::memcpy(&v, bytes.data() + i * sizeof(float), sizeof(float));
+                    off += std::snprintf(values + off, sizeof(values) - (size_t)off,
+                                         "%s%.6g", i ? "," : "", (double)v);
                 }
                 MITHRIL_LOG_WARN(
                     "vk-diag",
-                    "final-source-readback ok=%d tex=%u fbo=%u size=%dx%d sample=%dx%d "
-                    "nonblack_ratio=%.6f avgRGB=(%.2f,%.2f,%.2f)",
-                    ok, sampledTex, sampledFbo,
-                    (int)sampledState->width, (int)sampledState->height,
-                    sw, sh,
-                    pixels ? (double)nonblack / (double)pixels : 0.0,
-                    pixels ? (double)sumR / (double)pixels : 0.0,
-                    pixels ? (double)sumG / (double)pixels : 0.0,
-                    pixels ? (double)sumB / (double)pixels : 0.0);
-            } else {
-                MITHRIL_LOG_WARN(
-                    "vk-diag",
-                    "final-source-readback unavailable tex=%u fbo=%u state=%p",
-                    sampledTex, sampledFbo, (void*)sampledState);
+                    "final-ubo binding=%u bytes=%zu firstFloats=[%s]",
+                    storeItem.first, bytes.size(), values);
             }
         }
     }
