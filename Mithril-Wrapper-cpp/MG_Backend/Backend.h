@@ -409,6 +409,8 @@ void        backend_invalidate_sampler_cache(GLuint name);
  */
 void        backend_transition_texture_layout(GLuint name, VkImageLayout target_layout);
 VkImageLayout backend_get_texture_layout(GLuint name);
+VkImageLayout backend_get_sampled_texture_layout(GLuint name);
+void          backend_transition_texture_to_sampled(GLuint name);
 
 /*
  * Generate mipmaps for the named texture via vkCmdBlitImage. Each level L>=1
