@@ -1896,6 +1896,24 @@ VkImageLayout backend_get_texture_layout(GLuint name) {
     return it == tbl.end() ? VK_IMAGE_LAYOUT_UNDEFINED : it->second.currentLayout;
 }
 
+VkImageLayout backend_get_sampled_texture_layout(GLuint name) {
+    auto& tbl = mithril::vk::texture_table();
+    auto it = tbl.find(name);
+    return it == tbl.end()
+        ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+        : mithril::vk::sampled_layout_for_format(it->second.format);
+}
+
+void backend_transition_texture_to_sampled(GLuint name) {
+    mithril::vk::Backend* b = mithril::vk::backend();
+    if (!b->initialized) return;
+    auto& tbl = mithril::vk::texture_table();
+    auto it = tbl.find(name);
+    if (it == tbl.end()) return;
+    mithril::vk::transition_image_layout(
+        it->second, mithril::vk::sampled_layout_for_format(it->second.format));
+}
+
 /* GL compare func -> VkCompareOp (local; avoids cross-TU linkage assumptions). */
 static VkCompareOp mithril_gl_compare_to_vk(GLenum f) {
     switch (f) {
