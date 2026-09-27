@@ -460,16 +460,20 @@ void glBlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1,
 
         VkImage dsrc = VK_NULL_HANDLE, ddst = VK_NULL_HANDLE;
         VkFormat dsrc_fmt = VK_FORMAT_UNDEFINED, ddst_fmt = VK_FORMAT_UNDEFINED;
+        VkImageLayout dsrc_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+        VkImageLayout ddst_layout = VK_IMAGE_LAYOUT_UNDEFINED;
         int ddst_h = 0;
         bool d_dst_default = (g_state->currentDrawFBO == 0);
 
         if (g_state->currentReadFBO == 0) {
             dsrc = g_state->eglDefaultDepthImage;
             dsrc_fmt = g_state->eglDefaultDepthFormat;
+            dsrc_layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
         } else {
             mithril::Framebuffer* sf = mithril::state_get_framebuffer(g_state->currentReadFBO);
             if (sf && sf->depth.texture) {
                 dsrc = backend_get_texture_image(sf->depth.texture);
+                dsrc_layout = backend_get_texture_layout(sf->depth.texture);
                 mithril::Texture* t = mithril::state_get_texture(sf->depth.texture);
                 if (t) dsrc_fmt = backend_vk_format_for_gl((GLenum)t->internalFormat);
             }
@@ -477,18 +481,21 @@ void glBlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1,
         if (d_dst_default) {
             ddst = g_state->eglDefaultDepthImage;
             ddst_fmt = g_state->eglDefaultDepthFormat;
+            ddst_layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
             ddst_h = g_state->eglDefaultHeight;
         } else {
             mithril::Framebuffer* df = mithril::state_get_framebuffer(g_state->currentDrawFBO);
             if (df && df->depth.texture) {
                 ddst = backend_get_texture_image(df->depth.texture);
+                ddst_layout = backend_get_texture_layout(df->depth.texture);
                 mithril::Texture* t = mithril::state_get_texture(df->depth.texture);
                 if (t) { ddst_fmt = backend_vk_format_for_gl((GLenum)t->internalFormat); ddst_h = t->height; }
             }
         }
         if (dsrc != VK_NULL_HANDLE && ddst != VK_NULL_HANDLE &&
             dsrc_fmt != VK_FORMAT_UNDEFINED && ddst_fmt != VK_FORMAT_UNDEFINED) {
-            backend_blit_images(dsrc, dsrc_fmt, ddst, ddst_fmt,
+            backend_blit_images(dsrc, dsrc_fmt, dsrc_layout,
+                                ddst, ddst_fmt, ddst_layout,
                                 srcX0, srcY0, srcX1, srcY1,
                                 dstX0, dstY0, dstX1, dstY1,
                                 mask & (GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT),
