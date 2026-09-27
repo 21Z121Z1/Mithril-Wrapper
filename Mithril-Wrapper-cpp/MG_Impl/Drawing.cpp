@@ -612,6 +612,54 @@ static bool validate_draw_call(GLenum mode, GLsizei count) {
 void glDrawArrays(GLenum mode, GLint first, GLsizei count) {
     MITHRIL_ENSURE_INIT();
     if (!validate_draw_call(mode, count)) return;
+
+    // E2E convergence diagnostic: source texture, descriptor resolution and
+    // raster state are already proven correct for Minecraft's final blit.
+    // Capture the last unresolved inputs: draw range, CPU-side vertex payload
+    // and the original vertex shader source. Keep this warning one-shot so the
+    // long-running Minecraft gate remains readable.
+    if (g_state->currentDrawFBO == 0 && g_state->currentProgram == 1 &&
+        g_state->presentedFrames >= 1000) {
+        static bool finalDrawInputsLogged = false;
+        if (!finalDrawInputsLogged) {
+            finalDrawInputsLogged = true;
+            mithril::VertexArray* diagVao = mithril::state_get_vao(g_state->currentVAO);
+            if (!diagVao) diagVao = mithril::state_get_vao(0);
+            const mithril::VertexAttrib* diagAttr = diagVao ? &diagVao->attribs[0] : nullptr;
+            const GLuint diagBufferName = diagAttr ? diagAttr->boundBuffer : 0;
+            mithril::Buffer* diagBuffer = mithril::state_get_buffer(diagBufferName);
+            MITHRIL_LOG_WARN(
+                "vk-diag",
+                "final-draw-inputs mode=0x%x first=%d count=%d vao=%u "
+                "buffer=%u cpuBytes=%zu contentVersion=%llu",
+                (unsigned)mode, (int)first, (int)count, g_state->currentVAO,
+                diagBufferName, diagBuffer ? diagBuffer->data.size() : 0,
+                (unsigned long long)(diagBuffer ? diagBuffer->contentVersion : 0));
+            if (diagBuffer && !diagBuffer->data.empty()) {
+                const size_t floatCount = diagBuffer->data.size() / sizeof(float);
+                const size_t dumpCount = std::min<size_t>(floatCount, 24);
+                char dump[768];
+                int off = 0;
+                for (size_t i = 0; i < dumpCount && off < (int)sizeof(dump) - 32; ++i) {
+                    float v = 0.0f;
+                    std::memcpy(&v, diagBuffer->data.data() + i * sizeof(float), sizeof(float));
+                    off += snprintf(dump + off, sizeof(dump) - (size_t)off,
+                                    "%s%.6g", i ? "," : "", (double)v);
+                }
+                MITHRIL_LOG_WARN("vk-diag", "final-vbo-floats first24=[%s]", dump);
+            }
+            mithril::Program* diagProg = mithril::state_get_program(1);
+            if (diagProg) {
+                for (GLuint shaderId : diagProg->attachedShaders) {
+                    mithril::Shader* s = mithril::state_get_shader(shaderId);
+                    if (!s || s->type != GL_VERTEX_SHADER) continue;
+                    MITHRIL_LOG_WARN("vk-diag",
+                                     "final-vertex-shader id=%u source-bytes=%zu source=<<<%s>>>",
+                                     shaderId, s->source.size(), s->source.c_str());
+                }
+            }
+        }
+    }
     // Root cause AI: a false return means no render pass was begun and no
     // pipeline was bound — issuing the draw anyway would record a vkCmdDraw
     // outside a render-pass instance and crash inside MoltenVK. Bail out
