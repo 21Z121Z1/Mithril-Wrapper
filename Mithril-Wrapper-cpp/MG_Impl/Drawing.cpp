@@ -799,6 +799,24 @@ void glDrawElements(GLenum mode, GLsizei count, GLenum type, const void* indices
                         (long long)(intptr_t)a.pointer);
                 }
             }
+            if (vao) {
+                for (int loc2 = 0; loc2 < mithril::kMaxVertexAttribs; ++loc2) {
+                    const mithril::VertexAttrib& a2 = vao->attribs[loc2];
+                    if (!a2.enabled) continue;
+                    mithril::Buffer* vbobj = mithril::state_get_buffer(a2.boundBuffer);
+                    if (!vbobj) continue;
+                    const float* fp = (const float*)vbobj->data.data();
+                    size_t nf = vbobj->data.size() / 4;
+                    char vdump[512]; int voff=0;
+                    size_t show = std::min<size_t>(nf, 16);
+                    for (size_t k = 0; k < show && voff < (int)sizeof(vdump)-20; ++k)
+                        voff += snprintf(vdump+voff, sizeof(vdump)-(size_t)voff,
+                                         "%s%.4f", k?",":"", fp[k]);
+                    MITHRIL_LOG_WARN("vk-diag",
+                        "final-blit-vbo loc=%d name=%u floats[%zu]=[%s]",
+                        loc2, a2.boundBuffer, nf, vdump);
+                }
+            }
             backend_encoder_diag_s ed = backend_get_encoder_diag();
             MITHRIL_LOG_WARN("vk-diag",
                 "final-blit-encoder recording=%d pass=%d descriptors=%d pipeline=0x%llx",
