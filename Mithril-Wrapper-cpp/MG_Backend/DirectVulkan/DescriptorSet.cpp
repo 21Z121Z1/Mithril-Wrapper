@@ -1371,6 +1371,7 @@ void bind_program_descriptors(GLuint program, VkPipelineBindPoint bindPoint) {
                 VkDescriptorPool oldPool = pr.descriptorPools[slot];
                 VkDescriptorPool newPool = create_program_pool(pr, kMaxSetsPerPool);
                 if (newPool == VK_NULL_HANDLE) {
+                    if (std::getenv("MITHRIL_DUMP_BLIT")) { static uint64_t z1=0;++z1; if((z1%20)==1)MITHRIL_LOG_WARN("vk-diag","BIND-DROP secondary-create-fail #%llu prog=%u slot=%d",(unsigned long long)z1,program,slot);}
                     return;  // 次级池创建失败，放弃本次 bind（下次 draw 重试）
                 }
                 // 旧池可能仍被当前 command buffer 引用 —— 延迟到 fence 后销毁。
@@ -1393,6 +1394,7 @@ void bind_program_descriptors(GLuint program, VkPipelineBindPoint bindPoint) {
                 // 从新池重试分配
                 dsai.descriptorPool = newPool;
                 if (vkAllocateDescriptorSets(b->device, &dsai, &set) != VK_SUCCESS) {
+                    if (std::getenv("MITHRIL_DUMP_BLIT")) { static uint64_t z2=0;++z2; if((z2%20)==1)MITHRIL_LOG_WARN("vk-diag","BIND-DROP retry-alloc-fail #%llu prog=%u slot=%d",(unsigned long long)z2,program,slot);}
                     return;  // 重试仍失败，放弃本次 bind
                 }
             }

@@ -45,6 +45,8 @@
 #endif
 #if defined(__APPLE__) && TARGET_OS_IPHONE
 #include <os/proc.h>
+#elif defined(__APPLE__)
+#include <sys/sysctl.h>
 #endif
 
 namespace mithril {
@@ -833,56 +835,64 @@ bool init_device() {
         }
     }
 
-    // 查询进程真实可用内存（iOS Jetsam 上限 - 已用）
+    // 查询进程真实可用内存。
+    //   iOS: os_proc_available_memory() = Jetsam kill 之前还能分配的字节数。
+    //   macOS: 没有 Jetsam，os_proc_available_memory() API_UNAVAILABLE(macos)；
+    //          改用 sysctl hw.memsize 取物理内存（Apple Silicon 为统一内存）。
     VkDeviceSize availableBytes = 0;
 #if defined(__APPLE__) && TARGET_OS_IPHONE
     availableBytes = os_proc_available_memory();
+#elif defined(__APPLE__)
+    {
+        int64_t phys = 0;
+        size_t physLen = sizeof(phys);
+        if (sysctlbyname("hw.memsize", &phys, &physLen, nullptr, 0) == 0 && phys > 0) {
+            availableBytes = static_cast<VkDeviceSize>(phys);
+        }
+    }
+#endif
+
+    // 平台相关的硬上限 / 下限 / 回退预算。
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
+    // macOS: 统一内存容量大、无 Jetsam；25% 物理内存，硬上限 4GB。
+    constexpr VkDeviceSize kPlatformMaxVramBudget = 4096ULL * 1024 * 1024;  // 4 GB
+    constexpr VkDeviceSize kPlatformMinVramBudget = 512ULL * 1024 * 1024;    // 512 MB
+    constexpr VkDeviceSize kPlatformFallbackBudget = 1024ULL * 1024 * 1024; // 1 GB
+#else
+    // iOS / 其他平台：保守。
+    constexpr VkDeviceSize kPlatformMaxVramBudget = 512ULL * 1024 * 1024;    // 512 MB
+    constexpr VkDeviceSize kPlatformMinVramBudget = 96ULL * 1024 * 1024;     // 96 MB
+    constexpr VkDeviceSize kPlatformFallbackBudget = 256ULL * 1024 * 1024;   // 256 MB
 #endif
 
     VkDeviceSize gpuBudget = 0;
     if (availableBytes > 0) {
-        // 取可用内存的 25% 给 GPU — 留 75% 给 CPU/JVM 增长。
-        // iPhone X (3GB RAM) 启动器分配 2400MB RAM，os_proc_available_memory
-        // 报告可能只有 ~1-1.5GB 可用。25% = 256-384MB，对 GPU 安全。
-        // Minecraft 的 CPU 端（chunk meshing、JVM heap）在游戏中会显著增长，
-        // 必须为它保留大部分内存。
+        // 取可用/物理内存的 25% 给 GPU — 留 75% 给 CPU/JVM 增长。
         gpuBudget = (availableBytes * 25) / 100;
-        MITHRIL_LOG_INFO("vk", "os_proc_available_memory = %llu MB, "
+        MITHRIL_LOG_INFO("vk", "available memory = %llu MB, "
                          "GPU budget = 25%% = %llu MB",
                          (unsigned long long)(availableBytes / (1024*1024)),
                          (unsigned long long)(gpuBudget / (1024*1024)));
     } else {
-        // 回退（非 Apple 或旧 iOS）：用保守的固定预算。
-        // iPhone X 级设备（3GB RAM）：256MB 对 GPU 是安全的。
-        gpuBudget = 256ULL * 1024 * 1024;
-        MITHRIL_LOG_INFO("vk", "os_proc_available_memory unavailable, "
+        gpuBudget = kPlatformFallbackBudget;
+        MITHRIL_LOG_INFO("vk", "available memory unavailable, "
                          "using fallback budget %llu MB",
                          (unsigned long long)(gpuBudget / (1024*1024)));
     }
 
-    // 硬上限 512MB — iPhone X 的 A11 GPU + MoltenVK per-allocation 开销。
-    // 历史教训：旧 1.5GB/512MB 预算下 GPU 在阈值前就 fault，但那时的 fault
-    // 根因是资源生命周期错误（drawable 池不匹配 / descriptor UAF / buffer
-    // 覆写竞争），不是真实显存耗尽 —— 调低预算只是掩盖症状。P0 修复后，
-    // 512MB 对 3GB 统一内存的 iPhone X 是安全的（Jetsam 任务限制 2828MB，
-    // 系统 + JVM + Minecraft 占用后留给 GPU 的余量足够），同时避免 256MB
-    // 下每帧 mid-frame GC flush 的性能与一致性代价。
-    constexpr VkDeviceSize kMaxVramBudget = 512ULL * 1024 * 1024;  // 512 MB
-    if (gpuBudget > kMaxVramBudget) {
-        MITHRIL_LOG_INFO("vk", "GPU budget %llu MB exceeds hard cap, "
+    if (gpuBudget > kPlatformMaxVramBudget) {
+        MITHRIL_LOG_INFO("vk", "GPU budget %llu MB exceeds platform cap, "
                           "clamping to %llu MB",
                           (unsigned long long)(gpuBudget / (1024*1024)),
-                          (unsigned long long)(kMaxVramBudget / (1024*1024)));
-        gpuBudget = kMaxVramBudget;
+                          (unsigned long long)(kPlatformMaxVramBudget / (1024*1024)));
+        gpuBudget = kPlatformMaxVramBudget;
     }
-    // 下限 96MB — 低于此值 Minecraft 无法渲染基本内容
-    constexpr VkDeviceSize kMinVramBudget = 96ULL * 1024 * 1024;  // 96 MB
-    if (gpuBudget < kMinVramBudget) {
+    if (gpuBudget < kPlatformMinVramBudget) {
         MITHRIL_LOG_WARN("vk", "GPU budget %llu MB below floor, "
                          "raising to %llu MB (may be unstable)",
                          (unsigned long long)(gpuBudget / (1024*1024)),
-                         (unsigned long long)(kMinVramBudget / (1024*1024)));
-        gpuBudget = kMinVramBudget;
+                         (unsigned long long)(kPlatformMinVramBudget / (1024*1024)));
+        gpuBudget = kPlatformMinVramBudget;
     }
     // 不能超过物理 heap size
     if (maxHeapSize > 0 && gpuBudget > maxHeapSize) {

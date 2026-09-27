@@ -200,6 +200,7 @@ void glBindVertexBuffer(GLuint bindingindex, GLuint buffer, GLintptr offset, GLs
     vb.stride = stride;
     // bump configVersion so pipeline re-evaluates vertex input state
     vao->configVersion++;
+    if (getenv("MITHRIL_VA_DUMP")) fprintf(stderr,"[VAMAP] binding %u -> buf %u offset %lld stride %d\n",bindingindex,buffer,(long long)offset,stride);
 }
 
 void glVertexAttribBinding(GLuint attribindex, GLuint bindingindex) {
@@ -214,6 +215,7 @@ void glVertexAttribBinding(GLuint attribindex, GLuint bindingindex) {
     vao->attribs[attribindex].bindingIndex = bindingindex;
     vao->attribVersions[attribindex]++;
     vao->configVersion++;
+    if (getenv("MITHRIL_VA_DUMP")) fprintf(stderr,"[VAMAP] attrib %u -> binding %u\n",attribindex,bindingindex);
 }
 
 void glVertexAttribFormat(GLuint attribindex, GLint size, GLenum type,

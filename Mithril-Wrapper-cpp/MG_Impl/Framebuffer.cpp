@@ -216,6 +216,13 @@ void glFramebufferTexture2D(GLenum target, GLenum attachment, GLenum textarget,
     a.level = level;
     if (attachment >= GL_COLOR_ATTACHMENT0 && attachment < GL_COLOR_ATTACHMENT0 + mithril::kMaxColorAttachments) {
         fbo->colors[attachment - GL_COLOR_ATTACHMENT0] = a;
+        if (std::getenv("MITHRIL_DUMP_BLIT") && texture) {
+            int tw=0,th=0; unsigned int ifm=0;
+            if (mithril::Texture* tt = mithril::state_get_texture(texture)) {
+                tw=tt->width; th=tt->height; ifm=(unsigned)tt->internalFormat; }
+            MITHRIL_LOG_WARN("vk-diag","fboAttach fbo=%u colorSlot=%d tex=%u texSize=%dx%d glInternal=0x%x",
+                fbo->id, attachment-GL_COLOR_ATTACHMENT0, texture, tw, th, ifm);
+        }
     } else if (attachment == GL_DEPTH_ATTACHMENT) {
         fbo->depth = a;
     } else if (attachment == GL_STENCIL_ATTACHMENT) {
@@ -258,6 +265,13 @@ void glFramebufferTexture(GLenum target, GLenum attachment, GLuint texture, GLin
     a.layered = true;
     if (attachment >= GL_COLOR_ATTACHMENT0 && attachment < GL_COLOR_ATTACHMENT0 + mithril::kMaxColorAttachments) {
         fbo->colors[attachment - GL_COLOR_ATTACHMENT0] = a;
+        if (std::getenv("MITHRIL_DUMP_BLIT") && texture) {
+            int tw=0,th=0; unsigned int ifm=0;
+            if (mithril::Texture* tt = mithril::state_get_texture(texture)) {
+                tw=tt->width; th=tt->height; ifm=(unsigned)tt->internalFormat; }
+            MITHRIL_LOG_WARN("vk-diag","fboAttachTex fbo=%u colorSlot=%d tex=%u texSize=%dx%d glInternal=0x%x",
+                fbo->id, attachment-GL_COLOR_ATTACHMENT0, texture, tw, th, ifm);
+        }
     } else if (attachment == GL_DEPTH_ATTACHMENT) {
         fbo->depth = a;
     } else if (attachment == GL_STENCIL_ATTACHMENT) {
@@ -445,6 +459,9 @@ void glBlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1,
                        GLint dstX0, GLint dstY0, GLint dstX1, GLint dstY1,
                        GLbitfield mask, GLenum filter) {
     MITHRIL_ENSURE_INIT();
+    if (std::getenv("MITHRIL_DUMP_BLIT"))
+        MITHRIL_LOG_WARN("vk-diag","blit-enter readFBO=%u drawFBO=%u defaultColorImg=%p",
+          g_state->currentReadFBO,g_state->currentDrawFBO,(void*)g_state->eglDefaultColorImage);
 
     // FIX (Iris 阴影贴图必需): depth/stencil blit 支持。Iris 的阴影贴图
     // cascade copy、深度 pre-pass 重建依赖 glBlitFramebuffer(...,
@@ -500,10 +517,53 @@ void glBlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1,
         // 自身也会做；为保持原流程不变，这里不重复，直接进入 color 解析）。
     }
 
-    // Flush any pending rendering into the source/destination so the blit
-    // sees the latest pixels and subsequent draws see the blit's result.
-    backend_end_render_pass();
-    backend_commit();
+    // A colour blit to the DEFAULT framebuffer is implemented as an in-frame
+    // fullscreen quad (see the routing at the end of this function). That path
+    // keeps the scene draws and the quad in ONE command buffer, committed once
+    // at eglSwapBuffers; it must NOT pre-commit here. An early commit_frame()
+    // moves the swapchain image to PRESENT_SRC_KHR and signals renderFinished
+    // before the quad is recorded, and consumes the acquire wait -- leaving the
+    // image that actually gets presented empty. The quad routine ends the
+    // active scene pass itself, in-buffer (the quad is later in the buffer, so
+    // it samples tex6 after the scene draws).
+    const bool quad_path = (g_state->currentDrawFBO == 0) &&
+                           (mask & GL_COLOR_BUFFER_BIT);
+    if (!quad_path) {
+        // User-FBO destination (one-shot vkCmdBlitImage): flush pending
+        // rendering so the blit sees the latest pixels.
+        backend_end_render_pass();
+        backend_commit();
+    }
+
+    // TEMP DIAG (MITHRIL_DUMP_BLIT=1): read back the blit SOURCE (currentReadFBO)
+    // to decide whether the offscreen scene render has content before the blit.
+    if (std::getenv("MITHRIL_DUMP_BLIT")) {
+        GLuint rfbo = g_state->currentReadFBO;
+        int sw = 0, sh = 0;
+        if (rfbo == 0) { sw = g_state->eglDefaultWidth; sh = g_state->eglDefaultHeight; }
+        else if (mithril::Framebuffer* rf = mithril::state_get_framebuffer(rfbo)) {
+            GLuint rt = rf->colors[0].texture;
+            if (mithril::Texture* rtt = mithril::state_get_texture(rt)) {
+                sw = rtt->width; sh = rtt->height;
+                VkFormat mf = backend_vk_format_for_gl((GLenum)rtt->internalFormat);
+                MITHRIL_LOG_WARN("vk-diag", "blit-src fbo=%u tex=%u glInternal=0x%x vkFmt=%d",
+                    rfbo, rt, (unsigned)rtt->internalFormat, (int)mf);
+            }
+        }
+        if (sw > 0 && sh > 0) {
+            std::vector<uint8_t> tmp((size_t)sw * sh * 4);
+            glReadPixels(0, 0, sw, sh, GL_RGBA, GL_UNSIGNED_BYTE, tmp.data());
+            const char* root = std::getenv("MITHRIL_E2E_ROOT");
+            if (root) {
+                std::string dp = std::string(root) + "/render/blit-source.rgba";
+                FILE* df = std::fopen(dp.c_str(), "wb");
+                if (df) { std::fwrite(tmp.data(), 1, tmp.size(), df); std::fclose(df); }
+                std::string dm = std::string(root) + "/render/blit-source.meta";
+                FILE* mf = std::fopen(dm.c_str(), "wb");
+                if (mf) { std::fprintf(mf, "%d %d %zu rfbo=%u", sw, sh, tmp.size(), rfbo); std::fclose(mf); }
+            }
+        }
+    }
 
     // Resolve the source FBO's colour attachment. The read FBO is the source.
     //   - FBO 0 (EGL default): use the swapchain image installed on g_state.
@@ -511,9 +571,12 @@ void glBlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1,
     //     buffer selected by glReadBuffer, but MC Java only uses attachment 0).
     VkImage src_image = VK_NULL_HANDLE;
     VkFormat src_format = VK_FORMAT_UNDEFINED;
+    int src_w = 0, src_h = 0;
     if (g_state->currentReadFBO == 0) {
         src_image  = g_state->eglDefaultColorImage;
         src_format = g_state->eglDefaultColorFormat;
+        src_w = g_state->eglDefaultWidth;
+        src_h = g_state->eglDefaultHeight;
     } else {
         mithril::Framebuffer* fbo = mithril::state_get_framebuffer(g_state->currentReadFBO);
         if (fbo) {
@@ -531,7 +594,11 @@ void glBlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1,
             if (tex) {
                 src_image = backend_get_texture_image(tex);
                 mithril::Texture* t = mithril::state_get_texture(tex);
-                if (t) src_format = backend_vk_format_for_gl((GLenum)t->internalFormat);
+                if (t) {
+                    src_format = backend_vk_format_for_gl((GLenum)t->internalFormat);
+                    src_w = t->width;
+                    src_h = t->height;
+                }
             }
         }
     }
@@ -562,7 +629,14 @@ void glBlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1,
         }
     }
 
-    if (src_image == VK_NULL_HANDLE || dst_image == VK_NULL_HANDLE) return;
+    if (src_image == VK_NULL_HANDLE || dst_image == VK_NULL_HANDLE) {
+        if (std::getenv("MITHRIL_DUMP_BLIT")) {
+            static uint64_t bn=0; ++bn;
+            if((bn%30)==1) MITHRIL_LOG_WARN("vk-diag","blit-null #%llu readFBO=%u drawFBO=%u srcImg=%p dstImg=%p defaultColorImg=%p",
+                (unsigned long long)bn,g_state->currentReadFBO,g_state->currentDrawFBO,(void*)src_image,(void*)dst_image,(void*)g_state->eglDefaultColorImage);
+        }
+        return;
+    }
     if (src_format == VK_FORMAT_UNDEFINED) src_format = VK_FORMAT_R8G8B8A8_UNORM;
     if (dst_format == VK_FORMAT_UNDEFINED) dst_format = VK_FORMAT_R8G8B8A8_UNORM;
 
@@ -575,12 +649,23 @@ void glBlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1,
     // so their blit coords pass through unchanged. Deep reference: MobileGL
     // ApplyNativeBlitDefaultFramebufferTransform (identity branch).
     // Source Y is never flipped (MobileGL never flips src Y).
-    backend_blit_images(src_image, src_format,
-                        dst_image, dst_format,
-                        srcX0, srcY0, srcX1, srcY1,
-                        dstX0, dstY0, dstX1, dstY1,
-                        mask, filter,
-                        is_dst_default_fbo ? 1 : 0, dst_height);
+    // A colour blit whose DESTINATION is the EGL default framebuffer cannot
+    // use vkCmdBlitImage (into a MoltenVK swapchain drawable it writes no
+    // pixels). Draw a fullscreen textured quad through a render pass instead
+    // (the proven draw-to-drawable path). User-FBO destinations and
+    // depth/stencil blits still use backend_blit_images.
+    if (is_dst_default_fbo && (mask & GL_COLOR_BUFFER_BIT)) {
+        backend_blit_to_default_quad(src_image, src_format, src_w, src_h,
+                                     srcX0, srcY0, srcX1, srcY1,
+                                     dstX0, dstY0, dstX1, dstY1, filter);
+    } else {
+        backend_blit_images(src_image, src_format,
+                            dst_image, dst_format,
+                            srcX0, srcY0, srcX1, srcY1,
+                            dstX0, dstY0, dstX1, dstY1,
+                            mask, filter,
+                            is_dst_default_fbo ? 1 : 0, dst_height);
+    }
 }
 
 /* Renderbuffers: full state-machine implementation (used rarely by MC Java,

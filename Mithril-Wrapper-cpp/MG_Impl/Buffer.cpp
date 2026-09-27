@@ -318,9 +318,17 @@ void glBindBufferRange(GLenum target, GLuint index, GLuint buffer,
         mithril::state_set_error(GL_INVALID_VALUE);
         return;
     }
-    // GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT is implementation-defined; approximate
-    // with 256 (a common desktop value). Enforced only for uniform buffers.
-    if (target == GL_UNIFORM_BUFFER && (offset % 256) != 0) {
+    // Offset alignment must match what the driver reports via
+    // GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT / GL_SHADER_STORAGE_BUFFER_OFFSET_ALIGNMENT
+    // (16 on MoltenVK/Metal). A hardcoded 256 wrongly rejected the 16-aligned
+    // offsets the host legitimately computes from the reported alignment; the
+    // dropped bind left every UBO unbound -> zero recorded draws / black frame.
+    GLintptr needAlign = 16;
+    if (target == GL_UNIFORM_BUFFER) {
+        needAlign = backend_device_limit(MITHRIL_LIMIT_UNIFORM_BUFFER_ALIGNMENT, 256);
+    }
+    if ((target == GL_UNIFORM_BUFFER || target == GL_SHADER_STORAGE_BUFFER) &&
+        needAlign > 0 && (offset % needAlign) != 0) {
         mithril::state_set_error(GL_INVALID_VALUE);
         return;
     }

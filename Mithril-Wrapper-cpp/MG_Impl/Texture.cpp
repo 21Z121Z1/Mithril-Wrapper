@@ -255,6 +255,10 @@ void glTexImage2D(GLenum target, GLint level, GLint internalFormat,
         t->width  = width;
         t->height = height;
         t->depth  = 1;
+        if (std::getenv("MITHRIL_DUMP_BLIT") && target==GL_TEXTURE_2D) {
+            MITHRIL_LOG_WARN("vk-diag","texImage name=%u size=%dx%d internal=0x%x fmt=0x%x type=0x%x",
+                t->id,width,height,(unsigned)internalFormat,(unsigned)format,(unsigned)type);
+        }
     }
     if (t->levels < level + 1) t->levels = level + 1;
 

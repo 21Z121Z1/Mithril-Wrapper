@@ -165,6 +165,21 @@ extern "C" void mithril_e2e_capture_before_present(int width, int height, void* 
     readPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
     GLenum error = getError();
 
+    // DIAG: also read user scene FBOs (fbo3, fbo21) to locate content.
+    for (GLuint uf : {static_cast<GLuint>(3), static_cast<GLuint>(21)}) {
+        std::vector<unsigned char> ur(static_cast<size_t>(width)*height*4u);
+        bindFramebuffer(GL_READ_FRAMEBUFFER, uf);
+        readPixels(0,0,width,height,GL_RGBA,GL_UNSIGNED_BYTE,ur.data());
+        GLenum ue = getError();
+        char un[32]; std::snprintf(un,sizeof(un),"userfbo-%u",uf);
+        const std::string upath = root + "/render/" + un + ".rgba";
+        write_atomic(upath, ur.data(), ur.size());
+        unsigned long nz=0; for(size_t i=0;i<ur.size();++i) if(ur[i])++nz;
+        char ud[128]; std::snprintf(ud,sizeof(ud),"fbo=%u glError=0x%x nonzeroBytes=%lu size=%zu",uf,ue,nz,ur.size());
+        append_event(root,"diag_user_fbo",frame,ud);
+    }
+    bindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+
     bindFramebuffer(GL_READ_FRAMEBUFFER, static_cast<GLuint>(read_fbo));
     bindBuffer(GL_PIXEL_PACK_BUFFER, static_cast<GLuint>(pack_pbo));
     pixelStorei(GL_PACK_ALIGNMENT, pack_alignment);

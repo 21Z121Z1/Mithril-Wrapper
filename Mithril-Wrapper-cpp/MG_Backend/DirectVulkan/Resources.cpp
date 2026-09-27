@@ -1858,6 +1858,12 @@ VkImage backend_get_texture_image(GLuint name) {
     return it == tbl.end() ? VK_NULL_HANDLE : it->second.image;
 }
 
+VkFormat backend_get_texture_format(GLuint name) {
+    auto& tbl = mithril::vk::texture_table();
+    auto it = tbl.find(name);
+    return it == tbl.end() ? VK_FORMAT_UNDEFINED : it->second.format;
+}
+
 void backend_delete_texture(GLuint name) {
     auto& tbl = mithril::vk::texture_table();
     auto it = tbl.find(name);

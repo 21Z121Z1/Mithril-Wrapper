@@ -117,6 +117,10 @@ static void diag_log_formats(const VkFormat fmts[8], int count, VkFormat depth) 
 }
 
 static bool prepare_draw(GLenum mode) {
+    bool pd_dump = std::getenv("MITHRIL_DUMP_BLIT") != nullptr;
+    static uint64_t pd_att=0,pd_f_prog=0,pd_f_spirv=0,pd_f_att=0,pd_f_pipe=0;
+    ++pd_att;
+    #define PD_FAIL(which, why...) do { ++which; if (pd_dump && ((pd_att%120)==0)) { MITHRIL_LOG_WARN("vk-diag","prepareDrawFail att=%llu noprogram=%llu nospirv=%llu noattach=%llu nopipe=%llu drawFBO=%u " why, (unsigned long long)pd_att,(unsigned long long)pd_f_prog,(unsigned long long)pd_f_spirv,(unsigned long long)pd_f_att,(unsigned long long)pd_f_pipe, g_state->currentDrawFBO); } return false; } while(0)
     // Resolve current program + its SPIR-V.
     mithril::Program* prog = mithril::state_get_program(g_state->currentProgram);
     if (!prog || !prog->linked) {
@@ -126,7 +130,7 @@ static bool prepare_draw(GLenum mode) {
                               (!prog) ? "not found" : "not linked",
                               g_state->currentProgram);
         }
-        return false;
+        PD_FAIL(pd_f_prog, "reason=no-program");
     }
 
     // Determine whether we are drawing to the default framebuffer (FBO 0) or a
@@ -165,7 +169,7 @@ static bool prepare_draw(GLenum mode) {
                               prog->vertexSpirvYFlipped.size(),
                               prog->fragmentSpirv.size(), (int)is_default_fbo);
         }
-        return false;
+        PD_FAIL(pd_f_spirv, "reason=no-spirv");
     }
 
     // Resolve current draw FBO attachments (color + depth VkImageViews + size).
@@ -183,7 +187,7 @@ static bool prepare_draw(GLenum mode) {
                 MITHRIL_LOG_ERROR("vk-diag", "B1 draw skipped: no framebuffer attachment "
                                   "(currentDrawFBO=%u size=%dx%d)", g_state->currentDrawFBO, w, h);
             }
-            return false;
+            PD_FAIL(pd_f_att, "reason=no-attachment size=%dx%d", w, h);
         }
     }
 
@@ -224,6 +228,20 @@ static bool prepare_draw(GLenum mode) {
             }
         }
     }
+    if (std::getenv("MITHRIL_FMT_TRACE")) {
+        MITHRIL_LOG_WARN("vk-diag","SPVSZ prog=%u vsWords=%zu fsWords=%zu",
+          prog->id,(size_t)(vs_spirv_ptr?vs_spirv_ptr->size():0),prog->fragmentSpirv.size());
+        for (int i = 0; i < color_count; ++i) {
+            GLuint tt = fbo ? fbo->colors[i].texture : 0;
+            VkFormat allocFmt = tt ? backend_get_texture_format(tt) : VK_FORMAT_UNDEFINED;
+            MITHRIL_LOG_WARN("vk-diag",
+              "FMT fbo=%u slot=%d tex=%u glInternal=0x%x pipeFmt=%d allocFmt=%d match=%d",
+              g_state->currentDrawFBO, i, tt,
+              tt && mithril::state_get_texture(tt) ? (int)mithril::state_get_texture(tt)->internalFormat : 0,
+              (int)color_formats[i], (int)allocFmt,
+              (int)(color_formats[i]==allocFmt));
+        }
+    }
     // Depth format from the bound depth texture.
     // For FBO 0 (EGL default framebuffer), the depth image is a raw VkImage
     // created by the EGL layer (VK_FORMAT_D32_SFLOAT_S8_UINT), not tracked in
@@ -246,17 +264,35 @@ static bool prepare_draw(GLenum mode) {
     for (int i = 0; i < mithril::kMaxVertexAttribs; ++i) {
         const mithril::VertexAttrib& a = vao->attribs[i];
         if (!a.enabled) continue;
+        // GL 4.3 separate-attribute-format API (glVertexAttribFormat +
+        // glVertexAttribBinding + glBindVertexBuffer, used by modern MC's
+        // GpuBuffer present path) stores stride/buffer/divisor on the named
+        // binding, not on the attribute. Resolve them there; the legacy
+        // glVertexAttribPointer path never populates bindings[], so fall back
+        // to the attribute copies. Reading only the attribute copies under the
+        // modern API bound a stale 16-byte buffer with a wrong stride, which
+        // failed Metal's "argument length > buffer length" validation and made
+        // MoltenVK drop every scene draw (uniform black).
+        const GLuint bi = a.bindingIndex;
+        const mithril::VertexBinding& vbn = vao->bindings[bi];
         MGVertexAttrib& m = attribs[attrib_count++];
         m.location     = i;
         m.size         = a.size;
         m.type         = a.type;
         m.normalized   = a.normalized ? 1 : 0;
         m.integer      = a.integer ? 1 : 0;
-        m.stride       = a.stride;
+        m.stride       = vbn.stride > 0 ? vbn.stride : a.stride;
         m.offset       = (int)(intptr_t)a.pointer;
         m.enabled      = 1;
-        m.buffer_name  = a.boundBuffer;
-        m.divisor      = a.divisor;
+        m.buffer_name  = vbn.buffer ? vbn.buffer : a.boundBuffer;
+        m.divisor      = vbn.divisor ? vbn.divisor : a.divisor;
+    }
+    if (getenv("MITHRIL_VA_DUMP")) {
+        for (int q=0;q<attrib_count;++q)
+            fprintf(stderr,"[VA_DUMP] loc=%d size=%d type=0x%x stride=%d offset=%d buf=%u divisor=%u bi0=%u\n",
+                attribs[q].location,attribs[q].size,(unsigned)attribs[q].type,attribs[q].stride,
+                attribs[q].offset,attribs[q].buffer_name,attribs[q].divisor,
+                vao->attribs[attribs[q].location].bindingIndex);
     }
 
     // Get-or-create the VkGraphicsPipeline. Blend state + colorWriteMask are
@@ -297,7 +333,7 @@ static bool prepare_draw(GLenum mode) {
                               prog->id, (int)is_default_fbo, color_count, (int)depth_format);
             diag_log_formats(color_formats, color_count, depth_format);
         }
-        return false;
+        PD_FAIL(pd_f_pipe, "reason=no-pipeline colors=%d depth=%d", color_count, (int)depth_format);
     }
 
     // FIX (root cause Y, CRITICAL): Register user-FBO attachment tex_ids so
@@ -319,6 +355,13 @@ static bool prepare_draw(GLenum mode) {
         backend_set_fbo_attachment_tex_ids(color_tex_ids, color_count, depth_tex_id);
     } else {
         backend_set_fbo_attachment_tex_ids(nullptr, 0, 0);
+    }
+
+    if (std::getenv("MITHRIL_DRAW_TRACE")) {
+        GLuint ct = fbo ? fbo->colors[0].texture : 0;
+        void* im = ct ? (void*)backend_get_texture_image(ct) : (void*)g_state->eglDefaultColorImage;
+        MITHRIL_LOG_WARN("vk-diag","drawTrace fbo=%u tex=%u img=%p %dx%d mode=%d prog=%u",
+          g_state->currentDrawFBO,ct,im,w,h,(int)mode,g_state->currentProgram);
     }
 
     // Begin render pass (Load action preserves previous contents).
@@ -356,6 +399,24 @@ static bool prepare_draw(GLenum mode) {
                             g_state->scissorW, g_state->scissorH);
     } else {
         backend_set_scissor(0, 0, g_state->viewportW, g_state->viewportH);
+    }
+    // TEMP DIAG (MITHRIL_VP_DUMP): dump dynamic raster state for the first
+    // draws into FBO 3 to find why fragments produce no tex6 pixels.
+    if (std::getenv("MITHRIL_VP_DUMP") && g_state->currentDrawFBO != 0) {
+        static int vp_n=0;
+        if (vp_n < 40) {
+            ++vp_n;
+            MITHRIL_LOG_WARN("vk-diag",
+              "VP fbo=%u #%d viewport=(%d,%d,%d,%d) scissorTest=%d scissor=(%d,%d,%d,%d) "
+              "colorMask=(%d%d%d%d) blend=%d depthTest=%d depthMask=%d depthFunc=%d cull=%d",
+              g_state->currentDrawFBO,
+              vp_n, g_state->viewportX,g_state->viewportY,g_state->viewportW,g_state->viewportH,
+              (int)g_state->scissorTest, g_state->scissorX,g_state->scissorY,g_state->scissorW,g_state->scissorH,
+              (int)g_state->colorMask[0][0],(int)g_state->colorMask[0][1],
+              (int)g_state->colorMask[0][2],(int)g_state->colorMask[0][3],
+              (int)g_state->blends[0].enabled, (int)g_state->depthTest,
+              (int)g_state->depthMask, (int)g_state->depthFunc, (int)g_state->cullFace);
+        }
     }
     // FIX (root cause H + Y-flip winding fix): ALWAYS set cull mode.
     // VK_DYNAMIC_STATE_CULL_MODE is dynamic; skipping the call when cullFace is
@@ -441,6 +502,11 @@ static bool prepare_draw(GLenum mode) {
         MGVertexAttrib& m = attribs[i];
         VkBuffer buf = backend_get_buffer(m.buffer_name);
         if (buf != VK_NULL_HANDLE) {
+            // pOffsets = the binding base offset (glBindVertexBuffer offset);
+            // 0 for the legacy path (bindings untouched). The member/relative
+            // offset is handled separately by ad.offset (Root Cause H).
+            const GLuint mbi = vao->attribs[m.location].bindingIndex;
+            VkDeviceSize binding_off = vao->bindings[mbi].offset;
 // FIX (Root Cause H - 顶点属性偏移双重应用):
 // Vulkan 顶点寻址公式: buffer + pOffsets[binding] + vertexIndex*stride + attr.offset
 // m.offset 是属性在顶点结构内的成员偏移，必须只由 VkVertexInputAttributeDescription::offset
@@ -448,7 +514,8 @@ static bool prepare_draw(GLenum mode) {
 // 偏移会被应用两次 → 有效地址 = buffer + 2*m.offset，导致交错顶点格式（如
 // position@0/color@12/uv@24）的属性读取错位 → 加载界面红屏/花屏。
 // 参考 MobileGL VkglVertexAttribBindingState：binding offset 恒为 0，偏移由属性描述处理。
-            backend_set_vertex_buffer(m.location, buf, 0);
+            backend_set_vertex_buffer(m.location, buf, binding_off);
+            if (getenv("MITHRIL_VA_DUMP")) fprintf(stderr,"[LOW] slot=%d vkbuf=%p off=%llu\n",m.location,(void*)buf,(unsigned long long)binding_off);
             if (m.location < 16) bound_slots[m.location] = true;
         }
     }
@@ -1055,11 +1122,14 @@ GLenum glClientWaitSync(GLsync sync, GLbitfield flags, GLuint64 timeout) {
         return GL_WAIT_FAILED;
     }
     mithril::Sync& s = it->second;
+    static uint64_t cw_att=0,cw_already=0,cw_cond=0,cw_timeout=0; ++cw_att;
 
     if (s.signaled || s.submitSerial == 0 ||
         s.submitSerial <= backend_last_completed_serial()) {
         s.signaled = true;
         s.submitSerial = 0;
+        ++cw_already;
+        if (std::getenv("MITHRIL_DUMP_BLIT")&&(cw_att%60==0)) MITHRIL_LOG_WARN("vk-diag","clientWait att=%llu already=%llu cond=%llu timeout=%llu",(unsigned long long)cw_att,(unsigned long long)cw_already,(unsigned long long)cw_cond,(unsigned long long)cw_timeout);
         return GL_ALREADY_SIGNALED;
     }
 
@@ -1073,8 +1143,12 @@ GLenum glClientWaitSync(GLsync sync, GLbitfield flags, GLuint64 timeout) {
     if (backend_wait_serial(s.submitSerial, (uint64_t)timeout)) {
         s.signaled = true;
         s.submitSerial = 0;
+        ++cw_cond;
+        if (std::getenv("MITHRIL_DUMP_BLIT")&&(cw_att%60==0)) MITHRIL_LOG_WARN("vk-diag","clientWait att=%llu already=%llu cond=%llu timeout=%llu",(unsigned long long)cw_att,(unsigned long long)cw_already,(unsigned long long)cw_cond,(unsigned long long)cw_timeout);
         return GL_CONDITION_SATISFIED;
     }
+    ++cw_timeout;
+    if (std::getenv("MITHRIL_DUMP_BLIT")&&(cw_att%60==0)) MITHRIL_LOG_WARN("vk-diag","clientWait att=%llu already=%llu cond=%llu timeout=%llu serial=%llu completed=%llu",(unsigned long long)cw_att,(unsigned long long)cw_already,(unsigned long long)cw_cond,(unsigned long long)cw_timeout,(unsigned long long)s.submitSerial,(unsigned long long)backend_last_completed_serial());
     return GL_TIMEOUT_EXPIRED;
 }
 

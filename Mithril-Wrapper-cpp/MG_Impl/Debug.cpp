@@ -42,7 +42,12 @@ void glPopDebugGroup(void) {
     MITHRIL_ENSURE_INIT();
 }
 
-void glObjectLabel(GLenum, GLuint, GLsizei, const GLchar*) {
+void glObjectLabel(GLenum identifier, GLuint name, GLsizei length, const GLchar* label) {
+    if (label && std::getenv("MITHRIL_DUMP_BLIT")) {
+        std::string l(label, length>=0?(size_t)length:std::strlen(label));
+        MITHRIL_LOG_WARN("vk-diag","objLabel id=0x%x name=%u [%s]",(unsigned)identifier,name,l.c_str());
+    }
+
     MITHRIL_ENSURE_INIT();
 }
 

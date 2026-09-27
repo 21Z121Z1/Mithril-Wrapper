@@ -382,6 +382,7 @@ void        backend_texture_set_params(GLuint name, GLint min_filter, GLint mag_
                                        const float* border_color);
 VkImageView backend_get_texture_view(GLuint name);
 VkImage     backend_get_texture_image(GLuint name);
+VkFormat    backend_get_texture_format(GLuint name);
 void        backend_delete_texture(GLuint name);
 /* Drop any VkSampler cached for `name`. Called from glTexParameter*i* when a
  * texture's filtering/wrap state changes, so the next sampler fetch rebuilds a
@@ -472,6 +473,20 @@ void        backend_blit_images(VkImage src_image, VkFormat src_format,
                                 int dstX0, int dstY0, int dstX1, int dstY1,
                                 GLbitfield mask, GLenum filter,
                                 int is_dst_default_fbo, int dst_height);
+
+/*
+ * Colour blit TO the EGL default framebuffer via a fullscreen textured quad.
+ * vkCmdBlitImage into a MoltenVK swapchain drawable writes no pixels, while the
+ * render-pass draw path works; glBlitFramebuffer uses this when the draw FBO is
+ * 0 and GL_COLOR_BUFFER_BIT is set. src_w/src_h are the source image dims;
+ * coordinates are GL (bottom-left). Depth/stencil blits still use
+ * backend_blit_images.
+ */
+void        backend_blit_to_default_quad(VkImage src_image, VkFormat src_format,
+                                         int src_w, int src_h,
+                                         int srcX0, int srcY0, int srcX1, int srcY1,
+                                         int dstX0, int dstY0, int dstX1, int dstY1,
+                                         GLenum filter);
 
 /* ---- Samplers ---- */
 VkSampler backend_get_or_create_sampler(GLuint name, GLint min_filter, GLint mag_filter,
@@ -716,6 +731,7 @@ VkFormat    backend_swapchain_depth_format(void* swapchain_state);
 #define MITHRIL_LIMIT_MAX_COMPUTE_WG_SIZE_X       20
 
 int backend_device_limit(int which, int fallback);
+void backend_debug_frame_fbo_log(void);
 
 #ifdef __cplusplus
 }
