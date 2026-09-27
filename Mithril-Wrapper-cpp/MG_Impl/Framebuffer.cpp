@@ -511,9 +511,12 @@ void glBlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1,
     //     buffer selected by glReadBuffer, but MC Java only uses attachment 0).
     VkImage src_image = VK_NULL_HANDLE;
     VkFormat src_format = VK_FORMAT_UNDEFINED;
+    VkImageLayout src_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    GLuint src_tex = 0;
     if (g_state->currentReadFBO == 0) {
         src_image  = g_state->eglDefaultColorImage;
         src_format = g_state->eglDefaultColorFormat;
+        src_layout = backend_active_swapchain_color_layout();
     } else {
         mithril::Framebuffer* fbo = mithril::state_get_framebuffer(g_state->currentReadFBO);
         if (fbo) {
@@ -529,7 +532,9 @@ void glBlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1,
                 tex = fbo->colors[0].texture;
             }
             if (tex) {
+                src_tex = tex;
                 src_image = backend_get_texture_image(tex);
+                src_layout = backend_get_texture_layout(tex);
                 mithril::Texture* t = mithril::state_get_texture(tex);
                 if (t) src_format = backend_vk_format_for_gl((GLenum)t->internalFormat);
             }
@@ -541,18 +546,23 @@ void glBlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1,
     // computation (needed when dst is the default framebuffer — see below).
     VkImage dst_image = VK_NULL_HANDLE;
     VkFormat dst_format = VK_FORMAT_UNDEFINED;
+    VkImageLayout dst_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    GLuint dst_tex = 0;
     int dst_height = 0;
     bool is_dst_default_fbo = (g_state->currentDrawFBO == 0);
     if (is_dst_default_fbo) {
         dst_image  = g_state->eglDefaultColorImage;
         dst_format = g_state->eglDefaultColorFormat;
+        dst_layout = backend_active_swapchain_color_layout();
         dst_height = g_state->eglDefaultHeight;
     } else {
         mithril::Framebuffer* fbo = mithril::state_get_framebuffer(g_state->currentDrawFBO);
         if (fbo) {
             GLuint tex = fbo->colors[0].texture;
             if (tex) {
+                dst_tex = tex;
                 dst_image = backend_get_texture_image(tex);
+                dst_layout = backend_get_texture_layout(tex);
                 mithril::Texture* t = mithril::state_get_texture(tex);
                 if (t) {
                     dst_format = backend_vk_format_for_gl((GLenum)t->internalFormat);
@@ -575,8 +585,22 @@ void glBlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1,
     // so their blit coords pass through unchanged. Deep reference: MobileGL
     // ApplyNativeBlitDefaultFramebufferTransform (identity branch).
     // Source Y is never flipped (MobileGL never flips src Y).
-    backend_blit_images(src_image, src_format,
-                        dst_image, dst_format,
+    {
+        static uint64_t blitDiagCount = 0;
+        ++blitDiagCount;
+        if (blitDiagCount <= 12 || (blitDiagCount % 1000) == 0) {
+            MITHRIL_LOG_WARN("vk-diag",
+                "glBlitFramebuffer #%llu readFBO=%u drawFBO=%u srcTex=%u dstTex=%u "
+                "srcLayout=%u dstLayout=%u mask=0x%x src=(%d,%d)-(%d,%d) dst=(%d,%d)-(%d,%d)",
+                (unsigned long long)blitDiagCount,
+                g_state->currentReadFBO, g_state->currentDrawFBO,
+                src_tex, dst_tex, (unsigned)src_layout, (unsigned)dst_layout,
+                (unsigned)mask, srcX0, srcY0, srcX1, srcY1,
+                dstX0, dstY0, dstX1, dstY1);
+        }
+    }
+    backend_blit_images(src_image, src_format, src_layout,
+                        dst_image, dst_format, dst_layout,
                         srcX0, srcY0, srcX1, srcY1,
                         dstX0, dstY0, dstX1, dstY1,
                         mask, filter,
