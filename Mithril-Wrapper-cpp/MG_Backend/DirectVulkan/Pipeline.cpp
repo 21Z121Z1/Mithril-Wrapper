@@ -423,7 +423,7 @@ VkPipeline get_or_create_pipeline(GLuint program,
     // matches Vulkan/Metal's Y-down coordinate system; user FBOs use the
     // non-flipped variant so their textures stay in GL Y-up orientation for
     // correct sampling. Deep reference: MobileGL GetShaderTransformFlags.
-    VkShaderModule& vsModule = is_default_fbo ? pr.vertexModuleFlipped : pr.vertexModule;
+    VkShaderModule& vsModule = pr.vertexModule;  // non-flipped for all targets
     if (vsModule == VK_NULL_HANDLE && vertex_spirv && vertex_word_count > 0) {
         vsModule = create_module(vertex_spirv, vertex_word_count);
     }

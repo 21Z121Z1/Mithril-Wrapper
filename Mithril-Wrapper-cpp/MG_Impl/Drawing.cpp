@@ -136,8 +136,12 @@ static bool prepare_draw(GLenum mode) {
     // render into textures sampled by GL shaders (GL Y-up), so they use the
     // non-flipped variant. Deep reference: MobileGL GetShaderTransformFlags.
     bool is_default_fbo = (g_state->currentDrawFBO == 0);
-    const std::vector<uint32_t>& vs_spirv = is_default_fbo
-        ? prog->vertexSpirvYFlipped : prog->vertexSpirv;
+    // MoltenVK preserves GL Y-up orientation consistently for both user FBOs
+    // and the on-screen drawable (validated: the Y-flipped variant reverses the
+    // quad winding to clockwise, which GL_BACK culling discards -> zero
+    // fragments / black frame). Both targets therefore use the non-flipped
+    // vertex SPIR-V.
+    const std::vector<uint32_t>& vs_spirv = prog->vertexSpirv;
 
     // Defensive: skip draws whose shader translation produced no SPIR-V
     // (e.g. glslang failed on an unrecognised construct). Issuing the draw
@@ -405,20 +409,6 @@ static bool prepare_draw(GLenum mode) {
     backend_set_load_load();
     backend_begin_render_pass(colors, color_count, depth_view, w, h, 1);
 
-    // E2E convergence A/B: immediately before Minecraft's final fullscreen
-    // composite, paint the default framebuffer magenta with an explicit
-    // attachment clear. The source texture, sampler, CPU-side quad and shader
-    // inputs are already proven correct. If the pre-present oracle remains
-    // magenta, the indexed draw produced no covering fragments (GPU-side
-    // vertex/index/pipeline path). If it becomes black, fragments executed and
-    // the remaining fault is texture sampling / fragment output. Apply this on
-    // every settled final pass so the later bridge capture observes the probe.
-    if (is_default_fbo && prog->id == 1 && g_state->presentedFrames >= 1000) {
-        const float diagnosticColor[4] = {1.0f, 0.0f, 1.0f, 1.0f};
-        backend_clear_buffer_indexed(GL_COLOR, 0, diagnosticColor, 1.0f, 0);
-    }
-
-    // Bind pipeline + set dynamic state via vkCmdSet*.
     backend_bind_pipeline(pipeline);
     // FIX (root cause: gl_VertexID baseVertex semantics): push
     // currentBaseVertex into the shader's _MithrilBaseVertex push-constant
