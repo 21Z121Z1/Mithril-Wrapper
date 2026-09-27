@@ -695,6 +695,74 @@ void glDrawArraysInstancedBaseInstance(GLenum mode, GLint first, GLsizei count,
 void glDrawElements(GLenum mode, GLsizei count, GLenum type, const void* indices) {
     MITHRIL_ENSURE_INIT();
     if (!validate_draw_call(mode, count)) return;
+
+    // Minecraft's QUADS path is emitted as indexed triangles through the
+    // shared sequential index buffer. Capture both the vertex payload and EBO
+    // here; the glDrawArrays diagnostic above intentionally covers only true
+    // non-indexed callers.
+    if (g_state->currentDrawFBO == 0 && g_state->currentProgram == 1 &&
+        g_state->presentedFrames >= 1000) {
+        static bool finalIndexedInputsLogged = false;
+        if (!finalIndexedInputsLogged) {
+            finalIndexedInputsLogged = true;
+            mithril::VertexArray* diagVao = mithril::state_get_vao(g_state->currentVAO);
+            if (!diagVao) diagVao = mithril::state_get_vao(0);
+            const mithril::VertexAttrib* diagAttr = diagVao ? &diagVao->attribs[0] : nullptr;
+            const GLuint vboName = diagAttr ? diagAttr->boundBuffer : 0;
+            const GLuint eboName = diagVao ? diagVao->elementArrayBuffer : 0;
+            mithril::Buffer* vbo = mithril::state_get_buffer(vboName);
+            mithril::Buffer* ebo = mithril::state_get_buffer(eboName);
+            MITHRIL_LOG_WARN(
+                "vk-diag",
+                "final-indexed-inputs mode=0x%x count=%d type=0x%x indexOffset=%lld "
+                "vao=%u vbo=%u vboBytes=%zu ebo=%u eboBytes=%zu",
+                (unsigned)mode, (int)count, (unsigned)type,
+                (long long)(intptr_t)indices, g_state->currentVAO,
+                vboName, vbo ? vbo->data.size() : 0,
+                eboName, ebo ? ebo->data.size() : 0);
+            if (vbo && !vbo->data.empty()) {
+                const size_t floatCount = vbo->data.size() / sizeof(float);
+                const size_t dumpCount = std::min<size_t>(floatCount, 24);
+                char dump[768]; int off = 0;
+                for (size_t i = 0; i < dumpCount && off < (int)sizeof(dump) - 32; ++i) {
+                    float v = 0.0f;
+                    std::memcpy(&v, vbo->data.data() + i * sizeof(float), sizeof(float));
+                    off += snprintf(dump + off, sizeof(dump) - (size_t)off,
+                                    "%s%.6g", i ? "," : "", (double)v);
+                }
+                MITHRIL_LOG_WARN("vk-diag", "final-indexed-vbo-floats first24=[%s]", dump);
+            }
+            if (ebo && !ebo->data.empty()) {
+                char dump[512]; int off = 0;
+                const size_t elemBytes = (type == GL_UNSIGNED_INT) ? 4u :
+                                         (type == GL_UNSIGNED_BYTE) ? 1u : 2u;
+                const size_t start = (size_t)(intptr_t)indices;
+                const size_t available = start < ebo->data.size() ?
+                    (ebo->data.size() - start) / elemBytes : 0;
+                const size_t dumpCount = std::min<size_t>((size_t)count, std::min<size_t>(available, 12));
+                for (size_t i = 0; i < dumpCount && off < (int)sizeof(dump) - 24; ++i) {
+                    uint32_t idx = 0;
+                    const uint8_t* p = ebo->data.data() + start + i * elemBytes;
+                    if (elemBytes == 4) std::memcpy(&idx, p, 4);
+                    else if (elemBytes == 2) { uint16_t v = 0; std::memcpy(&v, p, 2); idx = v; }
+                    else idx = *p;
+                    off += snprintf(dump + off, sizeof(dump) - (size_t)off,
+                                    "%s%u", i ? "," : "", idx);
+                }
+                MITHRIL_LOG_WARN("vk-diag", "final-indexed-ebo first12=[%s]", dump);
+            }
+            mithril::Program* diagProg = mithril::state_get_program(1);
+            if (diagProg) {
+                for (GLuint shaderId : diagProg->attachedShaders) {
+                    mithril::Shader* s = mithril::state_get_shader(shaderId);
+                    if (!s || s->type != GL_VERTEX_SHADER) continue;
+                    MITHRIL_LOG_WARN("vk-diag",
+                                     "final-indexed-vertex-shader id=%u source-bytes=%zu source=<<<%s>>>",
+                                     shaderId, s->source.size(), s->source.c_str());
+                }
+            }
+        }
+    }
     if (!prepare_draw(mode)) return;  // root cause AI — see glDrawArrays
     // If a VBO is bound for GL_ELEMENT_ARRAY_BUFFER, indices is an offset into it.
     mithril::VertexArray* vao = mithril::state_get_vao(g_state->currentVAO);
