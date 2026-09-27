@@ -1466,6 +1466,27 @@ VkImage backend_get_or_create_texture(GLuint name, int width, int height, int de
         }
     }
 
+    // TEMP CI diagnostic: identify single-channel / legacy texture allocations
+    // used by Minecraft's glyph pipeline. Removed after the font-rendering root
+    // cause is confirmed.
+    if (internal_format == 0x1903 /* GL_RED */ ||
+        internal_format == 0x1906 /* GL_ALPHA */ ||
+        internal_format == 0x1909 /* GL_LUMINANCE */ ||
+        internal_format == 0x190A /* GL_LUMINANCE_ALPHA */ ||
+        internal_format == 0x8229 /* GL_R8 */ ||
+        internal_format == 0x803C /* GL_ALPHA8 */ ||
+        internal_format == 0x8040 /* GL_LUMINANCE8 */ ||
+        internal_format == 0x8045 /* GL_LUMINANCE8_ALPHA8 */ ||
+        internal_format == 0x8049 /* GL_INTENSITY */ ||
+        internal_format == 0x804B /* GL_INTENSITY8 */) {
+        static int glyphFormatDiagCount = 0;
+        if (glyphFormatDiagCount++ < 96) {
+            MITHRIL_LOG_WARN("font-diag",
+                "texture alloc name=%u internal=0x%x vkfmt=%d target=0x%x size=%dx%dx%d levels=%d",
+                name, internal_format, (int)fmt, target, width, height, depth, effective_levels);
+        }
+    }
+
     auto& tbl = mithril::vk::texture_table();
     auto it = tbl.find(name);
     // FIX (Root Cause AI - glTexImage2D mipmap uses base level dimensions):
@@ -1702,6 +1723,15 @@ void backend_texture_upload(GLuint name, int level, int x, int y, int z,
     auto& tbl = mithril::vk::texture_table();
     auto it = tbl.find(name);
     if (it == tbl.end() || !pixels) return;
+    if (it->second.format == VK_FORMAT_R8_UNORM || it->second.format == VK_FORMAT_R8G8_UNORM) {
+        static int glyphUploadDiagCount = 0;
+        if (glyphUploadDiagCount++ < 128) {
+            MITHRIL_LOG_WARN("font-diag",
+                "texture upload name=%u vkfmt=%d level=%d off=%d,%d,%d size=%dx%dx%d srcfmt=0x%x type=0x%x full=%d",
+                name, (int)it->second.format, level, x, y, z, w, h, d,
+                format, type, is_full_upload);
+        }
+    }
     const int unpack_alignment = (unpack && unpack->unpackAlignment > 0)
                                      ? unpack->unpackAlignment : 4;
     mithril::vk::stage_and_copy_image(it->second, level, x, y, z, w, h, d,
