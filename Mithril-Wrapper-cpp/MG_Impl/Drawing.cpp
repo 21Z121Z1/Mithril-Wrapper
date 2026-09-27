@@ -781,6 +781,41 @@ void glDrawElements(GLenum mode, GLsizei count, GLenum type, const void* indices
     mithril::VertexArray* vao = mithril::state_get_vao(g_state->currentVAO);
     GLuint ib_name = vao ? vao->elementArrayBuffer : 0;
     VkBuffer ib = backend_get_buffer(ib_name);
+    // One-shot root-cause probe for the final fullscreen blit: log the resolved
+    // index buffer, every enabled attribute's resolved vertex buffer, and the
+    // live encoder gating state. This distinguishes a silently-skipped draw
+    // (null EBO / dropped in backend) from a recorded-but-degenerate draw
+    // (null VBO -> shared zero buffer -> zero-area triangles).
+    if (g_state->currentDrawFBO == 0 && g_state->currentProgram == 1 &&
+        g_state->presentedFrames >= 1000) {
+        static bool finalBlitHandlesLogged = false;
+        if (!finalBlitHandlesLogged) {
+            finalBlitHandlesLogged = true;
+            MITHRIL_LOG_WARN("vk-diag",
+                "final-blit-handles ib_name=%u ib=0x%llx indexOffset=%lld",
+                ib_name, (unsigned long long)(uint64_t)(uintptr_t)ib,
+                (long long)(intptr_t)indices);
+            if (vao) {
+                for (int loc = 0; loc < mithril::kMaxVertexAttribs; ++loc) {
+                    const mithril::VertexAttrib& a = vao->attribs[loc];
+                    if (!a.enabled) continue;
+                    VkBuffer vb = backend_get_buffer(a.boundBuffer);
+                    MITHRIL_LOG_WARN("vk-diag",
+                        "final-blit-attrib loc=%d buffer_name=%u vkbuffer=0x%llx "
+                        "size=%d stride=%d offset=%lld",
+                        loc, a.boundBuffer,
+                        (unsigned long long)(uint64_t)(uintptr_t)vb,
+                        (int)a.size, (int)a.stride,
+                        (long long)(intptr_t)a.pointer);
+                }
+            }
+            backend_encoder_diag_s ed = backend_get_encoder_diag();
+            MITHRIL_LOG_WARN("vk-diag",
+                "final-blit-encoder recording=%d pass=%d descriptors=%d pipeline=0x%llx",
+                ed.command_buffer_recording, ed.pass_active, ed.descriptors_bound,
+                (unsigned long long)ed.bound_pipeline);
+        }
+    }
     if (ib != VK_NULL_HANDLE) {
         backend_draw_indexed((int)mode, (int)count, index_type_to_int(type),
                              ib, (VkDeviceSize)(intptr_t)indices);

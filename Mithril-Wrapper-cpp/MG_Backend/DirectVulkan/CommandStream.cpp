@@ -391,6 +391,19 @@ bool render_pass_active() { return encoder().passActive; }
 void set_descriptors_bound(bool bound) { encoder().descriptorsBound = bound; }
 bool descriptors_bound() { return encoder().descriptorsBound; }
 
+// Temporary diagnostic (final-blit black frame): snapshot the encoder gating
+// state. Public C wrapper follows at the bottom of this file.
+::backend_encoder_diag_s get_encoder_diag() {
+    Backend* b = backend();
+    EncoderState& e = encoder();
+    ::backend_encoder_diag_s d;
+    d.command_buffer_recording = (b->commandBuffer && b->commandBufferRecording) ? 1 : 0;
+    d.pass_active = e.passActive ? 1 : 0;
+    d.descriptors_bound = e.descriptorsBound ? 1 : 0;
+    d.bound_pipeline = (uint64_t)(uintptr_t)e.boundPipeline;
+    return d;
+}
+
 /*
  * ---- Root cause AI (CRITICAL, SIGSEGV inside MVKRenderSubpass) ----
  * Last line of defence before any vkCmdDraw* is recorded.
@@ -2678,6 +2691,10 @@ void backend_draw_indexed_indirect_count(int primitive, int index_type,
     vkCmdDrawIndexedIndirectCount(b->commandBuffer, indirect_buffer, indirect_offset,
                                   count_buffer, count_offset,
                                   (uint32_t)max_drawcount, effStride);
+}
+
+backend_encoder_diag_s backend_get_encoder_diag(void) {
+    return mithril::vk::get_encoder_diag();
 }
 
 } // extern "C"

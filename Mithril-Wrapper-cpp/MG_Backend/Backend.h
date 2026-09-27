@@ -330,6 +330,17 @@ void     backend_delete_buffer(GLuint name);
 /* Shared 16-byte zero-filled buffer for unbound vertex attribute slots. */
 VkBuffer backend_get_zero_buffer(void);
 
+/* One-shot diagnostic for the final fullscreen-blit black-frame investigation.
+ * Snapshots the live command-encoder gating state so the GL frontend can log
+ * exactly why a draw is recorded or dropped. Temporary diagnostic aid. */
+struct backend_encoder_diag_s {
+    int command_buffer_recording;
+    int pass_active;
+    int descriptors_bound;
+    uint64_t bound_pipeline;
+};
+struct backend_encoder_diag_s backend_get_encoder_diag(void);
+
 /*
  * Generic vertex attribute values (root cause AQ).
  *
