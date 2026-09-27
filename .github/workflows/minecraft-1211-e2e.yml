@@ -238,6 +238,8 @@ jobs:
           export MITHRIL_E2E_MITHRIL_DYLIB="${{ steps.mithril.outputs.dylib }}"
           export MITHRIL_E2E_GLFW_DELEGATE="${{ steps.bridge.outputs.glfw_real }}"
           export MITHRIL_DBG_CONST_FS=1
+          export MVK_CONFIG_LOG_LEVEL=4
+          export METAL_DEVICE_WRAPPER_TYPE=1
           echo "[mithril-e2e] MITHRIL_E2E_ROOT=$MITHRIL_E2E_ROOT" \
             >> "$E2E_ROOT/minecraft-client-run.log"
 
