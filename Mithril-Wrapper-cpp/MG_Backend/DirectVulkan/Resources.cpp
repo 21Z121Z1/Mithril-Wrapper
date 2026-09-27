@@ -1483,7 +1483,7 @@ VkImage backend_get_or_create_texture(GLuint name, int width, int height, int de
         if (glyphFormatDiagCount++ < 96) {
             MITHRIL_LOG_WARN("font-diag",
                 "texture alloc name=%u internal=0x%x vkfmt=%d target=0x%x size=%dx%dx%d levels=%d",
-                name, internal_format, (int)fmt, target, width, height, depth, effective_levels);
+                name, internal_format, (int)fmt, target, width, height, depth, levels > 0 ? levels : 1);
         }
     }
 
