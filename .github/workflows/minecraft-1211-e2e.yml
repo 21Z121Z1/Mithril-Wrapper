@@ -440,7 +440,10 @@ jobs:
           png="${meta%.meta}.png"
           export MITHRIL_RENDERER_IDENTITY="$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('gl_renderer',''))" "$E2E_ROOT/game-state.json")"
           export MITHRIL_MINECRAFT_VERSION="1.21.1"
-          line="$(python3 ci/minecraft-e2e/rgba_to_png.py "$raw" "$w" "$h" "$png" --flip-y --meta "${meta%.meta}.png.json")"
+          # The pre-present glReadPixels readback is already upright (top-row
+          # first) on this lane, so no display Y-flip is applied; verified
+          # against the captured menu (logo on top, buttons below).
+          line="$(python3 ci/minecraft-e2e/rgba_to_png.py "$raw" "$w" "$h" "$png" --meta "${meta%.meta}.png.json")"
           echo "$line"
           # Hard render gate: refuse a uniform/blank PNG. This is the same
           # real-Minecraft-content criterion as the oracle step and must fail

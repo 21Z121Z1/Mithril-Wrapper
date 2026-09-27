@@ -21,7 +21,7 @@ import sys
 import zlib
 
 
-def write_png(path, width, height, rgba, flip_y=False):
+def write_png(path, width, height, rgba, flip_y=False, opaque=False):
     def chunk(tag, payload):
         c = tag + payload
         return struct.pack(">I", len(payload)) + c + struct.pack(">I", zlib.crc32(c) & 0xFFFFFFFF)
@@ -35,7 +35,15 @@ def write_png(path, width, height, rgba, flip_y=False):
         # reproduce the upright on-screen drawable.
         y = (height - 1 - row) if flip_y else row
         raw.append(0)  # filter type 0 (None) for this scanline
-        raw += rgba[y * stride:(y + 1) * stride]
+        scan = bytearray(rgba[y * stride:(y + 1) * stride])
+        if opaque:
+            # The CAMetalLayer/swapchain surface carries no meaningful alpha
+            # (MoltenVK reports 0 for every pixel). Minecraft draws an opaque
+            # frame; force alpha 255 so the evidence PNG is viewable instead of
+            # compositing as fully transparent. The raw .rgba is left untouched.
+            for a in range(3, len(scan), 4):
+                scan[a] = 255
+        raw += scan
     png = b"\x89PNG\r\n\x1a\n"
     png += chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0))
     png += chunk(b"IDAT", zlib.compress(bytes(raw), 6))
@@ -72,7 +80,9 @@ def main():
             for i in range(0, total * 4, 4 * max(1, total // 20000))]
     stddev = statistics.pstdev(gray) if gray else 0.0
 
-    write_png(args.output, w, h, data, flip_y=args.flip_y)
+    opaque_frac = sum(1 for i in range(3, total * 4, 4)
+                      if data[i] == 255) / total
+    write_png(args.output, w, h, data, flip_y=args.flip_y, opaque=True)
 
     print("uniform_fill=%.6f dominant=%s distinct=%d gray_stddev=%.3f png=%s"
           % (uniform, "%d,%d,%d" % dom, len(counts), stddev, args.output))
@@ -84,6 +94,8 @@ def main():
             "pixel_format": "RGBA8",
             "capture_source": "native-bridge pre-present glReadPixels",
             "rows_flipped_for_display": bool(args.flip_y),
+            "source_alpha_opaque_fraction": opaque_frac,
+            "png_alpha_forced_opaque": True,
             "uniform_fill_ratio": uniform,
             "dominant_color_rgb": list(dom),
             "distinct_colors": len(counts),
