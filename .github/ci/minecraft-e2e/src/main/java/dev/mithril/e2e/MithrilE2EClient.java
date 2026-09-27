@@ -3,10 +3,14 @@ package dev.mithril.e2e;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.minecraft.client.Minecraft;
-import org.lwjgl.BufferUtils;
-import org.lwjgl.opengl.GL11;
+import net.minecraft.world.Difficulty;
+import net.minecraft.world.level.GameRules;
+import net.minecraft.world.level.GameType;
+import net.minecraft.world.level.LevelSettings;
+import net.minecraft.world.level.WorldDataConfiguration;
+import net.minecraft.world.level.levelgen.WorldOptions;
+import net.minecraft.world.level.levelgen.presets.WorldPresets;
 
-import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -15,168 +19,124 @@ import java.util.Locale;
 import java.util.Map;
 
 /**
- * Minimal, version-portable Minecraft client E2E probe for Mithril.
+ * Minecraft 1.21.1 gameplay E2E probe.
  *
- * The upstream lane drove the game through Fabric's client-gametest module.
- * That module does not exist for Minecraft 1.21.1, so this lane instead boots
- * the real production client to the main menu under a plain
- * {@code ClientModInitializer}, waits for a steady number of rendered ticks,
- * then samples the default framebuffer.
- *
- * The whole point of the sample is the red-screen regression: when every draw
- * sampled an undefined descriptor the entire surface came back saturated red
- * instead of the clear colour / menu content. Sampling a centred block and
- * measuring the fraction of "pure red" pixels turns that visual failure into a
- * hard, machine-checkable CI gate.
+ * This is deliberately stronger than a title-screen smoke test: after the
+ * production client has reached a stable title state it creates a deterministic
+ * single-player world through the same WorldOpenFlows path used by vanilla,
+ * waits until both the client level and local player exist, lets gameplay render
+ * for a settling interval, and only then publishes world-ready.json.
  */
 public final class MithrilE2EClient implements ClientModInitializer {
-    /** Ticks to wait so the loading screen / main menu is fully rendered. */
-    private static final int WARMUP_TICKS = 120;
-    /** Fraction of sampled pixels above which the screen counts as "pure red". */
-    private static final double RED_FAIL_RATIO = 0.90;
-    /** Hard deadline: if no sample has happened by now, kill the JVM anyway. */
+    private static final int TITLE_SETTLE_TICKS = 120;
+    private static final int WORLD_SETTLE_TICKS = 120;
+    private static final String WORLD_ID = "mithril-e2e-world";
     private static final long WATCHDOG_DEADLINE_MS = 420_000L;
 
-    private int ticks = 0;
-    private boolean done = false;
-    /** Progress visible to the watchdog thread (and to its hang evidence). */
-    private static final java.util.concurrent.atomic.AtomicInteger TICKS_SEEN =
-            new java.util.concurrent.atomic.AtomicInteger(0);
+    private int ticks;
+    private int worldTicks;
+    private boolean worldRequested;
+    private boolean readyWritten;
 
     @Override
     public void onInitializeClient() {
-        final Path root = Path.of(System.getProperty("mithril.e2e.root", "build/evidence"))
+        final Path root = Path.of(System.getProperty("mithril.e2e.root",
+                System.getenv().getOrDefault("MITHRIL_E2E_ROOT", "build/evidence")))
                 .toAbsolutePath().normalize();
 
-        // Watchdog: if the game never reaches the sample (stuck loading, blocked
-        // render thread, or any other hang), nothing would ever call System.exit
-        // and the CI step would burn its whole job timeout while the useful log
-        // stayed unpublished. A daemon thread guarantees the JVM terminates on a
-        // deadline so the evidence -- including the log showing where it hung --
-        // is always published. halt() (not exit()) because a hung game may block
-        // in a shutdown hook.
         Thread watchdog = new Thread(() -> {
             try {
                 Thread.sleep(WATCHDOG_DEADLINE_MS);
             } catch (InterruptedException ignored) {
                 return;
             }
-            System.err.println("[mithril-e2e] WATCHDOG: deadline reached before the "
-                    + "120-tick sample completed; forcing JVM halt");
+            if (readyWritten) return;
             try {
-                Files.createDirectories(root.resolve("render"));
-                Map<String, Object> hang = new LinkedHashMap<>();
-                hang.put("schema_version", "1.0");
-                hang.put("reason", "watchdog deadline reached before sample");
-                hang.put("deadline_ms", WATCHDOG_DEADLINE_MS);
-                hang.put("ticks_observed", TICKS_SEEN.get());
-                writeJson(root.resolve("hang-detected.json"), hang);
+                Files.createDirectories(root);
+                Map<String, Object> failure = new LinkedHashMap<>();
+                failure.put("schema_version", "1.0");
+                failure.put("reason", "world-ready deadline exceeded");
+                failure.put("ticks_observed", ticks);
+                failure.put("world_requested", worldRequested);
+                writeJson(root.resolve("world-entry-failure.json"), failure);
             } catch (Throwable t) {
                 t.printStackTrace();
             }
-            Runtime.getRuntime().halt(11);
-        });
+        }, "mithril-e2e-world-watchdog");
         watchdog.setDaemon(true);
-        watchdog.setName("mithril-e2e-watchdog");
         watchdog.start();
 
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
-            if (done) return;
+            if (readyWritten) return;
             ticks++;
-            TICKS_SEEN.set(ticks);
-            if (ticks < WARMUP_TICKS) return;
-            done = true;
 
-            try {
-                Files.createDirectories(root.resolve("render"));
-
-                String vendor = safe(GL11.glGetString(GL11.GL_VENDOR));
-                String renderer = safe(GL11.glGetString(GL11.GL_RENDERER));
-                String version = safe(GL11.glGetString(GL11.GL_VERSION));
-
-                int w = client.getWindow().getWidth();
-                int h = client.getWindow().getHeight();
-
-                int sw = Math.max(1, Math.min(64, w));
-                int sh = Math.max(1, Math.min(64, h));
-                int x = (w - sw) / 2;
-                int y = (h - sh) / 2;
-
-                ByteBuffer px = BufferUtils.createByteBuffer(sw * sh * 4);
-                GL11.glReadPixels(x, y, sw, sh, GL11.GL_RGBA, GL11.GL_UNSIGNED_BYTE, px);
-
-                int total = sw * sh;
-                int red = 0;
-                for (int i = 0; i < total; i++) {
-                    int r = px.get() & 0xFF;
-                    int g = px.get() & 0xFF;
-                    int b = px.get() & 0xFF;
-                    px.get(); // alpha
-                    if (r > 200 && g < 40 && b < 40) red++;
+            if (!worldRequested && ticks >= TITLE_SETTLE_TICKS
+                    && client.level == null && client.player == null) {
+                worldRequested = true;
+                System.out.println("[mithril-e2e] requesting deterministic single-player world");
+                try {
+                    LevelSettings settings = new LevelSettings(
+                            "Mithril E2E",
+                            GameType.CREATIVE,
+                            false,
+                            Difficulty.PEACEFUL,
+                            true,
+                            new GameRules(),
+                            WorldDataConfiguration.DEFAULT);
+                    WorldOptions options = new WorldOptions(0x4D49544852494CL, false, false);
+                    client.createWorldOpenFlows().createFreshLevel(
+                            WORLD_ID,
+                            settings,
+                            options,
+                            WorldPresets::createNormalWorldDimensions,
+                            client.screen);
+                } catch (Throwable t) {
+                    t.printStackTrace();
+                    try {
+                        Files.createDirectories(root);
+                        Map<String, Object> failure = new LinkedHashMap<>();
+                        failure.put("schema_version", "1.0");
+                        failure.put("reason", "createFreshLevel threw");
+                        failure.put("exception", t.toString());
+                        writeJson(root.resolve("world-entry-failure.json"), failure);
+                    } catch (Throwable nested) {
+                        nested.printStackTrace();
+                    }
                 }
-                double redRatio = (double) red / (double) total;
+                return;
+            }
 
-                // NOTE: build these records with plain put() calls, NOT the
-                // double-brace map idiom. That idiom creates an anonymous inner
-                // class, which may only capture locals that are final or
-                // effectively final -- and `red` is the counter incremented once
-                // per sampled pixel, so it cannot be captured. The result was a
-                // compile-time failure ("local variables referenced from an inner
-                // class must be final or effectively final") that aborted
-                // :compileJava before Minecraft ever launched.
-                Map<String, Object> gameState = new LinkedHashMap<>();
-                gameState.put("schema_version", "1.0");
-                gameState.put("tick", ticks);
-                gameState.put("window_width", w);
-                gameState.put("window_height", h);
-                gameState.put("gl_vendor", vendor);
-                gameState.put("gl_renderer", renderer);
-                gameState.put("gl_version", version);
-                gameState.put("red_pixel_ratio", redRatio);
-                gameState.put("sampled_pixels", total);
-                gameState.put("red_pixels", red);
-                writeJson(root.resolve("game-state.json"), gameState);
+            if (worldRequested && client.level != null && client.player != null
+                    && client.screen == null) {
+                worldTicks++;
+                if (worldTicks < WORLD_SETTLE_TICKS) return;
 
-                boolean identityOk = version.contains("Mithril-Wrapper")
-                        && renderer.contains("Mithril-Wrapper");
-                boolean gameOk = w > 0 && h > 0;
-                boolean renderOk = redRatio <= RED_FAIL_RATIO;
-
-                Map<String, Object> oracles = new LinkedHashMap<>();
-                oracles.put("schema_version", "1.0");
-                oracles.put("l1_process", "pass");
-                oracles.put("l2_runtime_identity", identityOk ? "pass" : "fail");
-                oracles.put("l3_game_state", gameOk ? "pass" : "fail");
-                oracles.put("l4_gpu_render", renderOk ? "pass" : "fail");
-                oracles.put("l5_presentation", "diagnostic");
-                writeJson(root.resolve("oracle-results.json"), oracles);
-
-                System.out.println("[mithril-e2e] GL_VENDOR=" + vendor);
-                System.out.println("[mithril-e2e] GL_RENDERER=" + renderer);
-                System.out.println("[mithril-e2e] GL_VERSION=" + version);
-                System.out.println("[mithril-e2e] red_pixel_ratio=" + redRatio);
-
-                if (!renderOk) {
-                    System.err.println("[mithril-e2e] FAILURE: pure-red screen detected "
-                            + "(red_pixel_ratio=" + redRatio + ")");
-                    Map<String, Object> redEvidence = new LinkedHashMap<>();
-                    redEvidence.put("schema_version", "1.0");
-                    redEvidence.put("red_pixel_ratio", redRatio);
-                    writeJson(root.resolve("red-screen-detected.json"), redEvidence);
-                    System.exit(3);
+                try {
+                    Files.createDirectories(root);
+                    Map<String, Object> ready = new LinkedHashMap<>();
+                    ready.put("schema_version", "1.0");
+                    ready.put("world_id", WORLD_ID);
+                    ready.put("client_tick", ticks);
+                    ready.put("world_settle_ticks", worldTicks);
+                    ready.put("dimension", client.level.dimension().location().toString());
+                    ready.put("player_x", client.player.getX());
+                    ready.put("player_y", client.player.getY());
+                    ready.put("player_z", client.player.getZ());
+                    ready.put("screen", "none");
+                    writeJson(root.resolve("world-ready.json"), ready);
+                    readyWritten = true;
+                    System.out.println("[mithril-e2e] world-ready: level+player live for "
+                            + worldTicks + " ticks");
+                } catch (Throwable t) {
+                    t.printStackTrace();
                 }
-                System.exit(0);
-            } catch (Throwable t) {
-                t.printStackTrace();
-                System.exit(4);
+            } else if (worldRequested) {
+                worldTicks = 0;
             }
         });
     }
 
-    private static String safe(String s) { return s == null ? "" : s; }
-
     private static void writeJson(Path path, Map<String, Object> values) throws Exception {
-        Files.createDirectories(path.getParent());
         StringBuilder b = new StringBuilder("{\n");
         int i = 0;
         for (Map.Entry<String, Object> e : values.entrySet()) {
@@ -189,7 +149,7 @@ public final class MithrilE2EClient implements ClientModInitializer {
             } else if (v instanceof Boolean) {
                 b.append(((Boolean) v) ? "true" : "false");
             } else {
-                b.append('"').append(escape(String.valueOf(v))).append('"');
+                b.append('\"').append(escape(String.valueOf(v))).append('\"');
             }
             if (++i < values.size()) b.append(',');
             b.append('\n');
@@ -199,12 +159,6 @@ public final class MithrilE2EClient implements ClientModInitializer {
     }
 
     private static String escape(String s) {
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < s.length(); i++) {
-            char c = s.charAt(i);
-            if (c == '"' || c == '\\') sb.append('\\');
-            sb.append(c);
-        }
-        return sb.toString();
+        return s.replace("\\", "\\\\").replace("\"", "\\\"");
     }
 }

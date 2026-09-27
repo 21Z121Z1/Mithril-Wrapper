@@ -66,3 +66,15 @@ tasks.named('runClient') {
         logger.lifecycle('runClient exposes no environment(...); relying on bridge fallbacks')
     }
 }
+
+
+loom {
+    // Make the E2E probe an actual Fabric development mod in runClient.
+    // Without this classpath grouping, Fabric sees only loader/API modules and
+    // never executes the client entrypoint declared in fabric.mod.json.
+    mods {
+        "mithril_minecraft_e2e" {
+            sourceSet sourceSets.main
+        }
+    }
+}

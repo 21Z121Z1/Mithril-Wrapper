@@ -291,11 +291,26 @@ jobs:
             exit 1
           fi
 
-          # 2) Let it finish loading and settle on the main menu so the capture
-          #    sees real GUI content rather than the transient loading screen.
-          sleep 120
+          # 2) Require the Fabric probe to create and enter a real single-player
+          #    world. A title-screen frame is not sufficient gameplay evidence.
+          world_deadline=$(( $(date +%s) + 360 ))
+          while [ "$(date +%s)" -lt "$world_deadline" ]; do
+            [ -s "$E2E_ROOT/world-ready.json" ] && break
+            kill -0 "$gradle_pid" 2>/dev/null || break
+            sleep 2
+          done
+          if [ ! -s "$E2E_ROOT/world-ready.json" ]; then
+            stop_game
+            python3 ci/minecraft-e2e/evidence.py --root "$E2E_ROOT" fail \
+              --failure-id RUNTIME_MINECRAFT_WORLD_ENTRY_FAILED --phase minecraft_client \
+              --message "Minecraft E2E probe never published world-ready.json"
+            exit 1
+          fi
+          echo "[mithril-e2e] world entry confirmed:" >> "$E2E_ROOT/minecraft-client-run.log"
+          cat "$E2E_ROOT/world-ready.json" >> "$E2E_ROOT/minecraft-client-run.log"
+          sleep 20
 
-          # 3) Ask the bridge to capture the frame it is about to present.
+          # 3) Ask the bridge to capture a gameplay frame it is about to present.
           #
           # Re-post the request periodically rather than firing once. The bridge
           # claims (removes) a request on its very next swap, so a single failed
@@ -394,8 +409,16 @@ jobs:
           red_frac = sum(cnt for (r, g, bl), cnt in counts.items()
                          if r > 200 and g < 80 and bl < 80) / total if total else 1.0
           ratio = 0.0 if (content_ok and not shader_err and not dropped) else 1.0
+          world_ready_path = root / 'world-ready.json'
+          world_ready = {}
+          if world_ready_path.exists():
+              try:
+                  world_ready = json.loads(world_ready_path.read_text())
+              except Exception:
+                  world_ready = {}
+
           state = {
-              'schema_version': '1.0', 'tick': -1,
+              'schema_version': '1.0', 'tick': world_ready.get('client_tick', -1),
               'window_width': w, 'window_height': h,
               'gl_vendor': bridge.get('gl_vendor', ''),
               'gl_renderer': bridge.get('gl_renderer', ''),
@@ -415,7 +438,7 @@ jobs:
               'schema_version': '1.0',
               'l1_process': 'pass',
               'l2_runtime_identity': 'pass' if 'Mithril-Wrapper' in state['gl_version'] else 'fail',
-              'l3_game_state': 'pass' if (w > 0 and h > 0) else 'fail',
+              'l3_game_state': 'pass' if (w > 0 and h > 0 and world_ready.get('world_id') == 'mithril-e2e-world') else 'fail',
               'l4_gpu_render': 'pass' if ratio <= 0.90 else 'fail',
               'l5_presentation': 'pass',
           }, indent=2) + '\n')
