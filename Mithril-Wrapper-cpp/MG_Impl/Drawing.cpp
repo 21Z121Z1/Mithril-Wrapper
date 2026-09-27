@@ -408,6 +408,10 @@ static bool prepare_draw(GLenum mode) {
     // Begin render pass (Load action preserves previous contents).
     backend_set_load_load();
     backend_begin_render_pass(colors, color_count, depth_view, w, h, 1);
+    if (is_default_fbo && prog->id == 1 && g_state->presentedFrames >= 1000) {
+        const float dbgMagenta[4] = {1.0f, 0.0f, 1.0f, 1.0f};
+        backend_clear_buffer_indexed(GL_COLOR, 0, dbgMagenta, 1.0f, 0);
+    }
 
     backend_bind_pipeline(pipeline);
     // FIX (root cause: gl_VertexID baseVertex semantics): push
