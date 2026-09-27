@@ -1723,6 +1723,17 @@ void backend_texture_upload(GLuint name, int level, int x, int y, int z,
     auto& tbl = mithril::vk::texture_table();
     auto it = tbl.find(name);
     if (it == tbl.end() || !pixels) return;
+    if (format == 0x1903 /* GL_RED */ || format == 0x8227 /* GL_RG */ ||
+        format == 0x1906 /* GL_ALPHA */ || format == 0x1909 /* GL_LUMINANCE */ ||
+        format == 0x190A /* GL_LUMINANCE_ALPHA */) {
+        static int narrowUploadDiagCount = 0;
+        if (narrowUploadDiagCount++ < 192) {
+            MITHRIL_LOG_WARN("font-diag",
+                "narrow upload name=%u dstVkFmt=%d level=%d off=%d,%d,%d size=%dx%dx%d srcfmt=0x%x type=0x%x full=%d",
+                name, (int)it->second.format, level, x, y, z, w, h, d,
+                format, type, is_full_upload);
+        }
+    }
     if (it->second.format == VK_FORMAT_R8_UNORM || it->second.format == VK_FORMAT_R8G8_UNORM) {
         static int glyphUploadDiagCount = 0;
         if (glyphUploadDiagCount++ < 128) {
