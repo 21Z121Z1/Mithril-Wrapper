@@ -313,6 +313,34 @@ static bool prepare_draw(GLenum mode) {
         return false;
     }
 
+    // Final DirectVulkan invariant from e10d9c: descriptors do not
+    // transition images. If a texture currently bound for sampling still
+    // carries an attachment/transfer layout, finish the active render pass
+    // before recording the barrier, then move every bound texture object to
+    // its format-appropriate sampled read-only layout.
+    bool need_sampled_transition = false;
+    for (int unit = 0; unit < mithril::kMaxTextureUnits && !need_sampled_transition; ++unit) {
+        for (int ti = 0; ti < mithril::kTextureTargetCount; ++ti) {
+            GLuint tex_id = g_state->textureBindings[unit][ti].name;
+            if (!tex_id) continue;
+            VkImageLayout cur = backend_get_texture_layout(tex_id);
+            VkImageLayout want = backend_get_sampled_texture_layout(tex_id);
+            if (cur != VK_IMAGE_LAYOUT_UNDEFINED && cur != want) {
+                need_sampled_transition = true;
+                break;
+            }
+        }
+    }
+    if (need_sampled_transition) {
+        backend_end_render_pass();
+        for (int unit = 0; unit < mithril::kMaxTextureUnits; ++unit) {
+            for (int ti = 0; ti < mithril::kTextureTargetCount; ++ti) {
+                GLuint tex_id = g_state->textureBindings[unit][ti].name;
+                if (tex_id) backend_transition_texture_to_sampled(tex_id);
+            }
+        }
+    }
+
     // FIX (root cause Y, CRITICAL): Register user-FBO attachment tex_ids so
     // begin_render_pass can barrier their images to attachment-optimal and
     // end_render_pass can barrier them back to read-only + update
