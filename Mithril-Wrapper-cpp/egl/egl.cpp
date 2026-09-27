@@ -381,6 +381,7 @@ EGLBoolean eglDestroySurface(EGLDisplay dpy, EGLSurface surface) {
     }
     if (t_currentRead == s) { t_currentRead = nullptr; }
     swapchain_destroy(s, is_current);
+    if (s->native_window) surface_destroy(s->native_window);
     s->native_window = nullptr;
     delete s;
     return EGL_TRUE;
@@ -742,9 +743,17 @@ EGLBoolean eglSwapInterval(EGLDisplay dpy, EGLint interval) {
     return EGL_TRUE;
 }
 
-// ---- Idle sync (no-ops; Mithril flushes work synchronously per draw) ----
-EGLBoolean eglWaitClient(void)  { swapchain_flush_and_commit(); return EGL_TRUE; }
-EGLBoolean eglWaitGL(void)      { swapchain_flush_and_commit(); return EGL_TRUE; }
+// ---- Client completion waits -------------------------------------------
+EGLBoolean eglWaitClient(void) {
+    swapchain_flush_and_commit();
+    mithril::vk::safe_device_wait_idle();
+    return EGL_TRUE;
+}
+EGLBoolean eglWaitGL(void) {
+    swapchain_flush_and_commit();
+    mithril::vk::safe_device_wait_idle();
+    return EGL_TRUE;
+}
 EGLBoolean eglWaitNative(EGLint) { return EGL_TRUE; }
 
 // ---- Extension function resolution ----
@@ -789,18 +798,33 @@ EGLBoolean eglCopyBuffers(EGLDisplay dpy, EGLSurface surface, EGLNativePixmapTyp
     return EGL_TRUE;
 }
 
-// ---- EGL 1.5 Sync (shadow implementation) ----
+// ---- EGL 1.5 Sync: backed by DirectVulkan submit serials -----------------
 EGLSync eglCreateSync(EGLDisplay dpy, EGLenum type, const EGLAttrib* attrib_list) {
     clear_error();
     if (!valid_display(dpy)) { set_error(EGL_BAD_DISPLAY); return EGL_NO_SYNC; }
     if (type != EGL_SYNC_FENCE) { set_error(EGL_BAD_ATTRIBUTE); return EGL_NO_SYNC; }
-    (void)attrib_list;  // EGL_SYNC_FENCE ignores attrib_list per spec
+    if (!t_currentCtx) { set_error(EGL_BAD_MATCH); return EGL_NO_SYNC; }
+    if (attrib_list && attrib_list[0] != EGL_NONE) {
+        set_error(EGL_BAD_ATTRIBUTE);
+        return EGL_NO_SYNC;
+    }
+
+    // A fence sync represents all commands before this call. Flush now so the
+    // object can record an exact queue-submit serial rather than a guessed
+    // "next" serial that can be invalidated by out-of-band upload submits.
+    backend_end_render_pass();
+    backend_commit();
 
     EglSync sync{};
     sync.dpy = dpy;
     sync.type = EGL_SYNC_FENCE;
     sync.condition = EGL_SYNC_PRIOR_COMMANDS_COMPLETE;
-    sync.status = EGL_SIGNALED;
+    sync.submitSerial = mithril::vk::backend_current_submit_serial();
+    if (sync.submitSerial == 0 ||
+        sync.submitSerial <= mithril::vk::backend_last_completed_serial()) {
+        sync.status = EGL_SIGNALED;
+        sync.submitSerial = 0;
+    }
 
     EGLSync handle = reinterpret_cast<EGLSync>(g_nextSyncHandle++);
     g_syncs[handle] = sync;
@@ -811,38 +835,80 @@ EGLBoolean eglDestroySync(EGLDisplay dpy, EGLSync sync) {
     clear_error();
     if (!valid_display(dpy)) { set_error(EGL_BAD_DISPLAY); return EGL_FALSE; }
     auto it = g_syncs.find(sync);
-    if (it == g_syncs.end()) { set_error(EGL_BAD_SYNC_KHR); return EGL_FALSE; }
+    if (it == g_syncs.end() || it->second.dpy != dpy) {
+        set_error(EGL_BAD_SYNC_KHR);
+        return EGL_FALSE;
+    }
     g_syncs.erase(it);
     return EGL_TRUE;
 }
 
 EGLint eglClientWaitSync(EGLDisplay dpy, EGLSync sync, EGLint flags, EGLTime timeout) {
     clear_error();
-    (void)flags; (void)timeout;
     if (!valid_display(dpy)) { set_error(EGL_BAD_DISPLAY); return EGL_FALSE; }
+    if (flags & ~EGL_SYNC_FLUSH_COMMANDS_BIT) {
+        set_error(EGL_BAD_PARAMETER);
+        return EGL_FALSE;
+    }
     auto it = g_syncs.find(sync);
-    if (it == g_syncs.end()) { set_error(EGL_BAD_SYNC_KHR); return EGL_FALSE; }
-    // Shadow implementation: always signaled, return immediately.
-    return EGL_CONDITION_SATISFIED;
+    if (it == g_syncs.end() || it->second.dpy != dpy) {
+        set_error(EGL_BAD_SYNC_KHR);
+        return EGL_FALSE;
+    }
+    EglSync& s = it->second;
+    if (s.status == EGL_SIGNALED || s.submitSerial == 0 ||
+        s.submitSerial <= mithril::vk::backend_last_completed_serial()) {
+        s.status = EGL_SIGNALED;
+        s.submitSerial = 0;
+        return EGL_CONDITION_SATISFIED;
+    }
+    if (flags & EGL_SYNC_FLUSH_COMMANDS_BIT) {
+        backend_end_render_pass();
+        backend_commit();
+    }
+    if (mithril::vk::backend_wait_serial(s.submitSerial, (uint64_t)timeout)) {
+        s.status = EGL_SIGNALED;
+        s.submitSerial = 0;
+        return EGL_CONDITION_SATISFIED;
+    }
+    return EGL_TIMEOUT_EXPIRED;
 }
 
 EGLBoolean eglWaitSync(EGLDisplay dpy, EGLSync sync, EGLint flags) {
     clear_error();
-    (void)flags;
     if (!valid_display(dpy)) { set_error(EGL_BAD_DISPLAY); return EGL_FALSE; }
+    if (flags != 0) { set_error(EGL_BAD_PARAMETER); return EGL_FALSE; }
     auto it = g_syncs.find(sync);
-    if (it == g_syncs.end()) { set_error(EGL_BAD_SYNC_KHR); return EGL_FALSE; }
-    // Shadow implementation: no real GPU-side wait.
-    return EGL_TRUE;
+    if (it == g_syncs.end() || it->second.dpy != dpy) {
+        set_error(EGL_BAD_SYNC_KHR);
+        return EGL_FALSE;
+    }
+    EglSync& s = it->second;
+    if (s.status == EGL_SIGNALED || s.submitSerial == 0 ||
+        mithril::vk::backend_wait_serial(s.submitSerial, UINT64_MAX)) {
+        s.status = EGL_SIGNALED;
+        s.submitSerial = 0;
+        return EGL_TRUE;
+    }
+    return EGL_FALSE;
 }
 
 EGLBoolean eglGetSyncAttrib(EGLDisplay dpy, EGLSync sync, EGLint attribute, EGLAttrib* value) {
     clear_error();
     if (!valid_display(dpy)) { set_error(EGL_BAD_DISPLAY); return EGL_FALSE; }
     auto it = g_syncs.find(sync);
-    if (it == g_syncs.end()) { set_error(EGL_BAD_SYNC_KHR); return EGL_FALSE; }
+    if (it == g_syncs.end() || it->second.dpy != dpy) {
+        set_error(EGL_BAD_SYNC_KHR);
+        return EGL_FALSE;
+    }
     if (!value) { set_error(EGL_BAD_PARAMETER); return EGL_FALSE; }
-    const EglSync& s = it->second;
+    EglSync& s = it->second;
+    if (s.status != EGL_SIGNALED &&
+        (s.submitSerial == 0 ||
+         s.submitSerial <= mithril::vk::backend_last_completed_serial())) {
+        s.status = EGL_SIGNALED;
+        s.submitSerial = 0;
+    }
     switch (attribute) {
         case EGL_SYNC_TYPE:      *value = s.type;      break;
         case EGL_SYNC_STATUS:    *value = s.status;    break;

@@ -500,6 +500,9 @@ struct Sync {
     void*       handle = nullptr;
     GLenum      condition = GL_SYNC_GPU_COMMANDS_COMPLETE;
     GLbitfield  flags = 0;
+    // Queue-submit serial containing all commands that preceded this fence.
+    // Zero means the fence has already completed (or there was no queued work).
+    uint64_t    submitSerial = 0;
     bool        signaled = false;
     bool        markedForDeletion = false;
 };

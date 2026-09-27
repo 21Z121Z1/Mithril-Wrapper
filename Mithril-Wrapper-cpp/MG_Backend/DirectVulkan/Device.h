@@ -9,7 +9,8 @@
 //     VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR
 //   * VK_KHR_portability_subset device extension (always enabled alongside
 //     VK_KHR_swapchain)
-// MoltenVK is statically linked, so there is no Vulkan loader / ICD file.
+// Apple builds link MoltenVK directly as a dylib (host-bundled on iOS,
+// Homebrew on macOS); there is no separate Vulkan loader / ICD file.
 #ifndef MITHRIL_DIRECTVULKAN_DEVICE_H
 #define MITHRIL_DIRECTVULKAN_DEVICE_H
 
@@ -389,12 +390,14 @@ void safe_device_wait_idle();
 // commit_frame(). Records the current frame slot so a sync object stamped with
 // the returned serial can be completed exactly when that slot's fence signals.
 uint64_t backend_frame_serial_advance(int frameSlot);
+// Latest queue-submit serial. Exposed for GL/EGL fence synchronization.
+extern "C" uint64_t backend_current_submit_serial();
 // Returns the highest serial whose GPU submission has definitely completed.
-uint64_t backend_last_completed_serial();
+extern "C" uint64_t backend_last_completed_serial();
 // Block (or, with timeout==0, poll) until the submission bearing `serial` has
 // completed. Returns true if completed, false if still pending (timeout==0) or
 // the wait failed.
-bool     backend_wait_serial(uint64_t serial, uint64_t timeout_ns);
+extern "C" bool backend_wait_serial(uint64_t serial, uint64_t timeout_ns);
 
 // FIX (显存耗尽根因 - 主动式 GC，深度参考 MobileGL):
 //

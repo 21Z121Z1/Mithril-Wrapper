@@ -195,12 +195,15 @@ void glLinkProgram(GLuint program) {
     // unaffected by attribute bindings.
     const bool has_attrib_bindings = !p->attribBindings.empty();
 
+    std::string vertexSource;
+    std::string fragmentSource;
     bool missing = false;
     for (GLuint sid : p->attachedShaders) {
         mithril::Shader* s = mithril::state_get_shader(sid);
         if (!s) continue;
         if (!s->compiled || s->spirv.empty()) { missing = true; continue; }
         if (s->type == GL_VERTEX_SHADER) {
+            vertexSource = s->source;
             // --- Non-flipped variant (for user-created FBOs) ---
             // s->spirv (from glCompileShader) already has Z remap injected but
             // no Y flip and no attrib bindings. Re-translate with bindings if
@@ -255,6 +258,7 @@ void glLinkProgram(GLuint program) {
                 }
             }
         } else if (s->type == GL_FRAGMENT_SHADER) {
+            fragmentSource = s->source;
             p->fragmentSpirv = s->spirv;
         }
     }
@@ -284,6 +288,22 @@ void glLinkProgram(GLuint program) {
         MITHRIL_LOG_WARN("program", "vertexSpirvYFlipped was empty for program %u, "
                           "falling back to non-flipped variant (%zu words)",
                           program, p->vertexSpirv.size());
+    }
+
+    // glslang auto-maps stage locations independently. Reconcile VS outputs
+    // with FS inputs before Vulkan pipeline creation, then pin the Y-flipped
+    // vertex variant to the same output locations.
+    std::string interfaceError;
+    if (!mithril::vk::align_stage_interface_locations(
+            p->vertexSpirv, p->fragmentSpirv,
+            vertexSource, fragmentSource, interfaceError) ||
+        !mithril::vk::align_vertex_output_locations(
+            p->vertexSpirv, p->vertexSpirvYFlipped, interfaceError)) {
+        p->linked = false;
+        p->infoLog = "link failed: " + interfaceError;
+        MITHRIL_LOG_ERROR("program", "Link failed for program %u: %s",
+                          program, p->infoLog.c_str());
+        return;
     }
 
     p->linked = true;

@@ -766,8 +766,11 @@ VkPipeline get_or_create_pipeline(GLuint program,
     VkPipelineColorBlendStateCreateInfo cb{};
     cb.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
     cb.logicOpEnable = VK_FALSE;
-    cb.attachmentCount = color_count > 0 ? (uint32_t)color_count : 1;
-    cb.pAttachments = &cbAttach;
+    // One blend record per color attachment. A depth-only pipeline has none.
+    std::vector<VkPipelineColorBlendAttachmentState> cbAttachments;
+    if (color_count > 0) cbAttachments.assign((size_t)color_count, cbAttach);
+    cb.attachmentCount = (uint32_t)cbAttachments.size();
+    cb.pAttachments = cbAttachments.empty() ? nullptr : cbAttachments.data();
 
     // ---- Dynamic state ----
     // VK_DYNAMIC_STATE_COLOR_WRITE_ENABLE_EXT requires the
@@ -812,8 +815,8 @@ VkPipeline get_or_create_pipeline(GLuint program,
     for (int i = 0; i < color_count && i < 8; ++i) colorFmts[i] = color_formats[i];
     VkPipelineRenderingCreateInfo renderingCI{};
     renderingCI.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
-    renderingCI.colorAttachmentCount = color_count > 0 ? (uint32_t)color_count : 1;
-    renderingCI.pColorAttachmentFormats = colorFmts;
+    renderingCI.colorAttachmentCount = color_count > 0 ? (uint32_t)color_count : 0;
+    renderingCI.pColorAttachmentFormats = color_count > 0 ? colorFmts : nullptr;
     renderingCI.depthAttachmentFormat = depth_format;
     // FIX (root cause O): For packed depth-stencil formats (D32_SFLOAT_S8_UINT,
     // D24_UNORM_S8_UINT), the stencil attachment format MUST match the depth

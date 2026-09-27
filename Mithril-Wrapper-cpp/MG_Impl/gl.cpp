@@ -9,6 +9,7 @@
 // declared in MG_Backend/Backend.h.
 #include "includes.h"
 #include "Framebuffer.h"
+#include "../MG_Backend/DirectVulkan/Device.h"  // safe_device_wait_idle for real glFinish
 
 // glClearBuffer* uses GL_COLOR / GL_DEPTH / GL_STENCIL (GL 3.0+ buffer tokens),
 // which are not defined in glcorearb.h. Guard so the file still compiles on
@@ -629,6 +630,9 @@ void glFinish(void) {
     MITHRIL_ENSURE_INIT();
     backend_end_render_pass();
     backend_commit();
+    // GL requires glFinish to return only after all prior effects are
+    // complete. backend_commit alone is glFlush semantics.
+    mithril::vk::safe_device_wait_idle();
 }
 
 void glPrimitiveRestartIndex(GLuint index) {

@@ -65,6 +65,21 @@ std::vector<DescriptorBinding> reflect_stage(const uint32_t* spirv, int words,
 void merge_bindings(std::vector<DescriptorBinding>& dst,
                     const std::vector<DescriptorBinding>& src);
 
+// Reconcile separately compiled VS outputs and FS inputs by GLSL interface
+// name/type/span. Explicit layout(location=) remains authoritative; otherwise
+// automatic fragment locations follow the vertex stage.
+bool align_stage_interface_locations(std::vector<uint32_t>& vertex_spirv,
+                                     std::vector<uint32_t>& fragment_spirv,
+                                     const std::string& vertex_source,
+                                     const std::string& fragment_source,
+                                     std::string& error);
+
+// Keep the Y-flipped vertex variant on the exact output locations selected for
+// the canonical non-flipped variant.
+bool align_vertex_output_locations(const std::vector<uint32_t>& reference_spirv,
+                                   std::vector<uint32_t>& target_spirv,
+                                   std::string& error);
+
 } // namespace vk
 } // namespace mithril
 

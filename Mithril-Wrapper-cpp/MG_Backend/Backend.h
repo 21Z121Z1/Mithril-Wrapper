@@ -23,6 +23,11 @@
 extern "C" {
 #endif
 
+/* EXT_texture_filter_anisotropic exposes a floating-point limit. Keep this
+ * separate from backend_device_limit so glGetFloatv does not lose precision
+ * by routing the Vulkan value through GLint. */
+float backend_device_max_sampler_anisotropy(float fallback);
+
 /* ---- Lifecycle ----
  * backend_init() creates the VkInstance / VkPhysicalDevice / VkDevice /
  * VkQueue / VkCommandPool once. It is idempotent. backend_available() reports
@@ -473,7 +478,8 @@ VkSampler backend_get_or_create_sampler(GLuint name, GLint min_filter, GLint mag
                                         GLint wrap_s, GLint wrap_t, GLint wrap_r,
                                         const float* border_color,
                                         GLint compare_enable, GLint compare_op,
-                                        GLfloat min_lod, GLfloat lod_bias);
+                                        GLfloat min_lod, GLfloat lod_bias,
+                                        GLint texture_max_level);
 
 /* ---- Format helpers ----
  * Map a GL internal format to the matching VkFormat. Returns VK_FORMAT_UNDEFINED
