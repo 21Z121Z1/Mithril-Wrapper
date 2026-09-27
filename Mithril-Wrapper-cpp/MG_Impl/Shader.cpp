@@ -1053,11 +1053,26 @@ bool glsl_to_spirv(GLenum gl_stage, const std::string& src,
     // fragment shader with a constant-green output, ignoring the texture. This
     // separates geometry/pipeline/target faults (green appears) from
     // fragment/descriptor/sampling faults (still black).
-    if (gl_stage == GL_FRAGMENT_SHADER &&
-        std::getenv("MITHRIL_DBG_CONST_FS") != nullptr &&
-        source.find("DiffuseSampler") != std::string::npos) {
-        source = "#version 150\nout vec4 mithrilDbgColor;\n"
-                 "void main(){ mithrilDbgColor = vec4(0.0, 1.0, 0.0, 1.0); }\n";
+    if (std::getenv("MITHRIL_DBG_CONST_FS") != nullptr) {
+        if (gl_stage == GL_FRAGMENT_SHADER &&
+            source.find("DiffuseSampler") != std::string::npos) {
+            source = "#version 150\nin vec2 mithrilDbgTc;\n"
+                     "out vec4 mithrilDbgColor;\n"
+                     "void main(){ mithrilDbgColor = vec4(0.0, 1.0, 0.0, 1.0); }\n";
+        } else if (gl_stage == GL_VERTEX_SHADER &&
+                   source.find("Position") != std::string::npos &&
+                   source.find("2.0 - 1.0") != std::string::npos) {
+            source =
+                "#version 450\n"
+                "out vec2 mithrilDbgTc;\n"
+                "void main(){\n"
+                "  float u = float((gl_VertexIndex << 1) & 2);\n"
+                "  float v = float(gl_VertexIndex & 2);\n"
+                "  vec2 q = vec2(u, v);\n"
+                "  gl_Position = vec4(q * 2.0 - 1.0, 0.0, 1.0);\n"
+                "  mithrilDbgTc = q;\n"
+                "}\n";
+        }
     }
     int glsl_version = ensure_glsl_version(source);
     rewrite_desktop_builtins(source, gl_stage);
