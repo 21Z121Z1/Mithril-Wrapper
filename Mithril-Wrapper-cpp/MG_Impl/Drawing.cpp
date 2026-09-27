@@ -418,7 +418,7 @@ static bool prepare_draw(GLenum mode) {
                 (unsigned long long)(uint64_t)(uintptr_t)g_state->eglDefaultColor,
                 g_state->presentedFrames);
         }
-        if (g_state->presentedFrames >= 1000) {
+        if (std::getenv("MITHRIL_DBG_MAGENTA") != nullptr) {
             const float dbgMagenta[4] = {1.0f, 0.0f, 1.0f, 1.0f};
             backend_clear_buffer_indexed(GL_COLOR, 0, dbgMagenta, 1.0f, 0);
         }
