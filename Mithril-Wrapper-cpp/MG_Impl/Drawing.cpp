@@ -199,7 +199,7 @@ static bool prepare_draw(GLenum mode) {
     // match the framebuffer's MTLPixelFormatBGRA8Unorm: Metal validation aborts
     // (setRenderPipelineState pixelFormat assertion) and, without validation,
     // silently rasterizes nothing -> uniformly black frame.
-    if (g_state->currentDrawFBO != 0 && fbo) {
+    if (!is_default_fbo && fbo) {
         for (int i = 0; i < color_count; ++i) {
             GLuint t = fbo->colors[i].texture;
             mithril::Texture* tex = mithril::state_get_texture(t);
