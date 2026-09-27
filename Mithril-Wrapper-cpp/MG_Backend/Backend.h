@@ -408,6 +408,7 @@ void        backend_invalidate_sampler_cache(GLuint name);
  *                   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
  */
 void        backend_transition_texture_layout(GLuint name, VkImageLayout target_layout);
+VkImageLayout backend_get_texture_layout(GLuint name);
 
 /*
  * Generate mipmaps for the named texture via vkCmdBlitImage. Each level L>=1
@@ -473,7 +474,9 @@ void        backend_blit_texture(GLuint src_name, GLuint dst_name,
  *                is_dst_default_fbo is 1 for the Y flip computation.
  */
 void        backend_blit_images(VkImage src_image, VkFormat src_format,
+                                VkImageLayout src_layout,
                                 VkImage dst_image, VkFormat dst_format,
+                                VkImageLayout dst_layout,
                                 int srcX0, int srcY0, int srcX1, int srcY1,
                                 int dstX0, int dstY0, int dstX1, int dstY1,
                                 GLbitfield mask, GLenum filter,
