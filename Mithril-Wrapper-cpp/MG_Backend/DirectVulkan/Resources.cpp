@@ -1890,6 +1890,12 @@ void backend_transition_texture_layout(GLuint name, VkImageLayout target_layout)
     mithril::vk::transition_image_layout(it->second, target_layout);
 }
 
+VkImageLayout backend_get_texture_layout(GLuint name) {
+    auto& tbl = mithril::vk::texture_table();
+    auto it = tbl.find(name);
+    return it == tbl.end() ? VK_IMAGE_LAYOUT_UNDEFINED : it->second.currentLayout;
+}
+
 /* GL compare func -> VkCompareOp (local; avoids cross-TU linkage assumptions). */
 static VkCompareOp mithril_gl_compare_to_vk(GLenum f) {
     switch (f) {
