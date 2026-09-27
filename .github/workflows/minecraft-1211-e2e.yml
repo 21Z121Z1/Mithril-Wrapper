@@ -423,6 +423,32 @@ jobs:
                 % (uniform, dom, shader_err, dropped))
           PY
 
+      - name: Convert captured frame to PNG and record image metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          meta=""
+          for f in "$E2E_ROOT"/render/prepresent-frame-*.meta; do
+            if [ -f "$f" ]; then meta="$f"; break; fi
+          done
+          if [ -z "$meta" ]; then
+            echo "::error::no pre-present frame metadata found for PNG conversion"
+            exit 1
+          fi
+          raw="${meta%.meta}.rgba"
+          read -r w h size < "$meta"
+          png="${meta%.meta}.png"
+          export MITHRIL_RENDERER_IDENTITY="$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('gl_renderer',''))" "$E2E_ROOT/game-state.json")"
+          export MITHRIL_MINECRAFT_VERSION="1.21.1"
+          line="$(python3 ci/minecraft-e2e/rgba_to_png.py "$raw" "$w" "$h" "$png" --flip-y --meta "${meta%.meta}.png.json")"
+          echo "$line"
+          # Hard render gate: refuse a uniform/blank PNG. This is the same
+          # real-Minecraft-content criterion as the oracle step and must fail
+          # the job when the rendered frame is black/clear-only.
+          uniform="$(python3 -c "import sys;line=sys.argv[1];import re;m=re.search(r'uniform_fill=([0-9.]+)',line);print(m.group(1) if m else 1.0)" "$line")"
+          python3 -c "import sys;u=float(sys.argv[1]);sys.exit(0 if u < 0.999 else 1)" "$uniform"
+          echo "[mithril-e2e] PNG render artifact: $png (uniform_fill=$uniform)"
+
       - name: Verify Mithril identity, GL 3.3 caps gate and red-screen gate
         shell: bash
         env:

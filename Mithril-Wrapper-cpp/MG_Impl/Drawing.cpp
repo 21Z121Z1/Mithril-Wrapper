@@ -190,7 +190,16 @@ static bool prepare_draw(GLenum mode) {
     // Compute color attachment VkFormats.
     VkFormat color_formats[8] = {VK_FORMAT_UNDEFINED};
     mithril::Framebuffer* fbo = mithril::state_get_framebuffer(g_state->currentDrawFBO);
-    if (fbo) {
+    // FIX (black-frame root cause): FBO 0 must ALWAYS take the swapchain-format
+    // path. state_get_framebuffer(0) returns a non-null EMPTY Framebuffer entry;
+    // branching on `fbo != null` routed the default framebuffer into the
+    // user-FBO branch, where colors[i].texture == 0 left color_formats[] as
+    // VK_FORMAT_UNDEFINED. The pipeline was then created with color attachment
+    // format VK_FORMAT_UNDEFINED -> Metal MTLPixelFormatInvalid, which does not
+    // match the framebuffer's MTLPixelFormatBGRA8Unorm: Metal validation aborts
+    // (setRenderPipelineState pixelFormat assertion) and, without validation,
+    // silently rasterizes nothing -> uniformly black frame.
+    if (g_state->currentDrawFBO != 0 && fbo) {
         for (int i = 0; i < color_count; ++i) {
             GLuint t = fbo->colors[i].texture;
             mithril::Texture* tex = mithril::state_get_texture(t);
