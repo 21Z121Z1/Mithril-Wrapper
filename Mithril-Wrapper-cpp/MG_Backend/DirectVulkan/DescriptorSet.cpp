@@ -1037,6 +1037,37 @@ void bind_program_descriptors(GLuint program, VkPipelineBindPoint bindPoint) {
                     samp = dt.sampler;
                 }
             }
+            // E2E convergence diagnostic: for Minecraft's final fullscreen
+            // composite, prove which GL texture actually reaches the reflected
+            // DiffuseSampler descriptor. A prior readback proved texture 1/FBO 1
+            // contains non-black pixels; if this reports another texture (or the
+            // default fallback), the black screen is in sampler resolution rather
+            // than rasterization/presentation.
+            if (program == 1 && mithril::g_state &&
+                mithril::g_state->presentedFrames >= 1000) {
+                static bool finalSamplerStateLogged = false;
+                if (!finalSamplerStateLogged) {
+                    finalSamplerStateLogged = true;
+                    mithril::Texture* finalTex = tex_id ? mithril::state_get_texture(tex_id) : nullptr;
+                    const GLuint unit0_2d = mithril::g_state->boundTextureForUnit(
+                        0, mithril::TextureTarget::_2D);
+                    const GLuint unit0_any = mithril::g_state->boundTextureForUnit(0);
+                    MITHRIL_LOG_WARN(
+                        "vk-diag",
+                        "final-sampler-state prog=1 binding=%u name='%s' unit=%d "
+                        "target=0x%x tex=%u unit0_2d=%u unit0_any=%u "
+                        "size=%dx%d viewValid=%d samplerValid=%d "
+                        "layout=%d sampledLayout=%d",
+                        db.binding, db.name.c_str(), unit, (unsigned)db.samplerTarget,
+                        tex_id, unit0_2d, unit0_any,
+                        finalTex ? (int)finalTex->width : -1,
+                        finalTex ? (int)finalTex->height : -1,
+                        view != VK_NULL_HANDLE, samp != VK_NULL_HANDLE,
+                        tex_id ? (int)backend_get_texture_layout(tex_id) : -1,
+                        tex_id ? (int)backend_get_sampled_texture_layout(tex_id) : -1);
+                }
+            }
+
             // DEBUG (sampler black-screen triage): log how each sampler binding
             // resolved so CI can tell a real-texture bind (tex_id != 0) from the
             // default-black fallback, and whether the view/sampler are valid.
