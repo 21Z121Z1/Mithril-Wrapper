@@ -814,6 +814,24 @@ void glDrawElements(GLenum mode, GLsizei count, GLenum type, const void* indices
                 "final-blit-encoder recording=%d pass=%d descriptors=%d pipeline=0x%llx",
                 ed.command_buffer_recording, ed.pass_active, ed.descriptors_bound,
                 (unsigned long long)ed.bound_pipeline);
+            MITHRIL_LOG_WARN("vk-diag",
+                "final-blit-raster fbo=%d depthTest=%d depthMask=%d depthFunc=0x%x "
+                "cullFace=%d cullMode=0x%x frontFace=0x%x discard=%d",
+                g_state->currentDrawFBO, (int)g_state->depthTest,
+                (int)g_state->depthMask, (unsigned)g_state->depthFunc,
+                (int)g_state->cullFace, (unsigned)g_state->cullMode,
+                (unsigned)g_state->frontFace, (int)g_state->rasterizerDiscard);
+            MITHRIL_LOG_WARN("vk-diag",
+                "final-blit-raster2 viewport=%d,%d %dx%d scissorTest=%d "
+                "scissor=%d,%d %dx%d blend=%d colorMask=%d%d%d%d poly=0x%x stencilTest=%d",
+                g_state->viewportX, g_state->viewportY,
+                g_state->viewportW, g_state->viewportH,
+                (int)g_state->scissorTest, g_state->scissorX, g_state->scissorY,
+                g_state->scissorW, g_state->scissorH,
+                (int)g_state->blends[0].enabled,
+                (int)g_state->colorMask[0][0], (int)g_state->colorMask[0][1],
+                (int)g_state->colorMask[0][2], (int)g_state->colorMask[0][3],
+                (unsigned)g_state->polygonModeFront, (int)g_state->stencilTest);
         }
     }
     if (ib != VK_NULL_HANDLE) {
