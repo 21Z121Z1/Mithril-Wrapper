@@ -1007,6 +1007,9 @@ void glCopyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLevel,
     backend_end_render_pass();
     backend_commit();
 
+    const VkImageLayout srcLayout = backend_get_texture_layout(srcName);
+    const VkImageLayout dstLayout = backend_get_texture_layout(dstName);
+
     // Blit each Z-slice. For 2D textures, depth==1 → single iteration.
     // For 3D textures and cube map arrays, blit each slice separately.
     for (GLsizei z = 0; z < srcDepth; ++z) {
@@ -1026,7 +1029,8 @@ void glCopyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLevel,
             dstY0 = dstY; dstY1 = dstY + srcHeight;
         }
 
-        backend_blit_images(srcImage, srcFmt, dstImage, dstFmt,
+        backend_blit_images(srcImage, srcFmt, srcLayout,
+                            dstImage, dstFmt, dstLayout,
                             srcX0, srcY0, srcX1, srcY1,
                             dstX0, dstY0, dstX1, dstY1,
                             GL_COLOR_BUFFER_BIT, GL_NEAREST,
