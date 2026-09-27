@@ -1011,31 +1011,43 @@ int read_pixels(int x, int y, int w, int h, GLenum format, GLenum type, void* ou
     vkCmdCopyImageToBuffer(c.cmd, src_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                            staging.buffer, 1, &region);
 
-    // Transition the source image back to COLOR_ATTACHMENT_OPTIMAL so
-    // subsequent draws can render into it again.
+    // Restore the source image to the layout it had immediately before the
+    // readback copy. glReadPixels is observational and must not perturb the
+    // image's layout for subsequent sampling/present.
     bar.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-    bar.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
     bar.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    bar.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    bar.newLayout = src_layout;
+    VkPipelineStageFlags restoreStage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+    switch (src_layout) {
+        case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:
+            bar.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
+                                VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+            restoreStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+            break;
+        case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
+        case VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL:
+            bar.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            restoreStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+            break;
+        case VK_IMAGE_LAYOUT_PRESENT_SRC_KHR:
+            bar.dstAccessMask = 0;
+            restoreStage = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
+            break;
+        default:
+            bar.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+            restoreStage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+            break;
+    }
     vkCmdPipelineBarrier(c.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0,
+                         restoreStage, 0,
                          0, nullptr, 0, nullptr, 1, &bar);
-    // Update the tracked layout so the next begin_render_pass / draw uses a
-    // non-stale oldLayout (otherwise its barrier would claim SHADER_READ_ONLY_OPTIMAL
-    // while the image is actually in COLOR_ATTACHMENT_OPTIMAL -> same no-op
-    // transition -> dropped draw / black screen). Only the user-FBO colour
-    // attachment lives in texture_table(); the swapchain image is handled by
-    // the activeSwapchain path in begin_render_pass/commit_frame.
+
     if (src_tex_id != 0) {
         auto& tbl = mithril::vk::texture_table();
         auto tit = tbl.find(src_tex_id);
-        if (tit != tbl.end()) tit->second.currentLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    }
-    else if (readFboName == 0) {
-        // The barrier above left the swapchain image in COLOR_ATTACHMENT_OPTIMAL.
-        // Record that, or commit_frame()'s next barrier would use a stale
-        // oldLayout (PRESENT_SRC_KHR) against an image that is no longer in it.
-        backend_set_active_swapchain_color_layout(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+        if (tit != tbl.end()) tit->second.currentLayout = src_layout;
+    } else if (readFboName == 0) {
+        backend_set_active_swapchain_color_layout(src_layout);
     }
 
     end_one_shot(c);
