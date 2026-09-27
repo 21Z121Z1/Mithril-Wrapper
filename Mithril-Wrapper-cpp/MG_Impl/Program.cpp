@@ -439,6 +439,29 @@ void glLinkProgram(GLuint program) {
     MITHRIL_LOG_INFO("program", "Linked program %u (VS=%zu VS_yflip=%zu FS=%zu SPIR-V words)",
                      program, p->vertexSpirv.size(), p->vertexSpirvYFlipped.size(),
                      p->fragmentSpirv.size());
+
+    // TEMP CI diagnostic: classify Minecraft shader programs without relying
+    // on resource names (GL exposes source + reflection here).
+    if (program < 64) {
+        std::string uniforms;
+        for (const auto& kv : p->uniforms) {
+            if (!uniforms.empty()) uniforms += ",";
+            uniforms += kv.first;
+        }
+        std::string attribNames;
+        for (const auto& kv : p->attribs) {
+            if (!attribNames.empty()) attribNames += ",";
+            attribNames += kv.first;
+        }
+        MITHRIL_LOG_WARN("program-diag",
+            "program=%u uniforms=[%s] attribs=[%s] fs_flags sampler0=%d colorMod=%d discard=%d texcoord=%d vertexColor=%d",
+            program, uniforms.c_str(), attribNames.c_str(),
+            fragmentSource.find("Sampler0") != std::string::npos,
+            fragmentSource.find("ColorModulator") != std::string::npos,
+            fragmentSource.find("discard") != std::string::npos,
+            fragmentSource.find("texCoord") != std::string::npos,
+            fragmentSource.find("vertexColor") != std::string::npos);
+    }
 }
 
 void glUseProgram(GLuint program) {

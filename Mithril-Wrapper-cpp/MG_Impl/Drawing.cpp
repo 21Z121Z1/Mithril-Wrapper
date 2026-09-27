@@ -270,6 +270,28 @@ static bool prepare_draw(GLenum mode) {
     if (g_state->colorMask[0][1]) cwm_bits |= 2;
     if (g_state->colorMask[0][2]) cwm_bits |= 4;
     if (g_state->colorMask[0][3]) cwm_bits |= 8;
+
+    // TEMP CI diagnostic: capture the first few draw signatures per program.
+    static int drawDiagCount[128] = {};
+    if (prog->id < 128 && drawDiagCount[prog->id]++ < 6) {
+        char abuf[768] = {};
+        int off = 0;
+        for (int i = 0; i < attrib_count && off < (int)sizeof(abuf) - 96; ++i) {
+            const MGVertexAttrib& a = attribs[i];
+            off += snprintf(abuf + off, sizeof(abuf) - (size_t)off,
+                "%sL%d:s%d:t%x:n%d:i%d:st%d:o%d:b%u", i ? ";" : "",
+                a.location, a.size, a.type, a.normalized, a.integer,
+                a.stride, a.offset, a.buffer_name);
+        }
+        MITHRIL_LOG_WARN("draw-diag",
+            "prog=%u fbo=%u mode=0x%x vao=%u attribs=[%s] blend=%d srcRGB=0x%x dstRGB=0x%x srcA=0x%x dstA=0x%x cwm=%d tex0=%u tex1=%u tex2=%u",
+            prog->id, g_state->currentDrawFBO, mode, g_state->currentVAO, abuf,
+            g_state->blends[0].enabled ? 1 : 0,
+            g_state->blends[0].srcRGB, g_state->blends[0].dstRGB,
+            g_state->blends[0].srcA, g_state->blends[0].dstA,
+            cwm_bits, g_state->boundTextureForUnit(0),
+            g_state->boundTextureForUnit(1), g_state->boundTextureForUnit(2));
+    }
     VkPipeline pipeline = backend_get_or_create_pipeline(
         prog->id,
         vs_spirv_ptr->data(),            (int)vs_spirv_ptr->size(),
