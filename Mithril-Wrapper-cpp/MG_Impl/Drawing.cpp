@@ -250,6 +250,45 @@ static bool prepare_draw(GLenum mode) {
         m.divisor      = a.divisor;
     }
 
+    // E2E convergence diagnostic: the final Minecraft fullscreen composite has
+    // a proven non-black source texture, but the default framebuffer remains
+    // uniformly black. Capture the remaining raster state exactly once after
+    // the client has reached a stable frame so CI can distinguish a descriptor
+    // problem from degenerate/off-screen geometry or depth/scissor rejection.
+    if (is_default_fbo && prog->id == 1 && g_state->presentedFrames >= 1000) {
+        static bool finalRasterStateLogged = false;
+        if (!finalRasterStateLogged) {
+            finalRasterStateLogged = true;
+            MITHRIL_LOG_WARN(
+                "vk-diag",
+                "final-raster-state prog=1 mode=0x%x vao=%u attribs=%d target=%dx%d "
+                "viewport=(%d,%d %dx%d %.3f..%.3f) scissor=%d:(%d,%d %dx%d) "
+                "depth=%d mask=%d func=0x%x cull=%d mode=0x%x front=0x%x "
+                "blend=%d colorMask=%d%d%d%d",
+                (unsigned)mode, g_state->currentVAO, attrib_count, w, h,
+                g_state->viewportX, g_state->viewportY,
+                g_state->viewportW, g_state->viewportH,
+                (double)g_state->depthNear, (double)g_state->depthFar,
+                (int)g_state->scissorTest, g_state->scissorX, g_state->scissorY,
+                g_state->scissorW, g_state->scissorH,
+                (int)g_state->depthTest, (int)g_state->depthMask,
+                (unsigned)g_state->depthFunc,
+                (int)g_state->cullFace, (unsigned)g_state->cullMode,
+                (unsigned)g_state->frontFace, (int)g_state->blends[0].enabled,
+                (int)g_state->colorMask[0][0], (int)g_state->colorMask[0][1],
+                (int)g_state->colorMask[0][2], (int)g_state->colorMask[0][3]);
+            for (int ai = 0; ai < attrib_count; ++ai) {
+                const MGVertexAttrib& a = attribs[ai];
+                MITHRIL_LOG_WARN(
+                    "vk-diag",
+                    "final-attrib loc=%d size=%d type=0x%x norm=%d int=%d stride=%d "
+                    "offset=%d buffer=%u divisor=%u",
+                    a.location, a.size, (unsigned)a.type, a.normalized, a.integer,
+                    a.stride, a.offset, a.buffer_name, a.divisor);
+            }
+        }
+    }
+
     // Get-or-create the VkGraphicsPipeline. Blend state + colorWriteMask are
     // part of the pipeline signature so that enabling/disabling GL_BLEND,
     // changing blend functions, or calling glColorMask creates a distinct
