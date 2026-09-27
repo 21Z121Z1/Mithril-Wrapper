@@ -341,6 +341,73 @@ static bool prepare_draw(GLenum mode) {
         }
     }
 
+    // E2E convergence diagnostic: once Minecraft has reached a stable frame,
+    // inspect the texture sampled by the final default-FBO composite before
+    // that composite is recorded. This cleanly separates "source FBO is black"
+    // from "source has content but the swapchain composite loses it".
+    if (is_default_fbo && prog->id == 1 && g_state->presentedFrames >= 1000) {
+        static bool sampledSourceChecked = false;
+        if (!sampledSourceChecked) {
+            sampledSourceChecked = true;
+            GLuint sampledTex = g_state->boundTextureForUnit(
+                0, mithril::TextureTarget::_2D);
+            GLuint sampledFbo = 0;
+            for (const auto& item : g_state->framebuffers) {
+                for (int ci = 0; ci < 8; ++ci) {
+                    if (item.second.colors[ci].texture == sampledTex && sampledTex != 0) {
+                        sampledFbo = item.first;
+                        break;
+                    }
+                }
+                if (sampledFbo != 0) break;
+            }
+
+            mithril::Texture* sampledState = mithril::state_get_texture(sampledTex);
+            if (sampledFbo != 0 && sampledState &&
+                sampledState->width > 0 && sampledState->height > 0) {
+                const int sw = std::min(64, (int)sampledState->width);
+                const int sh = std::min(64, (int)sampledState->height);
+                const int sx = std::max(0, ((int)sampledState->width - sw) / 2);
+                const int sy = std::max(0, ((int)sampledState->height - sh) / 2);
+                std::vector<unsigned char> sample((size_t)sw * (size_t)sh * 4u);
+                const GLuint savedReadFbo = g_state->currentReadFBO;
+                g_state->currentReadFBO = sampledFbo;
+                const int ok = backend_read_pixels(
+                    sx, sy, sw, sh, GL_RGBA, GL_UNSIGNED_BYTE, sample.data());
+                g_state->currentReadFBO = savedReadFbo;
+
+                unsigned long long sumR = 0, sumG = 0, sumB = 0;
+                size_t nonblack = 0;
+                const size_t pixels = (size_t)sw * (size_t)sh;
+                if (ok) {
+                    for (size_t i = 0; i < pixels; ++i) {
+                        const unsigned r = sample[i * 4 + 0];
+                        const unsigned g = sample[i * 4 + 1];
+                        const unsigned b = sample[i * 4 + 2];
+                        sumR += r; sumG += g; sumB += b;
+                        if (r > 4 || g > 4 || b > 4) ++nonblack;
+                    }
+                }
+                MITHRIL_LOG_WARN(
+                    "vk-diag",
+                    "final-source-readback ok=%d tex=%u fbo=%u size=%dx%d sample=%dx%d "
+                    "nonblack_ratio=%.6f avgRGB=(%.2f,%.2f,%.2f)",
+                    ok, sampledTex, sampledFbo,
+                    (int)sampledState->width, (int)sampledState->height,
+                    sw, sh,
+                    pixels ? (double)nonblack / (double)pixels : 0.0,
+                    pixels ? (double)sumR / (double)pixels : 0.0,
+                    pixels ? (double)sumG / (double)pixels : 0.0,
+                    pixels ? (double)sumB / (double)pixels : 0.0);
+            } else {
+                MITHRIL_LOG_WARN(
+                    "vk-diag",
+                    "final-source-readback unavailable tex=%u fbo=%u state=%p",
+                    sampledTex, sampledFbo, (void*)sampledState);
+            }
+        }
+    }
+
     // FIX (root cause Y, CRITICAL): Register user-FBO attachment tex_ids so
     // begin_render_pass can barrier their images to attachment-optimal and
     // end_render_pass can barrier them back to read-only + update
