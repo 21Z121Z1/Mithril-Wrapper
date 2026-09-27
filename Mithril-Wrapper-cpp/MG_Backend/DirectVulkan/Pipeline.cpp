@@ -432,6 +432,20 @@ VkPipeline get_or_create_pipeline(GLuint program,
     }
     if (vsModule == VK_NULL_HANDLE) return VK_NULL_HANDLE;
 
+    if (program == 1) {
+        int fneg = 0;
+        for (int wi = 0; wi < vertex_word_count; ++wi) {
+            if ((vertex_spirv[wi] & 0xFFFFu) == 128u) ++fneg;  // OpFNegate
+        }
+        MITHRIL_LOG_WARN("vk-diag",
+            "pipeline-create prog=1 default=%d inputWords=%d OpFNegate=%d "
+            "selModule=0x%llx flippedModule=0x%llx normalModule=0x%llx",
+            (int)is_default_fbo, (int)vertex_word_count, fneg,
+            (unsigned long long)(uint64_t)(uintptr_t)vsModule,
+            (unsigned long long)(uint64_t)(uintptr_t)pr.vertexModuleFlipped,
+            (unsigned long long)(uint64_t)(uintptr_t)pr.vertexModule);
+    }
+
     // Reflect SPIR-V + build VkDescriptorSetLayout / VkPipelineLayout /
     // VkDescriptorPool once per program (idempotent). The pipeline below binds
     // against pr.pipelineLayout (or the empty fallback for binding-less
