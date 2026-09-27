@@ -34,6 +34,54 @@ namespace vk {
 
 namespace {
 
+static void access_stage_for_layout(VkImageLayout layout,
+                                    VkAccessFlags* access,
+                                    VkPipelineStageFlags* stage) {
+    switch (layout) {
+        case VK_IMAGE_LAYOUT_UNDEFINED:
+            *access = 0;
+            *stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+            break;
+        case VK_IMAGE_LAYOUT_PRESENT_SRC_KHR:
+            *access = 0;
+            *stage = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
+            break;
+        case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:
+            *access = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+            *stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+            break;
+        case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
+            *access = VK_ACCESS_SHADER_READ_BIT;
+            *stage = VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT;
+            break;
+        case VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL:
+            *access = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                      VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+            *stage = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+                     VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+            break;
+        case VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL:
+            *access = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_SHADER_READ_BIT;
+            *stage = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+                     VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT |
+                     VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+            break;
+        case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
+            *access = VK_ACCESS_TRANSFER_READ_BIT;
+            *stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+            break;
+        case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
+            *access = VK_ACCESS_TRANSFER_WRITE_BIT;
+            *stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+            break;
+        default:
+            *access = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+            *stage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+            break;
+    }
+}
+
+
 // One-shot command buffer + fence helper: records into a freshly allocated
 // primary command buffer, submits it, waits for completion, and frees the
 // buffer. The lambda returns false to abort the submit (e.g. recording error).
@@ -1180,9 +1228,8 @@ void blit_images_impl(VkImage src_image, VkFormat src_format,
     // Transition source to TRANSFER_SRC_OPTIMAL.
     VkImageMemoryBarrier sb{};
     sb.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    sb.srcAccessMask = (src_initial == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
-                        ? VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
-                        : VK_ACCESS_SHADER_READ_BIT;
+    VkPipelineStageFlags srcStage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+    access_stage_for_layout(src_initial, &sb.srcAccessMask, &srcStage);
     sb.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
     sb.oldLayout = src_initial;
     sb.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
@@ -1194,9 +1241,6 @@ void blit_images_impl(VkImage src_image, VkFormat src_format,
     sb.subresourceRange.levelCount = 1;
     sb.subresourceRange.baseArrayLayer = 0;
     sb.subresourceRange.layerCount = 1;
-    VkPipelineStageFlags srcStage = (src_initial == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
-                        ? VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
-                        : VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
     vkCmdPipelineBarrier(c.cmd, srcStage,
                          VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
                          0, nullptr, 0, nullptr, 1, &sb);
@@ -1204,9 +1248,8 @@ void blit_images_impl(VkImage src_image, VkFormat src_format,
     // Transition destination to TRANSFER_DST_OPTIMAL.
     VkImageMemoryBarrier db{};
     db.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    db.srcAccessMask = (dst_initial == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
-                        ? VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
-                        : VK_ACCESS_SHADER_READ_BIT;
+    VkPipelineStageFlags dstStage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+    access_stage_for_layout(dst_initial, &db.srcAccessMask, &dstStage);
     db.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
     db.oldLayout = dst_initial;
     db.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
@@ -1218,9 +1261,6 @@ void blit_images_impl(VkImage src_image, VkFormat src_format,
     db.subresourceRange.levelCount = 1;
     db.subresourceRange.baseArrayLayer = 0;
     db.subresourceRange.layerCount = 1;
-    VkPipelineStageFlags dstStage = (dst_initial == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
-                        ? VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
-                        : VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
     vkCmdPipelineBarrier(c.cmd, dstStage,
                          VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
                          0, nullptr, 0, nullptr, 1, &db);
@@ -1247,27 +1287,19 @@ void blit_images_impl(VkImage src_image, VkFormat src_format,
 
     // Transition both images back to their final layouts.
     sb.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-    sb.dstAccessMask = (src_final == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
-                        ? (VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT)
-                        : VK_ACCESS_SHADER_READ_BIT;
+    VkPipelineStageFlags srcFinalStage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+    access_stage_for_layout(src_final, &sb.dstAccessMask, &srcFinalStage);
     sb.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
     sb.newLayout = src_final;
-    VkPipelineStageFlags srcFinalStage = (src_final == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
-                        ? VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
-                        : VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
     vkCmdPipelineBarrier(c.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
                          srcFinalStage, 0,
                          0, nullptr, 0, nullptr, 1, &sb);
 
     db.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    db.dstAccessMask = (dst_final == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
-                        ? (VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT)
-                        : VK_ACCESS_SHADER_READ_BIT;
+    VkPipelineStageFlags dstFinalStage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+    access_stage_for_layout(dst_final, &db.dstAccessMask, &dstFinalStage);
     db.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     db.newLayout = dst_final;
-    VkPipelineStageFlags dstFinalStage = (dst_final == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
-                        ? VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
-                        : VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
     vkCmdPipelineBarrier(c.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
                          dstFinalStage, 0,
                          0, nullptr, 0, nullptr, 1, &db);
@@ -1303,25 +1335,18 @@ void backend_blit_texture(GLuint src_name, GLuint dst_name,
 }
 
 void backend_blit_images(VkImage src_image, VkFormat src_format,
+                         VkImageLayout src_layout,
                          VkImage dst_image, VkFormat dst_format,
+                         VkImageLayout dst_layout,
                          int srcX0, int srcY0, int srcX1, int srcY1,
                          int dstX0, int dstY0, int dstX1, int dstY1,
                          GLbitfield mask, GLenum filter,
                          int is_dst_default_fbo, int dst_height) {
-    // Both images are assumed to be in a sampling or attachment layout before
-    // the blit. The swapchain color image is in COLOR_ATTACHMENT_OPTIMAL
-    // (it was just rendered into, or will be rendered into next frame); user
-    // FBO textures are in SHADER_READ_ONLY_OPTIMAL (after an upload or a
-    // previous blit). We transition them back to those same layouts after the
-    // blit so subsequent rendering / sampling continues to work.
-    //
-    // Heuristic: if the format is a color format (not depth/stencil), assume
-    // COLOR_ATTACHMENT_OPTIMAL for the initial/final layout. This matches the
-    // common glBlitFramebuffer case (blitting between render targets that are
-    // actively being rendered into). For depth/stencil formats we would use
-    // DEPTH_STENCIL_ATTACHMENT_OPTIMAL, but depth blits are not yet supported.
-    VkImageLayout src_layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    VkImageLayout dst_layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    // The GL layer has already ended/submitted pending rendering and supplies
+    // the exact tracked layout for both images. Restore each image to that same
+    // layout after the synchronous one-shot blit so backend tracking remains
+    // truthful. In particular, a user-FBO source is normally sampled read-only
+    // while a default framebuffer is normally PRESENT_SRC_KHR after commit.
     mithril::vk::blit_images_impl(src_image, src_format, src_layout, src_layout,
                                   dst_image, dst_format, dst_layout, dst_layout,
                                   srcX0, srcY0, srcX1, srcY1,
