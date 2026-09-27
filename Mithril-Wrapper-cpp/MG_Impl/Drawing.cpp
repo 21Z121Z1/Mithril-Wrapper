@@ -341,62 +341,6 @@ static bool prepare_draw(GLenum mode) {
         }
     }
 
-    // E2E convergence diagnostic: source FBO has already been proven non-black.
-    // Inspect the final composite's frontend uniform state without recording
-    // any extra Vulkan work, so this diagnostic cannot perturb the frame.
-    if (is_default_fbo && prog->id == 1 && g_state->presentedFrames >= 1000) {
-        static bool finalUniformStateLogged = false;
-        if (!finalUniformStateLogged) {
-            finalUniformStateLogged = true;
-            MITHRIL_LOG_WARN(
-                "vk-diag",
-                "final-uniform-state prog=1 uniforms=%zu uboStores=%zu "
-                "cull=%d cullMode=0x%x frontFace=0x%x blend=%d "
-                "blendRGB=(0x%x,0x%x) blendA=(0x%x,0x%x) colorMask=%d%d%d%d",
-                prog->uniforms.size(), prog->uboBackingStore.size(),
-                (int)g_state->cullFace, (unsigned)g_state->cullMode,
-                (unsigned)g_state->frontFace, (int)g_state->blends[0].enabled,
-                (unsigned)g_state->blends[0].srcRGB, (unsigned)g_state->blends[0].dstRGB,
-                (unsigned)g_state->blends[0].srcA, (unsigned)g_state->blends[0].dstA,
-                (int)g_state->colorMask[0][0], (int)g_state->colorMask[0][1],
-                (int)g_state->colorMask[0][2], (int)g_state->colorMask[0][3]);
-
-            for (const auto& item : prog->uniforms) {
-                const auto& u = item.second;
-                char values[256] = {};
-                int off = 0;
-                const size_t n = std::min<size_t>(u.value.size(), 16);
-                for (size_t i = 0; i < n && off < (int)sizeof(values) - 24; ++i) {
-                    off += std::snprintf(values + off, sizeof(values) - (size_t)off,
-                                         "%s%.6g", i ? "," : "", (double)u.value[i]);
-                }
-                MITHRIL_LOG_WARN(
-                    "vk-diag",
-                    "final-uniform name='%s' loc=%d type=0x%x blockBinding=%d "
-                    "offset=%d logicalCount=%zu values=[%s]",
-                    item.first.c_str(), u.location, (unsigned)u.type,
-                    u.blockBinding, u.offset, u.value.size(), values);
-            }
-
-            for (const auto& storeItem : prog->uboBackingStore) {
-                const auto& bytes = storeItem.second;
-                char values[320] = {};
-                int off = 0;
-                const size_t nf = std::min<size_t>(bytes.size() / sizeof(float), 20);
-                for (size_t i = 0; i < nf && off < (int)sizeof(values) - 24; ++i) {
-                    float v = 0.0f;
-                    std::memcpy(&v, bytes.data() + i * sizeof(float), sizeof(float));
-                    off += std::snprintf(values + off, sizeof(values) - (size_t)off,
-                                         "%s%.6g", i ? "," : "", (double)v);
-                }
-                MITHRIL_LOG_WARN(
-                    "vk-diag",
-                    "final-ubo binding=%u bytes=%zu firstFloats=[%s]",
-                    storeItem.first, bytes.size(), values);
-            }
-        }
-    }
-
     // FIX (root cause Y, CRITICAL): Register user-FBO attachment tex_ids so
     // begin_render_pass can barrier their images to attachment-optimal and
     // end_render_pass can barrier them back to read-only + update
@@ -468,7 +412,14 @@ static bool prepare_draw(GLenum mode) {
     //   - Hardcode frontFace to CLOCKWISE (the inverted winding makes GL's
     //     CCW triangles appear as CW in Vulkan). MobileGL does the same.
     // User FBOs (no Y flip) keep the original cull mode and frontFace.
-    if (g_state->cullFace) {
+    if (is_default_fbo && prog->id == 1) {
+        // Convergence A/B: Minecraft 1.21.1's final blit is a fullscreen
+        // Position-only pass sampling DiffuseSampler. Its source FBO is proven
+        // non-black while the default framebuffer remains uniformly black.
+        // Disable culling for this one pass to determine whether the remaining
+        // failure is winding/front-face compensation rather than sampling.
+        backend_set_cull_mode(0);
+    } else if (g_state->cullFace) {
         // FIX (Root Cause K - Y翻转面剔除双重补偿):
         // Vulkan 面剔除由两个独立状态控制：frontFace（定义正面缠绕方向）+ cullMode（剔除哪面）。
         // Y 翻转（gl_Position.y = -y）反转缠绕：GL-CCW → Vulkan-CW。
