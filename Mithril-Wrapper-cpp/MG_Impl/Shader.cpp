@@ -1049,6 +1049,16 @@ bool glsl_to_spirv(GLenum gl_stage, const std::string& src,
     // inject attribute location bindings, and wrap loose non-opaque uniforms
     // into a synthetic UBO so glslang produces Vulkan-conformant SPIR-V.
     std::string source = src;
+    // DIAGNOSTIC A/B (env MITHRIL_DBG_CONST_FS): replace the fullscreen blit
+    // fragment shader with a constant-green output, ignoring the texture. This
+    // separates geometry/pipeline/target faults (green appears) from
+    // fragment/descriptor/sampling faults (still black).
+    if (gl_stage == GL_FRAGMENT_SHADER &&
+        std::getenv("MITHRIL_DBG_CONST_FS") != nullptr &&
+        source.find("DiffuseSampler") != std::string::npos) {
+        source = "#version 150\nout vec4 mithrilDbgColor;\n"
+                 "void main(){ mithrilDbgColor = vec4(0.0, 1.0, 0.0, 1.0); }\n";
+    }
     int glsl_version = ensure_glsl_version(source);
     rewrite_desktop_builtins(source, gl_stage);
     // Root cause: gl_VertexID baseVertex semantics. After ensure_glsl_version
