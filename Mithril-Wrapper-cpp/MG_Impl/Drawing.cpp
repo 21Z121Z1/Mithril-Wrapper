@@ -405,6 +405,19 @@ static bool prepare_draw(GLenum mode) {
     backend_set_load_load();
     backend_begin_render_pass(colors, color_count, depth_view, w, h, 1);
 
+    // E2E convergence A/B: immediately before Minecraft's final fullscreen
+    // composite, paint the default framebuffer magenta with an explicit
+    // attachment clear. The source texture, sampler, CPU-side quad and shader
+    // inputs are already proven correct. If the pre-present oracle remains
+    // magenta, the indexed draw produced no covering fragments (GPU-side
+    // vertex/index/pipeline path). If it becomes black, fragments executed and
+    // the remaining fault is texture sampling / fragment output. Apply this on
+    // every settled final pass so the later bridge capture observes the probe.
+    if (is_default_fbo && prog->id == 1 && g_state->presentedFrames >= 1000) {
+        const float diagnosticColor[4] = {1.0f, 0.0f, 1.0f, 1.0f};
+        backend_clear_buffer_indexed(GL_COLOR, 0, diagnosticColor, 1.0f, 0);
+    }
+
     // Bind pipeline + set dynamic state via vkCmdSet*.
     backend_bind_pipeline(pipeline);
     // FIX (root cause: gl_VertexID baseVertex semantics): push
