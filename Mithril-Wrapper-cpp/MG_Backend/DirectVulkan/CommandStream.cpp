@@ -447,6 +447,9 @@ bool draw_recording_allowed(const char* who) {
     }
     // B1 first-frame diagnostic: a real draw was recorded this frame.
     ++d_ok;
+    if (getenv("MITHRIL_DRAWKIND") && mithril::g_state && mithril::g_state->currentDrawFBO==3){
+      static int un=0; if(un<20){++un; fprintf(stderr,"[DK] fbo3 OK #%d who=%s prog=%u mode? baseV=%d baseI=%u\n",un,who,mithril::g_state->currentProgram,(int)mithril::g_state->currentBaseVertex,(unsigned)mithril::g_state->currentBaseInstance);}
+    }
     mithril::vk::debug_frame_fbo_inc(mithril::g_state ? mithril::g_state->currentDrawFBO : 0);
     if (mithril::g_state) {
         if (mithril::g_state->currentDrawFBO==0) ++d_fbo0;
@@ -2061,6 +2064,7 @@ void backend_set_fbo_attachment_tex_ids(GLuint* color_tex_ids, int color_count,
 
 void backend_end_render_pass(void) { mithril::vk::end_render_pass(); }
 void backend_commit(void)          { mithril::vk::commit_frame(); }
+void backend_mark_commands(void){ mithril::vk::encoder().hasCommands = true; }
 
 void backend_set_active_swapchain(void* swapchain_state) {
     mithril::vk::set_active_swapchain((mithril::vk::Swapchain*)swapchain_state);
@@ -2414,6 +2418,9 @@ void backend_draw_arrays(int primitive, int first, int count) {
     // Mirrors MobileGL drawParams.firstInstance.
     uint32_t firstInstance = 0;
     if (mithril::g_state) firstInstance = mithril::g_state->currentBaseInstance;
+    if (getenv("MITHRIL_DRAWKIND") && mithril::g_state && mithril::g_state->currentDrawFBO==3){
+      static int an=0; if(an<16){++an; fprintf(stderr,"[DK] fbo3 ARRAYS #%d count=%d first=%d baseV=%d baseI=%u\n",an,count,first,(int)mithril::g_state->currentBaseVertex,firstInstance);}
+    }
     vkCmdDraw(b->commandBuffer, (uint32_t)count, 1, (uint32_t)first, firstInstance);
 }
 
@@ -2453,6 +2460,9 @@ void backend_draw_indexed(int primitive, int count, int index_type,
         vertexOffset = mithril::g_state->currentBaseVertex;
         firstInstance = mithril::g_state->currentBaseInstance;
     }
+    if (getenv("MITHRIL_DRAWKIND") && mithril::g_state && mithril::g_state->currentDrawFBO==3){
+      static int in2=0; if(in2<16){++in2; fprintf(stderr,"[DK] fbo3 INDEXED #%d count=%d vOff=%d baseI=%u\n",in2,count,(int)vertexOffset,firstInstance);}
+    }
     vkCmdDrawIndexed(b->commandBuffer, (uint32_t)count, 1, 0,
                      (int32_t)vertexOffset, firstInstance);
 }
@@ -2468,6 +2478,9 @@ void backend_draw_arrays_instanced(int primitive, int first, int count, int prim
     // instanced draw path.
     uint32_t firstInstance = 0;
     if (mithril::g_state) firstInstance = mithril::g_state->currentBaseInstance;
+    if (getenv("MITHRIL_DRAWKIND") && mithril::g_state && mithril::g_state->currentDrawFBO==3){
+      static int an=0; if(an<16){++an; fprintf(stderr,"[DK] fbo3 ARRAYS #%d count=%d first=%d baseV=%d baseI=%u\n",an,count,first,(int)mithril::g_state->currentBaseVertex,firstInstance);}
+    }
     vkCmdDraw(b->commandBuffer, (uint32_t)count, (uint32_t)primcount,
               (uint32_t)first, firstInstance);
 }
@@ -2496,6 +2509,9 @@ void backend_draw_indexed_instanced(int primitive, int count, int index_type,
     if (mithril::g_state) {
         vertexOffset = mithril::g_state->currentBaseVertex;
         firstInstance = mithril::g_state->currentBaseInstance;
+    }
+    if (getenv("MITHRIL_DRAWKIND") && mithril::g_state && mithril::g_state->currentDrawFBO==3){
+      static int in2=0; if(in2<16){++in2; fprintf(stderr,"[DK] fbo3 INDEXED #%d count=%d vOff=%d baseI=%u\n",in2,count,(int)vertexOffset,firstInstance);}
     }
     vkCmdDrawIndexed(b->commandBuffer, (uint32_t)count, (uint32_t)primcount, 0,
                      (int32_t)vertexOffset, firstInstance);

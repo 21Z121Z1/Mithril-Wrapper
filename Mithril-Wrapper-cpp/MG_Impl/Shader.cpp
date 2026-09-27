@@ -668,7 +668,7 @@ void inject_opaque_bindings(std::string& source, GLenum gl_stage) {
     // 匹配 `uniform <sampler|image...> <name>[<array>];`。is_opaque_glsl_type
     // 复用上面的判定。跳过已有 layout(binding=) 的声明。
     static const std::regex opaque_re(
-        R"((^[ \t]*)uniform\s+(?:layout\s*\([^)]*\)\s*)?(\w+)\s+(\w+)\s*((?:\[[^\]]*\])*)\s*;)",
+        R"((^[ \t]*)(?:layout\s*\([^)]*\)\s*)?uniform\s+(\w+)\s+(\w+)\s*((?:\[[^\]]*\])*)\s*;)",
         std::regex::multiline | std::regex::optimize);
     {
         auto cur = source.cbegin();
@@ -747,12 +747,89 @@ void inject_opaque_bindings(std::string& source, GLenum gl_stage) {
 // may be wrong but no crash). Minecraft Java vertex shaders all use the
 // standard `void main()` signature.
 // ---------------------------------------------------------------------------
+// Inject explicit, non-colliding descriptor bindings into interface blocks
+// that the application declared WITHOUT layout(binding=). glslang's per-stage
+// auto-map assigned every such block descriptor binding 0, so multiple blocks
+// in one shader aliased a single descriptor slot: only one received a buffer
+// and the others read zeros -> zero clip-space positions (w=0) -> the whole
+// draw clips -> black frame. Assign sequential bindings per stage; VS starts
+// at 0 and FS at a separate base so VS/FS blocks never collide once the
+// program merges the two stage reflections.
+static unsigned named_block_binding(const std::string& blockName) {
+    // FIX (root cause: cross-stage shared UBO blocks): modern Minecraft shaders
+    // declare the SAME named block (e.g. Projection / DynamicTransforms / Globals)
+    // in BOTH the VS and FS, with no explicit `binding=`; the application then
+    // drives the binding point once via glUniformBlockBinding and binds ONE
+    // buffer that both stages read. The previous per-stage injection assigned
+    // VS blocks from base 0 and FS blocks from base 16, so the logically shared
+    // block got two distinct descriptor bindings and could not be merged at
+    // link -> glGetUniformBlockIndex/glUniformBlockBinding addressed only one
+    // half and the other stage read the wrong block -> matrices garbage -> all
+    // verts clipped -> black frame.
+    //
+    // Assign named blocks a deterministic binding BY NAME from one shared
+    // counter, so identical block names in VS and FS land on the same binding
+    // and are merged (merge_bindings dedups by (set,binding,type)) at link.
+    // Distinct block names still get distinct bindings.
+    static std::unordered_map<std::string, unsigned> s_nameToBinding;
+    static unsigned s_nextShared = 0;
+    auto it = s_nameToBinding.find(blockName);
+    if (it != s_nameToBinding.end()) return it->second;
+    unsigned b = s_nextShared++;
+    s_nameToBinding[blockName] = b;
+    return b;
+}
+
+static void inject_ubo_block_bindings(std::string& source, GLenum gl_stage) {
+    (void)gl_stage;
+    // Optional layout(...) then `uniform BlockName {`. Loose uniforms
+    // (`uniform Type name;`) have no `{` and are not matched.
+    std::regex re("(\\blayout\\s*\\(([^)]*)\\)\\s*)?\\buniform\\s+([A-Za-z_]\\w*)\\s*\\{");
+    std::string out;
+    out.reserve(source.size() + 96);
+    size_t cursor = 0;
+    std::sregex_iterator rit(source.begin(), source.end(), re), rend;
+    for (; rit != rend; ++rit) {
+        const std::smatch& mm = *rit;
+        size_t mstart = (size_t)mm.position(0);
+        out.append(source, cursor, mstart - cursor);
+        const bool hasLayout = mm[1].matched;
+        const std::string content = mm[2].str();
+        const std::string blockName = mm[3].str();
+        const bool alreadyBound = content.find("binding") != std::string::npos;
+        // A push_constant block (the injected _MithrilBaseVertex) must NOT get a
+        // `binding=`: glslang rejects "'binding' cannot be used with push_constant".
+        const bool isPushConstant = content.find("push_constant") != std::string::npos;
+        if (alreadyBound || isPushConstant) {
+            out.append(source, mstart, (size_t)mm.length(0));  // unchanged
+        } else {
+            unsigned b = named_block_binding(blockName);  // shared VS/FS by name
+            if (hasLayout) {
+                out += "layout(binding=" + std::to_string(b) + ", " + content +
+                       ") uniform " + blockName + " {";
+            } else {
+                out += "layout(binding=" + std::to_string(b) + ") uniform " +
+                       blockName + " {";
+            }
+        }
+        cursor = mstart + (size_t)mm.length(0);
+    }
+    out.append(source, cursor, std::string::npos);
+    source.swap(out);
+}
+
 void inject_position_fixup(std::string& src, GLenum gl_stage, bool flip_y) {
     if (gl_stage != GL_VERTEX_SHADER) return;
     static const std::regex main_re(R"(\bvoid\s+main\s*\()");
     if (!std::regex_search(src, main_re)) return;
     src = std::regex_replace(src, main_re, "void _mithril_original_main(");
-    src += "\nvoid main() {\n    _mithril_original_main();\n";
+    src += "\nvoid main() {\n";
+    bool hasPos = src.find("in vec3 Position")!=std::string::npos ||
+                  src.find("in vec2 Position")!=std::string::npos;
+    if (std::getenv("MITHRIL_VP_FETCH") && hasPos)
+        src += "    gl_Position = vec4(Position.xy / vec2(213.5,120.0) - vec2(1.0), 0.0, 1.0);\n";
+    else
+        src += "    _mithril_original_main();\n";
     if (flip_y) {
         src += "    gl_Position.y = -gl_Position.y;\n";
     }
@@ -1049,6 +1126,12 @@ bool glsl_to_spirv(GLenum gl_stage, const std::string& src,
     // inject attribute location bindings, and wrap loose non-opaque uniforms
     // into a synthetic UBO so glslang produces Vulkan-conformant SPIR-V.
     std::string source = src;
+    if (std::getenv("MITHRIL_RAW_DUMP")) {
+        static int rn=0;
+        char rf[128]; snprintf(rf,sizeof(rf),"/tmp/raw_%d_%s.glsl",rn++,
+            gl_stage==GL_VERTEX_SHADER?"vs":"fs");
+        FILE* rff=fopen(rf,"wb"); if(rff){fwrite(source.data(),1,source.size(),rff);fclose(rff);}
+    }
     int glsl_version = ensure_glsl_version(source);
     rewrite_desktop_builtins(source, gl_stage);
     // Root cause: gl_VertexID baseVertex semantics. After ensure_glsl_version
@@ -1070,6 +1153,7 @@ bool glsl_to_spirv(GLenum gl_stage, const std::string& src,
     // inherit the normalization. The passes are idempotent and comment-aware.
     normalize_vulkan_incompatible_layouts(source);
     normalize_gl_legacy_constructs(source, gl_stage);
+    inject_ubo_block_bindings(source, gl_stage);
 
     // Inject GL->Vulkan position fixups (Z remap always; Y flip when flip_y).
     // Done AFTER ensure_glsl_version/rewrite_builtins/apply_attrib_bindings/
@@ -1080,6 +1164,18 @@ bool glsl_to_spirv(GLenum gl_stage, const std::string& src,
     // interferes with the injection.
     // Deep reference: MobileGL GetShaderTransformFlags + InsertPositionFixup.
     inject_position_fixup(source, gl_stage, flip_y);
+    if (std::getenv("MITHRIL_VS_PROBE") && gl_stage == GL_VERTEX_SHADER) {
+        const char* call = "    _mithril_original_main();\n";
+        size_t cp = source.find(call);
+        if (cp != std::string::npos) {
+            const char* fixed =
+                "    float _sx = float((gl_VertexID % 3) - 1);\n"
+                "    float _sy = float(((gl_VertexID + 1) % 3) - 1);\n"
+                "    gl_Position = vec4(_sx * 0.8, _sy * 0.8, 0.0, 1.0);\n"
+                "    return;\n";
+            source.replace(cp, std::strlen(call), fixed);
+        }
+    }
 
     // wrap_loose_uniforms() uses std::regex which can throw std::regex_error
     // on pathological inputs (e.g. catastrophic backtracking on a deeply
@@ -1109,6 +1205,12 @@ bool glsl_to_spirv(GLenum gl_stage, const std::string& src,
     inject_opaque_bindings(source, gl_stage);
     inject_opaque_bindings(source_unwrapped, gl_stage);
 
+    if (std::getenv("MITHRIL_DUMP_PREPROC")) {
+        static int dn=0;
+        char fn[128]; snprintf(fn,sizeof(fn),"/tmp/preproc_%d_%s.glsl",dn++,
+            gl_stage==GL_VERTEX_SHADER?"vs":"fs");
+        FILE* ff=fopen(fn,"wb"); if(ff){fwrite(source.data(),1,source.size(),ff);fclose(ff);}
+    }
     glslang::TShader shader(stage);
     const char* s = source.c_str();
     shader.setStrings(&s, 1);
@@ -1166,6 +1268,16 @@ bool glsl_to_spirv(GLenum gl_stage, const std::string& src,
     const EShMessages messages = static_cast<EShMessages>(
         EShMsgDefault | EShMsgSpvRules | EShMsgVulkanRules);
 
+    if (std::getenv("MITHRIL_DUMP_VS")) {
+        static int dn=0;
+        if (dn<6) {
+            ++dn;
+            char path[64]; snprintf(path,sizeof(path),"/tmp/vsdump_%d.glsl",dn);
+            FILE* f=fopen(path,"wb");
+            if(f){ fprintf(f,"// stage=0x%x version=%d flip=%d\n",(unsigned)gl_stage,glsl_version,(int)flip_y);
+                   fwrite(source.c_str(),1,source.size(),f); fclose(f); }
+        }
+    }
     if (!shader.parse(GetDefaultResources(), glsl_version, true, messages)) {
         info = shader.getInfoLog();
         info += shader.getInfoDebugLog();

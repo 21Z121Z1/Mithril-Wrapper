@@ -47,6 +47,26 @@
 #endif
 
 #include "includes.h"
+
+namespace {
+struct DrawRec { unsigned prog,fbo,t0,t1,t2,t3; };
+constexpr int kDrawRingN = 1024;
+DrawRec g_drawRing[kDrawRingN];
+int g_drawRingIdx = 0;
+}
+extern "C" void mithril_dump_draw_ring(const char* path) {
+    FILE* f = std::fopen(path, "wb");
+    if (!f) return;
+    int start = (g_drawRingIdx < kDrawRingN) ? 0 : g_drawRingIdx;
+    for (int k=0;k<kDrawRingN;++k) {
+        int i = (start + k) % kDrawRingN;
+        const DrawRec& r = g_drawRing[i];
+        if (r.prog==0 && r.fbo==0) continue;
+        std::fprintf(f, "prog=%u fbo=%u tex[%u,%u,%u,%u]\n", r.prog,r.fbo,r.t0,r.t1,r.t2,r.t3);
+    }
+    std::fclose(f);
+}
+
 #include "Framebuffer.h"
 #include "../MG_Backend/DirectVulkan/Device.h"
 
@@ -385,6 +405,29 @@ static bool prepare_draw(GLenum mode) {
     // the upcoming draw. The set is built per-draw from Program.uniforms +
     // g_state->boundTextures by DescriptorSet.cpp.
     backend_bind_program_descriptors(prog->id);
+    {
+      DrawRec rec{ prog->id,(unsigned)g_state->currentDrawFBO,
+        g_state->boundTextureForUnit(0),g_state->boundTextureForUnit(1),
+        g_state->boundTextureForUnit(2),g_state->boundTextureForUnit(3) };
+      g_drawRing[g_drawRingIdx % kDrawRingN] = rec;
+      ++g_drawRingIdx;
+    }
+    if (getenv("MITHRIL_TOPO")) {
+      static int tn=0; if(tn<400){++tn;
+        MITHRIL_LOG_WARN("vk-diag","TOPO #%d fbo=%d mode=0x%x (STRIP=5,FAN=6,TRIS=4,QUADS=7)",tn,g_state->currentDrawFBO,(unsigned)mode);}
+    }
+    if (getenv("MITHRIL_MAT_DUMP") && g_state->currentDrawFBO==3){
+      static int mn=0; ++mn; if(mn<=3||mn%400==0){
+        for(int pt=0;pt<=1;++pt){
+          mithril::IndexedBindingSlot& sl=g_state->indexedBufferBindings[0][pt];
+          float m[16]={0};
+          if(sl.name) backend_read_buffer_host(sl.name,(VkDeviceSize)sl.offset,64,m);
+          MITHRIL_LOG_WARN("vk-diag","PT fbo3 #%d prog=%u strd=%d point=%d vbo=%u off=%ld range=%ld c0=(%.4f,%.4f,%.4f,%.4f) c1=(%.4f,%.4f,%.4f,%.4f) c3=(%.4f,%.4f,%.4f,%.4f)",
+            mn,prog->id,(attrib_count?attribs[0].stride:-1),pt,sl.name,(long)sl.offset,(long)sl.size,
+            m[0],m[1],m[2],m[3],m[4],m[5],m[6],m[7],m[12],m[13],m[14],m[15]);
+        }
+      }
+    }
     backend_set_viewport(g_state->viewportX, g_state->viewportY,
                          g_state->viewportW, g_state->viewportH,
                          g_state->depthNear, g_state->depthFar);
@@ -400,6 +443,17 @@ static bool prepare_draw(GLenum mode) {
     } else {
         backend_set_scissor(0, 0, g_state->viewportW, g_state->viewportH);
     }
+    // TEMP DIAG (MITHRIL_FIXED_QUAD): draw a self-contained fullscreen yellow
+    // triangle into the active user-FBO pass, then restore the app pipeline.
+    // Tells whether the pass rasterizes draws independent of app vertex data.
+    if (std::getenv("MITHRIL_FIXED_QUAD") && g_state->currentDrawFBO != 0) {
+        backend_probe_fixed_quad();
+        backend_bind_pipeline(pipeline);
+    }
+    if (std::getenv("MITHRIL_UBO_PROBE") && g_state->currentDrawFBO != 0) {
+        backend_probe_ubo_fixed(prog->id);
+        backend_bind_pipeline(pipeline);
+    }
     // TEMP DIAG (MITHRIL_VP_DUMP): dump dynamic raster state for the first
     // draws into FBO 3 to find why fragments produce no tex6 pixels.
     if (std::getenv("MITHRIL_VP_DUMP") && g_state->currentDrawFBO != 0) {
@@ -408,14 +462,17 @@ static bool prepare_draw(GLenum mode) {
             ++vp_n;
             MITHRIL_LOG_WARN("vk-diag",
               "VP fbo=%u #%d viewport=(%d,%d,%d,%d) scissorTest=%d scissor=(%d,%d,%d,%d) "
-              "colorMask=(%d%d%d%d) blend=%d depthTest=%d depthMask=%d depthFunc=%d cull=%d",
+              "colorMask=(%d%d%d%d) blend=%d(%u,%u) depthTest=%d depthMask=%d depthFunc=%d cull=%d baseV=%d baseI=%u mode=%u",
               g_state->currentDrawFBO,
               vp_n, g_state->viewportX,g_state->viewportY,g_state->viewportW,g_state->viewportH,
               (int)g_state->scissorTest, g_state->scissorX,g_state->scissorY,g_state->scissorW,g_state->scissorH,
               (int)g_state->colorMask[0][0],(int)g_state->colorMask[0][1],
               (int)g_state->colorMask[0][2],(int)g_state->colorMask[0][3],
-              (int)g_state->blends[0].enabled, (int)g_state->depthTest,
-              (int)g_state->depthMask, (int)g_state->depthFunc, (int)g_state->cullFace);
+              (int)g_state->blends[0].enabled,
+              (unsigned)g_state->blends[0].srcRGB,(unsigned)g_state->blends[0].dstRGB,
+              (int)g_state->depthTest,
+              (int)g_state->depthMask, (int)g_state->depthFunc, (int)g_state->cullFace,
+              (int)g_state->currentBaseVertex, (unsigned)g_state->currentBaseInstance, (unsigned)mode);
         }
     }
     // FIX (root cause H + Y-flip winding fix): ALWAYS set cull mode.
@@ -432,6 +489,9 @@ static bool prepare_draw(GLenum mode) {
     //   - Hardcode frontFace to CLOCKWISE (the inverted winding makes GL's
     //     CCW triangles appear as CW in Vulkan). MobileGL does the same.
     // User FBOs (no Y flip) keep the original cull mode and frontFace.
+    if (std::getenv("MITHRIL_NO_CULL")) {
+        backend_set_cull_mode(0);  // diagnostic
+    } else
     if (g_state->cullFace) {
         // FIX (Root Cause K - Y翻转面剔除双重补偿):
         // Vulkan 面剔除由两个独立状态控制：frontFace（定义正面缠绕方向）+ cullMode（剔除哪面）。
@@ -456,10 +516,14 @@ static bool prepare_draw(GLenum mode) {
         // A positive-height Vulkan viewport reverses GL window-space winding
         // on the iOS MoltenVK path, including user FBOs. The physical-device
         // Minecraft 26.2 run exposed this on offscreen passes.
-        bool invert_front_face = is_default_fbo;
-#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
-        invert_front_face = true;
-#endif
+        // A positive-height Vulkan viewport has y DOWN; GL window space has
+        // y UP. This reverses triangle winding on EVERY target (not just the
+        // default FBO), so GL's CCW front faces appear CW in Vulkan and must be
+        // classified with frontFace=CW whether or not the position Y was
+        // flipped. The previous is_default_fbo gate left user-FBO front faces
+        // culled -> uniform black fbo3 even with valid vertices/matrices.
+        bool invert_front_face = true;
+        (void)is_default_fbo;
         backend_set_front_face(
             invert_front_face ?
                 (g_state->frontFace == GL_CCW ? 0 /*CW*/ : 1 /*CCW*/) :
@@ -516,6 +580,42 @@ static bool prepare_draw(GLenum mode) {
 // 参考 MobileGL VkglVertexAttribBindingState：binding offset 恒为 0，偏移由属性描述处理。
             backend_set_vertex_buffer(m.location, buf, binding_off);
             if (getenv("MITHRIL_VA_DUMP")) fprintf(stderr,"[LOW] slot=%d vkbuf=%p off=%llu\n",m.location,(void*)buf,(unsigned long long)binding_off);
+            if (getenv("MITHRIL_GEO_DUMP") && m.location==0 && m.stride==16) {
+                static int gn2=0; if(gn2<2){++gn2; unsigned char raw[120]={0};
+                  backend_read_buffer_host(m.buffer_name, binding_off, 120, raw);
+                  for(int vv=0;vv<4;++vv){ float x,y; memcpy(&x,raw+vv*16,4); memcpy(&y,raw+vv*16+4,4);
+                    MITHRIL_LOG_WARN("vk-diag","GEO #%d v%d pos=(%.3f,%.3f)",gn2,vv,x,y);} }
+            }
+            if (getenv("MITHRIL_TEX_DUMP") && m.location==0 && g_state->currentDrawFBO==3 && m.stride==24) {
+                static int tn=0;
+                if (tn<6){ ++tn; unsigned char raw[200]={0};
+                  backend_read_buffer_host(m.buffer_name, binding_off, 200, raw);
+                  for(int vv=0; vv<2; ++vv){
+                    float px,py,pz,ux,uy;
+                    memcpy(&px,raw+vv*24,4); memcpy(&py,raw+vv*24+4,4); memcpy(&pz,raw+vv*24+8,4);
+                    memcpy(&ux,raw+vv*24+12,4); memcpy(&uy,raw+vv*24+16,4);
+                    MITHRIL_LOG_WARN("vk-diag","T24 #%d v%d pos=(%.2f,%.2f,%.2f) uv=(%.4f,%.4f)",
+                       tn,vv,px,py,pz,ux,uy); }
+                }
+            }
+            if (getenv("MITHRIL_TXT_DUMP") && m.location==0 && m.stride==24) {
+                static int xn=0;
+                if (xn<24){ ++xn;
+                  FILE* tf=fopen("/tmp/mithril_txt_captures.txt","a");
+                  if(tf){ fprintf(tf,"%u %llu %d %d %u\n",m.buffer_name,
+                     (unsigned long long)binding_off,m.stride,
+                     g_state->currentDrawFBO,prog->id); fclose(tf); }
+                }
+            }
+            if (getenv("MITHRIL_POS_DUMP") && m.location==0 && g_state->currentDrawFBO==3) {
+                static int pn=0;
+                if (pn<3){ ++pn; unsigned char raw[160]={0};
+                  backend_read_buffer_host(m.buffer_name, 0, 160, raw);
+                  int any=0; for(int z=0;z<160;z++) if(raw[z]) any=1;
+                  char hex[480]={0}; int hx=0; for(int z=0;z<96;z++) hx+=snprintf(hex+hx,480-hx,"%02x",raw[z]);
+                  MITHRIL_LOG_WARN("vk-diag","BUF33 #%d anyNZ=%d first96=%s",pn,any,hex);
+                }
+            }
             if (m.location < 16) bound_slots[m.location] = true;
         }
     }
@@ -683,6 +783,20 @@ void glDrawElementsInstanced(GLenum mode, GLsizei count, GLenum type,
     mithril::VertexArray* vao = mithril::state_get_vao(g_state->currentVAO);
     GLuint ib_name = vao ? vao->elementArrayBuffer : 0;
     VkBuffer ib = backend_get_buffer(ib_name);
+    if (getenv("MITHRIL_IDX_DUMP") && g_state->currentDrawFBO==3 && ib != VK_NULL_HANDLE){
+      static int in_=0; if(in_<4){++in_;
+        size_t el=(type==GL_UNSIGNED_INT)?4:(type==GL_UNSIGNED_BYTE)?1:2;
+        long off=(long)(intptr_t)indices;
+        unsigned char ibb[128]={0};
+        backend_read_buffer_host(ib_name,(VkDeviceSize)off,128,ibb);
+        if(el==2){ unsigned short* q=(unsigned short*)ibb;
+          MITHRIL_LOG_WARN("vk-diag","IDX fbo3 #%d ib=%u off=%ld type=us count=%d first=%u,%u,%u,%u,%u,%u",
+            in_,ib_name,off,count,q[0],q[1],q[2],q[3],q[4],q[5]); }
+        else { unsigned int* q=(unsigned int*)ibb;
+          MITHRIL_LOG_WARN("vk-diag","IDX fbo3 #%d ib=%u off=%ld type=ui count=%d first=%u,%u,%u,%u,%u,%u",
+            in_,ib_name,off,count,q[0],q[1],q[2],q[3],q[4],q[5]); }
+      }
+    }
     if (ib != VK_NULL_HANDLE) {
         backend_draw_indexed_instanced((int)mode, (int)count,
                                        index_type_to_int(type), ib,

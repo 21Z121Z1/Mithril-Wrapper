@@ -24,6 +24,7 @@
 
 namespace mithril {
 namespace vk {
+VkShaderModule create_probe_fs_module();
 
 std::unordered_map<GLuint, ProgramResources>& program_table() {
     static std::unordered_map<GLuint, ProgramResources> t;
@@ -762,6 +763,16 @@ VkPipeline get_or_create_pipeline(GLuint program,
     if (color_write_mask & 4) cwm |= VK_COLOR_COMPONENT_B_BIT;
     if (color_write_mask & 8) cwm |= VK_COLOR_COMPONENT_A_BIT;
     cbAttach.colorWriteMask = cwm;
+    if (std::getenv("MITHRIL_BLEND_PROBE")) {
+        // Diagnostic: force output = fragment RGB regardless of alpha.
+        cbAttach.blendEnable = VK_TRUE;
+        cbAttach.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;   // 1
+        cbAttach.dstColorBlendFactor = VK_BLEND_FACTOR_ZERO;  // 0
+        cbAttach.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        cbAttach.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+        cbAttach.colorBlendOp = VK_BLEND_OP_ADD;
+        cbAttach.alphaBlendOp = VK_BLEND_OP_ADD;
+    }
 
     VkPipelineColorBlendStateCreateInfo cb{};
     cb.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
@@ -807,6 +818,11 @@ VkPipeline get_or_create_pipeline(GLuint program,
         fsStage.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
         fsStage.module = pr.fragmentModule;
         fsStage.pName = "main";
+        if (std::getenv("MITHRIL_FS_PROBE")) {
+            static VkShaderModule probeMod = VK_NULL_HANDLE;
+            if (probeMod == VK_NULL_HANDLE) probeMod = create_probe_fs_module();
+            if (probeMod != VK_NULL_HANDLE) fsStage.module = probeMod;
+        }
         stages.push_back(fsStage);
     }
 

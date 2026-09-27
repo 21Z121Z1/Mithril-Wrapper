@@ -480,10 +480,13 @@ static VkAccessFlags       dst_access_for_layout(VkImageLayout layout);
 static VkPipelineStageFlags src_stage_for_layout(VkImageLayout layout);
 static VkPipelineStageFlags dst_stage_for_layout(VkImageLayout layout);
 
-void stage_and_copy_image(TextureEntry& tex, int level, int x, int y, int z,
+void stage_and_copy_image(TextureEntry& tex, GLuint gl_name, int level, int x, int y, int z,
                           int w, int h, int d, const void* pixels,
                           int unpack_alignment, GLenum format, GLenum type,
-                          bool is_full_upload) {
+                          bool is_full_upload,
+                          int unpack_row_length,
+                          int unpack_skip_pixels,
+                          int unpack_skip_rows) {
     Backend* b = backend();
     if (!b->commandBuffer) return;
     // With per-slot command buffers, the alias b->commandBuffer may point at
@@ -543,11 +546,23 @@ void stage_and_copy_image(TextureEntry& tex, int level, int x, int y, int z,
     size_t mask = (size_t)unpack_alignment - 1;
     // staging 装的是展开后的 RGBA 数据（紧密排列）；tight_row 按 dst_bpp 计算。
     // 源行 stride 按 src_bpp 计算并受 GL_UNPACK_ALIGNMENT 约束。
-    // 非展开路径下 src_bpp == dst_bpp == bpp，行为与原实现完全一致。
+    // FIX (bitmap font garble): 当 GL_UNPACK_ROW_LENGTH > 0 时，源行按
+    // ROW_LENGTH（源图像全宽）排布，而非 w（子矩形宽）。copyBufferToTexture
+    // 把字形从 128 宽 PNG 中以子矩形拷出时 ROW_LENGTH=128；旧代码误用 w=8
+    // 作为源行宽 → 行间只隔 32B 而非 512B → 读到错列 → 字形横向 garble。
+    size_t src_row_pixels = (unpack_row_length > 0) ? (size_t)unpack_row_length
+                                                    : (size_t)w;
     size_t tight_row = (size_t)w * (size_t)dst_bpp;
-    size_t src_tight_row = (size_t)w * (size_t)src_bpp;
-    size_t src_stride = (src_tight_row + mask) & ~mask;
+    size_t src_full_row = src_row_pixels * (size_t)src_bpp;
+    size_t src_stride = (src_full_row + mask) & ~mask;
     size_t staging = tight_row * (size_t)h * (size_t)d;
+    // Honor GL_UNPACK_SKIP_ROWS / GL_UNPACK_SKIP_PIXELS by advancing the
+    // source base pointer before any row reads.
+    if ((unpack_skip_rows | unpack_skip_pixels) != 0) {
+        size_t skip_bytes = ((size_t)unpack_skip_rows * src_row_pixels +
+                             (size_t)unpack_skip_pixels) * (size_t)src_bpp;
+        pixels = (const char*)pixels + skip_bytes;
+    }
 
     // ---- FIX (Invalid Resource 根因 - per-frame transient staging arena) ----
     // 深度参考 MobileGL 的 transient staging arena 模式：
@@ -569,7 +584,7 @@ void stage_and_copy_image(TextureEntry& tex, int level, int x, int y, int z,
     void* stagingMapped = nullptr;
     bool usedArena = false;
 
-    if (b->frameStagingReady) {
+    if (b->frameStagingReady && !getenv("MITHRIL_NO_ARENA")) {
         // 对齐到 256 字节（满足 VkBufferImageCopy.bufferOffset 的对齐要求，
         // 也满足 MoltenVK/Metal 的 MTLBuffer offset 对齐）
         VkDeviceSize alignedOffset = (b->frameStagingOffset[b->currentFrame] + 255) & ~255;
@@ -685,12 +700,30 @@ void stage_and_copy_image(TextureEntry& tex, int level, int x, int y, int z,
         }
     }
 
+    if (getenv("MITHRIL_DUMP_BLIT")) {
+        FILE* ff=fopen("/tmp/stage_dump.bin","wb");
+        fwrite((char*)stagingMapped+stagingOffset,1,staging,ff); fclose(ff);
+        MITHRIL_LOG_WARN("vk-diag","STAGED usedArena=%d staging=%zu",(int)usedArena,staging);
+    }
     if (!usedArena && stagingMapped) {
         // Unmap the per-upload mapping (overflow path only)
         vkUnmapMemory(b->device, tex.stagingMemory);
     }
     // Arena path: no unmap needed (persistently mapped)
 
+    if (getenv("MITHRIL_DUMP_BLIT")) {
+        MITHRIL_LOG_WARN("vk-diag","STAGE-COPY name=%u tex.format=%d tex.w=%d tex.h=%d w=%d h=%d off=(%d,%d) staging=%zu bpp=%d src_stride=%zu tight_row=%zu target=0x%x",
+            gl_name,(int)tex.format,tex.width,tex.height,w,h,x,y,staging,bpp,src_stride,tight_row,(unsigned)tex.target);
+    }
+    {
+        static int g8dump=0;
+        if(w==8&&h==8&&tex.width==8&&bpp==4&&g8dump<6){
+            char pn[80]; snprintf(pn,sizeof(pn),"/tmp/g8src_%d_name%u.rgba",g8dump,gl_name);
+            FILE* gf=fopen(pn,"wb");
+            if(gf){ fwrite((const char*)pixels,1,256,gf); fclose(gf); }
+            ++g8dump;
+        }
+    }
     VkBufferImageCopy region{};
     region.bufferOffset = stagingOffset;  // 非 0 for arena sub-allocation
     region.bufferRowLength = 0;     // tightly packed
@@ -1257,6 +1290,10 @@ void backend_buffer_upload(GLuint name, GLintptr offset, const void* data, size_
     auto& tbl = mithril::vk::buffer_table();
     auto it = tbl.find(name);
     if (it == tbl.end()) return;
+    if (name==33 && getenv("MITHRIL_B33")) {
+      static int u33=0; if(u33<10){++u33; float f3[3]={0}; if(size>=12) memcpy(f3,data,12);
+        fprintf(stderr,"[B33] backend_upload #%d off=%lld size=%zu first=(%.3f,%.3f,%.3f) inflight=%d\n",u33,(long long)offset,size,f3[0],f3[1],f3[2],(int)mithril::vk::buffer_maybe_inflight(it->second));}
+    }
     if (data && size > 0 && mithril::vk::buffer_maybe_inflight(it->second)) {
         // FIX (GPU page fault 根因 - 覆写竞争): glBufferSubData /
         // glMapBufferRange-flush 在 buffer 可能在飞时改为 staged GPU copy
@@ -1344,6 +1381,200 @@ void* backend_get_buffer_mapped_pointer(GLuint name) {
     auto it = tbl.find(name);
     if (it == tbl.end()) return nullptr;
     return it->second.persistentlyMapped ? it->second.mapped : nullptr;
+}
+
+int backend_copy_buffer_gpu(GLuint srcName, GLuint dstName,
+                             VkDeviceSize srcOff, VkDeviceSize dstOff,
+                             VkDeviceSize size) {
+    mithril::vk::Backend* b = mithril::vk::backend();
+    if (!b->initialized || size == 0) return 0;
+    auto& tbl = mithril::vk::buffer_table();
+    auto si = tbl.find(srcName);
+    auto di = tbl.find(dstName);
+    if (si == tbl.end() || di == tbl.end()) return 0;
+    // vkCmdCopyBuffer must be recorded outside a render-pass instance.
+    if (mithril::vk::render_pass_active()) mithril::vk::end_render_pass();
+    if (!mithril::vk::ensure_command_buffer_recording()) return 0;
+
+    VkBufferMemoryBarrier pre[2]{};
+    pre[0].sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+    pre[0].srcAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+    pre[0].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    pre[0].buffer = si->second.buffer; pre[0].offset = srcOff; pre[0].size = size;
+    pre[1].sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+    pre[1].srcAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+    pre[1].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    pre[1].buffer = di->second.buffer; pre[1].offset = dstOff; pre[1].size = size;
+    vkCmdPipelineBarrier(b->commandBuffer,
+        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT | VK_PIPELINE_STAGE_HOST_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 2, pre, 0, nullptr);
+
+    VkBufferCopy region{};
+    region.srcOffset = srcOff; region.dstOffset = dstOff; region.size = size;
+    vkCmdCopyBuffer(b->commandBuffer, si->second.buffer, di->second.buffer, 1, &region);
+
+    VkBufferMemoryBarrier post{};
+    post.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+    post.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    post.dstAccessMask = VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT |
+                         VK_ACCESS_INDEX_READ_BIT | VK_ACCESS_UNIFORM_READ_BIT |
+                         VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_INDIRECT_COMMAND_READ_BIT |
+                         VK_ACCESS_HOST_READ_BIT;
+    post.buffer = di->second.buffer; post.offset = dstOff; post.size = size;
+    vkCmdPipelineBarrier(b->commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_VERTEX_INPUT_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
+        VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT | VK_PIPELINE_STAGE_HOST_BIT,
+        0, 0, nullptr, 1, &post, 0, nullptr);
+    mithril::vk::stamp_buffer_write(di->second);
+    return 1;
+}
+
+int backend_read_buffer_host(GLuint name, VkDeviceSize offset, VkDeviceSize size,
+                             void* dst) {
+    auto& tbl = mithril::vk::buffer_table();
+    auto it = tbl.find(name);
+    if (it == tbl.end()) return 0;
+    mithril::vk::BufferEntry& e = it->second;
+    if (e.persistentlyMapped && e.mapped) {
+        std::memcpy(dst, static_cast<uint8_t*>(e.mapped) + offset, (size_t)size);
+        return 1;
+    }
+    void* mp = nullptr;
+    if (vkMapMemory(mithril::vk::backend()->device, e.memory, 0, e.size, 0, &mp) != VK_SUCCESS || !mp)
+        return 0;
+    std::memcpy(dst, static_cast<uint8_t*>(mp) + offset, (size_t)size);
+    vkUnmapMemory(mithril::vk::backend()->device, e.memory);
+    return 1;
+}
+
+static uint32_t vk_format_bpp_bytes(VkFormat f) {
+    switch (f) {
+        case VK_FORMAT_R8_UNORM: case VK_FORMAT_R8_SNORM: case VK_FORMAT_R8_USCALED:
+        case VK_FORMAT_R8_SSCALED: case VK_FORMAT_R8_UINT: case VK_FORMAT_R8_SRGB:
+            return 1;
+        case VK_FORMAT_R8G8_UNORM: case VK_FORMAT_R8G8_SNORM:
+        case VK_FORMAT_R16_SFLOAT: case VK_FORMAT_R16_UNORM:
+        case VK_FORMAT_D16_UNORM:
+            return 2;
+        case VK_FORMAT_R8G8B8_UNORM: case VK_FORMAT_R8G8B8_SNORM:
+        case VK_FORMAT_D16_UNORM_S8_UINT:
+            return 3;
+        case VK_FORMAT_R8G8B8A8_UNORM: case VK_FORMAT_R8G8B8A8_SNORM:
+        case VK_FORMAT_R8G8B8A8_SRGB: case VK_FORMAT_D24_UNORM_S8_UINT:
+        case VK_FORMAT_R32_SFLOAT: case VK_FORMAT_D32_SFLOAT:
+            return 4;
+        case VK_FORMAT_R16G16_SFLOAT: case VK_FORMAT_R16G16_UNORM:
+        case VK_FORMAT_D32_SFLOAT_S8_UINT:
+            return 8;
+        case VK_FORMAT_R16G16B16A16_SFLOAT:
+        case VK_FORMAT_R32G32B32A32_SFLOAT:
+            return 16;
+        default: return 4;
+    }
+}
+
+// Self-contained GPU texture readback (image -> TRANSFER_SRC -> host staging),
+// independent of FBO-attachment readback. Returns tightly packed pixels for
+// the given mip level. Used to implement glGetTexImage and for diagnostics.
+int backend_read_texture_pixels(GLuint name, int level, void* dst) {
+    mithril::vk::Backend* b = mithril::vk::backend();
+    if (!b->initialized) return 0;
+    auto& tbl = mithril::vk::texture_table();
+    auto it = tbl.find(name);
+    if (it == tbl.end() || !dst) return 0;
+    mithril::vk::TextureEntry& tex = it->second;
+    int lw = tex.width  >> level; if (lw < 1) lw = 1;
+    int lh = tex.height >> level; if (lh < 1) lh = 1;
+    uint32_t bpp = vk_format_bpp_bytes(tex.format);
+    VkDeviceSize sz = (VkDeviceSize)lw * lh * bpp;
+
+    VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT;
+    if (tex.format == VK_FORMAT_D16_UNORM || tex.format == VK_FORMAT_D32_SFLOAT)
+        aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
+    if (tex.format == VK_FORMAT_S8_UINT) aspect = VK_IMAGE_ASPECT_STENCIL_BIT;
+    if (tex.format == VK_FORMAT_D24_UNORM_S8_UINT || tex.format == VK_FORMAT_D32_SFLOAT_S8_UINT)
+        aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
+
+    if (mithril::vk::render_pass_active()) mithril::vk::end_render_pass();
+    if (!mithril::vk::ensure_command_buffer_recording()) return 0;
+
+    VkImageLayout srcLayout = tex.currentLayout;
+    VkImageMemoryBarrier tb{};
+    tb.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    tb.srcAccessMask = mithril::vk::src_access_for_layout(srcLayout);
+    tb.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    tb.oldLayout = srcLayout; tb.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    tb.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED; tb.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    tb.image = tex.image;
+    tb.subresourceRange.aspectMask = aspect;
+    tb.subresourceRange.baseMipLevel = level; tb.subresourceRange.levelCount = 1;
+    tb.subresourceRange.baseArrayLayer = 0; tb.subresourceRange.layerCount = 1;
+    vkCmdPipelineBarrier(b->commandBuffer,
+        mithril::vk::src_stage_for_layout(srcLayout), VK_PIPELINE_STAGE_TRANSFER_BIT,
+        0, 0, nullptr, 0, nullptr, 1, &tb);
+
+    // host-visible staging buffer
+    VkBuffer staging; VkDeviceMemory smem;
+    VkBufferImageCopy region{};
+    {
+        VkBufferCreateInfo bi{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+        bi.size = sz; bi.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        if (vkCreateBuffer(b->device, &bi, nullptr, &staging) != VK_SUCCESS) return 0;
+        VkMemoryRequirements mr; vkGetBufferMemoryRequirements(b->device, staging, &mr);
+        VkMemoryAllocateInfo mai{ VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO };
+        mai.allocationSize = mr.size;
+        mai.memoryTypeIndex = mithril::vk::find_memory_type(mr.memoryTypeBits,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        if (vkAllocateMemory(b->device, &mai, nullptr, &smem) != VK_SUCCESS) {
+            vkDestroyBuffer(b->device, staging, nullptr); return 0;
+        }
+        vkBindBufferMemory(b->device, staging, smem, 0);
+        region.bufferRowLength = 0; region.bufferImageHeight = 0;
+        region.imageSubresource.aspectMask = aspect;
+        region.imageSubresource.mipLevel = level; region.imageSubresource.baseArrayLayer = 0;
+        region.imageSubresource.layerCount = 1;
+        region.imageOffset = { 0,0,0 };
+        region.imageExtent = { (uint32_t)lw,(uint32_t)lh,1 };
+    }
+    vkCmdCopyImageToBuffer(b->commandBuffer, tex.image,
+        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, staging, 1, &region);
+
+    VkImageLayout sampledLayout = mithril::vk::sampled_layout_for_format(tex.format);
+    VkImageMemoryBarrier back{};
+    back.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    back.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    back.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    back.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL; back.newLayout = sampledLayout;
+    back.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED; back.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    back.image = tex.image;
+    back.subresourceRange = tb.subresourceRange;
+    vkCmdPipelineBarrier(b->commandBuffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        mithril::vk::dst_stage_for_layout(sampledLayout), 0,
+        0, nullptr, 0, nullptr, 1, &back);
+    tex.currentLayout = sampledLayout;
+
+    // The readback's own barrier/copy must be submitted even when no draw frame
+    // is active (e.g. diagnostic capture after the frame already committed).
+    backend_mark_commands();
+    backend_commit();
+    vkQueueWaitIdle(b->graphicsQueue);
+
+    void* mp = nullptr;
+    if (vkMapMemory(b->device, smem, 0, sz, 0, &mp) == VK_SUCCESS && mp) {
+        std::memcpy(dst, mp, (size_t)sz);
+        vkUnmapMemory(b->device, smem);
+    }
+    vkFreeMemory(b->device, smem, nullptr);
+    vkDestroyBuffer(b->device, staging, nullptr);
+    return 1;
+}
+
+void backend_texture_size(GLuint name, int* w, int* h, int* vkfmt) {
+    auto& tbl = mithril::vk::texture_table();
+    auto it = tbl.find(name);
+    if (it == tbl.end()) { if(w)*w=0; if(h)*h=0; if(vkfmt)*vkfmt=0; return; }
+    if(w)*w=it->second.width; if(h)*h=it->second.height;
+    if(vkfmt)*vkfmt=(int)it->second.format;
 }
 
 void backend_delete_buffer(GLuint name) {
@@ -1704,9 +1935,12 @@ void backend_texture_upload(GLuint name, int level, int x, int y, int z,
     if (it == tbl.end() || !pixels) return;
     const int unpack_alignment = (unpack && unpack->unpackAlignment > 0)
                                      ? unpack->unpackAlignment : 4;
-    mithril::vk::stage_and_copy_image(it->second, level, x, y, z, w, h, d,
+    mithril::vk::stage_and_copy_image(it->second, name, level, x, y, z, w, h, d,
                                       pixels, unpack_alignment, format, type,
-                                      is_full_upload != 0);
+                                      is_full_upload != 0,
+                                      unpack ? unpack->unpackRowLength : 0,
+                                      unpack ? unpack->unpackSkipPixels : 0,
+                                      unpack ? unpack->unpackSkipRows : 0);
 }
 
 /* Compressed texture upload. Compressed data is copied verbatim — no pixel

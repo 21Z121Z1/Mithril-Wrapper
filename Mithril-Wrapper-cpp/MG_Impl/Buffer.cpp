@@ -8,6 +8,7 @@
 // C API (backend_get_or_create_buffer / backend_buffer_upload / backend_get_buffer
 // / backend_delete_buffer) declared in MG_Backend/Backend.h.
 #include "includes.h"
+#include <execinfo.h>
 
 /* GL buffer parameter / query constants not always present in the minimal
  * glcorearb.h we ship. Standard GL 3.3 Core values. */
@@ -98,6 +99,9 @@ void glBindBuffer(GLenum target, GLuint buffer) {
         g_state->buffers[buffer] = mithril::Buffer{};
         g_state->buffers[buffer].id = buffer;
     }
+    if (target == 0x88EC /*GL_PIXEL_UNPACK_BUFFER*/) {
+        fprintf(stderr,"[PUBIND] buf=%u\n",buffer);
+    }
     if (target == GL_ELEMENT_ARRAY_BUFFER) {
         // ELEMENT_ARRAY_BUFFER is stored on the current VAO, never globally.
         mithril::VertexArray* vao = mithril::state_get_vao(g_state->currentVAO);
@@ -127,6 +131,7 @@ void glBufferData(GLenum target, GLsizeiptr size, const void* data, GLenum usage
     b->data.assign((size_t)size, 0);
     if (data && size > 0) std::memcpy(b->data.data(), data, (size_t)size);
     b->mapped = nullptr;
+    if (b->id==33 && getenv("MITHRIL_B33")) fprintf(stderr,"[B33] BufferData size=%lld data=%p firstNZ=%d\n",(long long)size,(void*)data,(data?((const unsigned char*)data)[0]:-1));
     // Recreate the VkBuffer (allocates + uploads).
     backend_get_or_create_buffer(b->id, data && size ? b->data.data() : nullptr, (size_t)size);
 }
@@ -158,6 +163,13 @@ void glBufferStorage(GLenum target, GLsizeiptr size, const void* data, GLbitfiel
     // mapping when persistent=true and data != NULL or data == NULL with persistent.
     bool persistent = (flags & GL_MAP_PERSISTENT_BIT) != 0;
     bool coherent = (flags & GL_MAP_COHERENT_BIT) != 0;
+    if (b->id==42) {
+        void* bt[24]; int n=backtrace(bt,24); char** sym=backtrace_symbols(bt,n);
+        fprintf(stderr,"[CREATE42] size=%lld flags=0x%x persistent=%d\n",(long long)size,(unsigned)flags,(int)persistent);
+        for(int i=0;i<n;++i) fprintf(stderr,"  %s\n",sym[i]);
+        free(sym);
+    }
+    if (getenv("MITHRIL_B33")) fprintf(stderr,"[B33] Storage id=%u size=%lld flags=0x%x persistent=%d coherent=%d\n",b->id,(long long)size,(unsigned)flags,persistent,coherent);
     if (persistent) {
         // Use backend_create_buffer_storage for persistent mapping (GL 4.4 path).
         // Upload initial data via glBufferSubData after creation.
@@ -181,6 +193,7 @@ void glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, const void
         return;
     }
     std::memcpy(b->data.data() + offset, data, (size_t)size);
+    if (b->id==33 && getenv("MITHRIL_B33")) fprintf(stderr,"[B33] SubData off=%lld size=%lld first=(%f,%f,%f)\n",(long long)offset,(long long)size,((const float*)data)[0],((const float*)data)[1],((const float*)data)[2]);
     backend_buffer_upload(b->id, offset, data, (size_t)size);
 }
 
@@ -196,8 +209,29 @@ void glCopyBufferSubData(GLenum readTarget, GLenum writeTarget,
         mithril::state_set_error(GL_INVALID_VALUE);
         return;
     }
+    // FIX (root cause: glCopyBufferSubData vs persistent source): the source may
+    // be a persistently-mapped buffer the app wrote through the LIVE backend
+    // pointer (not the CPU shadow). Refresh the source shadow from the live
+    // mapped range first (cheap host read, no GPU stall), otherwise a CPU copy
+    // would propagate stale zeros.
+    void* srcLive = backend_get_buffer_mapped_pointer(src->id);
+    if (srcLive) {
+        std::memcpy(src->data.data() + readOffset,
+                    static_cast<uint8_t*>(srcLive) + readOffset, (size_t)size);
+    }
     std::memmove(dst->data.data() + writeOffset, src->data.data() + readOffset, (size_t)size);
-    backend_buffer_upload(dst->id, writeOffset, dst->data.data() + writeOffset, (size_t)size);
+    // glCopyBufferSubData is a SERVER-side copy: issue a GPU vkCmdCopyBuffer
+    // (ordered with barriers) rather than an in-place host upload, so the data
+    // moves even when both buffers are in flight. Fall back to a host upload
+    // only if the GPU copy could not be recorded.
+    if (!backend_copy_buffer_gpu(src->id, dst->id, (VkDeviceSize)readOffset,
+                                 (VkDeviceSize)writeOffset, (VkDeviceSize)size)) {
+        backend_buffer_upload(dst->id, writeOffset, dst->data.data() + writeOffset, (size_t)size);
+    }
+    if (getenv("MITHRIL_B33") && dst->id==33){
+      float df2[3]={0}; if(size>=12)memcpy(df2,dst->data.data()+writeOffset,12);
+      fprintf(stderr,"[B33] CopyBuffer src=%u->dst=%u size=%lld dstShadowFirst=(%.3f,%.3f,%.3f)\n",src->id,dst->id,(long long)size,df2[0],df2[1],df2[2]);
+    }
 }
 
 void* glMapBuffer(GLenum target, GLenum access) {
@@ -225,7 +259,18 @@ void* glMapBufferRange(GLenum target, GLintptr offset, GLsizeiptr length, GLbitf
     b->mapAccess  = access;
     b->mapOffset  = offset;
     b->mapLength  = length;
-    b->mapped     = b->data.data() + offset;
+    // Persistent storage (glBufferStorage + GL_MAP_PERSISTENT_BIT): return the
+    // backend's LIVE vkMapMemory pointer, not the CPU shadow (b->data). Apps
+    // using GL_MAP_COHERENT_BIT do NOT call glFlushMappedBufferRange, so a
+    // shadow pointer would never reach GPU-visible memory (matrices stayed
+    // zero -> all vertex transforms clipped -> black frame).
+    void* live = backend_get_buffer_mapped_pointer(b->id);
+    if (live) {
+        b->mapped = static_cast<uint8_t*>(live) + offset;
+    } else {
+        b->mapped = b->data.data() + offset;
+    }
+    if (b->id==33 && getenv("MITHRIL_B33")) fprintf(stderr,"[B33] MapRange off=%lld len=%lld access=0x%x live=%p ptr=%p\n",(long long)offset,(long long)length,(unsigned)access,live,b->mapped);
     return b->mapped;
 }
 
@@ -270,7 +315,9 @@ void glGetBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, void* d
     mithril::Buffer* b = bound_buffer_for_target(target);
     if (!b) return;
     if (offset < 0 || offset + size > b->size) return;
-    std::memcpy(data, b->data.data() + offset, (size_t)size);
+    void* live = backend_get_buffer_mapped_pointer(b->id);
+    if (live) std::memcpy(data, static_cast<uint8_t*>(live) + offset, (size_t)size);
+    else       std::memcpy(data, b->data.data() + offset, (size_t)size);
 }
 
 void glBindBufferBase(GLenum target, GLuint index, GLuint buffer) {
@@ -289,6 +336,8 @@ void glBindBufferBase(GLenum target, GLuint index, GLuint buffer) {
         g_state->buffers[buffer].id = buffer;
     }
     g_state->indexedBufferBindings[(int)cat][index].bind(buffer);
+    if (std::getenv("MITHRIL_UBO_TRACE") && target==GL_UNIFORM_BUFFER)
+        fprintf(stderr,"UBO-BASE point=%u name=%u\n",index,buffer);
     if ((int)index + 1 > g_state->touchedIndexed[(int)cat]) {
         g_state->touchedIndexed[(int)cat] = (int)index + 1;
     }
@@ -337,6 +386,8 @@ void glBindBufferRange(GLenum target, GLuint index, GLuint buffer,
         g_state->buffers[buffer].id = buffer;
     }
     g_state->indexedBufferBindings[(int)cat][index].bindRange(buffer, offset, size);
+    if (std::getenv("MITHRIL_UBO_TRACE") && target==GL_UNIFORM_BUFFER)
+        fprintf(stderr,"UBO-RANGE point=%u name=%u off=%ld size=%ld\n",index,buffer,(long)offset,(long)size);
     if ((int)index + 1 > g_state->touchedIndexed[(int)cat]) {
         g_state->touchedIndexed[(int)cat] = (int)index + 1;
     }

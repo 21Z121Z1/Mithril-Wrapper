@@ -343,6 +343,9 @@ void glLinkProgram(GLuint program) {
         GLuint blockIndex = 0;
         for (const auto& db : bindings) {
             if (db.type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER) {
+                if (std::getenv("MITHRIL_UBO_TRACE"))
+                    fprintf(stderr,"BLKREF prog-link binding=%d blockIndex=%u name='%s' size=%u\n",
+                        db.binding, blockIndex, db.name.c_str(), db.bufferSize);
                 if (!db.name.empty()) {
                     p->uniformBlocks[db.name] = blockIndex;
                 }
@@ -399,7 +402,17 @@ void glLinkProgram(GLuint program) {
                     mithril::UniformBlockInfo& info = p->blockInfos[blockIndex];
                     info.name = db.name;
                     info.dataSize = db.bufferSize ? (uint32_t)db.bufferSize : 0;
-                    info.bindingPoint = blockIndex;  // GL default: binding == index
+                    // FIX (root cause: explicit UBO binding point): when the shader
+                    // declares `layout(binding=N) uniform Block`, db.binding is N and
+                    // that IS the GL block binding point. The previous code used the
+                    // SPIR-V reflection-order counter (blockIndex), which differs from
+                    // the explicit binding when reflection order != binding order ->
+                    // e.g. Projection(binding=2) was routed to point 1, sampling the
+                    // DynamicTransforms buffer -> ProjMat garbage -> all verts clipped
+                    // -> black frame. For implicit bindings glslang assigns db.binding
+                    // sequentially == blockIndex, so this is unchanged there.
+                    info.bindingPoint = (GLuint)db.binding;  // explicit binding point
+                    (void)blockIndex;
                 }
                 ++blockIndex;
             } else if (db.type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
@@ -714,6 +727,8 @@ void glUniformBlockBinding(GLuint program, GLuint uniformBlockIndex, GLuint unif
     mithril::Program* p = mithril::state_get_program(program);
     if (!p) return;
     p->uniformBlockBindings[uniformBlockIndex] = uniformBlockBinding;
+    if(std::getenv("MITHRIL_UBO_TRACE"))
+        fprintf(stderr,"UBBIND prog=%u blockIdx=%u -> point=%u\n",program,uniformBlockIndex,uniformBlockBinding);
 }
 
 /* ---- Uniform setters ----

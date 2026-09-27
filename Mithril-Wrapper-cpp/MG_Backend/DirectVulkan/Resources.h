@@ -142,10 +142,13 @@ void defer_destroy_sampler_entry(SamplerEntry& e);
 // honour GL_UNPACK_ALIGNMENT row padding). `is_full_upload` (default true)
 // hints that this upload covers the whole image, letting the staging/copy
 // path use a single optimized buffer-image-copy instead of per-row strides.
-void stage_and_copy_image(TextureEntry& tex, int level, int x, int y, int z,
+void stage_and_copy_image(TextureEntry& tex, GLuint gl_name, int level, int x, int y, int z,
                           int w, int h, int d, const void* pixels,
                           int unpack_alignment, GLenum format, GLenum type,
-                          bool is_full_upload = true);
+                          bool is_full_upload = true,
+                          int unpack_row_length = 0,
+                          int unpack_skip_pixels = 0,
+                          int unpack_skip_rows = 0);
 
 // Record an image-memory barrier transitioning `tex` from its current layout
 // (tex.currentLayout) to `newLayout`. No-op if already in `newLayout`. Updates

@@ -152,6 +152,7 @@ void backend_set_invalidate_attachments(uint32_t color_mask, bool depth, bool st
 /* End + commit the active render pass / command buffer. */
 void backend_end_render_pass(void);
 void backend_commit(void);
+void backend_mark_commands(void);
 
 /*
  * Register the swapchain whose currently-acquired image backs framebuffer 0
@@ -428,6 +429,12 @@ void        backend_generate_mipmaps(GLuint name);
  */
 int         backend_read_pixels(int x, int y, int w, int h,
                                 GLenum format, GLenum type, void* out_pixels);
+void        backend_probe_fixed_quad(void);
+void        backend_probe_ubo_fixed(unsigned int program);
+int         backend_read_buffer_host(unsigned int name, unsigned long long offset, unsigned long long size, void* dst);
+int         backend_read_texture_pixels(unsigned int name, int level, void* dst);
+void        backend_texture_size(unsigned int name, int* w, int* h, int* vkfmt);
+int         backend_copy_buffer_gpu(unsigned int src, unsigned int dst, unsigned long long srcOff, unsigned long long dstOff, unsigned long long size);
 
 /*
  * Blit a rectangular region from the source texture to the destination
@@ -733,6 +740,7 @@ VkFormat    backend_swapchain_depth_format(void* swapchain_state);
 int backend_device_limit(int which, int fallback);
 void backend_debug_frame_fbo_log(void);
 
+extern "C" void mithril_dump_draw_ring(const char* path);
 #ifdef __cplusplus
 }
 #endif

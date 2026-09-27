@@ -499,6 +499,14 @@ inline uint64_t handle_bits(H h) {
  */
 void build_ubo_plans(ProgramResources& pr, const mithril::Program* prog) {
     pr.uboPlans.clear();
+    if (std::getenv("MITHRIL_BIND_DUMP")) {
+        static int bd=0;
+        if(bd<4){++bd;
+        for(const auto& dbb: pr.bindings){
+            MITHRIL_LOG_WARN("binddump","set=%u binding=%u type=%d name='%s' bufSize=%u",
+                dbb.set,dbb.binding,(int)dbb.type,dbb.name.c_str(),dbb.bufferSize);
+        }}
+    }
     for (const auto& db : pr.bindings) {
         if (db.type != VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER) continue;
         pr.uboPlans.emplace_back();
@@ -762,6 +770,16 @@ void bind_program_descriptors(GLuint program, VkPipelineBindPoint bindPoint) {
                             uoff   = (VkDeviceSize)sl.offset;
                             urange = (VkDeviceSize)sl.size;
                         }
+                    }
+                    if (std::getenv("MITHRIL_UBO_TRACE") && mithril::g_state->currentDrawFBO==3) {
+                        static int nlog=0;
+                        if (nlog<2) { ++nlog;
+                        float dbg[16]={0};
+                        if (sl.name) backend_read_buffer_host(sl.name,(VkDeviceSize)sl.offset,64,dbg);
+                        MITHRIL_LOG_WARN("ubo-diag","FULL prog=%u '%s' bind=%d pt=%u buf=%u off=%ld | c0(%.3f,%.3f,%.3f,%.3f) c1(%.3f,%.3f,%.3f,%.3f) c2(%.3f,%.3f,%.3f,%.3f) c3(%.3f,%.3f,%.3f,%.3f)",
+                            program,info.name.c_str(),(int)db.binding,point,sl.name,(long)sl.offset,
+                            dbg[0],dbg[1],dbg[2],dbg[3],dbg[4],dbg[5],dbg[6],dbg[7],
+                            dbg[8],dbg[9],dbg[10],dbg[11],dbg[12],dbg[13],dbg[14],dbg[15]); }
                     }
                 }
                 if (ubuf == VK_NULL_HANDLE) {

@@ -19,6 +19,7 @@
 #include "Device.h"
 #include "Swapchain.h"
 #include "CommandStream.h"
+#include "Pipeline.h"
 #include "Resources.h"
 #include "../Backend.h"
 #include "../../MG_State/State.h"
@@ -920,6 +921,15 @@ int read_pixels(int x, int y, int w, int h, GLenum format, GLenum type, void* ou
         case VK_FORMAT_R8G8B8A8_SRGB: src_bpp = 4; break;
         case VK_FORMAT_R8G8B8_UNORM:  src_bpp = 3; break;
         case VK_FORMAT_R5G6B5_UNORM_PACK16: src_bpp = 2; break;
+        case VK_FORMAT_R8_UNORM:
+        case VK_FORMAT_R8_SNORM:
+        case VK_FORMAT_R8_UINT:
+        case VK_FORMAT_R8_SINT:      src_bpp = 1; break;
+        case VK_FORMAT_R8G8_UNORM:
+        case VK_FORMAT_R8G8_SNORM:   src_bpp = 2; break;
+        case VK_FORMAT_R16_SFLOAT:
+        case VK_FORMAT_R16_UNORM:    src_bpp = 2; break;
+        case VK_FORMAT_R32_SFLOAT:   src_bpp = 4; break;
         default: src_bpp = 4; break;
     }
     VkDeviceSize staging_size = (VkDeviceSize)w * (VkDeviceSize)h * (VkDeviceSize)src_bpp;
@@ -2025,6 +2035,157 @@ void blit_to_default_in_frame(VkImage src_image, VkFormat src_format, int src_w,
     // A rare temporary source view stays referenced until present; not destroyed.
 }
 
+// Diagnostic (MITHRIL_FS_PROBE): constant-yellow fragment module used to
+// decide whether the vertex stage rasterizes when the app's own fragment
+// shader writes nothing. Not part of the shipping path.
+VkShaderModule create_probe_fs_module() {
+    static const char* kProbeFS =
+        "#version 450\n"
+        "layout(location=0) out vec4 outc;\n"
+        "void main(){ outc = vec4(1.0,1.0,0.0,1.0); }\n";
+    std::vector<uint32_t> spv;
+    if (!bq_compile_stage(EShLangFragment, kProbeFS, spv)) return VK_NULL_HANDLE;
+    VkShaderModuleCreateInfo vm{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+    vm.codeSize = spv.size() * 4;
+    vm.pCode = spv.data();
+    VkShaderModule m = VK_NULL_HANDLE;
+    Backend* bb = backend();
+    if (vkCreateShaderModule(bb->device, &vm, nullptr, &m) != VK_SUCCESS)
+        return VK_NULL_HANDLE;
+    return m;
+}
+
+// Self-contained fixed fullscreen triangle (gl_VertexIndex) + constant yellow FS,
+// empty pipeline layout, RGBA8 dynamic rendering. Verifies a user-FBO pass can
+// rasterize draws independent of app vertex data / UBO.
+const char* kFixedQVS = R"(#version 450
+layout(location=0) out vec2 vUv;
+void main(){
+    vec2 p = vec2(float((gl_VertexIndex<<1)&2), float(gl_VertexIndex&2));
+    gl_Position = vec4(p*2.0-1.0, 0.0, 1.0);
+    vUv = p;
+})";
+const char* kFixedQFS = R"(#version 450
+layout(location=0) in vec2 vUv;
+layout(location=0) out vec4 outc;
+void main(){ outc = vec4(1.0,1.0,0.0,1.0); })";
+
+void probe_fixed_quad() {
+    static VkPipeline pipe = VK_NULL_HANDLE;
+    Backend* b = backend();
+    VkCommandBuffer cmd = b->commandBuffer;
+    if (pipe == VK_NULL_HANDLE) {
+        std::vector<uint32_t> vspv,fspv;
+        if(!bq_compile_stage(EShLangVertex,kFixedQVS,vspv)) return;
+        if(!bq_compile_stage(EShLangFragment,kFixedQFS,fspv)) return;
+        VkShaderModule vsm,fsm;
+        VkShaderModuleCreateInfo vm{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+        vm.codeSize=vspv.size()*4; vm.pCode=vspv.data();
+        if(vkCreateShaderModule(b->device,&vm,nullptr,&vsm)!=VK_SUCCESS) return;
+        vm.codeSize=fspv.size()*4; vm.pCode=fspv.data();
+        if(vkCreateShaderModule(b->device,&vm,nullptr,&fsm)!=VK_SUCCESS) return;
+        VkPipelineLayoutCreateInfo pl{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+        VkPipelineLayout lay; if(vkCreatePipelineLayout(b->device,&pl,nullptr,&lay)!=VK_SUCCESS)return;
+        VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+        VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+        ia.topology=VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        VkPipelineViewportStateCreateInfo vp{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+        vp.viewportCount=1; vp.scissorCount=1;
+        VkPipelineRasterizationStateCreateInfo rs{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+        rs.polygonMode=VK_POLYGON_MODE_FILL; rs.cullMode=VK_CULL_MODE_NONE;
+        rs.frontFace=VK_FRONT_FACE_COUNTER_CLOCKWISE; rs.lineWidth=1;
+        VkPipelineMultisampleStateCreateInfo ms{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+        ms.rasterizationSamples=VK_SAMPLE_COUNT_1_BIT;
+        VkPipelineColorBlendStateCreateInfo cb{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
+        VkPipelineColorBlendAttachmentState ca{}; ca.blendEnable=VK_FALSE; ca.colorWriteMask=0xF;
+        cb.attachmentCount=1; cb.pAttachments=&ca;
+        VkDynamicState dyns[]={VK_DYNAMIC_STATE_VIEWPORT,VK_DYNAMIC_STATE_SCISSOR};
+        VkPipelineDynamicStateCreateInfo dyn{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
+        dyn.dynamicStateCount=2; dyn.pDynamicStates=dyns;
+        VkPipelineRenderingCreateInfo rci{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
+        VkFormat f=VK_FORMAT_R8G8B8A8_UNORM; rci.colorAttachmentCount=1; rci.pColorAttachmentFormats=&f;
+        VkGraphicsPipelineCreateInfo gi{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+        VkPipelineShaderStageCreateInfo st[2]={{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO},{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO}};
+        st[0].stage=VK_SHADER_STAGE_VERTEX_BIT; st[0].module=vsm; st[0].pName="main";
+        st[1].stage=VK_SHADER_STAGE_FRAGMENT_BIT; st[1].module=fsm; st[1].pName="main";
+        gi.pNext=&rci; gi.stageCount=2; gi.pStages=st; gi.pVertexInputState=&vi; gi.pInputAssemblyState=&ia;
+        gi.pViewportState=&vp; gi.pRasterizationState=&rs; gi.pMultisampleState=&ms; gi.pColorBlendState=&cb;
+        gi.pDynamicState=&dyn; gi.layout=lay; gi.renderPass=VK_NULL_HANDLE;
+        if(vkCreateGraphicsPipelines(b->device,b->pipelineCache,1,&gi,nullptr,&pipe)!=VK_SUCCESS) return;
+    }
+    VkViewport vpv{0,0,2048,2048,0,1}; vkCmdSetViewport(cmd,0,1,&vpv);
+    VkRect2D sr{{0,0},{2048,2048}}; vkCmdSetScissor(cmd,0,1,&sr);
+    vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_GRAPHICS,pipe);
+    vkCmdDraw(cmd,3,1,0,0);
+}
+
+// Fixed fullscreen verts transformed by the APP's Matrices UBO (set0 binding0),
+// constant cyan FS, reusing the app program's pipeline layout + already-bound
+// descriptor set. Distinguishes bad UBO matrix content (cyan clips -> nothing)
+// from bad position attributes (cyan region appears).
+const char* kUboQVS = R"(#version 450
+layout(set=0,binding=0) uniform Matrices { mat4 ProjMat; mat4 ModelViewMat; };
+void main(){
+    vec2 p = vec2(float((gl_VertexIndex<<1)&2), float(gl_VertexIndex&2));
+    gl_Position = ProjMat * ModelViewMat * vec4(p*2.0-1.0, 0.0, 1.0);
+})";
+const char* kUboQFS = R"(#version 450
+layout(location=0) out vec4 outc;
+void main(){ outc = vec4(0.0,1.0,1.0,1.0); })";
+
+void probe_ubo_fixed(GLuint program) {
+    Backend* b = backend();
+    VkCommandBuffer cmd = b->commandBuffer;
+    auto it = program_table().find(program);
+    if (it == program_table().end()) return;
+    VkPipelineLayout lay = it->second.pipelineLayout;
+    if (lay == VK_NULL_HANDLE) return;
+    static std::unordered_map<VkPipelineLayout,VkPipeline> cache;
+    VkPipeline pipe = VK_NULL_HANDLE;
+    auto ci = cache.find(lay);
+    if (ci != cache.end()) { pipe = ci->second; }
+    if (pipe == VK_NULL_HANDLE) {
+        std::vector<uint32_t> vspv,fspv;
+        if(!bq_compile_stage(EShLangVertex,kUboQVS,vspv)) return;
+        if(!bq_compile_stage(EShLangFragment,kUboQFS,fspv)) return;
+        VkShaderModule vsm,fsm;
+        VkShaderModuleCreateInfo vm{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+        vm.codeSize=vspv.size()*4; vm.pCode=vspv.data();
+        if(vkCreateShaderModule(b->device,&vm,nullptr,&vsm)!=VK_SUCCESS)return;
+        vm.codeSize=fspv.size()*4; vm.pCode=fspv.data();
+        if(vkCreateShaderModule(b->device,&vm,nullptr,&fsm)!=VK_SUCCESS)return;
+        VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+        VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+        ia.topology=VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        VkPipelineViewportStateCreateInfo vp{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+        vp.viewportCount=1; vp.scissorCount=1;
+        VkPipelineRasterizationStateCreateInfo rs{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+        rs.polygonMode=VK_POLYGON_MODE_FILL; rs.cullMode=VK_CULL_MODE_NONE;
+        rs.frontFace=VK_FRONT_FACE_COUNTER_CLOCKWISE; rs.lineWidth=1;
+        VkPipelineMultisampleStateCreateInfo ms{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+        ms.rasterizationSamples=VK_SAMPLE_COUNT_1_BIT;
+        VkPipelineColorBlendStateCreateInfo cb{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
+        VkPipelineColorBlendAttachmentState ca{}; ca.blendEnable=VK_FALSE; ca.colorWriteMask=0xF;
+        cb.attachmentCount=1; cb.pAttachments=&ca;
+        VkDynamicState dyns[]={VK_DYNAMIC_STATE_VIEWPORT,VK_DYNAMIC_STATE_SCISSOR};
+        VkPipelineDynamicStateCreateInfo dyn{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
+        dyn.dynamicStateCount=2; dyn.pDynamicStates=dyns;
+        VkPipelineRenderingCreateInfo rci{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
+        VkFormat f=VK_FORMAT_R8G8B8A8_UNORM; rci.colorAttachmentCount=1; rci.pColorAttachmentFormats=&f;
+        VkGraphicsPipelineCreateInfo gi{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+        VkPipelineShaderStageCreateInfo st[2]={{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO},{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO}};
+        st[0].stage=VK_SHADER_STAGE_VERTEX_BIT; st[0].module=vsm; st[0].pName="main";
+        st[1].stage=VK_SHADER_STAGE_FRAGMENT_BIT; st[1].module=fsm; st[1].pName="main";
+        gi.pNext=&rci; gi.stageCount=2; gi.pStages=st; gi.pVertexInputState=&vi; gi.pInputAssemblyState=&ia;
+        gi.pViewportState=&vp; gi.pRasterizationState=&rs; gi.pMultisampleState=&ms; gi.pColorBlendState=&cb;
+        gi.pDynamicState=&dyn; gi.layout=lay; gi.renderPass=VK_NULL_HANDLE;
+        if(vkCreateGraphicsPipelines(b->device,b->pipelineCache,1,&gi,nullptr,&pipe)!=VK_SUCCESS)return;
+        cache[lay]=pipe;
+    }
+    vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_GRAPHICS,pipe);
+    vkCmdDraw(cmd,3,1,0,0);
+}
+
 } // namespace vk
 } // namespace mithril
 
@@ -2040,6 +2201,14 @@ void backend_generate_mipmaps(GLuint name) {
 int backend_read_pixels(int x, int y, int w, int h,
                         GLenum format, GLenum type, void* out_pixels) {
     return mithril::vk::read_pixels(x, y, w, h, format, type, out_pixels);
+}
+
+void backend_probe_fixed_quad(void) {
+    mithril::vk::probe_fixed_quad();
+}
+
+void backend_probe_ubo_fixed(unsigned int program) {
+    mithril::vk::probe_ubo_fixed(program);
 }
 
 void backend_blit_texture(GLuint src_name, GLuint dst_name,
