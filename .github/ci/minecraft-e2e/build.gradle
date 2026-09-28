@@ -54,6 +54,13 @@ tasks.named('runClient') {
         "-Dorg.lwjgl.opengl.libname=${mithrilDylib.get()}"
     ]
 
+    // Explicitly place this project's mod (compiled classes + fabric.mod.json
+    // resources) on the run classpath. Loom normally adds the root project mod
+    // automatically, but when the Gradle project is driven via `-p` from a nested
+    // path the auto-included directory can be missed by Knot's classpath scan;
+    // adding the output directories directly makes the mod discoverable.
+    classpath += files(sourceSets.main.output.classesDirs, sourceSets.main.output.resourcesDir)
+
     // The native bridge reads its configuration from the environment. Older Loom
     // run tasks expose a JavaExec-style environment(...) method; configure it
     // only when present so this script keeps working across Loom versions (the

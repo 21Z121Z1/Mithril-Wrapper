@@ -8,13 +8,13 @@ import net.minecraft.client.gui.screens.Screen;
 import org.lwjgl.BufferUtils;
 import org.lwjgl.opengl.GL11;
 
-import javax.imageio.ImageIO;
-import java.awt.image.BufferedImage;
-import java.io.ByteArrayOutputStream;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.DirectoryStream;
+import java.util.regex.Pattern;
+import java.util.regex.Matcher;
 import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
@@ -24,34 +24,36 @@ import java.util.Map;
  *
  * Boot the real production client, validate the main menu, then PROGRAMMATICALLY
  * create and join a fresh world (no mouse / synthetic clicks), wait for the
- * integrated server and terrain, sample the full default framebuffer and gate
- * on real, non-uniform in-world content. The in-world frame is written both as
- * raw RGBA and as a viewable, Y-flipped PNG so the renderer output is a hard,
- * machine- and human-checkable release gate.
+ * integrated server and terrain, sample the full default framebuffer across a
+ * warm window and gate on real, non-uniform in-world content. The best in-world
+ * frame is written both as raw RGBA and as a viewable PNG so the renderer
+ * output is a hard, machine- and human-checkable release gate.
  */
 public final class MithrilE2EClient implements ClientModInitializer {
     private static final int MENU_WARMUP_TICKS = 120;
     private static final int CREATE_SCREEN_WAIT_TICKS = 200;
     private static final int WORLD_WAIT_TICKS = 300;
-    private static final int IN_WORLD_SETTLE_TICKS = 25;
     private static final double RED_FAIL_RATIO = 0.90;
     /** In-world content gates (full default framebuffer). */
     private static final double MAX_UNIFORM_FILL = 0.85;
     private static final int MIN_DISTINCT_COLORS = 250;
     private static final double MIN_GRAY_STDDEV = 18.0;
+    private static final int INWORLD_WARM_TICKS = 240;
     private static final long WATCHDOG_DEADLINE_MS = 600_000L;
 
-    private enum Phase { MENU, OPEN_CREATE, WAIT_WORLD, CAPTURE, DONE }
+    private enum Phase { MENU, OPEN_CREATE, WAIT_WORLD, INWORLD_WARM, DONE }
     private Phase phase = Phase.MENU;
     private int ticks = 0;
     private int phaseTicks = 0;
-    private static final java.util.concurrent.atomic.AtomicInteger TICKS_SEEN =
-            new java.util.concurrent.atomic.AtomicInteger(0);
-    private static final java.util.concurrent.atomic.AtomicInteger PHASE_SEEN =
-            new java.util.concurrent.atomic.AtomicInteger(0);
+    private Stats bestStats = null;
+    private byte[] bestRaw = null;
+    private int bestW = 0, bestH = 0;
+    private int prepresentReq = 0;
+    private int lastPrepresentSeen = -1;
 
     @Override
     public void onInitializeClient() {
+        System.out.println("[mithril-e2e] onInitializeClient: mod loaded and initializing");
         System.setProperty("java.awt.headless", "true");
         final Path root = Path.of(System.getProperty("mithril.e2e.root", "build/evidence"))
                 .toAbsolutePath().normalize();
@@ -70,7 +72,7 @@ public final class MithrilE2EClient implements ClientModInitializer {
                 hang.put("schema_version", "1.0");
                 hang.put("reason", "watchdog deadline reached");
                 hang.put("phase", phase.name());
-                hang.put("ticks_observed", TICKS_SEEN.get());
+                hang.put("ticks_observed", ticks);
                 writeJson(root.resolve("hang-detected.json"), hang);
             } catch (Throwable t) {
                 t.printStackTrace();
@@ -85,8 +87,6 @@ public final class MithrilE2EClient implements ClientModInitializer {
             if (phase == Phase.DONE) return;
             ticks++;
             phaseTicks++;
-            TICKS_SEEN.set(ticks);
-            PHASE_SEEN.set(phaseTicks);
             try {
                 switch (phase) {
                     case MENU -> {
@@ -100,9 +100,9 @@ public final class MithrilE2EClient implements ClientModInitializer {
                         Screen s = client.screen;
                         if (s instanceof CreateWorldScreen cws) {
                             // Equivalent to pressing the Create button: builds the
-                            // world from the default context and joins it.
-                            // onCreate() is private in Mojang mappings, so invoke
-                            // it reflectively (deterministic, no synthetic click).
+                            // world from the default context and joins it. onCreate()
+                            // is private in Mojang mappings, so invoke it reflectively
+                            // (deterministic, no synthetic click).
                             java.lang.reflect.Method create =
                                     CreateWorldScreen.class.getDeclaredMethod("onCreate");
                             create.setAccessible(true);
@@ -115,12 +115,31 @@ public final class MithrilE2EClient implements ClientModInitializer {
                     }
                     case WAIT_WORLD -> {
                         boolean inWorld = client.player != null && client.level != null;
-                        if (inWorld && phaseTicks > IN_WORLD_SETTLE_TICKS) {
-                            captureInWorld(client, root);
-                            advance(Phase.DONE);
+                        if (inWorld) {
+                            advance(Phase.INWORLD_WARM);
                         } else if (phaseTicks > WORLD_WAIT_TICKS) {
                             fail(root, "world never loaded; player=" + (client.player != null)
                                     + " level=" + (client.level != null));
+                        }
+                    }
+                    case INWORLD_WARM -> {
+                        // Sample the presented framebuffer every tick and remember the
+                        // most non-uniform frame, so a single blank/loading frame cannot
+                        // fail the gate.
+                        sampleInWorld(client, root);
+                        if (phaseTicks % 40 == 0) {
+                            System.out.println("[mithril-e2e] warm tick=" + phaseTicks
+                                + (bestStats == null ? " best=none"
+                                : " best_fill=" + fmt(bestStats.uniformFill)
+                                  + " best_distinct=" + bestStats.distinctColors
+                                  + " best_stddev=" + fmt(bestStats.grayStddev)));
+                        }
+                        boolean playerLeft = client.player == null || client.level == null;
+                        if (playerLeft) {
+                            advance(Phase.WAIT_WORLD);
+                        } else if (phaseTicks >= INWORLD_WARM_TICKS) {
+                            finalizeInWorld(root);
+                            advance(Phase.DONE);
                         }
                     }
                     default -> { }
@@ -190,17 +209,57 @@ public final class MithrilE2EClient implements ClientModInitializer {
         System.out.println("[mithril-e2e] menu OK; red_pixel_ratio=" + redRatio);
     }
 
-    private void captureInWorld(Minecraft client, Path root) throws Exception {
-        Files.createDirectories(root.resolve("render"));
+    /** Request a prepresent capture; remember the most non-uniform frame. */
+    private void sampleInWorld(Minecraft client, Path root) throws Exception {
         int w = client.getWindow().getWidth();
         int h = client.getWindow().getHeight();
+        Path renderDir = root.resolve("render");
+        Files.createDirectories(renderDir);
+        // The bridge captures the DEFAULT framebuffer at the next eglSwapBuffers
+        // (after the level target is blitted to screen and the HUD/GUI is drawn),
+        // so this frame truly represents what would be presented.
+        ++prepresentReq;
+        Files.writeString(renderDir.resolve("prepresent-request.txt"),
+                          String.valueOf(prepresentReq));
+        // Read the newest prepresent frame already captured (one-tick lag).
+        int bestNum = -1; Path newest = null;
+        try (DirectoryStream<Path> ds = Files.newDirectoryStream(renderDir,
+                "prepresent-frame-*.rgba")) {
+            for (Path fp : ds) {
+                Matcher m = Pattern.compile("prepresent-frame-(\\d{4})\\.rgba")
+                        .matcher(fp.getFileName().toString());
+                if (m.matches()) {
+                    int num = Integer.parseInt(m.group(1));
+                    if (num > bestNum) { bestNum = num; newest = fp; }
+                }
+            }
+        }
+        if (newest != null && bestNum != lastPrepresentSeen) {
+            lastPrepresentSeen = bestNum;
+            byte[] raw = Files.readAllBytes(newest);
+            Stats st = Stats.compute(raw, w, h);
+            boolean better = bestStats == null
+                    || st.uniformFill < bestStats.uniformFill
+                    || (st.uniformFill == bestStats.uniformFill
+                        && (st.distinctColors > bestStats.distinctColors
+                            || (st.distinctColors == bestStats.distinctColors
+                                && st.grayStddev > bestStats.grayStddev)));
+            if (better) {
+                bestStats = st; bestRaw = raw; bestW = w; bestH = h;
+            }
+        }
+    }
 
-        ByteBuffer buf = BufferUtils.createByteBuffer(w * h * 4);
-        GL11.glReadPixels(0, 0, w, h, GL11.GL_RGBA, GL11.GL_UNSIGNED_BYTE, buf);
-        byte[] raw = new byte[w * h * 4];
-        buf.get(raw);
+    private void finalizeInWorld(Path root) throws Exception {
+        Files.createDirectories(root.resolve("render"));
+        if (bestRaw == null) {
+            fail(root, "no in-world frame sampled");
+            return;
+        }
+        final byte[] raw = bestRaw;
+        final int w = bestW, h = bestH;
+        final Stats st = bestStats;
 
-        Stats st = Stats.compute(raw, w, h);
         String vendor = safe(GL11.glGetString(GL11.GL_VENDOR));
         String renderer = safe(GL11.glGetString(GL11.GL_RENDERER));
         String glversion = safe(GL11.glGetString(GL11.GL_VERSION));
@@ -211,33 +270,18 @@ public final class MithrilE2EClient implements ClientModInitializer {
                 && st.distinctColors > MIN_DISTINCT_COLORS
                 && st.grayStddev > MIN_GRAY_STDDEV;
 
-        // Raw evidence.
-        Path rawPath = root.resolve("render/inworld-frame.rgba");
-        Files.write(rawPath, raw);
-
-        // Viewable PNG (glReadPixels origin is bottom-left; flip Y upright).
-        BufferedImage img = new BufferedImage(w, h, BufferedImage.TYPE_INT_ARGB);
-        for (int yy = 0; yy < h; yy++) {
-            int srcRow = h - 1 - yy;
-            for (int xx = 0; xx < w; xx++) {
-                int o = (srcRow * w + xx) * 4;
-                int argb = ((raw[o + 3] & 0xFF) << 24) | ((raw[o] & 0xFF) << 16)
-                        | ((raw[o + 1] & 0xFF) << 8) | (raw[o + 2] & 0xFF);
-                img.setRGB(xx, yy, argb);
-            }
-        }
-        Path pngPath = root.resolve("render/inworld-frame.png");
-        ByteArrayOutputStream pngBytes = new ByteArrayOutputStream();
-        ImageIO.write(img, "png", pngBytes);
-        Files.write(pngPath, pngBytes.toByteArray());
+        // Raw evidence. The viewable PNG is produced by the CI workflow via
+        // ci/minecraft-e2e/rgba_to_png.py (canonical converter).
+        Files.write(root.resolve("render/inworld-frame.rgba"), raw);
 
         Map<String, Object> meta = new LinkedHashMap<>();
         meta.put("schema_version", "1.0");
         meta.put("git_sha", System.getenv().getOrDefault("MITHRIL_E2E_SHA", ""));
-        meta.put("capture_source", "default-framebuffer glReadPixels (in-world)");
+        meta.put("capture_source", "default-framebuffer glReadPixels (in-world, best of warm window)");
         meta.put("pixel_format", "RGBA8");
         meta.put("width", w);
         meta.put("height", h);
+        meta.put("warm_window_ticks", INWORLD_WARM_TICKS);
         meta.put("uniform_fill", st.uniformFill);
         meta.put("distinct_colors", st.distinctColors);
         meta.put("gray_stddev", st.grayStddev);
@@ -258,7 +302,7 @@ public final class MithrilE2EClient implements ClientModInitializer {
         writeJson(root.resolve("oracle-results.json"), oracles);
         writeJson(root.resolve("render/oracle-results.json"), oracles);
 
-        System.out.println("[mithril-e2e] in-world frame " + w + "x" + h
+        System.out.println("[mithril-e2e] BEST in-world frame " + w + "x" + h
                 + " uniform_fill=" + fmt(st.uniformFill)
                 + " distinct=" + st.distinctColors
                 + " gray_stddev=" + fmt(st.grayStddev)

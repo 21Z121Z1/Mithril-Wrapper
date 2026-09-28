@@ -287,6 +287,16 @@ jobs:
           wait "$gradle_pid"; gradle_rc=$?
           echo "[mithril-e2e] gradle runClient exit=$gradle_rc saw_present=$saw_present" \
             >> "$E2E_ROOT/minecraft-client-run.log"
+          # Convert the best in-world raw RGBA to a viewable PNG using the
+          # canonical converter (the mod writes only raw RGBA + metadata).
+          if [ "$gradle_rc" -eq 0 ] && \
+             [ -f "$E2E_ROOT/render/inworld-frame.rgba" ] && \
+             [ -f "$E2E_ROOT/render/inworld-frame.json" ]; then
+            read -r RW RH < <(python3 -c "import json;m=json.load(open('$E2E_ROOT/render/inworld-frame.json'));print(m['width'],m['height'])")
+            python3 ci/minecraft-e2e/rgba_to_png.py \
+              "$E2E_ROOT/render/inworld-frame.rgba" "$RW" "$RH" \
+              "$E2E_ROOT/render/inworld-frame.png"
+          fi
           # Surface the game log in the (fetchable) job log whenever the run did
           # not cleanly succeed, even when the ci-diagnostics push later fails.
           if [ "$gradle_rc" -ne 0 ]; then dump_game_log; fi
