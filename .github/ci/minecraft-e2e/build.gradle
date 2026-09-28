@@ -61,10 +61,16 @@ tasks.named('runClient') {
     // adding the output directories directly makes the mod discoverable.
     classpath += files(sourceSets.main.output.classesDirs, sourceSets.main.output.resourcesDir)
 
+    // On a fresh CI checkout the mod has never been compiled, so the output
+    // directories above are empty at runClient time and Knot loads one fewer
+    // mod (54 instead of 55). Force runClient to build the project's compiled
+    // classes and processed resources (the aggregate `classes` task) first.
+    dependsOn tasks.named('classes')
+
     // The native bridge reads its configuration from the environment. Older Loom
     // run tasks expose a JavaExec-style environment(...) method; configure it
     // only when present so this script keeps working across Loom versions (the
-    // bridge has hard-coded fallbacks for when it is missing).
+    // bridge has hard-cicoded fallbacks for when it is missing).
     try {
         environment('MITHRIL_E2E_ROOT', evidenceRoot.get())
         environment('MITHRIL_E2E_MITHRIL_DYLIB', mithrilDylib.get())
