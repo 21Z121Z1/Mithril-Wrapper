@@ -28,19 +28,6 @@ dependencies {
     mappings loom.officialMojangMappings()
     modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
     modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_api_version}"
-
-    // CRITICAL: make THIS project's own mod discoverable at dev runtime.
-    // Loom 1.7 launches the game through net.fabricmc.devlaunchinjector.Main,
-    // which builds the game classloader from the `runtimeClasspath` configuration
-    // (recorded in the generated DLI config) -- it does NOT scan extra entries
-    // appended to the JavaExec `classpath` property. A previous attempt that did
-    // `classpath += files(sourceSets.main.output...)` compiled the mod but Knot
-    // still reported "Loading 54 mods" (one fewer: mithril_minecraft_e2e was
-    // absent), so the in-process state machine never ran and the lane hit
-    // RUNTIME_MINECRAFT_HANG. Adding the compiled classes and processed
-    // resources (fabric.mod.json) to `runtimeOnly` puts them on the
-    // `runtimeClasspath` that DLI/Knot actually scan, so the mod loads.
-    runtimeOnly files(sourceSets.main.output.classesDirs, sourceSets.main.output.resourcesDir)
 }
 
 java { toolchain { languageVersion = JavaLanguageVersion.of(21) } }
@@ -67,11 +54,28 @@ tasks.named('runClient') {
         "-Dorg.lwjgl.opengl.libname=${mithrilDylib.get()}"
     ]
 
-    // On a fresh CI checkout the mod has never been compiled, so the output
-    // directories referenced by the runtimeOnly dependency above are empty at
-    // runClient time. Force runClient to build the project's compiled classes
-    // and processed resources (the aggregate `classes` task) first.
-    dependsOn tasks.named('classes')
+    // CRITICAL: force THIS project's own mod to load at dev runtime.
+    //
+    // Loom 1.7 launches the game through net.fabricmc.devlaunchinjector.Main,
+    // which builds the Knot classloader from the classpath recorded in the
+    // generated DLI config. In this nested `-p .github/ci/minecraft-e2e` setup the
+    // project's own mod is not on that classpath, so Knot reported "Loading 54
+    // mods" (one fewer: mithril_minecraft_e2e was absent), the in-process state
+    // machine never ran, and the lane hit RUNTIME_MINECRAFT_HANG. Two earlier
+    // attempts -- appending sourceSets.main.output to the JavaExec `classpath`,
+    // and adding it to `runtimeOnly` -- both compiled the mod but still did not
+    // reach the classloader DLI actually scans.
+    //
+    // Fabric Loader honors the `fabric.addMods` system property to add extra mod
+    // files explicitly, independent of classpath scanning. Point it at this
+    // project's built (dev, same-mappings) jar so Knot loads it for sure. The
+    // jar is built first via the task dependency; the property is appended in
+    // doFirst (execution time), once the jar's path is fully resolved.
+    dependsOn tasks.named('jar')
+    doFirst {
+        def modJar = tasks.named('jar').get().archiveFile.get().asFile.absolutePath
+        jvmArgs("-Dfabric.addMods=${modJar}")
+    }
 
     // The native bridge reads its configuration from the environment. Older Loom
     // run tasks expose a JavaExec-style environment(...) method; configure it
