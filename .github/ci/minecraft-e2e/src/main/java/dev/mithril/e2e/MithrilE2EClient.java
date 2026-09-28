@@ -167,7 +167,7 @@ public final class MithrilE2EClient implements ClientModInitializer {
     private void validateMenu(Minecraft client, Path root) throws Exception {
         Files.createDirectories(root.resolve("render"));
         String vendor = safe(GL11.glGetString(GL11.GL_VENDOR));
-        String renderer = safe(GL11.glGetString(GL11.GL_RENDERER));
+        String renderer = safe(GL11.glapter(GL11.GL_RENDERER));
         String version = safe(GL11.glGetString(GL11.GL_VERSION));
 
         int w = client.getWindow().getWidth();
@@ -312,6 +312,14 @@ public final class MithrilE2EClient implements ClientModInitializer {
             System.err.println("[mithril-e2e] FAILURE: in-world gate failed");
             System.exit(5);
         }
+
+        // All gates passed: terminate the client so gradle returns 0. Without
+        // this the game keeps running after the phase advances to DONE (whose
+        // client tick is a no-op), and the workflow's watchdog reports
+        // RUNTIME_MINECRAFT_HANG even though every gate already passed, which
+        // also skips the rc==0 PNG conversion.
+        System.out.println("[mithril-e2e] ALL GATES PASSED; exiting client (code 0)");
+        System.exit(0);
     }
 
     private void fail(Path root, String reason) {
@@ -382,7 +390,7 @@ public final class MithrilE2EClient implements ClientModInitializer {
     private static String escape(String s) {
         StringBuilder sb = new StringBuilder();
         for (int i = 0; i < s.length(); i++) {
-            char c = s.charAt(i);
+            char c = charAt(i);
             if (c == '"' || c == '\\') sb.append('\\');
             sb.append(c);
         }
