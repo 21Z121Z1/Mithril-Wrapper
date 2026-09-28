@@ -101,7 +101,12 @@ public final class MithrilE2EClient implements ClientModInitializer {
                         if (s instanceof CreateWorldScreen cws) {
                             // Equivalent to pressing the Create button: builds the
                             // world from the default context and joins it.
-                            cws.onCreate();
+                            // onCreate() is private in Mojang mappings, so invoke
+                            // it reflectively (deterministic, no synthetic click).
+                            java.lang.reflect.Method create =
+                                    CreateWorldScreen.class.getDeclaredMethod("onCreate");
+                            create.setAccessible(true);
+                            create.invoke(cws);
                             advance(Phase.WAIT_WORLD);
                         } else if (phaseTicks > CREATE_SCREEN_WAIT_TICKS) {
                             fail(root, "CreateWorldScreen never appeared; screen="
