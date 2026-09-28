@@ -1266,8 +1266,7 @@ VkBuffer backend_create_buffer_storage(GLuint name, VkDeviceSize size,
     auto& tbl = mithril::vk::buffer_table();
     auto it = tbl.find(name);
     if (it != tbl.end()) {
-        fprintf(stderr,"[RESPEC] name=%u oldSize=%lld oldMapped=%p persistent=%d -> newSize=%lld newPersistent=%d\n",
-            name,(long long)it->second.size,(void*)it->second.mapped,(int)it->second.persistentlyMapped,(long long)size,(int)persistent);
+        
         { void* bt[20]; int nn=backtrace(bt,20); char** sy=backtrace_symbols(bt,nn);
           for(int i=0;i<nn;++i) fprintf(stderr,"   RB%s\n",sy[i]); free(sy); }
         mithril::vk::defer_destroy_buffer_entry(it->second);
@@ -1588,7 +1587,7 @@ void backend_delete_buffer(GLuint name) {
     auto& tbl = mithril::vk::buffer_table();
     auto it = tbl.find(name);
     if (it == tbl.end()) return;
-    fprintf(stderr,"[DELBUF] name=%u size=%lld mapped=%p persistent=%d\n",name,(long long)it->second.size,(void*)it->second.mapped,(int)it->second.persistentlyMapped);
+    
     mithril::vk::defer_destroy_buffer_entry(it->second);
     tbl.erase(it);
 }

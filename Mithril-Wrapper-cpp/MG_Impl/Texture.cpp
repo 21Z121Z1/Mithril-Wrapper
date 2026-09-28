@@ -227,7 +227,7 @@ void glTexImage2D(GLenum target, GLint level, GLint internalFormat,
                   GLsizei width, GLsizei height, GLint border,
                   GLenum format, GLenum type, const void* pixels) {
     MITHRIL_ENSURE_INIT();
-    if(level==0) fprintf(stderr,"[T2TOP] target=0x%x ifmt=0x%x fmt=0x%x %dx%d\n",(unsigned)target,(unsigned)internalFormat,(unsigned)format,width,height);
+    if(level==0) 
     if (border != 0) { mithril::state_set_error(GL_INVALID_VALUE); return; }
 
     // GL_PROXY_TEXTURE_2D: no real texture is created. Just record the
@@ -253,9 +253,9 @@ void glTexImage2D(GLenum target, GLint level, GLint internalFormat,
 
     mithril::Texture* t = bound_texture_for_target(target);
     if (!t) return;
-    if (level==0) fprintf(stderr,"[T2ID] id=%u ifmt=0x%x %dx%d\n",t->id,(unsigned)internalFormat,width,height);
+    if (level==0) 
     if (level == 0) {
-        fprintf(stderr,"[IMG2] tex=%u ifmt=0x%x fmt=0x%x type=0x%x %dx%d\n",t->id,(unsigned)internalFormat,(unsigned)format,(unsigned)type,width,height);
+        
         t->internalFormat = internalFormat;
         t->width  = width;
         t->height = height;
@@ -430,8 +430,7 @@ void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset,
     if (t->id == 1532) {
         static int gdump = 0;
         GLuint pboN = g_state->bufferBindings[(int)mithril::BufferTarget::PixelUnpack].name;
-        fprintf(stderr,"[FONTUP idx=%d] %dx%d tw=%d fmt=0x%x pbo=%u pixarg=%p\n",
-                gdump,width,height,t->width,format,pboN,pixels);
+        
         if (pboN==42) {
             static int p42=0;
             if(p42<3){

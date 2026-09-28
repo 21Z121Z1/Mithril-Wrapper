@@ -307,13 +307,6 @@ static bool prepare_draw(GLenum mode) {
         m.buffer_name  = vbn.buffer ? vbn.buffer : a.boundBuffer;
         m.divisor      = vbn.divisor ? vbn.divisor : a.divisor;
     }
-    if (getenv("MITHRIL_VA_DUMP")) {
-        for (int q=0;q<attrib_count;++q)
-            fprintf(stderr,"[VA_DUMP] loc=%d size=%d type=0x%x integ=%d norm=%d stride=%d offset=%d buf=%u divisor=%u bi0=%u\n",
-                attribs[q].location,attribs[q].size,(unsigned)attribs[q].type,attribs[q].integer,attribs[q].normalized,attribs[q].stride,
-                attribs[q].offset,attribs[q].buffer_name,attribs[q].divisor,
-                vao->attribs[attribs[q].location].bindingIndex);
-    }
 
     // Get-or-create the VkGraphicsPipeline. Blend state + colorWriteMask are
     // part of the pipeline signature so that enabling/disabling GL_BLEND,

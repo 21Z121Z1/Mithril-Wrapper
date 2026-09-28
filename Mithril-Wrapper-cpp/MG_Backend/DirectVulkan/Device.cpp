@@ -303,11 +303,11 @@ void drain_disposal_queue(int slot) {
     auto& q = b->disposalQueue[slot];
     if (q.empty()) return;
     for (auto& d : q) {
-        if (d.buffer)  { std::fprintf(stderr,"[DX-BUF] %p\n",(void*)d.buffer); vkDestroyBuffer(b->device, d.buffer, nullptr); }
-        if (d.image)   { std::fprintf(stderr,"[DX-IMG] %p\n",(void*)d.image); vkDestroyImage(b->device, d.image, nullptr); }
-        if (d.view)    { std::fprintf(stderr,"[DX-VIEW] %p\n",(void*)d.view); vkDestroyImageView(b->device, d.view, nullptr); }
+        if (d.buffer)  {  vkDestroyBuffer(b->device, d.buffer, nullptr); }
+        if (d.image)   {  vkDestroyImage(b->device, d.image, nullptr); }
+        if (d.view)    {  vkDestroyImageView(b->device, d.view, nullptr); }
         if (d.memory)  {
-            std::fprintf(stderr,"[DX-MEM] %p size=%llu\n",(void*)d.memory,(unsigned long long)d.memorySize);
+            
             vkFreeMemory(b->device, d.memory, nullptr);
             // FIX (P1): 递减分配计数器（诊断）
             if (b->currentAllocationCount > 0) b->currentAllocationCount--;
@@ -318,11 +318,11 @@ void drain_disposal_queue(int slot) {
                 b->currentVramBytes = 0;  // 防止下溢
             }
         }
-        if (d.sampler) { std::fprintf(stderr,"[DX-SAMP] %p\n",(void*)d.sampler); vkDestroySampler(b->device, d.sampler, nullptr); }
+        if (d.sampler) {  vkDestroySampler(b->device, d.sampler, nullptr); }
         // FIX (descriptor pool UAF - P0): 次级池扩容时退役的 VkDescriptorPool。
         // 只能在此处（slot fence 已等待，所有引用其 set 的 command buffer 完成）
         // 销毁 —— vkDestroyDescriptorPool 隐式释放池内所有 set。
-        if (d.pool) { std::fprintf(stderr,"[DX-POOL] %p\n",(void*)d.pool); vkDestroyDescriptorPool(b->device, d.pool, nullptr); }
+        if (d.pool) {  vkDestroyDescriptorPool(b->device, d.pool, nullptr); }
     }
     q.clear();
 }

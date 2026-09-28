@@ -887,8 +887,7 @@ VkPipeline get_or_create_pipeline(GLuint program,
             static int s_dbg=0;
             if (s_dbg < 4) {
                 s_dbg++;
-                std::fprintf(stderr,"[PIPEFAIL-DUMP] program=%u rc=%d attrDescs=%zu bindDescs=%zu\n",
-                    program,(int)r,attrDescs.size(),bindDescs.size());
+                
                 for (auto& d : attrDescs)
                     std::fprintf(stderr,"   AD loc=%u binding=%u format=%d off=%u\n",
                         d.location,d.binding,(int)d.format,d.offset);
