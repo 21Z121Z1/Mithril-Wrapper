@@ -883,6 +883,18 @@ VkPipeline get_or_create_pipeline(GLuint program,
     VkResult r = vkCreateGraphicsPipelines(b->device, b->pipelineCache, 1, &gi,
                                            nullptr, &pipeline);
     if (r != VK_SUCCESS) {
+        {
+            static int s_dbg=0;
+            if (s_dbg < 4) {
+                s_dbg++;
+                std::fprintf(stderr,"[PIPEFAIL-DUMP] program=%u rc=%d attrDescs=%zu bindDescs=%zu\n",
+                    program,(int)r,attrDescs.size(),bindDescs.size());
+                for (auto& d : attrDescs)
+                    std::fprintf(stderr,"   AD loc=%u binding=%u format=%d off=%u\n",
+                        d.location,d.binding,(int)d.format,d.offset);
+                std::fflush(stderr);
+            }
+        }
         // FIX (红屏根因 - 瞬态失败不可永久缓存):
         // vkCreateGraphicsPipelines 可能在设备处于异常状态时因瞬态原因失败：
         //   VK_ERROR_OUT_OF_DEVICE_MEMORY     (-2) 显存不足，设备恢复后可成功

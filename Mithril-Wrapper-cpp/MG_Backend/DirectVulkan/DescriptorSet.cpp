@@ -1492,9 +1492,81 @@ void bind_program_descriptors(GLuint program, VkPipelineBindPoint bindPoint) {
             if (incomplete) return;  // do NOT commit/bind a half-written set
         }
 
+        // Pre-update liveness guard: every imageInfo imageView/sampler must still
+        // reference a LIVE backend object. A non-null but already-freed handle makes
+        // MoltenVK objc_msgSend a dead object (SIGBUS inside mvkUpdateDescriptorSets).
+        {
+            DefaultTexture& dtg = default_texture();
+            bool stale = false;
+            for (const VkWriteDescriptorSet& ww : writes) {
+                if (ww.pImageInfo) {
+                    const VkDescriptorImageInfo& iii = *ww.pImageInfo;
+                    bool viewLive = (iii.imageView == dtg.view);
+                    if (!viewLive) {
+                        for (auto& kv : texture_table()) {
+                            if (kv.second.view == iii.imageView && kv.second.image != VK_NULL_HANDLE) { viewLive = true; break; }
+                        }
+                    }
+                    bool sampLive = (iii.sampler == dtg.sampler);
+                    if (!sampLive) {
+                        for (auto& kv : sampler_table()) {
+                            for (auto& pp : kv.second.byParams)
+                                if (pp.second == iii.sampler) { sampLive = true; break; }
+                            if (sampLive) break;
+                        }
+                    }
+                    if (!viewLive || !sampLive) {
+                        std::fprintf(stderr,"[STALE-DESC] prog=%u binding=%u viewLive=%d sampLive=%d view=%p samp=%p\n",
+                            program, ww.dstBinding, (int)viewLive, (int)sampLive,
+                            (void*)iii.imageView, (void*)iii.sampler);
+                        stale = true;
+                    }
+                }
+                // Buffer liveness: pBufferInfo->buffer must resolve to a LIVE GL buffer
+                // whose backend VkBuffer is non-null. A renamed/orphaned buffer can
+                // leave a descriptor pointing at a destroyed VkBuffer (dead MTLBuffer
+                // -> [MTLBuffer gpuAddress] SEGV inside MoltenVK).
+                if (ww.pBufferInfo && ww.pBufferInfo->buffer) {
+                    const VkBuffer want = ww.pBufferInfo->buffer;
+                    GLuint owner=0;
+                    for (auto& bkv : buffer_table())
+                        if (bkv.second.buffer == want) { owner=bkv.first; break; }
+                    if (!owner) {
+                        std::fprintf(stderr,"[STALE-BUF] prog=%u binding=%u type=%d vkbuf=%p off=%llu range=%llu NOT LIVE\n",
+                            program, ww.dstBinding,(int)ww.descriptorType,(void*)want,
+                            (unsigned long long)ww.pBufferInfo->offset,(unsigned long long)ww.pBufferInfo->range);
+                        stale = true;
+                    }
+                }
+            }
+            if (stale) {
+                std::fprintf(stderr,"[STALE-DESC] aborting bind, NOT updating descriptors with dead handles\n");
+                return;
+            }
+        }
         if (!writes.empty()) {
-            vkUpdateDescriptorSets(b->device, static_cast<uint32_t>(writes.size()),
-                                   writes.data(), 0, nullptr);
+            for (const VkWriteDescriptorSet& w1 : writes) {
+                GLuint ownerName=0; VkImage backImg=VK_NULL_HANDLE; int backLay=-1;
+                if (w1.pImageInfo && w1.pImageInfo->imageView) {
+                    for (auto& tkv : texture_table()) {
+                        if (tkv.second.view == w1.pImageInfo->imageView) {
+                            ownerName=tkv.first; backImg=tkv.second.image;
+                            backLay=(int)tkv.second.currentLayout; break;
+                        }
+                    }
+                }
+                const VkWriteDescriptorSet& w1x=w1;
+                std::fprintf(stderr,"[UPD1] binding=%u type=%d->%d ownerTex=%u view=%p backImg=%p backLay=%d samp=%p buf=%p bufoff=%llu range=%llu\n",
+                    w1.dstBinding,(int)w1.descriptorType,(int)w1x.descriptorType,ownerName,
+                    w1.pImageInfo?(void*)w1.pImageInfo->imageView:nullptr,
+                    (void*)backImg,backLay,
+                    w1.pImageInfo?(void*)w1.pImageInfo->sampler:nullptr,
+                    w1.pBufferInfo?(void*)w1.pBufferInfo->buffer:nullptr,
+                    w1.pBufferInfo?(unsigned long long)w1.pBufferInfo->offset:0,
+                    w1.pBufferInfo?(unsigned long long)w1.pBufferInfo->range:0);
+                std::fflush(stderr);
+                vkUpdateDescriptorSets(b->device,1,&w1x,0,nullptr);
+            }
         }
         DescriptorMemoEntry& e = pr.descMemo[slot][pr.descMemoNext[slot]];
         e.signature = sig;

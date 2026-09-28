@@ -304,12 +304,12 @@ void apply_attrib_bindings(std::string& src, GLenum gl_stage,
                            const std::unordered_map<std::string, GLuint>* bindings) {
     if (gl_stage != GL_VERTEX_SHADER) return;
 
-    // Allow optional precision / interpolation qualifiers between the
-    // interface keyword and the type (e.g. `in highp vec4 Position;`), plus an
-    // optional trailing array suffix. Group 1 = type, 2 = name, 3 = array.
+    // Group 1 = leading layout(...) content (may be absent),
+    // Group 2 = type, Group 3 = name, Group 4 = array suffix.
     static std::regex in_decl_re(
-        R"(^\s*(?:layout\s*\([^)]*\)\s*)?(?:in|attribute)\s+(?:(?:highp|mediump|lowp|flat|smooth|noperspective|centroid|sample|patch)\s+)*(\w+)\s+(\w+)\s*(\[[^\]]*\])?\s*;)",
+        R"(^\s*(?:layout\s*\(([^)]*)\)\s*)?(?:in|attribute)\s+(?:(?:highp|mediump|lowp|flat|smooth|noperspective|centroid|sample|patch)\s+)*(\w+)\s+(\w+)\s*(\[[^\]]*\])?\s*;)",
         std::regex::optimize | std::regex::multiline);
+    static std::regex loc_re(R"(location\s*=\s*(\d+))");
 
     // Locations the application pinned with glBindAttribLocation().
     std::unordered_map<std::string, GLuint> explicit_locs;
@@ -320,8 +320,30 @@ void apply_attrib_bindings(std::string& src, GLenum gl_stage,
             used.insert(kv.second);
         }
     }
-    // Auto-assign the remaining (or all) attributes in declaration order,
-    // skipping any location the application already claimed.
+
+    // Reserve locations already written explicitly in the shader
+    // (`layout(location=N) in ...`). Modern Minecraft (1.21+/26.x) emits
+    // explicit locations and does NOT call glBindAttribLocation. Renumbering
+    // these in source declaration order swaps attributes whenever the source
+    // declaration order differs from location order (e.g. the lightmap ivec2
+    // declared before the block-atlas vec2), so the bound VAO and the shader
+    // disagree -> Metal "Vertex attribute ... int2 cannot be read using
+    // MTLAttributeFormatFloat2".
+    {
+        std::sregex_iterator it(src.begin(), src.end(), in_decl_re), end;
+        for (; it != end; ++it) {
+            const std::smatch& mm = *it;
+            if (mm[1].matched) {
+                std::string lay = mm[1].str();
+                std::smatch lm;
+                if (std::regex_search(lay, lm, loc_re))
+                    used.insert((GLuint)std::stoul(lm[1].str()));
+            }
+        }
+    }
+
+    // Auto-assign only attributes that carry no explicit location, skipping
+    // any location already claimed (by glBindAttribLocation or the shader).
     GLuint next_auto = 0;
     auto take_auto = [&]() -> GLuint {
         while (used.count(next_auto)) ++next_auto;
@@ -340,26 +362,39 @@ void apply_attrib_bindings(std::string& src, GLenum gl_stage,
         size_t match_pos = m.position(0) + (search_start - src.cbegin());
         out.append(src, last_pos, match_pos - last_pos);
 
-        const std::string& vartype = m[1].str();
-        const std::string& varname = m[2].str();
-        const std::string& array_suffix = m[3].matched ? m[3].str() : std::string();
+        const std::string& vartype = m[2].str();
+        const std::string& varname = m[3].str();
+        const std::string& array_suffix = m[4].matched ? m[4].str() : std::string();
 
-        GLuint loc = 0;
-        auto it = explicit_locs.find(varname);
-        if (it != explicit_locs.end()) {
-            loc = it->second;
-        } else {
-            loc = take_auto();
+        // Existing explicit shader location -> keep the original declaration
+        // verbatim (also preserves interpolation/precision layout qualifiers).
+        GLuint existing = 0; bool has_existing = false;
+        if (m[1].matched) {
+            std::string lay = m[1].str();
+            std::smatch lm;
+            if (std::regex_search(lay, lm, loc_re)) {
+                existing = (GLuint)std::stoul(lm[1].str());
+                has_existing = true;
+            }
         }
+        (void)existing;
 
-        out += "layout(location=";
-        out += std::to_string(loc);
-        out += ") in ";
-        out += vartype;
-        out += ' ';
-        out += varname;
-        if (!array_suffix.empty()) out += array_suffix;
-        out += ';';
+        if (has_existing) {
+            out.append(m[0].first, m[0].second);  // unchanged
+        } else {
+            GLuint loc = 0;
+            auto it = explicit_locs.find(varname);
+            if (it != explicit_locs.end()) loc = it->second;
+            else loc = take_auto();
+            out += "layout(location=";
+            out += std::to_string(loc);
+            out += ") in ";
+            out += vartype;
+            out += ' ';
+            out += varname;
+            if (!array_suffix.empty()) out += array_suffix;
+            out += ';';
+        }
 
         last_pos = match_pos + m[0].length();
         search_start = m.suffix().first;
@@ -662,6 +697,43 @@ void inject_opaque_bindings(std::string& source, GLenum gl_stage) {
         }
         out.append(source, last, std::string::npos);
         source.swap(out);
+    }
+
+    // Re-base the Pass-2 sampler counter. Pass 1 above is a no-op whenever
+    // inject_ubo_block_bindings() already pinned every block (the common
+    // modern-Minecraft path), so the shared `binding` counter never advanced
+    // past the stage base. Starting samplers there collides with UBO bindings
+    // whenever a VERTEX shader declares a sampler (26.x in-world light/fog
+    // shaders): the SPIR-V then carries two resources at binding 0, which
+    // (a) makes MoltenVK build a malformed argument buffer -> gpuAddress crash
+    // with argument buffers ON, and (b) makes SPIRV-Cross pack UBOs onto
+    // duplicate Metal buffer indices with argument buffers OFF. Vertex
+    // samplers live in the upper half of the vertex 64-slot space (UBO blocks
+    // top out at binding 6); fragment/compute keep their stage base, then we
+    // advance past any binding already present in the source.
+    auto sampler_base_for_stage = [](EShLanguage st) -> unsigned {
+        switch (st) {
+            case EShLangVertex:   return 32u;
+            case EShLangFragment: return 64u;
+            case EShLangCompute:  return 128u;
+            default:              return 192u;
+        }
+    };
+    {
+        unsigned sb = sampler_base_for_stage(stage);
+        static const std::regex used_layout_re(R"(layout\s*\(([^)]*)\))");
+        static const std::regex bindnum_re(R"(binding\s*=\s*(\d+))");
+        std::sregex_iterator ubit(source.begin(), source.end(), used_layout_re), ubend;
+        for (; ubit != ubend; ++ubit) {
+            const std::string c = (*ubit)[1].str();
+            if (c.find("push_constant") != std::string::npos) continue;
+            std::smatch bm;
+            if (std::regex_search(c, bm, bindnum_re)) {
+                unsigned v = (unsigned)std::stoul(bm[1].str()) + 1u;
+                if (v > sb) sb = v;
+            }
+        }
+        binding = sb;
     }
 
     // ---- Pass 2: opaque uniforms (sampler*/image*) ----

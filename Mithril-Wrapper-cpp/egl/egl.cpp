@@ -417,6 +417,7 @@ EGLContext eglCreateContext(EGLDisplay dpy, EGLConfig config,
 
     EglContext* ctx = new EglContext{};
     ctx->state = mithril::state_create();
+    fprintf(stderr,"[NEWCTX] ctx=%p state=%p share=%p\n",(void*)ctx,(void*)ctx->state,(void*)share_context);
     ctx->config = config;
     ctx->clientAPI = t_boundAPI;
     ctx->majorVer = 3;

@@ -3,6 +3,7 @@
 // -> VkFormat mapping + staging upload. Implements the backend_get_or_create_*
 // family declared in MG_Backend/Backend.h.
 #include "Resources.h"
+#include <execinfo.h>
 #include "Device.h"
 #include "CommandStream.h"  // ensure_command_buffer_recording
 #include "Pipeline.h"       // clear_all_pipeline_caches — OOM 时驱逐 pipeline
@@ -1264,7 +1265,13 @@ VkBuffer backend_create_buffer_storage(GLuint name, VkDeviceSize size,
     if (!b->initialized || name == 0 || size == 0) return VK_NULL_HANDLE;
     auto& tbl = mithril::vk::buffer_table();
     auto it = tbl.find(name);
-    if (it != tbl.end()) mithril::vk::defer_destroy_buffer_entry(it->second);
+    if (it != tbl.end()) {
+        fprintf(stderr,"[RESPEC] name=%u oldSize=%lld oldMapped=%p persistent=%d -> newSize=%lld newPersistent=%d\n",
+            name,(long long)it->second.size,(void*)it->second.mapped,(int)it->second.persistentlyMapped,(long long)size,(int)persistent);
+        { void* bt[20]; int nn=backtrace(bt,20); char** sy=backtrace_symbols(bt,nn);
+          for(int i=0;i<nn;++i) fprintf(stderr,"   RB%s\n",sy[i]); free(sy); }
+        mithril::vk::defer_destroy_buffer_entry(it->second);
+    }
     mithril::vk::BufferEntry e;
     VkBufferUsageFlags usage =
             VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
@@ -1581,6 +1588,7 @@ void backend_delete_buffer(GLuint name) {
     auto& tbl = mithril::vk::buffer_table();
     auto it = tbl.find(name);
     if (it == tbl.end()) return;
+    fprintf(stderr,"[DELBUF] name=%u size=%lld mapped=%p persistent=%d\n",name,(long long)it->second.size,(void*)it->second.mapped,(int)it->second.persistentlyMapped);
     mithril::vk::defer_destroy_buffer_entry(it->second);
     tbl.erase(it);
 }

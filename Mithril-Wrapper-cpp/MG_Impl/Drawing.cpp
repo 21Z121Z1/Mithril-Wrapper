@@ -309,8 +309,8 @@ static bool prepare_draw(GLenum mode) {
     }
     if (getenv("MITHRIL_VA_DUMP")) {
         for (int q=0;q<attrib_count;++q)
-            fprintf(stderr,"[VA_DUMP] loc=%d size=%d type=0x%x stride=%d offset=%d buf=%u divisor=%u bi0=%u\n",
-                attribs[q].location,attribs[q].size,(unsigned)attribs[q].type,attribs[q].stride,
+            fprintf(stderr,"[VA_DUMP] loc=%d size=%d type=0x%x integ=%d norm=%d stride=%d offset=%d buf=%u divisor=%u bi0=%u\n",
+                attribs[q].location,attribs[q].size,(unsigned)attribs[q].type,attribs[q].integer,attribs[q].normalized,attribs[q].stride,
                 attribs[q].offset,attribs[q].buffer_name,attribs[q].divisor,
                 vao->attribs[attribs[q].location].bindingIndex);
     }

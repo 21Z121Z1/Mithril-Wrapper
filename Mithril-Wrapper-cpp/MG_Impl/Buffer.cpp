@@ -40,6 +40,7 @@ void glDeleteBuffers(GLsizei n, const GLuint* buffers) {
     for (GLsizei i = 0; i < n; ++i) {
         GLuint name = buffers[i];
         if (name == 0) continue;
+        fprintf(stderr,"[DELGL] name=%u\n",name);
         // Unbind from all non-indexed buffer binding slots.
         for (int s = 0; s < mithril::kBufferTargetCount; ++s) {
             if (g_state->bufferBindings[s].name == name) g_state->bufferBindings[s].bind(0);
@@ -86,6 +87,7 @@ static mithril::Buffer* bound_buffer_for_target(GLenum target) {
     mithril::Buffer* b = mithril::state_get_buffer(name);
     if (!b && name != 0) {
         // The name was reserved by glGen* but not yet inserted into the table.
+        fprintf(stderr,"[FRESHBUF] name=%u target=0x%x\n",name,target);
         g_state->buffers[name] = mithril::Buffer{};
         b = mithril::state_get_buffer(name);
         b->id = name;
@@ -124,6 +126,7 @@ void glBufferData(GLenum target, GLsizeiptr size, const void* data, GLenum usage
     if (size < 0) { mithril::state_set_error(GL_INVALID_VALUE); return; }
     mithril::Buffer* b = bound_buffer_for_target(target);
     if (!b) { mithril::state_set_error(GL_INVALID_OPERATION); return; }
+    fprintf(stderr,"[BDATA] id=%u size=%lld wasImmutable=%d\n",b->id,(long long)size,(int)b->immutable);
     b->size  = size;
     b->usage = usage;
     b->immutable = false;  // glBufferData resets immutable flag
@@ -145,9 +148,11 @@ void glBufferStorage(GLenum target, GLsizeiptr size, const void* data, GLbitfiel
     if (size < 0) { mithril::state_set_error(GL_INVALID_VALUE); return; }
     mithril::Buffer* b = bound_buffer_for_target(target);
     if (!b) { mithril::state_set_error(GL_INVALID_OPERATION); return; }
+    fprintf(stderr,"[STOR-ENTRY] id=%u size=%lld immutable=%d flags=0x%x\n",b->id,(long long)size,(int)b->immutable,(unsigned)flags);
     if (b->immutable) {
         // GL_BUFFER_IMMUTABLE_STORAGE already set — glBufferStorage on immutable
         // buffer is an error (GL_INVALID_OPERATION).
+        fprintf(stderr,"[STOR-REJECT] id=%u already immutable\n",b->id);
         mithril::state_set_error(GL_INVALID_OPERATION);
         return;
     }
@@ -270,7 +275,7 @@ void* glMapBufferRange(GLenum target, GLintptr offset, GLsizeiptr length, GLbitf
     } else {
         b->mapped = b->data.data() + offset;
     }
-    if (b->id==33 && getenv("MITHRIL_B33")) fprintf(stderr,"[B33] MapRange off=%lld len=%lld access=0x%x live=%p ptr=%p\n",(long long)offset,(long long)length,(unsigned)access,live,b->mapped);
+    fprintf(stderr,"[MAP] id=%u off=%lld len=%lld access=0x%x live=%p ptr=%p\n",b->id,(long long)offset,(long long)length,(unsigned)access,live,b->mapped);
     return b->mapped;
 }
 
