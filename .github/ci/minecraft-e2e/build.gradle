@@ -70,7 +70,7 @@ tasks.named('runClient') {
     // The native bridge reads its configuration from the environment. Older Loom
     // run tasks expose a JavaExec-style environment(...) method; configure it
     // only when present so this script keeps working across Loom versions (the
-    // bridge has hard-cicoded fallbacks for when it is missing).
+    // bridge has hard-coded fallbacks for when it is missing).
     try {
         environment('MITHRIL_E2E_ROOT', evidenceRoot.get())
         environment('MITHRIL_E2E_MITHRIL_DYLIB', mithrilDylib.get())
