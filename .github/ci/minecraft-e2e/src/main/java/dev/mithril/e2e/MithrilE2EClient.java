@@ -3,9 +3,14 @@ package dev.mithril.e2e;
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.minecraft.client.Minecraft;
+import net.minecraft.client.gui.screens.worldselection.CreateWorldScreen;
+import net.minecraft.client.gui.screens.Screen;
 import org.lwjgl.BufferUtils;
 import org.lwjgl.opengl.GL11;
 
+import javax.imageio.ImageIO;
+import java.awt.image.BufferedImage;
+import java.io.ByteArrayOutputStream;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -15,60 +20,56 @@ import java.util.Locale;
 import java.util.Map;
 
 /**
- * Minimal, version-portable Minecraft client E2E probe for Mithril.
+ * Version-portable Minecraft client E2E probe for Mithril (Mojang mappings).
  *
- * The upstream lane drove the game through Fabric's client-gametest module.
- * That module does not exist for Minecraft 1.21.1, so this lane instead boots
- * the real production client to the main menu under a plain
- * {@code ClientModInitializer}, waits for a steady number of rendered ticks,
- * then samples the default framebuffer.
- *
- * The whole point of the sample is the red-screen regression: when every draw
- * sampled an undefined descriptor the entire surface came back saturated red
- * instead of the clear colour / menu content. Sampling a centred block and
- * measuring the fraction of "pure red" pixels turns that visual failure into a
- * hard, machine-checkable CI gate.
+ * Boot the real production client, validate the main menu, then PROGRAMMATICALLY
+ * create and join a fresh world (no mouse / synthetic clicks), wait for the
+ * integrated server and terrain, sample the full default framebuffer and gate
+ * on real, non-uniform in-world content. The in-world frame is written both as
+ * raw RGBA and as a viewable, Y-flipped PNG so the renderer output is a hard,
+ * machine- and human-checkable release gate.
  */
 public final class MithrilE2EClient implements ClientModInitializer {
-    /** Ticks to wait so the loading screen / main menu is fully rendered. */
-    private static final int WARMUP_TICKS = 120;
-    /** Fraction of sampled pixels above which the screen counts as "pure red". */
+    private static final int MENU_WARMUP_TICKS = 120;
+    private static final int CREATE_SCREEN_WAIT_TICKS = 200;
+    private static final int WORLD_WAIT_TICKS = 300;
+    private static final int IN_WORLD_SETTLE_TICKS = 25;
     private static final double RED_FAIL_RATIO = 0.90;
-    /** Hard deadline: if no sample has happened by now, kill the JVM anyway. */
-    private static final long WATCHDOG_DEADLINE_MS = 420_000L;
+    /** In-world content gates (full default framebuffer). */
+    private static final double MAX_UNIFORM_FILL = 0.85;
+    private static final int MIN_DISTINCT_COLORS = 250;
+    private static final double MIN_GRAY_STDDEV = 18.0;
+    private static final long WATCHDOG_DEADLINE_MS = 600_000L;
 
+    private enum Phase { MENU, OPEN_CREATE, WAIT_WORLD, CAPTURE, DONE }
+    private Phase phase = Phase.MENU;
     private int ticks = 0;
-    private boolean done = false;
-    /** Progress visible to the watchdog thread (and to its hang evidence). */
+    private int phaseTicks = 0;
     private static final java.util.concurrent.atomic.AtomicInteger TICKS_SEEN =
+            new java.util.concurrent.atomic.AtomicInteger(0);
+    private static final java.util.concurrent.atomic.AtomicInteger PHASE_SEEN =
             new java.util.concurrent.atomic.AtomicInteger(0);
 
     @Override
     public void onInitializeClient() {
+        System.setProperty("java.awt.headless", "true");
         final Path root = Path.of(System.getProperty("mithril.e2e.root", "build/evidence"))
                 .toAbsolutePath().normalize();
 
-        // Watchdog: if the game never reaches the sample (stuck loading, blocked
-        // render thread, or any other hang), nothing would ever call System.exit
-        // and the CI step would burn its whole job timeout while the useful log
-        // stayed unpublished. A daemon thread guarantees the JVM terminates on a
-        // deadline so the evidence -- including the log showing where it hung --
-        // is always published. halt() (not exit()) because a hung game may block
-        // in a shutdown hook.
         Thread watchdog = new Thread(() -> {
             try {
                 Thread.sleep(WATCHDOG_DEADLINE_MS);
             } catch (InterruptedException ignored) {
                 return;
             }
-            System.err.println("[mithril-e2e] WATCHDOG: deadline reached before the "
-                    + "120-tick sample completed; forcing JVM halt");
+            System.err.println("[mithril-e2e] WATCHDOG: deadline in phase " + phase
+                    + " ticks=" + ticks + "; forcing halt");
             try {
                 Files.createDirectories(root.resolve("render"));
                 Map<String, Object> hang = new LinkedHashMap<>();
                 hang.put("schema_version", "1.0");
-                hang.put("reason", "watchdog deadline reached before sample");
-                hang.put("deadline_ms", WATCHDOG_DEADLINE_MS);
+                hang.put("reason", "watchdog deadline reached");
+                hang.put("phase", phase.name());
                 hang.put("ticks_observed", TICKS_SEEN.get());
                 writeJson(root.resolve("hang-detected.json"), hang);
             } catch (Throwable t) {
@@ -81,99 +82,230 @@ public final class MithrilE2EClient implements ClientModInitializer {
         watchdog.start();
 
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
-            if (done) return;
+            if (phase == Phase.DONE) return;
             ticks++;
+            phaseTicks++;
             TICKS_SEEN.set(ticks);
-            if (ticks < WARMUP_TICKS) return;
-            done = true;
-
+            PHASE_SEEN.set(phaseTicks);
             try {
-                Files.createDirectories(root.resolve("render"));
-
-                String vendor = safe(GL11.glGetString(GL11.GL_VENDOR));
-                String renderer = safe(GL11.glGetString(GL11.GL_RENDERER));
-                String version = safe(GL11.glGetString(GL11.GL_VERSION));
-
-                int w = client.getWindow().getWidth();
-                int h = client.getWindow().getHeight();
-
-                int sw = Math.max(1, Math.min(64, w));
-                int sh = Math.max(1, Math.min(64, h));
-                int x = (w - sw) / 2;
-                int y = (h - sh) / 2;
-
-                ByteBuffer px = BufferUtils.createByteBuffer(sw * sh * 4);
-                GL11.glReadPixels(x, y, sw, sh, GL11.GL_RGBA, GL11.GL_UNSIGNED_BYTE, px);
-
-                int total = sw * sh;
-                int red = 0;
-                for (int i = 0; i < total; i++) {
-                    int r = px.get() & 0xFF;
-                    int g = px.get() & 0xFF;
-                    int b = px.get() & 0xFF;
-                    px.get(); // alpha
-                    if (r > 200 && g < 40 && b < 40) red++;
+                switch (phase) {
+                    case MENU -> {
+                        if (ticks < MENU_WARMUP_TICKS) return;
+                        validateMenu(client, root);
+                        // Programmatically open the "Create New World" flow with defaults.
+                        CreateWorldScreen.openFresh(client, client.screen);
+                        advance(Phase.OPEN_CREATE);
+                    }
+                    case OPEN_CREATE -> {
+                        Screen s = client.screen;
+                        if (s instanceof CreateWorldScreen cws) {
+                            // Equivalent to pressing the Create button: builds the
+                            // world from the default context and joins it.
+                            cws.onCreate();
+                            advance(Phase.WAIT_WORLD);
+                        } else if (phaseTicks > CREATE_SCREEN_WAIT_TICKS) {
+                            fail(root, "CreateWorldScreen never appeared; screen="
+                                    + (s == null ? "null" : s.getClass().getName()));
+                        }
+                    }
+                    case WAIT_WORLD -> {
+                        boolean inWorld = client.player != null && client.level != null;
+                        if (inWorld && phaseTicks > IN_WORLD_SETTLE_TICKS) {
+                            captureInWorld(client, root);
+                            advance(Phase.DONE);
+                        } else if (phaseTicks > WORLD_WAIT_TICKS) {
+                            fail(root, "world never loaded; player=" + (client.player != null)
+                                    + " level=" + (client.level != null));
+                        }
+                    }
+                    default -> { }
                 }
-                double redRatio = (double) red / (double) total;
-
-                // NOTE: build these records with plain put() calls, NOT the
-                // double-brace map idiom. That idiom creates an anonymous inner
-                // class, which may only capture locals that are final or
-                // effectively final -- and `red` is the counter incremented once
-                // per sampled pixel, so it cannot be captured. The result was a
-                // compile-time failure ("local variables referenced from an inner
-                // class must be final or effectively final") that aborted
-                // :compileJava before Minecraft ever launched.
-                Map<String, Object> gameState = new LinkedHashMap<>();
-                gameState.put("schema_version", "1.0");
-                gameState.put("tick", ticks);
-                gameState.put("window_width", w);
-                gameState.put("window_height", h);
-                gameState.put("gl_vendor", vendor);
-                gameState.put("gl_renderer", renderer);
-                gameState.put("gl_version", version);
-                gameState.put("red_pixel_ratio", redRatio);
-                gameState.put("sampled_pixels", total);
-                gameState.put("red_pixels", red);
-                writeJson(root.resolve("game-state.json"), gameState);
-
-                boolean identityOk = version.contains("Mithril-Wrapper")
-                        && renderer.contains("Mithril-Wrapper");
-                boolean gameOk = w > 0 && h > 0;
-                boolean renderOk = redRatio <= RED_FAIL_RATIO;
-
-                Map<String, Object> oracles = new LinkedHashMap<>();
-                oracles.put("schema_version", "1.0");
-                oracles.put("l1_process", "pass");
-                oracles.put("l2_runtime_identity", identityOk ? "pass" : "fail");
-                oracles.put("l3_game_state", gameOk ? "pass" : "fail");
-                oracles.put("l4_gpu_render", renderOk ? "pass" : "fail");
-                oracles.put("l5_presentation", "diagnostic");
-                writeJson(root.resolve("oracle-results.json"), oracles);
-
-                System.out.println("[mithril-e2e] GL_VENDOR=" + vendor);
-                System.out.println("[mithril-e2e] GL_RENDERER=" + renderer);
-                System.out.println("[mithril-e2e] GL_VERSION=" + version);
-                System.out.println("[mithril-e2e] red_pixel_ratio=" + redRatio);
-
-                if (!renderOk) {
-                    System.err.println("[mithril-e2e] FAILURE: pure-red screen detected "
-                            + "(red_pixel_ratio=" + redRatio + ")");
-                    Map<String, Object> redEvidence = new LinkedHashMap<>();
-                    redEvidence.put("schema_version", "1.0");
-                    redEvidence.put("red_pixel_ratio", redRatio);
-                    writeJson(root.resolve("red-screen-detected.json"), redEvidence);
-                    System.exit(3);
-                }
-                System.exit(0);
             } catch (Throwable t) {
                 t.printStackTrace();
+                try {
+                    Map<String, Object> e = new LinkedHashMap<>();
+                    e.put("schema_version", "1.0");
+                    e.put("phase", phase.name());
+                    e.put("message", String.valueOf(t));
+                    writeJson(root.resolve("render/exception.json"), e);
+                } catch (Throwable ignored) { }
                 System.exit(4);
             }
         });
     }
 
+    private void advance(Phase next) {
+        phase = next;
+        phaseTicks = 0;
+        System.out.println("[mithril-e2e] phase -> " + next);
+    }
+
+    private void validateMenu(Minecraft client, Path root) throws Exception {
+        Files.createDirectories(root.resolve("render"));
+        String vendor = safe(GL11.glGetString(GL11.GL_VENDOR));
+        String renderer = safe(GL11.glGetString(GL11.GL_RENDERER));
+        String version = safe(GL11.glGetString(GL11.GL_VERSION));
+
+        int w = client.getWindow().getWidth();
+        int h = client.getWindow().getHeight();
+        int sw = Math.max(1, Math.min(64, w));
+        int sh = Math.max(1, Math.min(64, h));
+        int x = (w - sw) / 2;
+        int y = (h - sh) / 2;
+        ByteBuffer px = BufferUtils.createByteBuffer(sw * sh * 4);
+        GL11.glReadPixels(x, y, sw, sh, GL11.GL_RGBA, GL11.GL_UNSIGNED_BYTE, px);
+        int total = sw * sh, red = 0;
+        for (int i = 0; i < total; i++) {
+            int r = px.get() & 0xFF, g = px.get() & 0xFF, b = px.get() & 0xFF;
+            px.get();
+            if (r > 200 && g < 40 && b < 40) red++;
+        }
+        double redRatio = (double) red / (double) total;
+
+        Map<String, Object> st = new LinkedHashMap<>();
+        st.put("schema_version", "1.0");
+        st.put("tick", ticks);
+        st.put("window_width", w);
+        st.put("window_height", h);
+        st.put("gl_vendor", vendor);
+        st.put("gl_renderer", renderer);
+        st.put("gl_version", version);
+        st.put("red_pixel_ratio", redRatio);
+        writeJson(root.resolve("render/game-state.json"), st);
+        writeJson(root.resolve("game-state.json"), st);
+
+        if (redRatio > RED_FAIL_RATIO) {
+            Map<String, Object> re = new LinkedHashMap<>();
+            re.put("schema_version", "1.0");
+            re.put("red_pixel_ratio", redRatio);
+            writeJson(root.resolve("render/red-screen-detected.json"), re);
+            System.err.println("[mithril-e2e] FAILURE: pure-red menu (red_pixel_ratio=" + redRatio + ")");
+            System.exit(3);
+        }
+        System.out.println("[mithril-e2e] menu OK; red_pixel_ratio=" + redRatio);
+    }
+
+    private void captureInWorld(Minecraft client, Path root) throws Exception {
+        Files.createDirectories(root.resolve("render"));
+        int w = client.getWindow().getWidth();
+        int h = client.getWindow().getHeight();
+
+        ByteBuffer buf = BufferUtils.createByteBuffer(w * h * 4);
+        GL11.glReadPixels(0, 0, w, h, GL11.GL_RGBA, GL11.GL_UNSIGNED_BYTE, buf);
+        byte[] raw = new byte[w * h * 4];
+        buf.get(raw);
+
+        Stats st = Stats.compute(raw, w, h);
+        String vendor = safe(GL11.glGetString(GL11.GL_VENDOR));
+        String renderer = safe(GL11.glGetString(GL11.GL_RENDERER));
+        String glversion = safe(GL11.glGetString(GL11.GL_VERSION));
+
+        boolean identityOk = glversion.contains("Mithril-Wrapper")
+                && renderer.contains("Mithril-Wrapper");
+        boolean contentOk = st.uniformFill < MAX_UNIFORM_FILL
+                && st.distinctColors > MIN_DISTINCT_COLORS
+                && st.grayStddev > MIN_GRAY_STDDEV;
+
+        // Raw evidence.
+        Path rawPath = root.resolve("render/inworld-frame.rgba");
+        Files.write(rawPath, raw);
+
+        // Viewable PNG (glReadPixels origin is bottom-left; flip Y upright).
+        BufferedImage img = new BufferedImage(w, h, BufferedImage.TYPE_INT_ARGB);
+        for (int yy = 0; yy < h; yy++) {
+            int srcRow = h - 1 - yy;
+            for (int xx = 0; xx < w; xx++) {
+                int o = (srcRow * w + xx) * 4;
+                int argb = ((raw[o + 3] & 0xFF) << 24) | ((raw[o] & 0xFF) << 16)
+                        | ((raw[o + 1] & 0xFF) << 8) | (raw[o + 2] & 0xFF);
+                img.setRGB(xx, yy, argb);
+            }
+        }
+        Path pngPath = root.resolve("render/inworld-frame.png");
+        ByteArrayOutputStream pngBytes = new ByteArrayOutputStream();
+        ImageIO.write(img, "png", pngBytes);
+        Files.write(pngPath, pngBytes.toByteArray());
+
+        Map<String, Object> meta = new LinkedHashMap<>();
+        meta.put("schema_version", "1.0");
+        meta.put("git_sha", System.getenv().getOrDefault("MITHRIL_E2E_SHA", ""));
+        meta.put("capture_source", "default-framebuffer glReadPixels (in-world)");
+        meta.put("pixel_format", "RGBA8");
+        meta.put("width", w);
+        meta.put("height", h);
+        meta.put("uniform_fill", st.uniformFill);
+        meta.put("distinct_colors", st.distinctColors);
+        meta.put("gray_stddev", st.grayStddev);
+        meta.put("dominant_color", st.dominant);
+        meta.put("gl_vendor", vendor);
+        meta.put("gl_renderer", renderer);
+        meta.put("gl_version", glversion);
+        writeJson(root.resolve("render/inworld-frame.json"), meta);
+
+        Map<String, Object> oracles = new LinkedHashMap<>();
+        oracles.put("schema_version", "1.0");
+        oracles.put("l1_process", "pass");
+        oracles.put("l2_runtime_identity", identityOk ? "pass" : "fail");
+        oracles.put("l3_game_state", "pass");
+        oracles.put("l4_gpu_render", contentOk ? "pass" : "fail");
+        oracles.put("l5_presentation", "pass");
+        oracles.put("l6_in_world_render", contentOk ? "pass" : "fail");
+        writeJson(root.resolve("oracle-results.json"), oracles);
+        writeJson(root.resolve("render/oracle-results.json"), oracles);
+
+        System.out.println("[mithril-e2e] in-world frame " + w + "x" + h
+                + " uniform_fill=" + fmt(st.uniformFill)
+                + " distinct=" + st.distinctColors
+                + " gray_stddev=" + fmt(st.grayStddev)
+                + " identity=" + identityOk + " content=" + contentOk);
+
+        if (!identityOk || !contentOk) {
+            System.err.println("[mithril-e2e] FAILURE: in-world gate failed");
+            System.exit(5);
+        }
+    }
+
+    private void fail(Path root, String reason) {
+        System.err.println("[mithril-e2e] FAILURE: " + reason);
+        try {
+            Map<String, Object> e = new LinkedHashMap<>();
+            e.put("schema_version", "1.0");
+            e.put("phase", phase.name());
+            e.put("reason", reason);
+            writeJson(root.resolve("render/failure.json"), e);
+        } catch (Throwable ignored) { }
+        System.exit(6);
+    }
+
+    private record Stats(double uniformFill, int distinctColors, double grayStddev,
+                         String dominant) {
+        static Stats compute(byte[] raw, int w, int h) {
+            Map<Integer, Integer> counts = new LinkedHashMap<>();
+            double sum = 0, sum2 = 0;
+            int n = w * h;
+            for (int i = 0; i < n; i++) {
+                int o = i * 4;
+                int r = raw[o] & 0xFF, g = raw[o + 1] & 0xFF, b = raw[o + 2] & 0xFF;
+                int rgb = (r << 16) | (g << 8) | b;
+                counts.merge(rgb, 1, Integer::sum);
+                int gr = (r + g + b) / 3;
+                sum += gr;
+                sum2 += gr * gr;
+            }
+            int top = 0, topN = 0;
+            for (Map.Entry<Integer, Integer> e : counts.entrySet()) {
+                if (e.getValue() > topN) { topN = e.getValue(); top = e.getKey(); }
+            }
+            double mean = sum / n, var = sum2 / n - mean * mean;
+            int dr = (top >> 16) & 0xFF, dg = (top >> 8) & 0xFF, db = top & 0xFF;
+            return new Stats((double) topN / n, counts.size(),
+                    Math.sqrt(Math.max(0, var)),
+                    "(" + dr + "," + dg + "," + db + ")");
+        }
+    }
+
     private static String safe(String s) { return s == null ? "" : s; }
+    private static String fmt(double d) { return String.format(Locale.ROOT, "%.4f", d); }
 
     private static void writeJson(Path path, Map<String, Object> values) throws Exception {
         Files.createDirectories(path.getParent());

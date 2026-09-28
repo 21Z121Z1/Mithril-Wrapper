@@ -218,40 +218,26 @@ jobs:
           cp "$E2E_ROOT/failure.json" "$E2E_ROOT/failure-pre-minecraft.json"
           rm -f "$E2E_ROOT/failure.json"
 
-          # Capture the full Gradle + Minecraft output. Job logs are not readable
-          # from outside GitHub, so this file is published to the ci-diagnostics
-          # branch and read back through the contents API. Without it a Gradle or
-          # client failure is completely opaque.
           gradle --version > "$E2E_ROOT/gradle-version.txt" 2>&1
           mkdir -p "$E2E_ROOT/render"
 
-          # The bridge reads its configuration from the environment. build.gradle
-          # sets these via the run task's environment(...), but that is
-          # best-effort (wrapped in try/catch for Loom compatibility) and Gradle
-          # does not guarantee forwarding to the forked game JVM. Exporting here
-          # is authoritative: gradle inherits our environment and hands it to the
-          # child, so the bridge sees the real evidence root and the real dylib
-          # path instead of falling back to the global symbol scope -- where
-          # dlsym("glGetIntegerv") can fail when LWJGL loaded the dylib
-          # RTLD_LOCAL, which would make capture report a missing GL symbol.
+          # The bridge and the in-process E2E mod read configuration from the
+          # environment. Exporting here is authoritative: gradle inherits it and
+          # hands it to the forked game JVM.
           export MITHRIL_E2E_ROOT="$E2E_ROOT"
           export MITHRIL_E2E_MITHRIL_DYLIB="${{ steps.mithril.outputs.dylib }}"
           export MITHRIL_E2E_GLFW_DELEGATE="${{ steps.bridge.outputs.glfw_real }}"
-          echo "[mithril-e2e] MITHRIL_E2E_ROOT=$MITHRIL_E2E_ROOT" \
-            >> "$E2E_ROOT/minecraft-client-run.log"
+          export MITHRIL_E2E_SHA="${GITHUB_SHA}"
 
-          # Start the game in the background. We deliberately do NOT wait for it
-          # to exit: the E2E client mod is never loaded by Fabric (the loader's
-          # mod list contains only the 54 Fabric API/loader mods), so it never
-          # reaches its 120-tick sample and never calls System.exit -- the step
-          # just burns the whole deadline while the log stays unpublished.
-          #
-          # Instead we drive the authoritative L4 capture from the native bridge,
-          # which IS loaded (it is the GLFW shim). Once the game is demonstrably
-          # presenting we drop a request file that the bridge claims on its next
-          # present, reads the default framebuffer back with glReadPixels, and
-          # writes render/prepresent-frame-NNNN.rgba + .meta. We then stop the
-          # game ourselves and let the red-screen oracle judge the result.
+          # The E2E client mod (dev.mithril.e2e.MithrilE2EClient) drives the
+          # whole scenario in-process and in order:
+          #   validate main menu -> create a fresh world -> join it -> let the
+          #   integrated server + terrain settle -> sample the FULL default
+          #   framebuffer -> gate on real, non-uniform in-world content -> write
+          #   render/inworld-frame.{rgba,png,json} and the L1-L6 oracles.
+          # It calls System.exit with a machine-readable code (0 pass; 3 red
+          # menu; 4 exception; 5 in-world gate; 6 scenario failure; 11
+          # watchdog). gradle returns that code.
           gradle -p .github/ci/minecraft-e2e --build-cache --stacktrace \
             -PmithrilDylib="${{ steps.mithril.outputs.dylib }}" \
             -PglfwBridge="${{ steps.bridge.outputs.bridge }}" \
@@ -272,185 +258,92 @@ jobs:
             wait "$gradle_pid" 2>/dev/null
           }
 
-          # 1) Wait until the game is actually presenting frames.
+          # Wait for the mod-driven run to finish (success or failure), with a
+          # liveness check on presented frames so a hard early hang is obvious.
           hard_deadline=$(( $(date +%s) + 600 ))
-          ready=0
+          saw_present=0
           while [ "$(date +%s)" -lt "$hard_deadline" ]; do
+            kill -0 "$gradle_pid" 2>/dev/null || break
             if [ -f "$E2E_ROOT/minecraft-client-run.log" ]; then
               n=$(grep -c "B1 present frame" "$E2E_ROOT/minecraft-client-run.log" 2>/dev/null)
-              if [ "${n:-0}" -ge 20 ]; then ready=1; break; fi
+              if [ "${n:-0}" -ge 20 ]; then saw_present=1; fi
             fi
-            kill -0 "$gradle_pid" 2>/dev/null || break
             sleep 5
           done
-          if [ "$ready" -ne 1 ]; then
+
+          if kill -0 "$gradle_pid" 2>/dev/null; then
             stop_game
             python3 ci/minecraft-e2e/evidence.py --root "$E2E_ROOT" fail \
               --failure-id RUNTIME_MINECRAFT_HANG --phase minecraft_client \
-              --message "Minecraft never presented 20 frames; treated as a hang"
+              --message "mod-driven run did not finish within deadline"
             exit 1
           fi
+          wait "$gradle_pid"; gradle_rc=$?
+          echo "[mithril-e2e] gradle runClient exit=$gradle_rc saw_present=$saw_present" \
+            >> "$E2E_ROOT/minecraft-client-run.log"
 
-          # 2) Let it finish loading and settle on the main menu so the capture
-          #    sees real GUI content rather than the transient loading screen.
-          sleep 120
-
-          # 3) Ask the bridge to capture the frame it is about to present.
-          #
-          # Re-post the request periodically rather than firing once. The bridge
-          # claims (removes) a request on its very next swap, so a single failed
-          # attempt is consumed and gone -- that is exactly how one run ended
-          # with a lone "prepresent_capture_failed" and then waited out the full
-          # 180s with nothing left to capture. Re-posting gives several chances
-          # within the same window; each file name carries the attempt number so
-          # attempts never overwrite each other.
-          attempt=1
-          post_request() {
-            printf '%s\n' "$attempt" > "$E2E_ROOT/render/prepresent-request.txt"
-          }
-          post_request
-
-          # 4) Wait for the bridge to produce the capture.
-          captured=""
-          cap_deadline=$(( $(date +%s) + 180 ))
-          last_post=$(date +%s)
-          while [ "$(date +%s)" -lt "$cap_deadline" ]; do
-            for f in "$E2E_ROOT"/render/prepresent-frame-*.meta; do
-              if [ -f "$f" ]; then captured="$f"; break; fi
-            done
-            [ -n "$captured" ] && break
-            kill -0 "$gradle_pid" 2>/dev/null || break
-            now=$(date +%s)
-            if [ $(( now - last_post )) -ge 20 ]; then
-              attempt=$(( attempt + 1 ))
-              post_request
-              last_post=$now
-              echo "[mithril-e2e] re-posted capture request (attempt $attempt)" \
-                >> "$E2E_ROOT/minecraft-client-run.log"
-            fi
-            sleep 2
-          done
-          if [ -z "$captured" ]; then
-            stop_game
+          if [ ! -f "$E2E_ROOT/render/inworld-frame.png" ] || \
+             [ ! -f "$E2E_ROOT/render/inworld-frame.json" ]; then
             python3 ci/minecraft-e2e/evidence.py --root "$E2E_ROOT" fail \
-              --failure-id RUNTIME_MINECRAFT_CAPTURE_TIMEOUT --phase minecraft_client \
-              --message "bridge did not produce a pre-present capture within 180s"
+              --failure-id RUNTIME_MINECRAFT_NO_INWORLD_FRAME --phase minecraft_client \
+              --message "run finished without render/inworld-frame.png (gradle_rc=$gradle_rc, saw_present=$saw_present)"
             exit 1
           fi
-          echo "[mithril-e2e] captured: $captured" >> "$E2E_ROOT/minecraft-client-run.log"
 
-          # 5) Stop the game. We killed it on purpose AFTER capturing, so this is
-          #    NOT a client failure -- do not record RUNTIME_MINECRAFT_E2E_FAILED.
-          stop_game
+          # Validate the in-world content + identity gate from the mod metadata.
+          python3 - "$E2E_ROOT" <<'PY'
+          import json, pathlib, sys
+          root = pathlib.Path(sys.argv[1])
+          m = json.loads((root/'render/inworld-frame.json').read_text())
+          uniform=float(m['uniform_fill']); distinct=int(m['distinct_colors'])
+          sd=float(m['gray_stddev'])
+          ident=(m['gl_version'].find('Mithril-Wrapper')>=0
+                  and m['gl_renderer'].find('Mithril-Wrapper')>=0)
+          ok=(uniform < 0.85 and distinct > 250 and sd > 18.0 and ident)
+          print('[mithril-e2e] in-world uniform=%.4f distinct=%d sd=%.2f identity=%s'
+                % (uniform, distinct, sd, ident))
+          sys.exit(0 if ok else 1)
+          PY
+          gate_rc=$?
+          if [ "$gate_rc" -ne 0 ]; then
+            python3 ci/minecraft-e2e/evidence.py --root "$E2E_ROOT" fail \
+              --failure-id RUNTIME_MINECRAFT_INWORLD_GATE --phase minecraft_client \
+              --message "in-world content/identity gate failed"
+            exit 1
+          fi
 
-          # No client failure to record: restore the pre-run placeholder so the
-          # finalize step sees a clean run and the oracle decides pass/fail.
+          # Clean success: keep the placeholder so finalize sees no failure.
           [[ -f "$E2E_ROOT/failure.json" ]] || \
             cp "$E2E_ROOT/failure-pre-minecraft.json" "$E2E_ROOT/failure.json"
 
-          # 6) Turn the captured pixels + the log into the evidence the oracle
-          #    step consumes (game-state.json / oracle-results.json).
-          python3 - "$E2E_ROOT" "$captured" <<'PY'
-          import json, pathlib, sys
-          root = pathlib.Path(sys.argv[1]); meta = pathlib.Path(sys.argv[2])
-          raw = meta.with_suffix('.rgba')
-          w, h, size = (int(x) for x in meta.read_text().split()[:3])
-          data = raw.read_bytes()[:size]
-          total = w * h
-          counts = {}
-          for i in range(0, min(total * 4, len(data)) - 3, 4):
-              key = (data[i], data[i + 1], data[i + 2])
-              counts[key] = counts.get(key, 0) + 1
-          dom_count = max(counts.values()) if counts else total
-          dom = max(counts, key=counts.get) if counts else (0, 0, 0)
-          uniform = (dom_count / total) if total else 1.0
-
-          log = (root / 'minecraft-client-run.log').read_text(errors='ignore')
-          shader_err = (log.count('Shader library compile failed')
-                        + log.count('could not be compiled into pipeline'))
-          dropped = log.count('draw skipped')
-
-          bridge = {}
-          bs = root / 'bridge-state.json'
-          if bs.exists():
-              try:
-                  bridge = json.loads(bs.read_text())
-              except Exception:
-                  bridge = {}
-
-          # Judge CONTENT, not colour.
-          #
-          # A real frame is never 100% uniform: even on the loading screen the
-          # Mojang logo and the progress bar cover part of the frame on top of
-          # the clear colour (which is itself red - MC clears to roughly
-          # RGB(239,50,61) during loading, so a "mostly red" frame is CORRECT
-          # and a colour-based gate would fail a perfectly good render).
-          #
-          # A 100%-uniform frame means only the clear happened and no drawn
-          # content is visible - that is exactly the red/blank screen symptom,
-          # whatever colour it happens to be. So fail on uniformity, and keep
-          # the dominant colour and the red-clear fraction as diagnostics.
-          content_ok = uniform < 0.999
-          red_frac = sum(cnt for (r, g, bl), cnt in counts.items()
-                         if r > 200 and g < 80 and bl < 80) / total if total else 1.0
-          ratio = 0.0 if (content_ok and not shader_err and not dropped) else 1.0
-          state = {
-              'schema_version': '1.0', 'tick': -1,
-              'window_width': w, 'window_height': h,
-              'gl_vendor': bridge.get('gl_vendor', ''),
-              'gl_renderer': bridge.get('gl_renderer', ''),
-              'gl_version': bridge.get('gl_version', ''),
-              'red_pixel_ratio': ratio,
-              'uniform_fill_ratio': uniform,
-              'has_rendered_content': content_ok,
-              'red_clear_pixel_fraction': red_frac,
-              'dominant_color_rgb': list(dom),
-              'shader_compile_errors': shader_err,
-              'draws_dropped_by_backend': dropped,
-              'sampled_pixels': total,
-              'capture_source': 'native-bridge pre-present readback',
-          }
-          (root / 'game-state.json').write_text(json.dumps(state, indent=2) + '\n')
-          (root / 'oracle-results.json').write_text(json.dumps({
-              'schema_version': '1.0',
-              'l1_process': 'pass',
-              'l2_runtime_identity': 'pass' if 'Mithril-Wrapper' in state['gl_version'] else 'fail',
-              'l3_game_state': 'pass' if (w > 0 and h > 0) else 'fail',
-              'l4_gpu_render': 'pass' if ratio <= 0.90 else 'fail',
-              'l5_presentation': 'pass',
-          }, indent=2) + '\n')
-          print('[mithril-e2e] uniform_fill=%.4f dominant=%s shader_err=%d dropped=%d'
-                % (uniform, dom, shader_err, dropped))
-          PY
-
-      - name: Convert captured frame to PNG and record image metadata
+      - name: Verify in-world Minecraft PNG artifact and image metadata
         shell: bash
         run: |
           set -euo pipefail
-          meta=""
-          for f in "$E2E_ROOT"/render/prepresent-frame-*.meta; do
-            if [ -f "$f" ]; then meta="$f"; break; fi
-          done
-          if [ -z "$meta" ]; then
-            echo "::error::no pre-present frame metadata found for PNG conversion"
+          png="$E2E_ROOT/render/inworld-frame.png"
+          meta="$E2E_ROOT/render/inworld-frame.json"
+          if [ ! -f "$png" ] || [ ! -f "$meta" ]; then
+            echo "::error::missing in-world Minecraft frame PNG/metadata"
             exit 1
           fi
-          raw="${meta%.meta}.rgba"
-          read -r w h size < "$meta"
-          png="${meta%.meta}.png"
-          export MITHRIL_RENDERER_IDENTITY="$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('gl_renderer',''))" "$E2E_ROOT/game-state.json")"
           export MITHRIL_MINECRAFT_VERSION="1.21.1"
-          # The pre-present glReadPixels readback is already upright (top-row
-          # first) on this lane, so no display Y-flip is applied; verified
-          # against the captured menu (logo on top, buttons below).
-          line="$(python3 ci/minecraft-e2e/rgba_to_png.py "$raw" "$w" "$h" "$png" --meta "${meta%.meta}.png.json")"
-          echo "$line"
-          # Hard render gate: refuse a uniform/blank PNG. This is the same
-          # real-Minecraft-content criterion as the oracle step and must fail
-          # the job when the rendered frame is black/clear-only.
-          uniform="$(python3 -c "import sys;line=sys.argv[1];import re;m=re.search(r'uniform_fill=([0-9.]+)',line);print(m.group(1) if m else 1.0)" "$line")"
-          python3 -c "import sys;u=float(sys.argv[1]);sys.exit(0 if u < 0.999 else 1)" "$uniform"
-          echo "[mithril-e2e] PNG render artifact: $png (uniform_fill=$uniform)"
+          python3 - "$meta" <<'PY'
+          import json, pathlib, sys
+          m=json.loads(pathlib.Path(sys.argv[1]).read_text())
+          uniform=float(m['uniform_fill']); distinct=int(m['distinct_colors'])
+          sd=float(m['gray_stddev'])
+          ident=(m['gl_version'].find('Mithril-Wrapper')>=0
+                  and m['gl_renderer'].find('Mithril-Wrapper')>=0)
+          sha=m.get('git_sha','')
+          print('[mithril-e2e] artifact sha=%s %sx%s uniform=%.4f distinct=%d sd=%.2f identity=%s'
+                % (sha, m['width'], m['height'], uniform, distinct, sd, ident))
+          assert uniform < 0.85, 'uniform frame'
+          assert distinct > 250, 'too few colors'
+          assert sd > 18.0, 'low variance'
+          assert ident, 'renderer identity mismatch'
+          PY
+          echo "[mithril-e2e] in-world Minecraft PNG render artifact: $png"
+
 
       - name: Verify Mithril identity, GL 3.3 caps gate and red-screen gate
         shell: bash
