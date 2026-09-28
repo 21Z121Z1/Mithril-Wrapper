@@ -1113,6 +1113,13 @@ void begin_render_pass(VkImageView* color_views, int color_count,
         fn = (PFN_vkCmdBeginRenderingKHR)vkGetDeviceProcAddr(b->device, "vkCmdBeginRendering");
         if (!fn) fn = (PFN_vkCmdBeginRenderingKHR)vkGetDeviceProcAddr(b->device, "vkCmdBeginRenderingKHR");
     }
+    if (std::getenv("MITHRIL_PASSLOG")) {
+        static uint64_t pn=0; ++pn;
+        uint32_t tfbo = mithril::g_state? mithril::g_state->currentDrawFBO:0;
+        fprintf(stderr,"[PL] #%llu fbo=%u colors=%d",(unsigned long long)pn,tfbo,color_count);
+        for(int q=0;q<color_count;q++) fprintf(stderr," [c%d L%d S%d]",q,(int)colorAttachs[q].loadOp,(int)colorAttachs[q].storeOp);
+        fprintf(stderr,"\n");
+    }
     if (fn) fn(b->commandBuffer, &ri);
 
     e.passActive = true;
@@ -2063,6 +2070,7 @@ void backend_set_fbo_attachment_tex_ids(GLuint* color_tex_ids, int color_count,
 }
 
 void backend_end_render_pass(void) { mithril::vk::end_render_pass(); }
+int backend_render_pass_active(void) { return mithril::vk::render_pass_active()?1:0; }
 void backend_commit(void)          { mithril::vk::commit_frame(); }
 void backend_mark_commands(void){ mithril::vk::encoder().hasCommands = true; }
 
@@ -2401,7 +2409,12 @@ void backend_set_stencil_state(int enabled, int func, int ref, int mask,
     // Stencil dynamic state deferred (bring-up).
 }
 
+void backend_queue_wait_idle(void) {
+    mithril::vk::Backend* b = mithril::vk::backend();
+    if (b && b->graphicsQueue) vkQueueWaitIdle(b->graphicsQueue);
+}
 void backend_draw_arrays(int primitive, int first, int count) {
+    if (std::getenv("MITHRIL_DRAWPATH")) { static uint64_t n_DA=0; ++n_DA; if((n_DA%200)==1) fprintf(stderr,"[DP:DA] #%llu (arrays)\n",(unsigned long long)n_DA); }
     (void)primitive;
     mithril::vk::Backend* b = mithril::vk::backend();
     if (!b->commandBuffer) return;
@@ -2426,6 +2439,7 @@ void backend_draw_arrays(int primitive, int first, int count) {
 
 void backend_draw_indexed(int primitive, int count, int index_type,
                           VkBuffer index_buffer, VkDeviceSize index_offset) {
+    if (std::getenv("MITHRIL_DRAWPATH")) { static uint64_t n_DI=0; ++n_DI; if((n_DI%200)==1) fprintf(stderr,"[DP:DI] #%llu (indexed)\n",(unsigned long long)n_DI); }
     (void)primitive;
     mithril::vk::Backend* b = mithril::vk::backend();
     if (!b->commandBuffer || !index_buffer) return;
@@ -2468,6 +2482,7 @@ void backend_draw_indexed(int primitive, int count, int index_type,
 }
 
 void backend_draw_arrays_instanced(int primitive, int first, int count, int primcount) {
+    if (std::getenv("MITHRIL_DRAWPATH")) { static uint64_t n_DAI=0; ++n_DAI; if((n_DAI%200)==1) fprintf(stderr,"[DP:DAI] #%llu (arrays-inst)\n",(unsigned long long)n_DAI); }
     (void)primitive;
     mithril::vk::Backend* b = mithril::vk::backend();
     if (!b->commandBuffer) return;
@@ -2488,6 +2503,7 @@ void backend_draw_arrays_instanced(int primitive, int first, int count, int prim
 void backend_draw_indexed_instanced(int primitive, int count, int index_type,
                                     VkBuffer index_buffer, VkDeviceSize index_offset,
                                     int primcount) {
+    if (std::getenv("MITHRIL_DRAWPATH")) { static uint64_t n_DII=0; ++n_DII; if((n_DII%200)==1) fprintf(stderr,"[DP:DII] #%llu (indexed-inst)\n",(unsigned long long)n_DII); }
     (void)primitive;
     mithril::vk::Backend* b = mithril::vk::backend();
     if (!b->commandBuffer || !index_buffer) return;

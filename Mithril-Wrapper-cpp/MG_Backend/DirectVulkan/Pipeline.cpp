@@ -312,6 +312,15 @@ uint64_t hash_signature(GLuint program, const MGVertexAttrib* attribs, int attri
     bool prfi = (mithril::g_state && mithril::g_state->primitiveRestartFixedIndex);
     mix(&pr, sizeof(pr));
     mix(&prfi, sizeof(prfi));
+    // Depth enable/write/func are baked into the pipeline (no dynamic depth-enable
+    // in Vulkan 1.2), so they must be part of the cache key. Read g_state directly,
+    // matching the pipeline-creation code below.
+    bool dte = (mithril::g_state && mithril::g_state->depthTest);
+    bool dwm = (mithril::g_state && mithril::g_state->depthMask);
+    GLenum dfn = mithril::g_state ? mithril::g_state->depthFunc : GL_LESS;
+    mix(&dte, sizeof(dte));
+    mix(&dwm, sizeof(dwm));
+    mix(&dfn, sizeof(dfn));
     return h;
 }
 
@@ -699,9 +708,13 @@ VkPipeline get_or_create_pipeline(GLuint program,
     // ---- Depth / stencil ----
     VkPipelineDepthStencilStateCreateInfo ds{};
     ds.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
-    ds.depthTestEnable = VK_TRUE;            // dynamic compare op + write mask
-    ds.depthWriteEnable = VK_TRUE;
-    ds.depthCompareOp = VK_COMPARE_OP_LESS;  // dynamic
+    // Reflect GL depth state. Previously these were hardcoded VK_TRUE, which
+    // depth-rejected GUI/HUD geometry (drawn after RenderSystem.disableDepthTest)
+    // against the terrain depth buffer, so the HUD never appeared.
+    ds.depthTestEnable = (mithril::g_state && mithril::g_state->depthTest) ? VK_TRUE : VK_FALSE;
+    ds.depthWriteEnable = (mithril::g_state && mithril::g_state->depthMask) ? VK_TRUE : VK_FALSE;
+    ds.depthCompareOp = mithril::g_state ? gl_compare_to_vk(mithril::g_state->depthFunc)
+                                         : VK_COMPARE_OP_LESS;
     ds.depthBoundsTestEnable = VK_FALSE;
     ds.stencilTestEnable = VK_FALSE;
 

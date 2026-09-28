@@ -49,7 +49,7 @@
 #include "includes.h"
 
 namespace {
-struct DrawRec { unsigned prog,fbo,t0,t1,t2,t3; };
+struct DrawRec { unsigned prog,fbo,t0,t1,t2,t3; unsigned char dt,dwm,bl,cull,sc; unsigned stride; };
 constexpr int kDrawRingN = 1024;
 DrawRec g_drawRing[kDrawRingN];
 int g_drawRingIdx = 0;
@@ -62,7 +62,7 @@ extern "C" void mithril_dump_draw_ring(const char* path) {
         int i = (start + k) % kDrawRingN;
         const DrawRec& r = g_drawRing[i];
         if (r.prog==0 && r.fbo==0) continue;
-        std::fprintf(f, "prog=%u fbo=%u tex[%u,%u,%u,%u]\n", r.prog,r.fbo,r.t0,r.t1,r.t2,r.t3);
+        std::fprintf(f, "prog=%u fbo=%u tex[%u,%u,%u,%u] dt=%u dwm=%u bl=%u cull=%u sc=%u stride=%u\n", r.prog,r.fbo,r.t0,r.t1,r.t2,r.t3,(unsigned)r.dt,(unsigned)r.dwm,(unsigned)r.bl,(unsigned)r.cull,(unsigned)r.sc,r.stride);
     }
     std::fclose(f);
 }
@@ -137,10 +137,12 @@ static void diag_log_formats(const VkFormat fmts[8], int count, VkFormat depth) 
 }
 
 static bool prepare_draw(GLenum mode) {
+    bool force_ccw_gui=false;
+
     bool pd_dump = std::getenv("MITHRIL_DUMP_BLIT") != nullptr;
     static uint64_t pd_att=0,pd_f_prog=0,pd_f_spirv=0,pd_f_att=0,pd_f_pipe=0;
     ++pd_att;
-    #define PD_FAIL(which, why...) do { ++which; if (pd_dump && ((pd_att%120)==0)) { MITHRIL_LOG_WARN("vk-diag","prepareDrawFail att=%llu noprogram=%llu nospirv=%llu noattach=%llu nopipe=%llu drawFBO=%u " why, (unsigned long long)pd_att,(unsigned long long)pd_f_prog,(unsigned long long)pd_f_spirv,(unsigned long long)pd_f_att,(unsigned long long)pd_f_pipe, g_state->currentDrawFBO); } return false; } while(0)
+    #define PD_FAIL(which, why...) do { ++which; if (pd_dump && ((pd_att%120)==0)) { MITHRIL_LOG_WARN("vk-diag","prepareDrawFail att=%llu noprogram=%llu nospirv=%llu noattach=%llu nopipe=%llu drawFBO=%u " why, (unsigned long long)pd_att,(unsigned long long)pd_f_prog,(unsigned long long)pd_f_spirv,(unsigned long long)pd_f_att,(unsigned long long)pd_f_pipe, g_state->currentDrawFBO); } if (std::getenv("MITHRIL_PDFAIL")) { fprintf(stderr,"[PF] att=%llu fbo=%u prog=%u ",(unsigned long long)pd_att,g_state->currentDrawFBO,g_state->currentProgram); fprintf(stderr, why); fprintf(stderr,"\n"); } return false; } while(0)
     // Resolve current program + its SPIR-V.
     mithril::Program* prog = mithril::state_get_program(g_state->currentProgram);
     if (!prog || !prog->linked) {
@@ -151,6 +153,22 @@ static bool prepare_draw(GLenum mode) {
                               g_state->currentProgram);
         }
         PD_FAIL(pd_f_prog, "reason=no-program");
+    }
+    // Front-face winding discriminator (root-cause fix for missing GUI/HUD).
+    // Geometry authored in screen/Y-down coordinates (Minecraft GUI ortho,
+    // ProjMat m[5] < 0) reaches the Metal framebuffer with the OPPOSITE winding
+    // from Y-up world geometry: world front faces are CW in the (Y-down)
+    // framebuffer; GUI front faces are CCW. Reading the current ProjMat loose
+    // uniform m[5] (column-major, second row / second column) distinguishes
+    // them without matching program ids. Programs that source ProjMat from an
+    // explicit UBO block have no loose "ProjMat" uniform and keep the default
+    // CW mapping (see invert_front_face below).
+    {
+        auto pu = prog->uniforms.find("ProjMat");
+        if (pu != prog->uniforms.end() && pu->second.value.size() >= 16 &&
+            pu->second.value[5] < 0.0f) {
+            force_ccw_gui = true;
+        }
     }
 
     // Determine whether we are drawing to the default framebuffer (FBO 0) or a
@@ -377,9 +395,17 @@ static bool prepare_draw(GLenum mode) {
           g_state->currentDrawFBO,ct,im,w,h,(int)mode,g_state->currentProgram);
     }
 
+    // If a pass is already open from a previous (kept-open) draw but it
+    // targets a different framebuffer, end it so we begin a fresh pass here.
+    static GLuint s_passFBO = 0;
+    GLuint wantFBO = (GLuint)g_state->currentDrawFBO;
+    if (backend_render_pass_active() && s_passFBO != wantFBO) {
+        backend_end_render_pass();
+    }
     // Begin render pass (Load action preserves previous contents).
     backend_set_load_load();
     backend_begin_render_pass(colors, color_count, depth_view, w, h, 1);
+    s_passFBO = wantFBO;
 
     // Bind pipeline + set dynamic state via vkCmdSet*.
     backend_bind_pipeline(pipeline);
@@ -401,7 +427,10 @@ static bool prepare_draw(GLenum mode) {
     {
       DrawRec rec{ prog->id,(unsigned)g_state->currentDrawFBO,
         g_state->boundTextureForUnit(0),g_state->boundTextureForUnit(1),
-        g_state->boundTextureForUnit(2),g_state->boundTextureForUnit(3) };
+        g_state->boundTextureForUnit(2),g_state->boundTextureForUnit(3),
+        (unsigned char)(g_state->depthTest?1:0),(unsigned char)(g_state->depthMask?1:0),
+        (unsigned char)(g_state->blends[0].enabled?1:0),(unsigned char)(g_state->cullFace?1:0),
+        (unsigned char)(g_state->scissorTest?1:0), 0u };
       g_drawRing[g_drawRingIdx % kDrawRingN] = rec;
       ++g_drawRingIdx;
     }
@@ -518,6 +547,7 @@ static bool prepare_draw(GLenum mode) {
         bool invert_front_face = true;
         (void)is_default_fbo;
         backend_set_front_face(
+            force_ccw_gui ? 1 /*CCW*/ :
             invert_front_face ?
                 (g_state->frontFace == GL_CCW ? 0 /*CW*/ : 1 /*CCW*/) :
                 (g_state->frontFace == GL_CCW ? 1 /*CCW*/ : 0 /*CW*/));
@@ -636,12 +666,15 @@ static bool prepare_draw(GLenum mode) {
 }
 
 static void end_draw(void) {
-    // End the render pass but DON'T commit the command buffer here.
-    // The command buffer is committed once per frame in eglSwapBuffers,
-    // which presents the swapchain image. Committing per-draw would flush
-    // the Vulkan pipeline hundreds of times per frame, causing severe perf
-    // loss and present timing issues.
-    backend_end_render_pass();
+    // Keep the dynamic-render pass OPEN across consecutive draws so they share
+    // ONE Metal render command encoder. MoltenVK does not guarantee the
+    // store->load color dependency between separate encoders packed into one
+    // Metal command buffer (verified: terrain accumulates only across command-
+    // buffer boundaries or within one encoder). The pass is ended lazily on
+    // FBO-target change (prepare_draw), FBO bind, state changes, texture
+    // upload, readback, and at present. Set MITHRIL_NO_KEEPPASS to restore the
+    // old end-pass-after-every-draw behavior.
+    if (std::getenv("MITHRIL_NO_KEEPPASS")) backend_end_render_pass();
 }
 
 static int index_type_to_int(GLenum type) {
@@ -719,7 +752,8 @@ void glDrawArraysInstancedBaseInstance(GLenum mode, GLint first, GLsizei count,
 
 void glDrawElements(GLenum mode, GLsizei count, GLenum type, const void* indices) {
     MITHRIL_ENSURE_INIT();
-    if (!validate_draw_call(mode, count)) return;
+    if (std::getenv("MITHRIL_DENT")) fprintf(stderr,"[DENT] fbo=%u prog=%u mode=%u count=%d type=%u\n",g_state->currentDrawFBO,g_state->currentProgram,mode,(int)count,type);
+    if (!validate_draw_call(mode, count)) { if (std::getenv("MITHRIL_DENT")) fprintf(stderr,"[DENT] validate-REJECT count=%d\n",(int)count); return; }
     if (!prepare_draw(mode)) return;  // root cause AI — see glDrawArrays
     // If a VBO is bound for GL_ELEMENT_ARRAY_BUFFER, indices is an offset into it.
     mithril::VertexArray* vao = mithril::state_get_vao(g_state->currentVAO);

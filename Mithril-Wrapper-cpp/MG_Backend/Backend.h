@@ -746,3 +746,13 @@ extern "C" void mithril_dump_draw_ring(const char* path);
 #endif
 
 #endif // MITHRIL_BACKEND_H
+
+#ifdef __cplusplus
+extern "C"
+#endif
+void backend_queue_wait_idle(void);
+
+#ifdef __cplusplus
+extern "C"
+#endif
+int backend_render_pass_active(void);
