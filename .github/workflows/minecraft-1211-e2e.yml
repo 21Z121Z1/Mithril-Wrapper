@@ -271,8 +271,14 @@ jobs:
             sleep 5
           done
 
+          dump_game_log() {
+            echo "::group::minecraft-client-run.log (tail)"
+            tail -n 220 "$E2E_ROOT/minecraft-client-run.log" 2>/dev/null
+            echo "::endgroup::"
+          }
           if kill -0 "$gradle_pid" 2>/dev/null; then
             stop_game
+            dump_game_log
             python3 ci/minecraft-e2e/evidence.py --root "$E2E_ROOT" fail \
               --failure-id RUNTIME_MINECRAFT_HANG --phase minecraft_client \
               --message "mod-driven run did not finish within deadline"
@@ -281,6 +287,9 @@ jobs:
           wait "$gradle_pid"; gradle_rc=$?
           echo "[mithril-e2e] gradle runClient exit=$gradle_rc saw_present=$saw_present" \
             >> "$E2E_ROOT/minecraft-client-run.log"
+          # Surface the game log in the (fetchable) job log whenever the run did
+          # not cleanly succeed, even when the ci-diagnostics push later fails.
+          if [ "$gradle_rc" -ne 0 ]; then dump_game_log; fi
 
           if [ ! -f "$E2E_ROOT/render/inworld-frame.png" ] || \
              [ ! -f "$E2E_ROOT/render/inworld-frame.json" ]; then
