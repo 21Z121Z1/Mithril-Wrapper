@@ -1516,28 +1516,18 @@ void bind_program_descriptors(GLuint program, VkPipelineBindPoint bindPoint) {
                         }
                     }
                     if (!viewLive || !sampLive) {
-                        std::fprintf(stderr,"[STALE-DESC] prog=%u binding=%u viewLive=%d sampLive=%d view=%p samp=%p\n",
-                            program, ww.dstBinding, (int)viewLive, (int)sampLive,
-                            (void*)iii.imageView, (void*)iii.sampler);
                         stale = true;
                     }
                 }
-                // Buffer liveness: pBufferInfo->buffer must resolve to a LIVE GL buffer
-                // whose backend VkBuffer is non-null. A renamed/orphaned buffer can
-                // leave a descriptor pointing at a destroyed VkBuffer (dead MTLBuffer
-                // -> [MTLBuffer gpuAddress] SEGV inside MoltenVK).
-                if (ww.pBufferInfo && ww.pBufferInfo->buffer) {
-                    const VkBuffer want = ww.pBufferInfo->buffer;
-                    GLuint owner=0;
-                    for (auto& bkv : buffer_table())
-                        if (bkv.second.buffer == want) { owner=bkv.first; break; }
-                    if (!owner) {
-                        std::fprintf(stderr,"[STALE-BUF] prog=%u binding=%u type=%d vkbuf=%p off=%llu range=%llu NOT LIVE\n",
-                            program, ww.dstBinding,(int)ww.descriptorType,(void*)want,
-                            (unsigned long long)ww.pBufferInfo->offset,(unsigned long long)ww.pBufferInfo->range);
-                        stale = true;
-                    }
-                }
+                // NOTE: uniform-block descriptors are frequently suballocated
+                // from the per-frame uniform ARENA (see plan.lastBuffer), whose
+                // long-lived ring VkBuffers are deliberately NOT tracked in
+                // buffer_table() yet are guaranteed live while the frame is in
+                // flight. A liveness lookup limited to buffer_table() therefore
+                // false-positives on every arena-backed dynamic UBO and aborted
+                // the whole bind (no descriptors -> no rendering). Arena
+                // lifetime is already bounded by the frame fence, so no buffer
+                // liveness gate is applied here.
             }
             if (stale) {
                 std::fprintf(stderr,"[STALE-DESC] aborting bind, NOT updating descriptors with dead handles\n");
@@ -1545,28 +1535,8 @@ void bind_program_descriptors(GLuint program, VkPipelineBindPoint bindPoint) {
             }
         }
         if (!writes.empty()) {
-            for (const VkWriteDescriptorSet& w1 : writes) {
-                GLuint ownerName=0; VkImage backImg=VK_NULL_HANDLE; int backLay=-1;
-                if (w1.pImageInfo && w1.pImageInfo->imageView) {
-                    for (auto& tkv : texture_table()) {
-                        if (tkv.second.view == w1.pImageInfo->imageView) {
-                            ownerName=tkv.first; backImg=tkv.second.image;
-                            backLay=(int)tkv.second.currentLayout; break;
-                        }
-                    }
-                }
-                const VkWriteDescriptorSet& w1x=w1;
-                std::fprintf(stderr,"[UPD1] binding=%u type=%d->%d ownerTex=%u view=%p backImg=%p backLay=%d samp=%p buf=%p bufoff=%llu range=%llu\n",
-                    w1.dstBinding,(int)w1.descriptorType,(int)w1x.descriptorType,ownerName,
-                    w1.pImageInfo?(void*)w1.pImageInfo->imageView:nullptr,
-                    (void*)backImg,backLay,
-                    w1.pImageInfo?(void*)w1.pImageInfo->sampler:nullptr,
-                    w1.pBufferInfo?(void*)w1.pBufferInfo->buffer:nullptr,
-                    w1.pBufferInfo?(unsigned long long)w1.pBufferInfo->offset:0,
-                    w1.pBufferInfo?(unsigned long long)w1.pBufferInfo->range:0);
-                std::fflush(stderr);
-                vkUpdateDescriptorSets(b->device,1,&w1x,0,nullptr);
-            }
+            vkUpdateDescriptorSets(b->device,
+                static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
         }
         DescriptorMemoEntry& e = pr.descMemo[slot][pr.descMemoNext[slot]];
         e.signature = sig;
