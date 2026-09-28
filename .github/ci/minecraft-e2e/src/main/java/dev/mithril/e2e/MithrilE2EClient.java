@@ -167,7 +167,7 @@ public final class MithrilE2EClient implements ClientModInitializer {
     private void validateMenu(Minecraft client, Path root) throws Exception {
         Files.createDirectories(root.resolve("render"));
         String vendor = safe(GL11.glGetString(GL11.GL_VENDOR));
-        String renderer = safe(GL11.glapter(GL11.GL_RENDERER));
+        String renderer = safe(GL11.glGetString(GL11.GL_RENDERER));
         String version = safe(GL11.glGetString(GL11.GL_VERSION));
 
         int w = client.getWindow().getWidth();
@@ -390,7 +390,7 @@ public final class MithrilE2EClient implements ClientModInitializer {
     private static String escape(String s) {
         StringBuilder sb = new StringBuilder();
         for (int i = 0; i < s.length(); i++) {
-            char c = charAt(i);
+            char c = s.charAt(i);
             if (c == '"' || c == '\\') sb.append('\\');
             sb.append(c);
         }
