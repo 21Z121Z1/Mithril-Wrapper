@@ -1732,6 +1732,12 @@ VkImage backend_get_or_create_texture(GLuint name, int width, int height, int de
     VkImageType imgType = (target == GL_TEXTURE_3D) ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D;
     VkImageCreateInfo ici{};
     ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    // Vulkan requires this flag on a 2D image before any
+    // VK_IMAGE_VIEW_TYPE_CUBE view may be created from it.  Minecraft's menu
+    // panorama uploads six GL cubemap faces and immediately samples them as a
+    // cube; without the flag vkCreateImageView can fail on physical MoltenVK.
+    ici.flags = (target == GL_TEXTURE_CUBE_MAP)
+        ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0;
     ici.imageType = imgType;
     ici.format = fmt;
     ici.extent = { (uint32_t)width, (uint32_t)height, (uint32_t)(imgType == VK_IMAGE_TYPE_3D ? depth : 1) };
