@@ -425,6 +425,7 @@ void glNamedBufferSubData(GLuint buffer, GLintptr offset, GLsizeiptr size,
 void glTextureStorage2D(GLuint texture, GLsizei levels, GLenum internalformat,
                         GLsizei width, GLsizei height) {
     MITHRIL_ENSURE_INIT();
+    fprintf(stderr,"[DSA-STORAGE2D] tex=%u levels=%d ifmt=0x%x %dx%d\n",texture,levels,internalformat,width,height);
     int unit = g_state->activeTextureUnit;
     GLuint prev = 0;
     if (unit >= 0 && unit < mithril::kMaxTextureUnits) {
@@ -468,6 +469,7 @@ void glTextureSubImage2D(GLuint texture, GLint level, GLint xoffset,
                          GLint yoffset, GLsizei width, GLsizei height,
                          GLenum format, GLenum type, const void* pixels) {
     MITHRIL_ENSURE_INIT();
+    fprintf(stderr,"[DSA-SUB2D] tex=%u %dx%d off=(%d,%d) fmt=0x%x type=0x%x pix=%p\n",texture,width,height,xoffset,yoffset,format,type,pixels);
     int unit = g_state->activeTextureUnit;
     GLuint prev = 0;
     if (unit >= 0 && unit < mithril::kMaxTextureUnits) {

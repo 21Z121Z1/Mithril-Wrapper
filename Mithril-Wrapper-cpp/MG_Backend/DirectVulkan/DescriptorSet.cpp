@@ -499,6 +499,14 @@ inline uint64_t handle_bits(H h) {
  */
 void build_ubo_plans(ProgramResources& pr, const mithril::Program* prog) {
     pr.uboPlans.clear();
+    if (std::getenv("MITHRIL_BIND_DUMP")) {
+        static int bd=0;
+        if(bd<4){++bd;
+        for(const auto& dbb: pr.bindings){
+            MITHRIL_LOG_WARN("binddump","set=%u binding=%u type=%d name='%s' bufSize=%u",
+                dbb.set,dbb.binding,(int)dbb.type,dbb.name.c_str(),dbb.bufferSize);
+        }}
+    }
     for (const auto& db : pr.bindings) {
         if (db.type != VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER) continue;
         pr.uboPlans.emplace_back();
@@ -762,6 +770,16 @@ void bind_program_descriptors(GLuint program, VkPipelineBindPoint bindPoint) {
                             uoff   = (VkDeviceSize)sl.offset;
                             urange = (VkDeviceSize)sl.size;
                         }
+                    }
+                    if (std::getenv("MITHRIL_UBO_TRACE") && mithril::g_state->currentDrawFBO==3) {
+                        static int nlog=0;
+                        if (nlog<2) { ++nlog;
+                        float dbg[16]={0};
+                        if (sl.name) backend_read_buffer_host(sl.name,(VkDeviceSize)sl.offset,64,dbg);
+                        MITHRIL_LOG_WARN("ubo-diag","FULL prog=%u '%s' bind=%d pt=%u buf=%u off=%ld | c0(%.3f,%.3f,%.3f,%.3f) c1(%.3f,%.3f,%.3f,%.3f) c2(%.3f,%.3f,%.3f,%.3f) c3(%.3f,%.3f,%.3f,%.3f)",
+                            program,info.name.c_str(),(int)db.binding,point,sl.name,(long)sl.offset,
+                            dbg[0],dbg[1],dbg[2],dbg[3],dbg[4],dbg[5],dbg[6],dbg[7],
+                            dbg[8],dbg[9],dbg[10],dbg[11],dbg[12],dbg[13],dbg[14],dbg[15]); }
                     }
                 }
                 if (ubuf == VK_NULL_HANDLE) {
@@ -1371,6 +1389,7 @@ void bind_program_descriptors(GLuint program, VkPipelineBindPoint bindPoint) {
                 VkDescriptorPool oldPool = pr.descriptorPools[slot];
                 VkDescriptorPool newPool = create_program_pool(pr, kMaxSetsPerPool);
                 if (newPool == VK_NULL_HANDLE) {
+                    if (std::getenv("MITHRIL_DUMP_BLIT")) { static uint64_t z1=0;++z1; if((z1%20)==1)MITHRIL_LOG_WARN("vk-diag","BIND-DROP secondary-create-fail #%llu prog=%u slot=%d",(unsigned long long)z1,program,slot);}
                     return;  // 次级池创建失败，放弃本次 bind（下次 draw 重试）
                 }
                 // 旧池可能仍被当前 command buffer 引用 —— 延迟到 fence 后销毁。
@@ -1393,6 +1412,7 @@ void bind_program_descriptors(GLuint program, VkPipelineBindPoint bindPoint) {
                 // 从新池重试分配
                 dsai.descriptorPool = newPool;
                 if (vkAllocateDescriptorSets(b->device, &dsai, &set) != VK_SUCCESS) {
+                    if (std::getenv("MITHRIL_DUMP_BLIT")) { static uint64_t z2=0;++z2; if((z2%20)==1)MITHRIL_LOG_WARN("vk-diag","BIND-DROP retry-alloc-fail #%llu prog=%u slot=%d",(unsigned long long)z2,program,slot);}
                     return;  // 重试仍失败，放弃本次 bind
                 }
             }
@@ -1472,9 +1492,51 @@ void bind_program_descriptors(GLuint program, VkPipelineBindPoint bindPoint) {
             if (incomplete) return;  // do NOT commit/bind a half-written set
         }
 
+        // Pre-update liveness guard: every imageInfo imageView/sampler must still
+        // reference a LIVE backend object. A non-null but already-freed handle makes
+        // MoltenVK objc_msgSend a dead object (SIGBUS inside mvkUpdateDescriptorSets).
+        {
+            DefaultTexture& dtg = default_texture();
+            bool stale = false;
+            for (const VkWriteDescriptorSet& ww : writes) {
+                if (ww.pImageInfo) {
+                    const VkDescriptorImageInfo& iii = *ww.pImageInfo;
+                    bool viewLive = (iii.imageView == dtg.view);
+                    if (!viewLive) {
+                        for (auto& kv : texture_table()) {
+                            if (kv.second.view == iii.imageView && kv.second.image != VK_NULL_HANDLE) { viewLive = true; break; }
+                        }
+                    }
+                    bool sampLive = (iii.sampler == dtg.sampler);
+                    if (!sampLive) {
+                        for (auto& kv : sampler_table()) {
+                            for (auto& pp : kv.second.byParams)
+                                if (pp.second == iii.sampler) { sampLive = true; break; }
+                            if (sampLive) break;
+                        }
+                    }
+                    if (!viewLive || !sampLive) {
+                        stale = true;
+                    }
+                }
+                // NOTE: uniform-block descriptors are frequently suballocated
+                // from the per-frame uniform ARENA (see plan.lastBuffer), whose
+                // long-lived ring VkBuffers are deliberately NOT tracked in
+                // buffer_table() yet are guaranteed live while the frame is in
+                // flight. A liveness lookup limited to buffer_table() therefore
+                // false-positives on every arena-backed dynamic UBO and aborted
+                // the whole bind (no descriptors -> no rendering). Arena
+                // lifetime is already bounded by the frame fence, so no buffer
+                // liveness gate is applied here.
+            }
+            if (stale) {
+                std::fprintf(stderr,"[STALE-DESC] aborting bind, NOT updating descriptors with dead handles\n");
+                return;
+            }
+        }
         if (!writes.empty()) {
-            vkUpdateDescriptorSets(b->device, static_cast<uint32_t>(writes.size()),
-                                   writes.data(), 0, nullptr);
+            vkUpdateDescriptorSets(b->device,
+                static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
         }
         DescriptorMemoEntry& e = pr.descMemo[slot][pr.descMemoNext[slot]];
         e.signature = sig;

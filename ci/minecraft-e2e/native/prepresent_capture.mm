@@ -1,7 +1,6 @@
 #include <GL/gl.h>
 
 #include <dlfcn.h>
-#include <cerrno>
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -51,12 +50,6 @@ bool write_atomic(const std::string& path, const void* data, size_t size) {
 extern "C" void mithril_e2e_capture_before_present(int width, int height, void* mithril_handle) {
     const std::string root = env_string("MITHRIL_E2E_ROOT");
 
-    // One-shot heartbeat. This seam returns silently on several paths (empty
-    // root, degenerate size, null handle, missing request file), and when that
-    // happens it leaves NO evidence at all -- which is exactly how a missing
-    // capture turned into an opaque RUNTIME_MINECRAFT_CAPTURE_TIMEOUT with no
-    // way to tell whether the seam never ran, was misconfigured, or merely
-    // never saw a request. Publish its own view of its configuration once.
     static std::atomic<bool> announced{false};
     if (!announced.exchange(true)) {
         char detail[512];
@@ -71,15 +64,7 @@ extern "C" void mithril_e2e_capture_before_present(int width, int height, void* 
 
     const std::string request = root + "/render/prepresent-request.txt";
     FILE* request_file = std::fopen(request.c_str(), "r");
-    if (!request_file) {
-        // Rate-limited: the seam runs on EVERY swap (one run presented 9720
-        // frames), so log the first miss and then only occasionally.
-        static std::atomic<int> misses{0};
-        if (misses.fetch_add(1) % 500 == 0) {
-            append_event(root, "capture_no_request", 0, request.c_str());
-        }
-        return;
-    }
+    if (!request_file) return;
 
     int frame = 0;
     if (std::fscanf(request_file, "%d", &frame) != 1 || frame <= 0) {
@@ -133,19 +118,8 @@ extern "C" void mithril_e2e_capture_before_present(int width, int height, void* 
 
     std::vector<unsigned char> rgba(static_cast<size_t>(width) * static_cast<size_t>(height) * 4u);
 
-    // Drain any STALE GL error before the readback.
-    //
-    // GL error flags are sticky: once set, they stay until glGetError() clears
-    // them, and later errors do not replace them. Minecraft had been running
-    // for minutes (the bridge counted 9720 presents) and any earlier call that
-    // reported GL_INVALID_ENUM left 0x0500 pending -- nothing drained it,
-    // because until Stage 1 the wrapper's glGetError() always returned
-    // GL_NO_ERROR, so the game never cleared anything.
-    //
-    // The capture therefore read that OLD error right after its own glReadPixels
-    // and concluded "glReadPixels error 0x0500", even though the readback
-    // itself had never reported a failure. Draining first means the error we
-    // inspect afterwards can only come from this call.
+    // Drain any sticky GL error so the error inspected after readPixels belongs
+    // to this call only.
     int drained = 0;
     for (int i = 0; i < 64; ++i) {
         if (getError() == GL_NO_ERROR) break;
@@ -157,11 +131,8 @@ extern "C" void mithril_e2e_capture_before_present(int width, int height, void* 
         append_event(root, "capture_drained_stale_errors", frame, detail);
     }
 
-    // glReadPixels is synchronous by GL contract. In Mithril this path ends the
-    // active render pass, submits the DirectMetal command buffer, blits the
-    // current default-color texture into CPU-visible storage, and waits for the
-    // copy. Crucially this runs before eglSwapBuffers presents/acquires the next
-    // drawable, so it observes the frame that Minecraft just rendered.
+    // Synchronous readback of the default framebuffer, before eglSwapBuffers
+    // presents/acquires the next drawable.
     readPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
     GLenum error = getError();
 
@@ -181,10 +152,6 @@ extern "C" void mithril_e2e_capture_before_present(int width, int height, void* 
         return;
     }
 
-    // Do not put the absolute path in a fixed-size C buffer: GitHub hosted
-    // workspaces are long enough that a 96-byte stem silently truncates
-    // "prepresent-frame-0001" into "prepres", making the producer and Java
-    // consumer disagree even though readback itself succeeded.
     char frame_name[40];
     std::snprintf(frame_name, sizeof(frame_name), "prepresent-frame-%04d", frame);
     const std::string stem = root + "/render/" + frame_name;

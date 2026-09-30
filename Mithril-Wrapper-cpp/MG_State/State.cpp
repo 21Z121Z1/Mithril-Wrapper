@@ -3,6 +3,12 @@
 // See State.h header comment and specs/rewrite-gl-state-machine/spec.md
 // for design rationale.
 #include "State.h"
+#include <execinfo.h>
+#include <cstdlib>
+#include <dlfcn.h>
+#include <cstring>
+#include <mach-o/dyld.h>
+#include <mach-o/loader.h>
 
 namespace mithril {
 
@@ -429,8 +435,75 @@ Query* state_get_query(GLuint id) {
 // =========================================================================
 // Error helpers (P0-2: queue-based, not single slot)
 // =========================================================================
+__attribute__((noinline))
 void state_set_error(GLenum err) {
     if (!g_state) return;
+    if (std::getenv("MITHRIL_DEBUG")) {
+        MITHRIL_LOG_WARN("glerr", "GL error 0x%x recorded; callers:", static_cast<unsigned>(err));
+        // Find this dylib's runtime load base via dyld, then report each
+        // caller as a FILE offset (ra - base) usable against `objdump -d`.
+        // Find the image whose loaded __TEXT range actually contains the
+        // immediate return address (name matching can hit the wrong image).
+        uintptr_t selfBase = 0;
+        auto textRange = [](const mach_header* mh, uintptr_t& outSize) -> bool {
+            outSize = 0;
+            if (!mh) return false;
+            uintptr_t p = (uintptr_t)mh;
+            uint32_t ncmd = mh->ncmds;
+            p += (mh->magic == MH_MAGIC_64) ? sizeof(mach_header_64) : sizeof(mach_header);
+            for (uint32_t c = 0; c < ncmd; ++c) {
+                const load_command* lc = (const load_command*)p;
+                if (lc->cmd == LC_SEGMENT_64) {
+                    const segment_command_64* sg = (const segment_command_64*)p;
+                    if (strncmp(sg->segname, "__TEXT", 6) == 0) {
+                        outSize = sg->vmsize; return true;
+                    }
+                }
+                p += lc->cmdsize;
+            }
+            return false;
+        };
+        uintptr_t raA = (uintptr_t)__builtin_return_address(0);
+        static int dumpedImages = 0;
+        if (dumpedImages++ < 1) {
+            MITHRIL_LOG_WARN("glerr", "ra0 raw=0x%lx; images with mithril:", (unsigned long)raA);
+            for (uint32_t k = 0; k < _dyld_image_count(); ++k) {
+                const char* nm = _dyld_get_image_name(k);
+                if (nm && strstr(nm, "mithril")) {
+                    const mach_header* mh2 = _dyld_get_image_header(k);
+                    uintptr_t b2 = (uintptr_t)mh2 + (uintptr_t)_dyld_get_image_vmaddr_slide(k);
+                    uintptr_t sz2 = 0; textRange(mh2, sz2);
+                    MITHRIL_LOG_WARN("glerr", "  img base=0x%lx textsz=0x%lx name=%s",
+                        (unsigned long)b2, (unsigned long)sz2, nm);
+                }
+            }
+        }
+        for (uint32_t k = 0; k < _dyld_image_count(); ++k) {
+            const mach_header* mh = _dyld_get_image_header(k);
+            uintptr_t base = (uintptr_t)mh + (uintptr_t)_dyld_get_image_vmaddr_slide(k);
+            uintptr_t sz = 0;
+            if (textRange(mh, sz) && raA >= base && raA < base + sz) {
+                selfBase = base; break;
+            }
+        }
+        auto reportRa = [&](int i, void* ra) {
+            if (!ra) return;
+            uintptr_t a = (uintptr_t)ra;
+            Dl_info info;
+            if (dladdr(ra, &info) && info.dli_sname) {
+                MITHRIL_LOG_WARN("glerr", "  ra%d fileoff=0x%lx sym=%s", i,
+                                 selfBase ? (unsigned long)(a - selfBase) : 0UL, info.dli_sname);
+            } else {
+                MITHRIL_LOG_WARN("glerr", "  ra%d fileoff=0x%lx (base=0x%lx)", i,
+                                 selfBase ? (unsigned long)(a - selfBase) : 0UL,
+                                 (unsigned long)selfBase);
+            }
+        };
+        reportRa(0, __builtin_return_address(0));
+        reportRa(1, __builtin_return_address(1));
+        reportRa(2, __builtin_return_address(2));
+        reportRa(3, __builtin_return_address(3));
+    }
     g_state->errors.recordGL(err);
 }
 

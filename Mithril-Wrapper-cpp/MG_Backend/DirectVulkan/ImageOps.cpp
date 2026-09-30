@@ -17,12 +17,21 @@
 // Each path allocates a transient VkCommandBuffer from the backend's pool,
 // records + submits + waits on a dedicated fence, then frees the buffer.
 #include "Device.h"
+#include "Swapchain.h"
+#include "CommandStream.h"
+#include "Pipeline.h"
 #include "Resources.h"
 #include "../Backend.h"
 #include "../../MG_State/State.h"
 #include "../../MG_Impl/Log.h"
 
+#include <glslang/Public/ShaderLang.h>
+#include <glslang/Public/ResourceLimits.h>
+#include <SPIRV/GlslangToSpv.h>
+
 #include <cstring>
+#include <mutex>
+#include <unordered_map>
 #include <vector>
 
 namespace mithril {
@@ -40,6 +49,12 @@ struct OneShotCtx {
     VkCommandBuffer cmd = VK_NULL_HANDLE;
     VkFence fence = VK_NULL_HANDLE;
     bool ok = false;
+    // Optional binary semaphore this one-shot must wait before touching the
+    // current swapchain drawable (used by a blit-to-default, which is recorded
+    // out-of-band rather than through commit_frame's normal acquire wait).
+    VkSemaphore waitSemaphore = VK_NULL_HANDLE;
+    VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    bool consumeAcquire = false;
 };
 
 bool begin_one_shot(OneShotCtx& c) {
@@ -79,7 +94,16 @@ void end_one_shot(OneShotCtx& c) {
     si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     si.commandBufferCount = 1;
     si.pCommandBuffers = &c.cmd;
-    vkQueueSubmit(b->graphicsQueue, 1, &si, c.fence);
+    if (c.waitSemaphore != VK_NULL_HANDLE) {
+        si.waitSemaphoreCount = 1;
+        si.pWaitSemaphores = &c.waitSemaphore;
+        si.pWaitDstStageMask = &c.waitStage;
+    }
+    VkResult submitRc = vkQueueSubmit(b->graphicsQueue, 1, &si, c.fence);
+    if (submitRc == VK_SUCCESS && c.consumeAcquire) {
+        Swapchain* sc0 = active_swapchain();
+        if (sc0) sc0->imageAvailableConsumed = true;
+    }
     vkWaitForFences(b->device, 1, &c.fence, VK_TRUE, UINT64_MAX);
     vkDestroyFence(b->device, c.fence, nullptr);
     vkFreeCommandBuffers(b->device, b->commandPool, 1, &c.cmd);
@@ -95,7 +119,7 @@ void end_one_shot(OneShotCtx& c) {
 void generate_mipmaps(GLuint name) {
     Backend* b = backend();
     if (!b->initialized || name == 0) return;
-    auto& tbl = texture_table();
+    auto& tbl = mithril::vk::texture_table();
     auto it = tbl.find(name);
     if (it == tbl.end()) return;
     TextureEntry& tex = it->second;
@@ -652,7 +676,7 @@ int read_pixels(int x, int y, int w, int h, GLenum format, GLenum type, void* ou
             mithril::Framebuffer* fbo = mithril::state_get_framebuffer(readFboName);
             if (!fbo || fbo->depth.texture == 0) return 0;
             srcTexId = fbo->depth.texture;
-            auto& tbl = texture_table();
+            auto& tbl = mithril::vk::texture_table();
             auto it = tbl.find(srcTexId);
             if (it == tbl.end() || it->second.image == VK_NULL_HANDLE) return 0;
             srcImage = it->second.image;
@@ -665,7 +689,7 @@ int read_pixels(int x, int y, int w, int h, GLenum format, GLenum type, void* ou
         backend_commit();
 
         if (readFboName != 0 && srcTexId != 0) {
-            auto& tbl = texture_table();
+            auto& tbl = mithril::vk::texture_table();
             auto it = tbl.find(srcTexId);
             if (it != tbl.end()) srcLayout = it->second.currentLayout;
         }
@@ -834,6 +858,10 @@ int read_pixels(int x, int y, int w, int h, GLenum format, GLenum type, void* ou
         return 0;
     }
 
+    if (std::getenv("MITHRIL_RPIMG")) {
+        MITHRIL_LOG_WARN("vk-diag","RPIMG fbo=%u tex=%u image=%p fmt=%d layout=%d",
+          readFboName,src_tex_id,(void*)src_image,(int)src_fmt,(int)src_layout);
+    }
     // Flush any pending rendering into the colour attachment so the readback
     // sees the latest pixels.
     backend_end_render_pass();
@@ -893,6 +921,15 @@ int read_pixels(int x, int y, int w, int h, GLenum format, GLenum type, void* ou
         case VK_FORMAT_R8G8B8A8_SRGB: src_bpp = 4; break;
         case VK_FORMAT_R8G8B8_UNORM:  src_bpp = 3; break;
         case VK_FORMAT_R5G6B5_UNORM_PACK16: src_bpp = 2; break;
+        case VK_FORMAT_R8_UNORM:
+        case VK_FORMAT_R8_SNORM:
+        case VK_FORMAT_R8_UINT:
+        case VK_FORMAT_R8_SINT:      src_bpp = 1; break;
+        case VK_FORMAT_R8G8_UNORM:
+        case VK_FORMAT_R8G8_SNORM:   src_bpp = 2; break;
+        case VK_FORMAT_R16_SFLOAT:
+        case VK_FORMAT_R16_UNORM:    src_bpp = 2; break;
+        case VK_FORMAT_R32_SFLOAT:   src_bpp = 4; break;
         default: src_bpp = 4; break;
     }
     VkDeviceSize staging_size = (VkDeviceSize)w * (VkDeviceSize)h * (VkDeviceSize)src_bpp;
@@ -922,6 +959,9 @@ int read_pixels(int x, int y, int w, int h, GLenum format, GLenum type, void* ou
     // above). Hardcoding COLOR_ATTACHMENT_OPTIMAL here makes the transition a
     // no-op on MoltenVK when the image is in a read-only layout after a render
     // pass, returning garbage/black on readback.
+    if (readFboName==0 && std::getenv("MITHRIL_DUMP_BLIT"))
+        MITHRIL_LOG_WARN("vk-diag","read-fbo0 img=%p layout=%d defaultColorImg=%p",
+          (void*)src_image,(int)src_layout,(void*)g_state->eglDefaultColorImage);
     bar.oldLayout = src_layout;
     bar.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
     bar.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -1003,6 +1043,30 @@ int read_pixels(int x, int y, int w, int h, GLenum format, GLenum type, void* ou
         std::memcpy(out_pixels, mapped, n);
     }
 
+    // Channel-order conversion. vkCmdCopyImageToBuffer preserves the image's
+    // in-memory channel order; it does NOT reorder to the GL request. A BGRA8
+    // swapchain read as GL_RGBA (or an RGBA8 image read as GL_BGRA) would
+    // otherwise come back with R and B swapped (observed: a red corner read as
+    // blue). Swap bytes 0/2 per texel for the cross-order 4-byte case.
+    if (dst_bpp == 4) {
+        const bool src_bgra = (src_fmt == VK_FORMAT_B8G8R8A8_UNORM ||
+                               src_fmt == VK_FORMAT_B8G8R8A8_SRGB);
+        const bool src_rgba = (src_fmt == VK_FORMAT_R8G8B8A8_UNORM ||
+                               src_fmt == VK_FORMAT_R8G8B8A8_SRGB);
+        const bool dst_bgra = (format == 0x80E1 /*GL_BGRA*/);
+        const bool dst_rgba = (format == 0x1908 /*GL_RGBA*/);
+        const bool swap_rb = (src_bgra && dst_rgba) || (src_rgba && dst_bgra);
+        if (swap_rb) {
+            unsigned char* px = static_cast<unsigned char*>(out_pixels);
+            size_t count = (size_t)w * (size_t)h;
+            for (size_t i = 0; i < count; ++i) {
+                unsigned char t = px[i*4+0];
+                px[i*4+0] = px[i*4+2];
+                px[i*4+2] = t;
+            }
+        }
+    }
+
     vkUnmapMemory(b->device, staging.memory);
     destroy_buffer_entry(staging);
     return 1;
@@ -1014,7 +1078,7 @@ void blit_texture(GLuint src_name, GLuint dst_name,
                   GLbitfield mask, GLenum filter) {
     Backend* b = backend();
     if (!b->initialized) return;
-    auto& tbl = texture_table();
+    auto& tbl = mithril::vk::texture_table();
     auto sit = tbl.find(src_name);
     auto dit = tbl.find(dst_name);
     if (sit == tbl.end() || dit == tbl.end()) return;
@@ -1159,8 +1223,16 @@ void blit_images_impl(VkImage src_image, VkFormat src_format,
     // reading from it still produce correct results because the content
     // orientation and coordinate mapping are consistent within the image.
     if (is_dst_default_fbo && dst_height > 0) {
-        dstY0 = dst_height - dstY0;
-        dstY1 = dst_height - dstY1;
+        // GL destination rect is bottom-origin; VkImageBlit offsets are
+        // top-origin AND must satisfy offsets[0] <= offsets[1]. Mapping each
+        // edge independently as (height - y0),(height - y1) reverses the order
+        // (offsets[0].y > offsets[1].y), which is an invalid VkImageBlit and
+        // makes MoltenVK blit nothing (uniform black). Convert as
+        // (height - y1, height - y0) so the min/max ordering is preserved.
+        int fy0 = dst_height - dstY1;
+        int fy1 = dst_height - dstY0;
+        dstY0 = fy0;
+        dstY1 = fy1;
     }
 
     OneShotCtx c;
@@ -1169,12 +1241,41 @@ void blit_images_impl(VkImage src_image, VkFormat src_format,
     VkImageAspectFlags srcAspect = aspect_for_format(src_format);
     VkImageAspectFlags dstAspect = aspect_for_format(dst_format);
 
+    // Map an image's CURRENT layout to the correct (srcAccessMask, srcStage)
+    // for the barrier that moves it into a TRANSFER layout. The old code only
+    // distinguished COLOR_ATTACHMENT vs "everything else" (assumed
+    // SHADER_READ_ONLY); a PRESENT_SRC_KHR image (which happens mid-frame
+    // after a glReadPixels/prepresent commit ran commit_frame and transitioned
+    // the swapchain image to PRESENT_SRC) was given SHADER_READ/FRAGMENT_SHADER,
+    // an invalid source for leaving the present layout. MoltenVK treated that
+    // barrier as a no-op, so vkCmdBlitImage wrote the destination in the wrong
+    // layout -> uniform black.
+    auto src_barrier_info = [](VkImageLayout lay)
+        -> std::pair<VkAccessFlags, VkPipelineStageFlags> {
+        switch (lay) {
+        case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:
+            return {VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
+        case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
+            return {VK_ACCESS_SHADER_READ_BIT,
+                    VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT};
+        case VK_IMAGE_LAYOUT_PRESENT_SRC_KHR:
+            return {0, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
+        case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
+            return {VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT};
+        case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
+            return {VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT};
+        default:
+            return {0, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
+        }
+    };
+
     // Transition source to TRANSFER_SRC_OPTIMAL.
     VkImageMemoryBarrier sb{};
     sb.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    sb.srcAccessMask = (src_initial == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
-                        ? VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
-                        : VK_ACCESS_SHADER_READ_BIT;
+    VkAccessFlags s_in_acc; VkPipelineStageFlags s_in_stage;
+    std::tie(s_in_acc, s_in_stage) = src_barrier_info(src_initial);
+    sb.srcAccessMask = s_in_acc;
     sb.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
     sb.oldLayout = src_initial;
     sb.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
@@ -1186,19 +1287,16 @@ void blit_images_impl(VkImage src_image, VkFormat src_format,
     sb.subresourceRange.levelCount = 1;
     sb.subresourceRange.baseArrayLayer = 0;
     sb.subresourceRange.layerCount = 1;
-    VkPipelineStageFlags srcStage = (src_initial == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
-                        ? VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
-                        : VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-    vkCmdPipelineBarrier(c.cmd, srcStage,
+    vkCmdPipelineBarrier(c.cmd, s_in_stage,
                          VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
                          0, nullptr, 0, nullptr, 1, &sb);
 
     // Transition destination to TRANSFER_DST_OPTIMAL.
     VkImageMemoryBarrier db{};
     db.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    db.srcAccessMask = (dst_initial == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
-                        ? VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT
-                        : VK_ACCESS_SHADER_READ_BIT;
+    VkAccessFlags d_in_acc; VkPipelineStageFlags d_in_stage;
+    std::tie(d_in_acc, d_in_stage) = src_barrier_info(dst_initial);
+    db.srcAccessMask = d_in_acc;
     db.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
     db.oldLayout = dst_initial;
     db.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
@@ -1210,10 +1308,7 @@ void blit_images_impl(VkImage src_image, VkFormat src_format,
     db.subresourceRange.levelCount = 1;
     db.subresourceRange.baseArrayLayer = 0;
     db.subresourceRange.layerCount = 1;
-    VkPipelineStageFlags dstStage = (dst_initial == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL)
-                        ? VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT
-                        : VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-    vkCmdPipelineBarrier(c.cmd, dstStage,
+    vkCmdPipelineBarrier(c.cmd, d_in_stage,
                          VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
                          0, nullptr, 0, nullptr, 1, &db);
 
@@ -1231,6 +1326,10 @@ void blit_images_impl(VkImage src_image, VkFormat src_format,
     blit.dstOffsets[0] = { dstX0, dstY0, 0 };
     blit.dstOffsets[1] = { dstX1, dstY1, 1 };
 
+    if (std::getenv("MITHRIL_DUMP_BLIT") || std::getenv("MITHRIL_DRAW_TRACE")) {
+        MITHRIL_LOG_WARN("vk-diag","blit-exec srcImg=%p dstImg=%p srcInit=%d srcFinal=%d dstInit=%d dstFinal=%d src[%d,%d,%d,%d] dst[%d,%d,%d,%d] dstH=%d dstDefault=%d",
+          (void*)src_image,(void*)dst_image,(int)src_initial,(int)src_final,(int)dst_initial,(int)dst_final,srcX0,srcY0,srcX1,srcY1,dstX0,dstY0,dstX1,dstY1,dst_height,(int)is_dst_default_fbo);
+    }
     VkFilter filt = (filter == GL_LINEAR) ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
     vkCmdBlitImage(c.cmd,
                    src_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
@@ -1264,7 +1363,827 @@ void blit_images_impl(VkImage src_image, VkFormat src_format,
                          dstFinalStage, 0,
                          0, nullptr, 0, nullptr, 1, &db);
 
+    // TEMP (MITHRIL_BLIT_VERIFY): read the dst swapchain straight back on the
+    // GPU right after the blit to decide whether vkCmdBlitImage wrote it.
+    BufferEntry vstg{};
+    bool vverify = is_dst_default_fbo && std::getenv("MITHRIL_BLIT_VERIFY");
+    int vvw = dstX1 - dstX0, vvh = dst_height;
+    if (vverify) {
+        create_buffer(vstg, (VkDeviceSize)vvw*vvh*4,
+                      VK_BUFFER_USAGE_TRANSFER_DST_BIT, nullptr);
+        VkImageMemoryBarrier vb0 = db;
+        vb0.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        vb0.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        vb0.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        vb0.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        vkCmdPipelineBarrier(c.cmd, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+                             0, nullptr, 0, nullptr, 1, &vb0);
+        VkBufferImageCopy vr{};
+        vr.imageSubresource.aspectMask = dstAspect;
+        vr.imageExtent = {(uint32_t)vvw,(uint32_t)vvh,1};
+        vkCmdCopyImageToBuffer(c.cmd, dst_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                               vstg.buffer, 1, &vr);
+        vb0.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        vb0.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        vb0.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        vb0.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        vkCmdPipelineBarrier(c.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0,
+                             0, nullptr, 0, nullptr, 1, &vb0);
+    }
+
     end_one_shot(c);
+
+    if (vverify) {
+        void* vm = nullptr;
+        vkMapMemory(b->device, vstg.memory, 0, (VkDeviceSize)vvw*vvh*4, 0, &vm);
+        unsigned char* qp = (unsigned char*)vm;
+        auto PP = [&](int x,int y)->unsigned char*{ return &qp[((size_t)y*vvw+x)*4]; };
+        unsigned char* zc = PP(vvw/2,(int)(vvh*0.62));
+        unsigned char* zk = PP(20,20);
+        MITHRIL_LOG_WARN("vk-diag","BLIT-VERIFY center=(%d,%d,%d,%d) corner=(%d,%d,%d,%d)",
+          zc[0],zc[1],zc[2],zc[3],zk[0],zk[1],zk[2],zk[3]);
+        vkUnmapMemory(b->device, vstg.memory);
+        destroy_buffer_entry(vstg);
+    }
+}
+
+// ===========================================================================
+// blit-to-default via a fullscreen textured quad
+// ===========================================================================
+// vkCmdBlitImage into a MoltenVK swapchain drawable writes no pixels (proven
+// by an in-GPU BLIT-VERIFY: dst reads all-zero, no Metal validation error),
+// while the normal render-pass draw path to the drawable works (CI Minecraft
+// 1.21.1 menu). Implement a COLOUR glBlitFramebuffer whose destination is
+// FBO 0 as a fullscreen textured quad drawn through a self-contained render
+// pass. Depth/stencil blits still use backend_blit_images.
+namespace {
+
+const char* kBlitQuadVS = R"(#version 450
+layout(location=0) in vec2 aPos;
+layout(location=1) in vec2 aUv;
+layout(location=0) out vec2 vUv;
+void main(){ vUv = aUv; gl_Position = vec4(aPos, 0.0, 1.0); }
+)";
+
+const char* kBlitQuadFS = R"(#version 450
+layout(location=0) in vec2 vUv;
+layout(location=0) out vec4 outColor;
+layout(set=0,binding=0) uniform sampler2D uTex;
+void main(){ outColor = texture(uTex, vUv); }
+)";
+
+bool bq_compile_stage(EShLanguage stage, const char* src,
+                      std::vector<uint32_t>& out) {
+    static std::once_flag s_init;
+    std::call_once(s_init, []() { glslang::InitializeProcess(); });
+    static std::mutex s_mu;
+    std::lock_guard<std::mutex> lk(s_mu);
+    glslang::TShader sh(stage);
+    sh.setStrings(&src, 1);
+    sh.setEnvInput(glslang::EShSourceGlsl, stage, glslang::EShClientVulkan, 450);
+    sh.setEnvClient(glslang::EShClientVulkan, glslang::EShTargetVulkan_1_1);
+    sh.setEnvTarget(glslang::EShTargetSpv, glslang::EShTargetSpv_1_5);
+    const TBuiltInResource* res = GetDefaultResources();
+    if (!sh.parse(res, 450, false, (EShMessages)(EShMsgDefault))) {
+        MITHRIL_LOG_WARN("blit-quad", "shader parse failed: %s", sh.getInfoLog());
+        return false;
+    }
+    glslang::TProgram prog;
+    prog.addShader(&sh);
+    if (!prog.link(EShMsgDefault)) {
+        MITHRIL_LOG_WARN("blit-quad", "shader link failed: %s", prog.getInfoLog());
+        return false;
+    }
+    glslang::TIntermediate* inter = prog.getIntermediate(stage);
+    if (!inter) return false;
+    glslang::SpvOptions spv_opts;
+    glslang::GlslangToSpv(*inter, out, &spv_opts);
+    return !out.empty();
+}
+
+struct BqGpu {
+    VkShaderModule      vs = VK_NULL_HANDLE;
+    VkShaderModule      fs = VK_NULL_HANDLE;
+    VkDescriptorSetLayout setLayout = VK_NULL_HANDLE;
+    VkPipelineLayout    pipeLayout = VK_NULL_HANDLE;
+    VkSampler           sampNearest = VK_NULL_HANDLE;
+    VkSampler           sampLinear = VK_NULL_HANDLE;
+    VkDescriptorPool    pool = VK_NULL_HANDLE;
+    VkBuffer            vbo = VK_NULL_HANDLE;
+    VkDeviceMemory      vboMem = VK_NULL_HANDLE;
+    void*               vboMap = nullptr;
+    std::unordered_map<uint32_t, VkRenderPass> rpByFmt;
+    std::unordered_map<uint32_t, VkPipeline>   pipeByFmt;
+    // Dynamic-rendering (VK_KHR_dynamic_rendering) blit pipelines, keyed by dst
+    // format; renderPass=VK_NULL_HANDLE, compatible with the begin_render_pass()
+    // frame path.
+    std::unordered_map<uint32_t, VkPipeline>   drPipeByFmt;
+    // One descriptor set per swapchain image index; rebuilt only when that image
+    // is re-acquired (prior present complete -> prior set not in GPU use).
+    std::vector<VkDescriptorSet>               frameSets;
+    bool                ready = false;
+};
+BqGpu& bq_gpu() { static BqGpu g; return g; }
+
+bool bq_ensure_gpu() {
+    BqGpu& g = bq_gpu();
+    if (g.ready) return true;
+    Backend* b = backend();
+    std::vector<uint32_t> vspv, fspv;
+    if (!bq_compile_stage(EShLangVertex, kBlitQuadVS, vspv)) return false;
+    if (!bq_compile_stage(EShLangFragment, kBlitQuadFS, fspv)) return false;
+
+    VkShaderModuleCreateInfo vm{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+    vm.codeSize = vspv.size() * 4; vm.pCode = vspv.data();
+    if (vkCreateShaderModule(b->device, &vm, nullptr, &g.vs) != VK_SUCCESS) return false;
+    vm.codeSize = fspv.size() * 4; vm.pCode = fspv.data();
+    if (vkCreateShaderModule(b->device, &vm, nullptr, &g.fs) != VK_SUCCESS) return false;
+
+    VkDescriptorSetLayoutBinding bind{};
+    bind.binding = 0;
+    bind.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    bind.descriptorCount = 1;
+    bind.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    VkDescriptorSetLayoutCreateInfo sl{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    sl.bindingCount = 1; sl.pBindings = &bind;
+    if (vkCreateDescriptorSetLayout(b->device, &sl, nullptr, &g.setLayout) != VK_SUCCESS) return false;
+    VkPipelineLayoutCreateInfo pl{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    pl.setLayoutCount = 1; pl.pSetLayouts = &g.setLayout;
+    if (vkCreatePipelineLayout(b->device, &pl, nullptr, &g.pipeLayout) != VK_SUCCESS) return false;
+
+    auto mk_sampler = [&](VkFilter f, VkSampler& out) -> bool {
+        VkSamplerCreateInfo s{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+        s.magFilter = f; s.minFilter = f;
+        s.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        s.addressModeU = s.addressModeV = s.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        s.minLod = 0.0f; s.maxLod = 0.0f;
+        return vkCreateSampler(b->device, &s, nullptr, &out) == VK_SUCCESS;
+    };
+    if (!mk_sampler(VK_FILTER_NEAREST, g.sampNearest)) return false;
+    if (!mk_sampler(VK_FILTER_LINEAR, g.sampLinear)) return false;
+
+    VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4};
+    VkDescriptorPoolCreateInfo pc{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    pc.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+    pc.maxSets = 4; pc.poolSizeCount = 1; pc.pPoolSizes = &ps;
+    if (vkCreateDescriptorPool(b->device, &pc, nullptr, &g.pool) != VK_SUCCESS) return false;
+
+    VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    bci.size = 6 * 16; bci.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+    if (vkCreateBuffer(b->device, &bci, nullptr, &g.vbo) != VK_SUCCESS) return false;
+    VkMemoryRequirements mr; vkGetBufferMemoryRequirements(b->device, g.vbo, &mr);
+    VkPhysicalDeviceMemoryProperties mp;
+    vkGetPhysicalDeviceMemoryProperties(b->physicalDevice, &mp);
+    uint32_t mi = UINT32_MAX;
+    for (uint32_t i = 0; i < mp.memoryTypeCount; ++i) {
+        if ((mr.memoryTypeBits & (1u << i)) &&
+            (mp.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) &&
+            (mp.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) { mi = i; break; }
+    }
+    if (mi == UINT32_MAX) return false;
+    VkMemoryAllocateInfo mal{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    mal.allocationSize = mr.size; mal.memoryTypeIndex = mi;
+    if (vkAllocateMemory(b->device, &mal, nullptr, &g.vboMem) != VK_SUCCESS) return false;
+    vkBindBufferMemory(b->device, g.vbo, g.vboMem, 0);
+    vkMapMemory(b->device, g.vboMem, 0, mr.size, 0, &g.vboMap);
+
+    g.ready = true;
+    return true;
+}
+
+VkRenderPass bq_render_pass(VkFormat fmt) {
+    BqGpu& g = bq_gpu();
+    auto it = g.rpByFmt.find((uint32_t)fmt);
+    if (it != g.rpByFmt.end()) return it->second;
+    Backend* b = backend();
+    VkAttachmentDescription a{};
+    a.format = fmt; a.samples = VK_SAMPLE_COUNT_1_BIT;
+    a.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD; a.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    a.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    a.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    a.initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    a.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    VkAttachmentReference ref{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    VkSubpassDescription sp{};
+    sp.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    sp.colorAttachmentCount = 1; sp.pColorAttachments = &ref;
+    VkSubpassDependency dep{};
+    dep.srcSubpass = VK_SUBPASS_EXTERNAL; dep.dstSubpass = 0;
+    dep.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dep.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dep.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    dep.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    VkRenderPassCreateInfo rp{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
+    rp.attachmentCount = 1; rp.pAttachments = &a;
+    rp.subpassCount = 1; rp.pSubpasses = &sp;
+    rp.dependencyCount = 1; rp.pDependencies = &dep;
+    VkRenderPass out = VK_NULL_HANDLE;
+    if (vkCreateRenderPass(b->device, &rp, nullptr, &out) == VK_SUCCESS)
+        g.rpByFmt[(uint32_t)fmt] = out;
+    return out;
+}
+
+VkPipeline bq_pipeline(VkRenderPass rp, VkFormat fmt) {
+    BqGpu& g = bq_gpu();
+    auto it = g.pipeByFmt.find((uint32_t)fmt);
+    if (it != g.pipeByFmt.end()) return it->second;
+    Backend* b = backend();
+    VkPipelineShaderStageCreateInfo st[2]{};
+    st[0].sType = st[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    st[0].stage = VK_SHADER_STAGE_VERTEX_BIT;   st[0].module = g.vs; st[0].pName = "main";
+    st[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT; st[1].module = g.fs; st[1].pName = "main";
+    VkVertexInputBindingDescription vib{0, 16, VK_VERTEX_INPUT_RATE_VERTEX};
+    VkVertexInputAttributeDescription via[2]{
+        {0, 0, VK_FORMAT_R32G32_SFLOAT, 0},
+        {1, 0, VK_FORMAT_R32G32_SFLOAT, 8}};
+    VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+    vi.vertexBindingDescriptionCount = 1; vi.pVertexBindingDescriptions = &vib;
+    vi.vertexAttributeDescriptionCount = 2; vi.pVertexAttributeDescriptions = via;
+    VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+    ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    VkPipelineViewportStateCreateInfo vp{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+    vp.viewportCount = 1; vp.scissorCount = 1;
+    VkPipelineRasterizationStateCreateInfo rs{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+    rs.polygonMode = VK_POLYGON_MODE_FILL; rs.cullMode = VK_CULL_MODE_NONE;
+    rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE; rs.lineWidth = 1.0f;
+    VkPipelineMultisampleStateCreateInfo ms{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+    ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    VkPipelineColorBlendAttachmentState ba{};
+    ba.blendEnable = VK_FALSE;
+    ba.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT
+                      | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    VkPipelineColorBlendStateCreateInfo bl{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
+    bl.attachmentCount = 1; bl.pAttachments = &ba;
+    VkDynamicState dyn[2]{VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    VkPipelineDynamicStateCreateInfo ds{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
+    ds.dynamicStateCount = 2; ds.pDynamicStates = dyn;
+    VkGraphicsPipelineCreateInfo gp{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+    gp.stageCount = 2; gp.pStages = st;
+    gp.pVertexInputState = &vi; gp.pInputAssemblyState = &ia; gp.pViewportState = &vp;
+    gp.pRasterizationState = &rs; gp.pMultisampleState = &ms;
+    gp.pColorBlendState = &bl; gp.pDynamicState = &ds;
+    gp.layout = g.pipeLayout; gp.renderPass = rp; gp.subpass = 0;
+    VkPipeline out = VK_NULL_HANDLE;
+    if (vkCreateGraphicsPipelines(b->device, VK_NULL_HANDLE, 1, &gp, nullptr, &out) == VK_SUCCESS)
+        g.pipeByFmt[(uint32_t)fmt] = out;
+    return out;
+}
+
+} // namespace
+
+void blit_to_default_quad(VkImage src_image, VkFormat src_format,
+                          int src_w, int src_h,
+                          int sx0, int sy0, int sx1, int sy1,
+                          int dx0, int dy0, int dx1, int dy1,
+                          GLenum filter) {
+    Backend* b = backend();
+    if (!b->initialized) return;
+    Swapchain* sc = active_swapchain();
+    if (!sc || sc->currentImage < 0 ||
+        sc->currentImage >= (int)sc->views.size()) {
+        MITHRIL_LOG_WARN("blit-quad", "no active acquired swapchain (sc=%p currentImage=%d views=%zu)",
+            (void*)sc, sc?sc->currentImage:-99, sc?sc->views.size():0);
+        return;
+    }
+    if (!bq_ensure_gpu()) {
+        MITHRIL_LOG_WARN("blit-quad", "gpu resources unavailable");
+        return;
+    }
+    BqGpu& g = bq_gpu();
+
+    int DW = sc->actualDrawableWidth  > 0 ? sc->actualDrawableWidth  : sc->width;
+    int DH = sc->actualDrawableHeight > 0 ? sc->actualDrawableHeight : sc->height;
+    if (DW <= 0 || DH <= 0 || src_w <= 0 || src_h <= 0) {
+        MITHRIL_LOG_WARN("blit-quad", "bad dims dst=%dx%d src=%dx%d", DW,DH,src_w,src_h);
+        return;
+    }
+    VkImage     dst_image = sc->images[sc->currentImage];
+    VkImageView dst_view  = sc->views[sc->currentImage];
+    VkFormat    dst_fmt   = sc->format;
+
+    // Source view + real tracked layout.
+    VkImageView src_view = VK_NULL_HANDLE;
+    VkImageLayout src_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    bool src_tracked = false;
+    for (auto& kv : texture_table()) {
+        if (kv.second.image == src_image) {
+            src_view = kv.second.view;
+            src_layout = kv.second.currentLayout;
+            src_tracked = true;
+            break;
+        }
+    }
+    bool created_src_view = false;
+    if (src_view == VK_NULL_HANDLE) {
+        VkImageViewCreateInfo vc{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+        vc.image = src_image; vc.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        vc.format = src_format;
+        vc.subresourceRange = {aspect_for_format(src_format), 0, 1, 0, 1};
+        if (vkCreateImageView(b->device, &vc, nullptr, &src_view) != VK_SUCCESS) return;
+        created_src_view = true;
+    }
+
+    // Acquire-wait semaphore (only if the frame has not consumed it yet).
+    VkSemaphore wait = VK_NULL_HANDLE;
+    if (!sc->imageAvailableConsumed && sc->imageAvailableFrameSlot >= 0 &&
+        sc->imageAvailableFrameSlot < (int)sc->imageAvailablePerFrame.size())
+        wait = sc->imageAvailablePerFrame[sc->imageAvailableFrameSlot];
+
+    OneShotCtx c;
+    if (!begin_one_shot(c)) {
+        if (created_src_view) vkDestroyImageView(b->device, src_view, nullptr);
+        return;
+    }
+    if (wait != VK_NULL_HANDLE) {
+        c.waitSemaphore = wait;
+        c.waitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        c.consumeAcquire = true;
+    }
+
+    // Source (real layout) -> SHADER_READ_ONLY_OPTIMAL.
+    auto src_barrier_src = [](VkImageLayout l)
+        -> std::pair<VkAccessFlags, VkPipelineStageFlags> {
+        switch (l) {
+        case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:
+            return {VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
+        case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
+            return {VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT};
+        case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
+            return {VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT};
+        default:
+            return {0, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT};
+        }
+    };
+    VkAccessFlags s_acc; VkPipelineStageFlags s_stage;
+    std::tie(s_acc, s_stage) = src_barrier_src(src_layout);
+    VkImageMemoryBarrier sb{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    sb.image = src_image;
+    sb.subresourceRange = {aspect_for_format(src_format), 0, 1, 0, 1};
+    sb.oldLayout = src_layout;
+    sb.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    sb.srcAccessMask = s_acc;
+    sb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(c.cmd, s_stage, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
+                         0, nullptr, 0, nullptr, 1, &sb);
+
+    // Destination UNDEFINED -> COLOR_ATTACHMENT_OPTIMAL (acquire => don't-care).
+    VkImageMemoryBarrier db{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    db.image = dst_image;
+    db.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    db.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    db.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    db.srcAccessMask = 0;
+    db.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    vkCmdPipelineBarrier(c.cmd, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0,
+                         0, nullptr, 0, nullptr, 1, &db);
+
+    // Fullscreen quad geometry. NDC maps the GL dst rect directly; the source
+    // user texture is in GL orientation so V is flipped.
+    struct BqVert { float x, y, u, v; };
+    auto U = [&](float qx) -> float { return qx / (float)src_w; };
+    auto VV = [&](float qy) -> float { return 1.0f - qy / (float)src_h; };
+    auto NX = [&](float px) -> float { return 2.0f * px / (float)DW - 1.0f; };
+    auto NY = [&](float py) -> float { return 2.0f * py / (float)DH - 1.0f; };
+    BqVert corner[4] = {
+        {NX(dx0), NY(dy0), U(sx0), VV(sy0)},
+        {NX(dx1), NY(dy0), U(sx1), VV(sy0)},
+        {NX(dx1), NY(dy1), U(sx1), VV(sy1)},
+        {NX(dx0), NY(dy1), U(sx0), VV(sy1)}};
+    BqVert verts[6] = {
+        corner[0], corner[1], corner[2],
+        corner[0], corner[2], corner[3]};
+    std::memcpy(g.vboMap, verts, sizeof(verts));
+
+    // Descriptor set (source combined image sampler).
+    VkDescriptorSet set = VK_NULL_HANDLE;
+    {
+        VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        ai.descriptorPool = g.pool;
+        ai.descriptorSetCount = 1;
+        ai.pSetLayouts = &g.setLayout;
+        if (vkAllocateDescriptorSets(b->device, &ai, &set) != VK_SUCCESS) {
+            c.ok = false; end_one_shot(c);
+            if (created_src_view) vkDestroyImageView(b->device, src_view, nullptr);
+            return;
+        }
+    }
+    VkDescriptorImageInfo dii{};
+    dii.sampler = (filter == GL_LINEAR) ? g.sampLinear : g.sampNearest;
+    dii.imageView = src_view;
+    dii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    w.dstSet = set; w.dstBinding = 0;
+    w.descriptorCount = 1;
+    w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    w.pImageInfo = &dii;
+    vkUpdateDescriptorSets(b->device, 1, &w, 0, nullptr);
+
+    VkRenderPass rp = bq_render_pass(dst_fmt);
+    VkPipeline pipe = bq_pipeline(rp, dst_fmt);
+    VkFramebuffer fb = VK_NULL_HANDLE;
+    if (rp && pipe) {
+        VkFramebufferCreateInfo fc{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+        fc.renderPass = rp; fc.attachmentCount = 1; fc.pAttachments = &dst_view;
+        fc.width = (uint32_t)DW; fc.height = (uint32_t)DH; fc.layers = 1;
+        if (vkCreateFramebuffer(b->device, &fc, nullptr, &fb) != VK_SUCCESS) fb = VK_NULL_HANDLE;
+    }
+    if (!rp || !pipe || !fb) {
+        MITHRIL_LOG_WARN("blit-quad", "ABORT before pass rp=%p pipe=%p fb=%p dstFmt=%d",
+            (void*)rp,(void*)pipe,(void*)fb,(int)dst_fmt);
+        vkFreeDescriptorSets(b->device, g.pool, 1, &set);
+        c.ok = false; end_one_shot(c);
+        if (created_src_view) vkDestroyImageView(b->device, src_view, nullptr);
+        return;
+    }
+
+    VkRenderPassBeginInfo rpb{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+    rpb.renderPass = rp; rpb.framebuffer = fb;
+    rpb.renderArea = {{0, 0}, {(uint32_t)DW, (uint32_t)DH}};
+    vkCmdBeginRenderPass(c.cmd, &rpb, VK_SUBPASS_CONTENTS_INLINE);
+    VkViewport vp{0.0f, 0.0f, (float)DW, (float)DH, 0.0f, 1.0f};
+    vkCmdSetViewport(c.cmd, 0, 1, &vp);
+    VkRect2D sr{{0, 0}, {(uint32_t)DW, (uint32_t)DH}};
+    vkCmdSetScissor(c.cmd, 0, 1, &sr);
+    vkCmdBindPipeline(c.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+    VkDeviceSize voff = 0;
+    vkCmdBindVertexBuffers(c.cmd, 0, 1, &g.vbo, &voff);
+    vkCmdBindDescriptorSets(c.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            g.pipeLayout, 0, 1, &set, 0, nullptr);
+    vkCmdDraw(c.cmd, 6, 1, 0, 0);
+    vkCmdEndRenderPass(c.cmd);
+
+    MITHRIL_LOG_WARN("blit-quad", "recorded quad, submitting dstView=%p wait=%p",
+        (void*)dst_view,(void*)wait);
+    end_one_shot(c);
+    MITHRIL_LOG_WARN("blit-quad", "quad submit complete");
+
+    vkDestroyFramebuffer(b->device, fb, nullptr);
+    vkFreeDescriptorSets(b->device, g.pool, 1, &set);
+    if (created_src_view) vkDestroyImageView(b->device, src_view, nullptr);
+
+    // Update tracked layouts so the next pass/present barrier is correct.
+    sc->currentColorLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    backend_set_active_swapchain_color_layout(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    if (src_tracked) {
+        for (auto& kv : texture_table())
+            if (kv.second.image == src_image)
+                kv.second.currentLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Frame-path blit: records the fullscreen textured quad into the backend's
+// CURRENT per-frame command buffer and begins the swapchain pass through
+// begin_render_pass(). commit_frame() (at eglSwapBuffers) then submits it with
+// the acquire wait and presents. This is the only path whose writes to a
+// MoltenVK drawable persist; an out-of-band one-shot (blit_to_default_quad)
+// does not.
+// ---------------------------------------------------------------------------
+
+// Dynamic-rendering blit pipeline (renderPass=VK_NULL_HANDLE), cached by format.
+VkPipeline bq_dr_pipeline(VkFormat dst_fmt) {
+    BqGpu& g = bq_gpu();
+    auto it = g.drPipeByFmt.find((uint32_t)dst_fmt);
+    if (it != g.drPipeByFmt.end()) return it->second;
+    Backend* b = backend();
+
+    VkVertexInputBindingDescription bd{};
+    bd.binding = 0; bd.stride = 16; bd.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+    VkVertexInputAttributeDescription ads[2]{};
+    ads[0].location = 0; ads[0].binding = 0; ads[0].format = VK_FORMAT_R32G32_SFLOAT; ads[0].offset = 0;
+    ads[1].location = 1; ads[1].binding = 0; ads[1].format = VK_FORMAT_R32G32_SFLOAT; ads[1].offset = 8;
+    VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+    vi.vertexBindingDescriptionCount = 1; vi.pVertexBindingDescriptions = &bd;
+    vi.vertexAttributeDescriptionCount = 2; vi.pVertexAttributeDescriptions = ads;
+
+    VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+    ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    VkPipelineViewportStateCreateInfo vp{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+    vp.viewportCount = 1; vp.scissorCount = 1;
+    VkPipelineRasterizationStateCreateInfo rs{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+    rs.polygonMode = VK_POLYGON_MODE_FILL; rs.cullMode = VK_CULL_MODE_NONE;
+    rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE; rs.lineWidth = 1.0f;
+    VkPipelineMultisampleStateCreateInfo ms{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+    ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    VkPipelineDepthStencilStateCreateInfo ds{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
+    VkPipelineColorBlendAttachmentState cba{};
+    cba.blendEnable = VK_FALSE; cba.colorWriteMask =
+        VK_COLOR_COMPONENT_R_BIT|VK_COLOR_COMPONENT_G_BIT|VK_COLOR_COMPONENT_B_BIT|VK_COLOR_COMPONENT_A_BIT;
+    VkPipelineColorBlendStateCreateInfo cb{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
+    cb.attachmentCount = 1; cb.pAttachments = &cba;
+    VkDynamicState dsts[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    VkPipelineDynamicStateCreateInfo dyn{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
+    dyn.dynamicStateCount = 2; dyn.pDynamicStates = dsts;
+
+    VkPipelineShaderStageCreateInfo stg[2]{};
+    stg[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stg[0].stage = VK_SHADER_STAGE_VERTEX_BIT; stg[0].module = g.vs; stg[0].pName = "main";
+    stg[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stg[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT; stg[1].module = g.fs; stg[1].pName = "main";
+
+    VkPipelineRenderingCreateInfo rci{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
+    rci.colorAttachmentCount = 1; rci.pColorAttachmentFormats = &dst_fmt;
+    VkGraphicsPipelineCreateInfo gi{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+    gi.pNext = &rci; gi.stageCount = 2; gi.pStages = stg;
+    gi.pVertexInputState = &vi; gi.pInputAssemblyState = &ia; gi.pViewportState = &vp;
+    gi.pRasterizationState = &rs; gi.pMultisampleState = &ms; gi.pDepthStencilState = &ds;
+    gi.pColorBlendState = &cb; gi.pDynamicState = &dyn;
+    gi.renderPass = VK_NULL_HANDLE; gi.subpass = 0; gi.layout = g.pipeLayout;
+
+    VkPipeline pipe = VK_NULL_HANDLE;
+    VkResult r = vkCreateGraphicsPipelines(b->device, b->pipelineCache, 1, &gi, nullptr, &pipe);
+    if (r != VK_SUCCESS) {
+        MITHRIL_LOG_WARN("blit-quad", "dr pipeline create failed r=%d fmt=%d",(int)r,(int)dst_fmt);
+        return VK_NULL_HANDLE;
+    }
+    g.drPipeByFmt[(uint32_t)dst_fmt] = pipe;
+    return pipe;
+}
+
+void blit_to_default_in_frame(VkImage src_image, VkFormat src_format, int src_w, int src_h,
+                              int sx0, int sy0, int sx1, int sy1,
+                              int dx0, int dy0, int dx1, int dy1, GLenum filter) {
+    Backend* b = backend();
+    if (!b->initialized) return;
+    Swapchain* sc = active_swapchain();
+    if (!sc || sc->currentImage < 0 || sc->currentImage >= (int)sc->views.size()) {
+        MITHRIL_LOG_WARN("blit-quad", "inframe: no acquired swapchain");
+        return;
+    }
+    if (!bq_ensure_gpu()) { MITHRIL_LOG_WARN("blit-quad", "inframe: gpu unavailable"); return; }
+    BqGpu& g = bq_gpu();
+    int DW = sc->actualDrawableWidth  > 0 ? sc->actualDrawableWidth  : sc->width;
+    int DH = sc->actualDrawableHeight > 0 ? sc->actualDrawableHeight : sc->height;
+    if (DW <= 0 || DH <= 0 || src_w <= 0 || src_h <= 0) {
+        MITHRIL_LOG_WARN("blit-quad", "inframe: bad dims dst=%dx%d src=%dx%d",DW,DH,src_w,src_h);
+        return;
+    }
+    VkImageView dst_view = sc->views[sc->currentImage];
+    VkFormat    dst_fmt  = sc->format;
+
+    // Source view + real tracked layout.
+    VkImageView src_view = VK_NULL_HANDLE;
+    VkImageLayout src_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    bool src_tracked = false;
+    for (auto& kv : texture_table()) {
+        if (kv.second.image == src_image && kv.second.view != VK_NULL_HANDLE) {
+            src_view = kv.second.view; src_layout = kv.second.currentLayout; src_tracked = true;
+            break;
+        }
+    }
+    bool created_src_view = false;
+    if (src_view == VK_NULL_HANDLE) {
+        VkImageViewCreateInfo vc{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+        vc.image = src_image; vc.viewType = VK_IMAGE_VIEW_TYPE_2D; vc.format = src_format;
+        vc.subresourceRange = {aspect_for_format(src_format), 0, 1, 0, 1};
+        if (vkCreateImageView(b->device, &vc, nullptr, &src_view) != VK_SUCCESS) return;
+        created_src_view = true;
+    }
+
+    // End any still-active offscreen pass (records end; transitions the scene
+    // color attachment back to SHADER_READ). No commit.
+    if (render_pass_active()) end_render_pass();
+    if (!ensure_command_buffer_recording()) {
+        MITHRIL_LOG_WARN("blit-quad", "inframe: no recording command buffer");
+        if (created_src_view) vkDestroyImageView(b->device, src_view, nullptr);
+        return;
+    }
+    VkCommandBuffer cmd = b->commandBuffer;
+
+    // Barrier src -> SHADER_READ (unless end_render_pass already put it there).
+    const VkImageLayout want = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    if (src_layout != want) {
+        VkImageMemoryBarrier mb{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+        mb.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT|VK_ACCESS_SHADER_WRITE_BIT;
+        mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        mb.oldLayout = src_layout; mb.newLayout = want;
+        mb.image = src_image;
+        mb.subresourceRange = {aspect_for_format(src_format), 0, 1, 0, 1};
+        vkCmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT|VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &mb);
+        if (src_tracked)
+            for (auto& kv : texture_table())
+                if (kv.second.image == src_image) kv.second.currentLayout = want;
+    }
+
+    VkPipeline pipe = bq_dr_pipeline(dst_fmt);
+    if (pipe == VK_NULL_HANDLE) {
+        if (created_src_view) vkDestroyImageView(b->device, src_view, nullptr);
+        return;
+    }
+
+    // Descriptor set ring keyed by swapchain image (prior use complete on reacquire).
+    if ((int)g.frameSets.size() < (int)sc->images.size())
+        g.frameSets.resize(sc->images.size(), VK_NULL_HANDLE);
+    int slot = sc->currentImage;
+    if (g.frameSets[slot] != VK_NULL_HANDLE) {
+        vkFreeDescriptorSets(b->device, g.pool, 1, &g.frameSets[slot]);
+        g.frameSets[slot] = VK_NULL_HANDLE;
+    }
+    VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    ai.descriptorPool = g.pool; ai.descriptorSetCount = 1; ai.pSetLayouts = &g.setLayout;
+    VkDescriptorSet set = VK_NULL_HANDLE;
+    if (vkAllocateDescriptorSets(b->device, &ai, &set) != VK_SUCCESS) {
+        MITHRIL_LOG_WARN("blit-quad", "inframe: descriptor alloc failed");
+        if (created_src_view) vkDestroyImageView(b->device, src_view, nullptr);
+        return;
+    }
+    g.frameSets[slot] = set;
+    VkDescriptorImageInfo dii{};
+    dii.sampler = (filter == GL_LINEAR) ? g.sampLinear : g.sampNearest;
+    dii.imageView = src_view; dii.imageLayout = want;
+    VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    w.dstSet = set; w.dstBinding = 0; w.descriptorCount = 1;
+    w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; w.pImageInfo = &dii;
+    vkUpdateDescriptorSets(b->device, 1, &w, 0, nullptr);
+
+    // Fill the shared VBO with this rect (NDC; flip source V for GL orientation).
+    float qx0=(float)sx0, qy0=(float)sy0, qx1=(float)sx1, qy1=(float)sy1;
+    float px0=(float)dx0, py0=(float)dy0, px1=(float)dx1, py1=(float)dy1;
+    float DWf=(float)DW, DHf=(float)DH, swf=(float)src_w, shf=(float)src_h;
+    float u0=qx0/swf, u1=qx1/swf, v0=1.0f-qy1/shf, v1=1.0f-qy0/shf;
+    float nx0=2.0f*px0/DWf-1.0f, nx1=2.0f*px1/DWf-1.0f;
+    float ny0=2.0f*py0/DHf-1.0f, ny1=2.0f*py1/DHf-1.0f;
+    float verts[6][4] = {
+        {nx0,ny0,u0,v0},{nx0,ny1,u0,v1},{nx1,ny1,u1,v1},
+        {nx0,ny0,u0,v0},{nx1,ny1,u1,v1},{nx1,ny0,u1,v0},
+    };
+    std::memcpy(g.vboMap, verts, sizeof(verts));
+
+    // Clear stale user-FBO attachment registration, then begin the swapchain
+    // dynamic-rendering pass (PRESENT/UNDEFINED -> COLOR_ATTACHMENT barrier).
+    backend_set_fbo_attachment_tex_ids(nullptr, 0, 0);
+    begin_render_pass(&dst_view, 1, VK_NULL_HANDLE, DW, DH, 1);
+
+    VkViewport vp{0.0f,0.0f,(float)DW,(float)DH,0.0f,1.0f};
+    vkCmdSetViewport(cmd,0,1,&vp);
+    VkRect2D sr{{0,0},{(uint32_t)DW,(uint32_t)DH}};
+    vkCmdSetScissor(cmd,0,1,&sr);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+    VkDeviceSize voff = 0;
+    vkCmdBindVertexBuffers(cmd, 0, 1, &g.vbo, &voff);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, g.pipeLayout,
+                            0, 1, &set, 0, nullptr);
+    vkCmdDraw(cmd, 6, 1, 0, 0);
+    // Pass stays active; eglSwapBuffers ends it, commits (waits acquire), presents.
+    MITHRIL_LOG_WARN("blit-quad", "inframe quad recorded into frame buffer");
+    // A rare temporary source view stays referenced until present; not destroyed.
+}
+
+// Diagnostic (MITHRIL_FS_PROBE): constant-yellow fragment module used to
+// decide whether the vertex stage rasterizes when the app's own fragment
+// shader writes nothing. Not part of the shipping path.
+VkShaderModule create_probe_fs_module() {
+    static const char* kProbeFS =
+        "#version 450\n"
+        "layout(location=0) out vec4 outc;\n"
+        "void main(){ outc = vec4(1.0,1.0,0.0,1.0); }\n";
+    std::vector<uint32_t> spv;
+    if (!bq_compile_stage(EShLangFragment, kProbeFS, spv)) return VK_NULL_HANDLE;
+    VkShaderModuleCreateInfo vm{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+    vm.codeSize = spv.size() * 4;
+    vm.pCode = spv.data();
+    VkShaderModule m = VK_NULL_HANDLE;
+    Backend* bb = backend();
+    if (vkCreateShaderModule(bb->device, &vm, nullptr, &m) != VK_SUCCESS)
+        return VK_NULL_HANDLE;
+    return m;
+}
+
+// Self-contained fixed fullscreen triangle (gl_VertexIndex) + constant yellow FS,
+// empty pipeline layout, RGBA8 dynamic rendering. Verifies a user-FBO pass can
+// rasterize draws independent of app vertex data / UBO.
+const char* kFixedQVS = R"(#version 450
+layout(location=0) out vec2 vUv;
+void main(){
+    vec2 p = vec2(float((gl_VertexIndex<<1)&2), float(gl_VertexIndex&2));
+    gl_Position = vec4(p*2.0-1.0, 0.0, 1.0);
+    vUv = p;
+})";
+const char* kFixedQFS = R"(#version 450
+layout(location=0) in vec2 vUv;
+layout(location=0) out vec4 outc;
+void main(){ outc = vec4(1.0,1.0,0.0,1.0); })";
+
+void probe_fixed_quad() {
+    static VkPipeline pipe = VK_NULL_HANDLE;
+    Backend* b = backend();
+    VkCommandBuffer cmd = b->commandBuffer;
+    if (pipe == VK_NULL_HANDLE) {
+        std::vector<uint32_t> vspv,fspv;
+        if(!bq_compile_stage(EShLangVertex,kFixedQVS,vspv)) return;
+        if(!bq_compile_stage(EShLangFragment,kFixedQFS,fspv)) return;
+        VkShaderModule vsm,fsm;
+        VkShaderModuleCreateInfo vm{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+        vm.codeSize=vspv.size()*4; vm.pCode=vspv.data();
+        if(vkCreateShaderModule(b->device,&vm,nullptr,&vsm)!=VK_SUCCESS) return;
+        vm.codeSize=fspv.size()*4; vm.pCode=fspv.data();
+        if(vkCreateShaderModule(b->device,&vm,nullptr,&fsm)!=VK_SUCCESS) return;
+        VkPipelineLayoutCreateInfo pl{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+        VkPipelineLayout lay; if(vkCreatePipelineLayout(b->device,&pl,nullptr,&lay)!=VK_SUCCESS)return;
+        VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+        VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+        ia.topology=VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        VkPipelineViewportStateCreateInfo vp{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+        vp.viewportCount=1; vp.scissorCount=1;
+        VkPipelineRasterizationStateCreateInfo rs{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+        rs.polygonMode=VK_POLYGON_MODE_FILL; rs.cullMode=VK_CULL_MODE_NONE;
+        rs.frontFace=VK_FRONT_FACE_COUNTER_CLOCKWISE; rs.lineWidth=1;
+        VkPipelineMultisampleStateCreateInfo ms{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+        ms.rasterizationSamples=VK_SAMPLE_COUNT_1_BIT;
+        VkPipelineColorBlendStateCreateInfo cb{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
+        VkPipelineColorBlendAttachmentState ca{}; ca.blendEnable=VK_FALSE; ca.colorWriteMask=0xF;
+        cb.attachmentCount=1; cb.pAttachments=&ca;
+        VkDynamicState dyns[]={VK_DYNAMIC_STATE_VIEWPORT,VK_DYNAMIC_STATE_SCISSOR};
+        VkPipelineDynamicStateCreateInfo dyn{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
+        dyn.dynamicStateCount=2; dyn.pDynamicStates=dyns;
+        VkPipelineRenderingCreateInfo rci{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
+        VkFormat f=VK_FORMAT_R8G8B8A8_UNORM; rci.colorAttachmentCount=1; rci.pColorAttachmentFormats=&f;
+        VkGraphicsPipelineCreateInfo gi{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+        VkPipelineShaderStageCreateInfo st[2]={{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO},{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO}};
+        st[0].stage=VK_SHADER_STAGE_VERTEX_BIT; st[0].module=vsm; st[0].pName="main";
+        st[1].stage=VK_SHADER_STAGE_FRAGMENT_BIT; st[1].module=fsm; st[1].pName="main";
+        gi.pNext=&rci; gi.stageCount=2; gi.pStages=st; gi.pVertexInputState=&vi; gi.pInputAssemblyState=&ia;
+        gi.pViewportState=&vp; gi.pRasterizationState=&rs; gi.pMultisampleState=&ms; gi.pColorBlendState=&cb;
+        gi.pDynamicState=&dyn; gi.layout=lay; gi.renderPass=VK_NULL_HANDLE;
+        if(vkCreateGraphicsPipelines(b->device,b->pipelineCache,1,&gi,nullptr,&pipe)!=VK_SUCCESS) return;
+    }
+    VkViewport vpv{0,0,2048,2048,0,1}; vkCmdSetViewport(cmd,0,1,&vpv);
+    VkRect2D sr{{0,0},{2048,2048}}; vkCmdSetScissor(cmd,0,1,&sr);
+    vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_GRAPHICS,pipe);
+    vkCmdDraw(cmd,3,1,0,0);
+}
+
+// Fixed fullscreen verts transformed by the APP's Matrices UBO (set0 binding0),
+// constant cyan FS, reusing the app program's pipeline layout + already-bound
+// descriptor set. Distinguishes bad UBO matrix content (cyan clips -> nothing)
+// from bad position attributes (cyan region appears).
+const char* kUboQVS = R"(#version 450
+layout(set=0,binding=0) uniform Matrices { mat4 ProjMat; mat4 ModelViewMat; };
+void main(){
+    vec2 p = vec2(float((gl_VertexIndex<<1)&2), float(gl_VertexIndex&2));
+    gl_Position = ProjMat * ModelViewMat * vec4(p*2.0-1.0, 0.0, 1.0);
+})";
+const char* kUboQFS = R"(#version 450
+layout(location=0) out vec4 outc;
+void main(){ outc = vec4(0.0,1.0,1.0,1.0); })";
+
+void probe_ubo_fixed(GLuint program) {
+    Backend* b = backend();
+    VkCommandBuffer cmd = b->commandBuffer;
+    auto it = program_table().find(program);
+    if (it == program_table().end()) return;
+    VkPipelineLayout lay = it->second.pipelineLayout;
+    if (lay == VK_NULL_HANDLE) return;
+    static std::unordered_map<VkPipelineLayout,VkPipeline> cache;
+    VkPipeline pipe = VK_NULL_HANDLE;
+    auto ci = cache.find(lay);
+    if (ci != cache.end()) { pipe = ci->second; }
+    if (pipe == VK_NULL_HANDLE) {
+        std::vector<uint32_t> vspv,fspv;
+        if(!bq_compile_stage(EShLangVertex,kUboQVS,vspv)) return;
+        if(!bq_compile_stage(EShLangFragment,kUboQFS,fspv)) return;
+        VkShaderModule vsm,fsm;
+        VkShaderModuleCreateInfo vm{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+        vm.codeSize=vspv.size()*4; vm.pCode=vspv.data();
+        if(vkCreateShaderModule(b->device,&vm,nullptr,&vsm)!=VK_SUCCESS)return;
+        vm.codeSize=fspv.size()*4; vm.pCode=fspv.data();
+        if(vkCreateShaderModule(b->device,&vm,nullptr,&fsm)!=VK_SUCCESS)return;
+        VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+        VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+        ia.topology=VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        VkPipelineViewportStateCreateInfo vp{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+        vp.viewportCount=1; vp.scissorCount=1;
+        VkPipelineRasterizationStateCreateInfo rs{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+        rs.polygonMode=VK_POLYGON_MODE_FILL; rs.cullMode=VK_CULL_MODE_NONE;
+        rs.frontFace=VK_FRONT_FACE_COUNTER_CLOCKWISE; rs.lineWidth=1;
+        VkPipelineMultisampleStateCreateInfo ms{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+        ms.rasterizationSamples=VK_SAMPLE_COUNT_1_BIT;
+        VkPipelineColorBlendStateCreateInfo cb{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
+        VkPipelineColorBlendAttachmentState ca{}; ca.blendEnable=VK_FALSE; ca.colorWriteMask=0xF;
+        cb.attachmentCount=1; cb.pAttachments=&ca;
+        VkDynamicState dyns[]={VK_DYNAMIC_STATE_VIEWPORT,VK_DYNAMIC_STATE_SCISSOR};
+        VkPipelineDynamicStateCreateInfo dyn{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
+        dyn.dynamicStateCount=2; dyn.pDynamicStates=dyns;
+        VkPipelineRenderingCreateInfo rci{VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
+        VkFormat f=VK_FORMAT_R8G8B8A8_UNORM; rci.colorAttachmentCount=1; rci.pColorAttachmentFormats=&f;
+        VkGraphicsPipelineCreateInfo gi{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+        VkPipelineShaderStageCreateInfo st[2]={{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO},{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO}};
+        st[0].stage=VK_SHADER_STAGE_VERTEX_BIT; st[0].module=vsm; st[0].pName="main";
+        st[1].stage=VK_SHADER_STAGE_FRAGMENT_BIT; st[1].module=fsm; st[1].pName="main";
+        gi.pNext=&rci; gi.stageCount=2; gi.pStages=st; gi.pVertexInputState=&vi; gi.pInputAssemblyState=&ia;
+        gi.pViewportState=&vp; gi.pRasterizationState=&rs; gi.pMultisampleState=&ms; gi.pColorBlendState=&cb;
+        gi.pDynamicState=&dyn; gi.layout=lay; gi.renderPass=VK_NULL_HANDLE;
+        if(vkCreateGraphicsPipelines(b->device,b->pipelineCache,1,&gi,nullptr,&pipe)!=VK_SUCCESS)return;
+        cache[lay]=pipe;
+    }
+    vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_GRAPHICS,pipe);
+    vkCmdDraw(cmd,3,1,0,0);
 }
 
 } // namespace vk
@@ -1284,6 +2203,14 @@ int backend_read_pixels(int x, int y, int w, int h,
     return mithril::vk::read_pixels(x, y, w, h, format, type, out_pixels);
 }
 
+void backend_probe_fixed_quad(void) {
+    mithril::vk::probe_fixed_quad();
+}
+
+void backend_probe_ubo_fixed(unsigned int program) {
+    mithril::vk::probe_ubo_fixed(program);
+}
+
 void backend_blit_texture(GLuint src_name, GLuint dst_name,
                           int srcX0, int srcY0, int srcX1, int srcY1,
                           int dstX0, int dstY0, int dstX1, int dstY1,
@@ -1294,32 +2221,77 @@ void backend_blit_texture(GLuint src_name, GLuint dst_name,
                               mask, filter);
 }
 
+void backend_blit_to_default_quad(VkImage src_image, VkFormat src_format,
+                                  int src_w, int src_h,
+                                  int srcX0, int srcY0, int srcX1, int srcY1,
+                                  int dstX0, int dstY0, int dstX1, int dstY1,
+                                  GLenum filter) {
+    mithril::vk::blit_to_default_in_frame(src_image, src_format, src_w, src_h,
+                                          srcX0, srcY0, srcX1, srcY1,
+                                          dstX0, dstY0, dstX1, dstY1, filter);
+}
+
 void backend_blit_images(VkImage src_image, VkFormat src_format,
                          VkImage dst_image, VkFormat dst_format,
                          int srcX0, int srcY0, int srcX1, int srcY1,
                          int dstX0, int dstY0, int dstX1, int dstY1,
                          GLbitfield mask, GLenum filter,
                          int is_dst_default_fbo, int dst_height) {
-    // Both images are assumed to be in a sampling or attachment layout before
-    // the blit. The swapchain color image is in COLOR_ATTACHMENT_OPTIMAL
-    // (it was just rendered into, or will be rendered into next frame); user
-    // FBO textures are in SHADER_READ_ONLY_OPTIMAL (after an upload or a
-    // previous blit). We transition them back to those same layouts after the
-    // blit so subsequent rendering / sampling continues to work.
-    //
-    // Heuristic: if the format is a color format (not depth/stencil), assume
-    // COLOR_ATTACHMENT_OPTIMAL for the initial/final layout. This matches the
-    // common glBlitFramebuffer case (blitting between render targets that are
-    // actively being rendered into). For depth/stencil formats we would use
-    // DEPTH_STENCIL_ATTACHMENT_OPTIMAL, but depth blits are not yet supported.
-    VkImageLayout src_layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    VkImageLayout dst_layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    mithril::vk::blit_images_impl(src_image, src_format, src_layout, src_layout,
-                                  dst_image, dst_format, dst_layout, dst_layout,
+    // Resolve each image's REAL current layout instead of hardcoding
+    // COLOR_ATTACHMENT_OPTIMAL. A user-FBO colour texture is in
+    // SHADER_READ_ONLY_OPTIMAL after end_render_pass() (it is a sampling
+    // source); a barrier whose oldLayout claims COLOR_ATTACHMENT_OPTIMAL
+    // against an image actually in SHADER_READ_ONLY is a no-op on MoltenVK,
+    // so vkCmdBlitImage reads the source in the wrong layout and produces a
+    // uniform-black destination.
+    auto layout_for_image = [](VkImage img) -> VkImageLayout {
+        if (img == VK_NULL_HANDLE) return VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        if (mithril::g_state && img == mithril::g_state->eglDefaultColorImage)
+            return backend_active_swapchain_color_layout();
+        auto& tbl = mithril::vk::texture_table();
+        for (auto& kv : tbl) if (kv.second.image == img) return kv.second.currentLayout;
+        return VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    };
+
+    VkImageLayout src_init = layout_for_image(src_image);
+    VkImageLayout src_final = src_init;  // source is sampled again afterwards
+
+    VkImageLayout dst_init = layout_for_image(dst_image);
+    VkImageLayout dst_final;
+    if (is_dst_default_fbo) {
+        // The swapchain image was acquired at the end of the PREVIOUS
+        // eglSwapBuffers. Its tracked layout is stale PRESENT_SRC_KHR (the
+        // layout the prior frame ended in), but the blit is recorded into a
+        // separate one-shot command buffer that does NOT wait on the
+        // image-available semaphore. A barrier whose oldLayout claims
+        // PRESENT_SRC against an image the presentation engine may still own
+        // is treated as a no-op by MoltenVK, so vkCmdBlitImage writes the
+        // drawable in the wrong layout -> uniform black.
+        //
+        // After acquire the image contents are don't-care, so oldLayout
+        // UNDEFINED is legal regardless of the image's real layout and
+        // correctly moves it into TRANSFER_DST for the blit.
+        dst_init = VK_IMAGE_LAYOUT_UNDEFINED;
+        // Leave the swapchain image in COLOR_ATTACHMENT_OPTIMAL: the bridge's
+        // prepresent read and commit_frame()'s present barrier both expect the
+        // pre-present state to be COLOR_ATTACHMENT_OPTIMAL.
+        dst_final = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    } else {
+        dst_final = dst_init;
+    }
+
+    mithril::vk::blit_images_impl(src_image, src_format, src_init, src_final,
+                                  dst_image, dst_format, dst_init, dst_final,
                                   srcX0, srcY0, srcX1, srcY1,
                                   dstX0, dstY0, dstX1, dstY1,
                                   mask, filter,
                                   is_dst_default_fbo != 0, dst_height);
+
+    if (is_dst_default_fbo) {
+        // Keep Swapchain::currentColorLayout from going stale, or the next
+        // begin_render_pass / commit_frame barrier would use a wrong oldLayout.
+        backend_set_active_swapchain_color_layout(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    }
 }
 
 } // extern "C"

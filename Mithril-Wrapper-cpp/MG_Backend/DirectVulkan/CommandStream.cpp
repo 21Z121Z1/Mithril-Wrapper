@@ -350,14 +350,53 @@ bool descriptors_bound() { return encoder().descriptorsBound; }
  * pipeline failure into a process abort. The cost is two predictable
  * branches per draw.
  */
+static std::unordered_map<uint32_t,uint32_t> s_frameFbo;
+static uint64_t s_atlasTrace=0;
+static uint64_t s_stateTrace=999;
+void debug_atlas_trace(const char* who,int count){
+    if(!std::getenv("MITHRIL_DUMP_BLIT"))return;
+    // trigger file resets the capture window
+    if(const char* root=std::getenv("MITHRIL_E2E_ROOT")){
+        std::string path=std::string(root)+"/render/atlas-trace";
+        FILE* tf=std::fopen(path.c_str(),"r"); if(tf){std::fclose(tf); std::remove(path.c_str()); s_atlasTrace=0;}
+    }
+    uint32_t fbo = mithril::g_state? mithril::g_state->currentDrawFBO:0;
+    if(fbo<9||fbo>13)return;
+    if(s_atlasTrace>=240)return;
+    ++s_atlasTrace;
+    GLuint prog = mithril::g_state? mithril::g_state->currentProgram:0;
+    MITHRIL_LOG_WARN("vk-diag","atlasDraw #%llu who=%s fbo=%u count=%d prog=%u",(unsigned long long)s_atlasTrace,who,fbo,count,prog);
+}
+void debug_frame_fbo_inc(uint32_t fbo){ s_frameFbo[fbo]++; }
+extern "C" void backend_debug_frame_fbo_log() {
+    if (std::getenv("MITHRIL_DUMP_BLIT")) {
+        std::string r;
+        for (auto& k : s_frameFbo) r += std::to_string(k.first)+":"+std::to_string(k.second)+" ";
+        MITHRIL_LOG_WARN("vk-diag","frameFBO [%s]", r.c_str());
+    }
+    s_frameFbo.clear();
+}
+
 bool draw_recording_allowed(const char* who) {
+    static uint64_t d_att=0,d_fbuf=0,d_fpass=0,d_fpipe=0,d_fdesc=0,d_ok=0,d_fbo0=0,d_fbo2=0;
+    bool d_dump = std::getenv("MITHRIL_DUMP_BLIT") != nullptr;
+    ++d_att;
+    auto d_log=[&](const char* r){
+        if (d_dump && ((d_att % 300) == 0)) {
+            MITHRIL_LOG_WARN("vk-diag","drawGate att=%llu ok=%llu nobuf=%llu nopass=%llu nopipe=%llu nodesc=%llu last=%s drawFBO=%u fbo0draws=%llu fbo2draws=%llu",
+              (unsigned long long)d_att,(unsigned long long)d_ok,(unsigned long long)d_fbuf,
+              (unsigned long long)d_fpass,(unsigned long long)d_fpipe,(unsigned long long)d_fdesc,
+              r, mithril::g_state ? mithril::g_state->currentDrawFBO : 0u,
+(unsigned long long)d_fbo0,(unsigned long long)d_fbo2);
+        }
+    };
     EncoderState& e = encoder();
     // FIX (VK_NOT_READY storm): verify the command buffer is actually recording
     // before allowing any draw. passActive can be stale-true after a deviceLost
     // recovery; recording vkCmdDraw into a non-recording buffer spams VK_NOT_READY.
     mithril::vk::Backend* b = mithril::vk::backend();
     if (!b->commandBuffer || !b->commandBufferRecording) {
-        return false;
+        ++d_fbuf; d_log("nobuf"); return false;
     }
     if (!e.passActive) {
         static uint32_t warned = 0;
@@ -368,7 +407,7 @@ bool draw_recording_allowed(const char* who) {
                                    "means a pipeline/pass setup step failed "
                                    "earlier; see prior warnings.", who);
         }
-        return false;
+        ++d_fpass; d_log("nopass"); return false;
     }
     if (e.boundPipeline == VK_NULL_HANDLE) {
         static uint32_t warned = 0;
@@ -379,7 +418,7 @@ bool draw_recording_allowed(const char* who) {
                                    "Pipeline creation most likely failed; see "
                                    "prior warnings.", who);
         }
-        return false;
+        ++d_fpipe; d_log("nopipe"); return false;
     }
     // FIX (GPU page fault / pure-red from frame 1): a vkCmdDraw is only legal
     // when a valid descriptor set is bound for the current command buffer.
@@ -404,9 +443,47 @@ bool draw_recording_allowed(const char* who) {
                                    "most likely bailed earlier; see prior "
                                    "warnings.", who);
         }
-        return false;
+        ++d_fdesc; d_log("nodesc"); return false;
     }
     // B1 first-frame diagnostic: a real draw was recorded this frame.
+    ++d_ok;
+    if (getenv("MITHRIL_DRAWKIND") && mithril::g_state && mithril::g_state->currentDrawFBO==3){
+      static int un=0; if(un<20){++un; fprintf(stderr,"[DK] fbo3 OK #%d who=%s prog=%u mode? baseV=%d baseI=%u\n",un,who,mithril::g_state->currentProgram,(int)mithril::g_state->currentBaseVertex,(unsigned)mithril::g_state->currentBaseInstance);}
+    }
+    mithril::vk::debug_frame_fbo_inc(mithril::g_state ? mithril::g_state->currentDrawFBO : 0);
+    if (mithril::g_state) {
+        if (mithril::g_state->currentDrawFBO==0) ++d_fbo0;
+        if (mithril::g_state->currentDrawFBO==2) ++d_fbo2;
+        if (std::getenv("MITHRIL_DUMP_BLIT")) {
+            if (const char* root=std::getenv("MITHRIL_E2E_ROOT")) {
+                std::string tp=std::string(root)+"/render/atlas-trace";
+                FILE* tf=std::fopen(tp.c_str(),"r");
+                if (tf){std::fclose(tf); std::remove(tp.c_str()); s_atlasTrace=0;}
+            }
+            uint32_t fbo=mithril::g_state->currentDrawFBO;
+            if ((fbo>=9&&fbo<=13) && s_atlasTrace<240) {
+                ++s_atlasTrace;
+                MITHRIL_LOG_WARN("vk-diag","atlasDraw #%llu who=%s fbo=%u prog=%u",
+                    (unsigned long long)s_atlasTrace,who,fbo,mithril::g_state->currentProgram);
+            }
+            if (const char* root2=std::getenv("MITHRIL_E2E_ROOT")) {
+                std::string tp2=std::string(root2)+"/render/state-trace";
+                FILE* tf2=std::fopen(tp2.c_str(),"r");
+                if (tf2){std::fclose(tf2); std::remove(tp2.c_str()); s_stateTrace=0;}
+            }
+            if (s_stateTrace<40) {
+                ++s_stateTrace;
+                auto& cm=mithril::g_state->colorMask[0];
+                MITHRIL_LOG_WARN("vk-diag","drawState #%llu fbo=%u prog=%u vp=%d,%d %dx%d sc=%d,%d %dx%d scTest=%d mask=%d%d%d%d blend=%d cull=%d depth=%d",
+                    (unsigned long long)s_stateTrace,fbo,mithril::g_state->currentProgram,
+                    mithril::g_state->viewportX,mithril::g_state->viewportY,mithril::g_state->viewportW,mithril::g_state->viewportH,
+                    mithril::g_state->scissorX,mithril::g_state->scissorY,mithril::g_state->scissorW,mithril::g_state->scissorH,
+                    (int)mithril::g_state->scissorTest,(int)cm[0],(int)cm[1],(int)cm[2],(int)cm[3],
+                    (int)mithril::g_state->isCapabilityEnabled(0x0BE2/*GL_BLEND*/),(int)mithril::g_state->isCapabilityEnabled(0x0B44/*GL_CULL_FACE*/),(int)mithril::g_state->isCapabilityEnabled(0x0B71/*GL_DEPTH_TEST*/));
+            }
+        }
+    }
+    d_log("ok");
     e.drawCount++;
     return true;
 }
@@ -938,6 +1015,15 @@ void begin_render_pass(VkImageView* color_views, int color_count,
             attachHasAlpha = format_has_alpha(e.activeSwapchain->format);
         }
         colorAttachs[i].clearValue.color.float32[3] = attachHasAlpha ? e.clearColor[3] : 1.0f;
+        // TEMP PROBE (MITHRIL_LOAD_MAGENTA): force user-FBO color load to a
+        // magenta clear (a non-fragment pass action) to test pass targeting.
+        if (std::getenv("MITHRIL_LOAD_MAGENTA") && e.fboColorTexCount > 0) {
+            colorAttachs[i].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+            colorAttachs[i].clearValue.color.float32[0]=1.0f;
+            colorAttachs[i].clearValue.color.float32[1]=0.0f;
+            colorAttachs[i].clearValue.color.float32[2]=1.0f;
+            colorAttachs[i].clearValue.color.float32[3]=1.0f;
+        }
     }
     // Depth/stencil loadOp (MobileGL ResolveDepthStencilAttachmentLoadInfo,
     // VkRenderPassManager.cpp:140-155). Same priority: hasClear -> CLEAR;
@@ -1026,6 +1112,13 @@ void begin_render_pass(VkImageView* color_views, int color_count,
     if (!fn) {
         fn = (PFN_vkCmdBeginRenderingKHR)vkGetDeviceProcAddr(b->device, "vkCmdBeginRendering");
         if (!fn) fn = (PFN_vkCmdBeginRenderingKHR)vkGetDeviceProcAddr(b->device, "vkCmdBeginRenderingKHR");
+    }
+    if (std::getenv("MITHRIL_PASSLOG")) {
+        static uint64_t pn=0; ++pn;
+        uint32_t tfbo = mithril::g_state? mithril::g_state->currentDrawFBO:0;
+        fprintf(stderr,"[PL] #%llu fbo=%u colors=%d",(unsigned long long)pn,tfbo,color_count);
+        for(int q=0;q<color_count;q++) fprintf(stderr," [c%d L%d S%d]",q,(int)colorAttachs[q].loadOp,(int)colorAttachs[q].storeOp);
+        fprintf(stderr,"\n");
     }
     if (fn) fn(b->commandBuffer, &ri);
 
@@ -1977,7 +2070,9 @@ void backend_set_fbo_attachment_tex_ids(GLuint* color_tex_ids, int color_count,
 }
 
 void backend_end_render_pass(void) { mithril::vk::end_render_pass(); }
+int backend_render_pass_active(void) { return mithril::vk::render_pass_active()?1:0; }
 void backend_commit(void)          { mithril::vk::commit_frame(); }
+void backend_mark_commands(void){ mithril::vk::encoder().hasCommands = true; }
 
 void backend_set_active_swapchain(void* swapchain_state) {
     mithril::vk::set_active_swapchain((mithril::vk::Swapchain*)swapchain_state);
@@ -2314,11 +2409,17 @@ void backend_set_stencil_state(int enabled, int func, int ref, int mask,
     // Stencil dynamic state deferred (bring-up).
 }
 
+void backend_queue_wait_idle(void) {
+    mithril::vk::Backend* b = mithril::vk::backend();
+    if (b && b->graphicsQueue) vkQueueWaitIdle(b->graphicsQueue);
+}
 void backend_draw_arrays(int primitive, int first, int count) {
+    if (std::getenv("MITHRIL_DRAWPATH")) { static uint64_t n_DA=0; ++n_DA; if((n_DA%200)==1) fprintf(stderr,"[DP:DA] #%llu (arrays)\n",(unsigned long long)n_DA); }
     (void)primitive;
     mithril::vk::Backend* b = mithril::vk::backend();
     if (!b->commandBuffer) return;
     if (!mithril::vk::draw_recording_allowed("backend_draw_arrays")) return;
+    mithril::vk::debug_atlas_trace("arrays",count);
     // Root cause AG (CRITICAL): pass firstInstance from g_state. glDrawArrays
     // itself has no baseInstance, but glDrawArraysInstancedBaseInstance /
     // glDrawArraysInstancedBaseVertexBaseInstance (rare) set
@@ -2330,15 +2431,20 @@ void backend_draw_arrays(int primitive, int first, int count) {
     // Mirrors MobileGL drawParams.firstInstance.
     uint32_t firstInstance = 0;
     if (mithril::g_state) firstInstance = mithril::g_state->currentBaseInstance;
+    if (getenv("MITHRIL_DRAWKIND") && mithril::g_state && mithril::g_state->currentDrawFBO==3){
+      static int an=0; if(an<16){++an; fprintf(stderr,"[DK] fbo3 ARRAYS #%d count=%d first=%d baseV=%d baseI=%u\n",an,count,first,(int)mithril::g_state->currentBaseVertex,firstInstance);}
+    }
     vkCmdDraw(b->commandBuffer, (uint32_t)count, 1, (uint32_t)first, firstInstance);
 }
 
 void backend_draw_indexed(int primitive, int count, int index_type,
                           VkBuffer index_buffer, VkDeviceSize index_offset) {
+    if (std::getenv("MITHRIL_DRAWPATH")) { static uint64_t n_DI=0; ++n_DI; if((n_DI%200)==1) fprintf(stderr,"[DP:DI] #%llu (indexed)\n",(unsigned long long)n_DI); }
     (void)primitive;
     mithril::vk::Backend* b = mithril::vk::backend();
     if (!b->commandBuffer || !index_buffer) return;
     if (!mithril::vk::draw_recording_allowed("backend_draw_indexed")) return;
+    mithril::vk::debug_atlas_trace("indexed",count);
     // FIX (root cause AE, CRITICAL): GL_UNSIGNED_BYTE index support.
     // Drawing.cpp maps GL_UNSIGNED_BYTE → 2 (index_type_to_int), but the
     // previous code only handled 0 (UINT16) and 1 (UINT32), treating
@@ -2368,11 +2474,15 @@ void backend_draw_indexed(int primitive, int count, int index_type,
         vertexOffset = mithril::g_state->currentBaseVertex;
         firstInstance = mithril::g_state->currentBaseInstance;
     }
+    if (getenv("MITHRIL_DRAWKIND") && mithril::g_state && mithril::g_state->currentDrawFBO==3){
+      static int in2=0; if(in2<16){++in2; fprintf(stderr,"[DK] fbo3 INDEXED #%d count=%d vOff=%d baseI=%u\n",in2,count,(int)vertexOffset,firstInstance);}
+    }
     vkCmdDrawIndexed(b->commandBuffer, (uint32_t)count, 1, 0,
                      (int32_t)vertexOffset, firstInstance);
 }
 
 void backend_draw_arrays_instanced(int primitive, int first, int count, int primcount) {
+    if (std::getenv("MITHRIL_DRAWPATH")) { static uint64_t n_DAI=0; ++n_DAI; if((n_DAI%200)==1) fprintf(stderr,"[DP:DAI] #%llu (arrays-inst)\n",(unsigned long long)n_DAI); }
     (void)primitive;
     mithril::vk::Backend* b = mithril::vk::backend();
     if (!b->commandBuffer) return;
@@ -2383,6 +2493,9 @@ void backend_draw_arrays_instanced(int primitive, int first, int count, int prim
     // instanced draw path.
     uint32_t firstInstance = 0;
     if (mithril::g_state) firstInstance = mithril::g_state->currentBaseInstance;
+    if (getenv("MITHRIL_DRAWKIND") && mithril::g_state && mithril::g_state->currentDrawFBO==3){
+      static int an=0; if(an<16){++an; fprintf(stderr,"[DK] fbo3 ARRAYS #%d count=%d first=%d baseV=%d baseI=%u\n",an,count,first,(int)mithril::g_state->currentBaseVertex,firstInstance);}
+    }
     vkCmdDraw(b->commandBuffer, (uint32_t)count, (uint32_t)primcount,
               (uint32_t)first, firstInstance);
 }
@@ -2390,6 +2503,7 @@ void backend_draw_arrays_instanced(int primitive, int first, int count, int prim
 void backend_draw_indexed_instanced(int primitive, int count, int index_type,
                                     VkBuffer index_buffer, VkDeviceSize index_offset,
                                     int primcount) {
+    if (std::getenv("MITHRIL_DRAWPATH")) { static uint64_t n_DII=0; ++n_DII; if((n_DII%200)==1) fprintf(stderr,"[DP:DII] #%llu (indexed-inst)\n",(unsigned long long)n_DII); }
     (void)primitive;
     mithril::vk::Backend* b = mithril::vk::backend();
     if (!b->commandBuffer || !index_buffer) return;
@@ -2411,6 +2525,9 @@ void backend_draw_indexed_instanced(int primitive, int count, int index_type,
     if (mithril::g_state) {
         vertexOffset = mithril::g_state->currentBaseVertex;
         firstInstance = mithril::g_state->currentBaseInstance;
+    }
+    if (getenv("MITHRIL_DRAWKIND") && mithril::g_state && mithril::g_state->currentDrawFBO==3){
+      static int in2=0; if(in2<16){++in2; fprintf(stderr,"[DK] fbo3 INDEXED #%d count=%d vOff=%d baseI=%u\n",in2,count,(int)vertexOffset,firstInstance);}
     }
     vkCmdDrawIndexed(b->commandBuffer, (uint32_t)count, (uint32_t)primcount, 0,
                      (int32_t)vertexOffset, firstInstance);

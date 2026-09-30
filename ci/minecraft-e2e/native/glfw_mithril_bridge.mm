@@ -17,8 +17,12 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <pthread.h>
+#include <mach/mach.h>
 
 extern "C" void mithril_e2e_capture_before_present(int width, int height, void* mithril_handle);
+extern "C" void maybe_inject_click(GLFWwindow* window);
+extern "C" void maybe_inject_key(GLFWwindow* window);
 
 namespace {
 struct ContextState {
@@ -434,7 +438,43 @@ GLFWwindow* glfwGetCurrentContext(void) {
     return g_current;
 }
 
+static unsigned long long cur_tid() {
+    uint64_t tid = 0;
+    pthread_threadid_np(nullptr, &tid);
+    return (unsigned long long)tid;
+}
+static void log_thread(const char* tag) {
+    const char* root = std::getenv("MITHRIL_E2E_ROOT");
+    if (!root) return;
+    std::string path = std::string(root) + "/render/threads.txt";
+    FILE* f = std::fopen(path.c_str(), "ab");
+    if (f) { std::fprintf(f, "%s tid=%llu\n", tag, cur_tid()); std::fclose(f); }
+}
+
 void glfwSwapBuffers(GLFWwindow* window) {
+    log_thread("swap");
+    maybe_inject_click(window);
+    maybe_inject_key(window);
+    {
+        const char* root = std::getenv("MITHRIL_E2E_ROOT");
+        if (root) {
+            std::string sp = std::string(root) + "/render/win-size.done";
+            static std::unordered_map<GLFWwindow*, bool> dumped;
+            if (!dumped[window]) {
+                dumped[window] = true;
+                auto ws = real_glfw<void (*)(GLFWwindow*, int*, int*)>("glfwGetWindowSize");
+                auto fs = real_glfw<void (*)(GLFWwindow*, int*, int*)>("glfwGetFramebufferSize");
+                auto cs = real_glfw<void (*)(GLFWwindow*, float*, float*)>("glfwGetWindowContentScale");
+                int wx=0,wy=0,fx=0,fy=0; float sx=0,sy=0;
+                if (ws) ws(window,&wx,&wy);
+                if (fs) fs(window,&fx,&fy);
+                if (cs) cs(window,&sx,&sy);
+                FILE* wf = std::fopen(sp.c_str(), "wb");
+                if (wf) { std::fprintf(wf,"win=%dx%d fb=%dx%d scale=%.2f,%.2f\n",wx,wy,fx,fy,sx,sy); std::fclose(wf); }
+            }
+        }
+    }
+
     ContextState state{};
     {
         std::lock_guard<std::mutex> lock(g_mutex);
@@ -489,6 +529,145 @@ int glfwGetWindowAttrib(GLFWwindow* window, int attrib) {
     }
     auto fn = real_glfw<int (*)(GLFWwindow*, int)>("glfwGetWindowAttrib");
     return fn ? fn(window, attrib) : 0;
+}
+
+// ---------------------------------------------------------------------------
+// Headless-CI synthetic input. The bridge captures the application's cursor /
+// mouse-button callbacks (it normally re-exports them from the delegate) and
+// can deliver a single click on the main thread when a one-shot request file
+// appears at $MITHRIL_E2E_ROOT/render/inject-click.txt containing
+// "<button> <x> <y>" in GLFW window (screen) coordinates. Used to advance the
+// post-upgrade join prompt so quickPlay can reach the in-world render path.
+struct WinCB { GLFWmousebuttonfun mb=nullptr; GLFWcursorposfun cp=nullptr; GLFWkeyfun key=nullptr; };
+std::mutex g_cb_mutex;
+std::unordered_map<GLFWwindow*, WinCB> g_win_cb;
+WinCB* cb_for(GLFWwindow* w) {
+    std::lock_guard<std::mutex> lk(g_cb_mutex);
+    auto it = g_win_cb.find(w);
+    return it == g_win_cb.end() ? nullptr : &it->second;
+}
+void cb_log(const char* line) {
+    const char* root = std::getenv("MITHRIL_E2E_ROOT");
+    if (!root) return;
+    std::string path = std::string(root) + "/render/cb-log.txt";
+    FILE* f = std::fopen(path.c_str(), "ab");
+    if (f) { std::fprintf(f, "%s\n", line); std::fclose(f); }
+}
+
+void maybe_inject_click(GLFWwindow* window) {
+    const char* root = std::getenv("MITHRIL_E2E_ROOT");
+    if (!root) return;
+    std::string path = std::string(root) + "/render/inject-click.txt";
+    FILE* f = std::fopen(path.c_str(), "rb");
+    if (!f) return;
+    int button = 0; double x = 0.0, y = 0.0;
+    int got = std::fscanf(f, "%d %lf %lf", &button, &x, &y);
+    std::fclose(f);
+    if (got != 3) return;
+    std::remove(path.c_str());
+    bool posted = false; int cgerr = 0;
+    // Primary path: post a real CGEvent through the OS so Cocoa's sendEvent and
+    // GLFW's normal poll dispatch deliver it. Coordinates in the request are
+    // GLFW window (screen) points, origin top-left.
+    auto getCocoa = real_glfw<id (*)(GLFWwindow*)>("glfwGetCocoaWindow");
+    if (getCocoa) {
+        @autoreleasepool {
+            id wid = getCocoa(window);
+            if ([wid isKindOfClass:[NSWindow class]]) {
+                NSWindow* nsw = (NSWindow*)wid;
+                NSView* cv = [nsw contentView];
+                CGFloat vh = cv.bounds.size.height;
+                // GLFW's content view is flipped (top-left origin). Convert the
+                // point to the window's screen coordinate (bottom-left origin).
+                NSPoint vp = NSMakePoint((CGFloat)x, vh - (CGFloat)y);
+                NSPoint bp = [cv convertPoint:vp toView:nil];
+                NSPoint sp = [nsw convertPointToScreen:bp];
+                CGPoint gp = CGPointMake(sp.x, sp.y);
+                CGMouseButton cgb = (button == 1) ? kCGMouseButtonRight
+                                  : (button == 2) ? kCGMouseButtonCenter : kCGMouseButtonLeft;
+                CGEventRef move = CGEventCreateMouseEvent(nullptr, kCGEventMouseMoved, gp, cgb);
+                CGEventRef down = CGEventCreateMouseEvent(nullptr,
+                    (cgb==kCGMouseButtonRight)?kCGEventRightMouseDown:kCGEventLeftMouseDown, gp, cgb);
+                CGEventRef up = CGEventCreateMouseEvent(nullptr,
+                    (cgb==kCGMouseButtonRight)?kCGEventRightMouseUp:kCGEventLeftMouseUp, gp, cgb);
+                if (move) { CGEventPost(kCGAnnotatedSessionEventTap, move); CFRelease(move); }
+                if (down) { CGEventPost(kCGAnnotatedSessionEventTap, down); CFRelease(down); posted=true; }
+                usleep(80000);
+                if (up) { CGEventPost(kCGAnnotatedSessionEventTap, up); CFRelease(up); }
+            }
+        }
+    }
+    // Always also invoke this window's captured LWJGL closures directly (the
+    // CGEvent above may be silently dropped without Accessibility permission).
+    WinCB* c = cb_for(window);
+    if (c) {
+        if (c->cp) c->cp(window, x, y);
+        if (c->mb) {
+            c->mb(window, button, GLFW_PRESS, 0);
+            c->mb(window, button, GLFW_RELEASE, 0);
+        }
+    }
+    std::string done = std::string(root) + "/render/inject-click.done";
+    FILE* df = std::fopen(done.c_str(), "wb");
+    if (df) {
+        std::fprintf(df, "win=%p posted=%d cgerr=%d havecb=%d x=%.1f y=%.1f btn=%d\n",
+                     (void*)window, (int)posted, cgerr, (int)(c!=nullptr), x, y, button);
+        std::fclose(df);
+    }
+}
+
+void maybe_inject_key(GLFWwindow* window) {
+    const char* root = std::getenv("MITHRIL_E2E_ROOT");
+    if (!root) return;
+    std::string path = std::string(root) + "/render/inject-key.txt";
+    FILE* f = std::fopen(path.c_str(), "rb");
+    if (!f) return;
+    int key = 0, sc = 0;
+    int got = std::fscanf(f, "%d %d", &key, &sc);
+    std::fclose(f);
+    if (got != 2) return;
+    std::remove(path.c_str());
+    WinCB* c = cb_for(window);
+    if (c && c->key) {
+        c->key(window, key, sc, GLFW_PRESS, 0);
+        c->key(window, key, sc, GLFW_RELEASE, 0);
+    }
+    std::string done = std::string(root) + "/render/inject-key.done";
+    FILE* df = std::fopen(done.c_str(), "wb");
+    if (df) {
+        std::fprintf(df, "win=%p havecb=%d keyp=%d keycode=%d sc=%d\n",
+                     (void*)window, (int)(c!=nullptr),
+                     (int)(c && c->key), key, sc);
+        std::fclose(df);
+    }
+}
+
+void glfwPollEvents(void) {
+    log_thread("poll");
+    using Fn = void (*)(void);
+    auto real = real_glfw<Fn>("glfwPollEvents");
+    if (real) real();
+}
+
+GLFWkeyfun glfwSetKeyCallback(GLFWwindow* window, GLFWkeyfun cb) {
+    { std::lock_guard<std::mutex> lk(g_cb_mutex); g_win_cb[window].key = cb; }
+    using Fn = GLFWkeyfun (*)(GLFWwindow*, GLFWkeyfun);
+    auto real = real_glfw<Fn>("glfwSetKeyCallback");
+    return real ? real(window, cb) : nullptr;
+}
+
+GLFWmousebuttonfun glfwSetMouseButtonCallback(GLFWwindow* window, GLFWmousebuttonfun cb) {
+    { std::lock_guard<std::mutex> lk(g_cb_mutex); g_win_cb[window].mb = cb; }
+    using Fn = GLFWmousebuttonfun (*)(GLFWwindow*, GLFWmousebuttonfun);
+    auto real = real_glfw<Fn>("glfwSetMouseButtonCallback");
+    return real ? real(window, cb) : nullptr;
+}
+
+GLFWcursorposfun glfwSetCursorPosCallback(GLFWwindow* window, GLFWcursorposfun cb) {
+    { std::lock_guard<std::mutex> lk(g_cb_mutex); g_win_cb[window].cp = cb; }
+    using Fn = GLFWcursorposfun (*)(GLFWwindow*, GLFWcursorposfun);
+    auto real = real_glfw<Fn>("glfwSetCursorPosCallback");
+    return real ? real(window, cb) : nullptr;
 }
 
 } // extern C

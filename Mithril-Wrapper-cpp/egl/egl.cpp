@@ -417,6 +417,7 @@ EGLContext eglCreateContext(EGLDisplay dpy, EGLConfig config,
 
     EglContext* ctx = new EglContext{};
     ctx->state = mithril::state_create();
+    fprintf(stderr,"[NEWCTX] ctx=%p state=%p share=%p\n",(void*)ctx,(void*)ctx->state,(void*)share_context);
     ctx->config = config;
     ctx->clientAPI = t_boundAPI;
     ctx->majorVer = 3;
@@ -678,8 +679,10 @@ EGLBoolean eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
     // 用于真机确认首帧到底有没有出现过红色/黑色 clear 值，以及红屏是否由
     // glClearColor 驱动。仅前 60 帧输出，避免刷屏。
     if (mithril::g_state) {
+        backend_debug_frame_fbo_log();
         ++mithril::g_state->presentedFrames;
-        if (mithril::g_state->presentedFrames <= 60) {
+        bool diag_dump = std::getenv("MITHRIL_DUMP_BLIT") != nullptr;
+        if (mithril::g_state->presentedFrames <= 60 || diag_dump) {
             // B1: log the frame's recorded draw count. draw>0 => draws reached
             // the command buffer but fragments aren't visible (depth/viewport/
             // shader); draw==0 => draws were dropped before recording.
@@ -691,6 +694,41 @@ EGLBoolean eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
                              mithril::g_state->clearColor[2],
                              mithril::g_state->clearColor[3],
                              draws);
+        }
+    }
+
+    // TEMP DIAG: on demand (render/dump-targets.txt) read back EVERY FBO's
+    // color[0] texture so we can locate which target actually holds the frame.
+    if (mithril::g_state) {
+        const char* eroot = std::getenv("MITHRIL_E2E_ROOT");
+        if (eroot) {
+            std::string reqf = std::string(eroot) + "/render/dump-targets.txt";
+            FILE* rf = std::fopen(reqf.c_str(), "r");
+            if (rf) {
+                std::fclose(rf);
+                std::remove(reqf.c_str());
+                GLint savedRead = 0;
+                glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &savedRead);
+                for (auto& kv : mithril::g_state->framebuffers) {
+                    GLuint fid = kv.first;
+                    GLuint tex = kv.second.colors[0].texture;
+                    if (!tex) continue;
+                    mithril::Texture* tt = mithril::state_get_texture(tex);
+                    if (!tt || tt->width <= 0 || tt->height <= 0) continue;
+                    int w = tt->width, h = tt->height;
+                    std::vector<uint8_t> buf((size_t)w*h*4);
+                    glBindFramebuffer(GL_READ_FRAMEBUFFER, fid);
+                    glReadPixels(0,0,w,h,GL_RGBA,GL_UNSIGNED_BYTE,buf.data());
+                    std::string rp = std::string(eroot)+"/render/tgt-"+std::to_string(fid)+".rgba";
+                    FILE* o = std::fopen(rp.c_str(),"wb");
+                    if (o){ std::fwrite(buf.data(),1,buf.size(),o); std::fclose(o); }
+                    std::string mp = std::string(eroot)+"/render/tgt-"+std::to_string(fid)+".meta";
+                    FILE* m = std::fopen(mp.c_str(),"wb");
+                    if (m){ std::fprintf(m,"%d %d fbo=%u tex=%u glInternal=0x%x",w,h,fid,tex,(unsigned)tt->internalFormat); std::fclose(m); }
+                }
+                glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)savedRead);
+                MITHRIL_LOG_WARN("vk-diag","dump-targets complete");
+            }
         }
     }
 

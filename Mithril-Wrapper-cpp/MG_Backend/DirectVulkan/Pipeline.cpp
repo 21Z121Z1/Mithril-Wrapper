@@ -24,6 +24,7 @@
 
 namespace mithril {
 namespace vk {
+VkShaderModule create_probe_fs_module();
 
 std::unordered_map<GLuint, ProgramResources>& program_table() {
     static std::unordered_map<GLuint, ProgramResources> t;
@@ -311,6 +312,15 @@ uint64_t hash_signature(GLuint program, const MGVertexAttrib* attribs, int attri
     bool prfi = (mithril::g_state && mithril::g_state->primitiveRestartFixedIndex);
     mix(&pr, sizeof(pr));
     mix(&prfi, sizeof(prfi));
+    // Depth enable/write/func are baked into the pipeline (no dynamic depth-enable
+    // in Vulkan 1.2), so they must be part of the cache key. Read g_state directly,
+    // matching the pipeline-creation code below.
+    bool dte = (mithril::g_state && mithril::g_state->depthTest);
+    bool dwm = (mithril::g_state && mithril::g_state->depthMask);
+    GLenum dfn = mithril::g_state ? mithril::g_state->depthFunc : GL_LESS;
+    mix(&dte, sizeof(dte));
+    mix(&dwm, sizeof(dwm));
+    mix(&dfn, sizeof(dfn));
     return h;
 }
 
@@ -698,9 +708,13 @@ VkPipeline get_or_create_pipeline(GLuint program,
     // ---- Depth / stencil ----
     VkPipelineDepthStencilStateCreateInfo ds{};
     ds.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
-    ds.depthTestEnable = VK_TRUE;            // dynamic compare op + write mask
-    ds.depthWriteEnable = VK_TRUE;
-    ds.depthCompareOp = VK_COMPARE_OP_LESS;  // dynamic
+    // Reflect GL depth state. Previously these were hardcoded VK_TRUE, which
+    // depth-rejected GUI/HUD geometry (drawn after RenderSystem.disableDepthTest)
+    // against the terrain depth buffer, so the HUD never appeared.
+    ds.depthTestEnable = (mithril::g_state && mithril::g_state->depthTest) ? VK_TRUE : VK_FALSE;
+    ds.depthWriteEnable = (mithril::g_state && mithril::g_state->depthMask) ? VK_TRUE : VK_FALSE;
+    ds.depthCompareOp = mithril::g_state ? gl_compare_to_vk(mithril::g_state->depthFunc)
+                                         : VK_COMPARE_OP_LESS;
     ds.depthBoundsTestEnable = VK_FALSE;
     ds.stencilTestEnable = VK_FALSE;
 
@@ -762,6 +776,16 @@ VkPipeline get_or_create_pipeline(GLuint program,
     if (color_write_mask & 4) cwm |= VK_COLOR_COMPONENT_B_BIT;
     if (color_write_mask & 8) cwm |= VK_COLOR_COMPONENT_A_BIT;
     cbAttach.colorWriteMask = cwm;
+    if (std::getenv("MITHRIL_BLEND_PROBE")) {
+        // Diagnostic: force output = fragment RGB regardless of alpha.
+        cbAttach.blendEnable = VK_TRUE;
+        cbAttach.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;   // 1
+        cbAttach.dstColorBlendFactor = VK_BLEND_FACTOR_ZERO;  // 0
+        cbAttach.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        cbAttach.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+        cbAttach.colorBlendOp = VK_BLEND_OP_ADD;
+        cbAttach.alphaBlendOp = VK_BLEND_OP_ADD;
+    }
 
     VkPipelineColorBlendStateCreateInfo cb{};
     cb.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
@@ -807,6 +831,11 @@ VkPipeline get_or_create_pipeline(GLuint program,
         fsStage.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
         fsStage.module = pr.fragmentModule;
         fsStage.pName = "main";
+        if (std::getenv("MITHRIL_FS_PROBE")) {
+            static VkShaderModule probeMod = VK_NULL_HANDLE;
+            if (probeMod == VK_NULL_HANDLE) probeMod = create_probe_fs_module();
+            if (probeMod != VK_NULL_HANDLE) fsStage.module = probeMod;
+        }
         stages.push_back(fsStage);
     }
 
@@ -867,6 +896,17 @@ VkPipeline get_or_create_pipeline(GLuint program,
     VkResult r = vkCreateGraphicsPipelines(b->device, b->pipelineCache, 1, &gi,
                                            nullptr, &pipeline);
     if (r != VK_SUCCESS) {
+        {
+            static int s_dbg=0;
+            if (s_dbg < 4) {
+                s_dbg++;
+                
+                for (auto& d : attrDescs)
+                    std::fprintf(stderr,"   AD loc=%u binding=%u format=%d off=%u\n",
+                        d.location,d.binding,(int)d.format,d.offset);
+                std::fflush(stderr);
+            }
+        }
         // FIX (红屏根因 - 瞬态失败不可永久缓存):
         // vkCreateGraphicsPipelines 可能在设备处于异常状态时因瞬态原因失败：
         //   VK_ERROR_OUT_OF_DEVICE_MEMORY     (-2) 显存不足，设备恢复后可成功

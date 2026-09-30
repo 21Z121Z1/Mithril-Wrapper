@@ -13,6 +13,8 @@
 // legacy flat boundTextures[] / boundTextureTargets[] arrays are gone.
 #include "includes.h"
 #include "../MG_Backend/DirectVulkan/FormatMap.h"
+#include <execinfo.h>
+#include <stdio.h>
 
 #include <cstdint>
 #include <limits>
@@ -225,6 +227,7 @@ void glTexImage2D(GLenum target, GLint level, GLint internalFormat,
                   GLsizei width, GLsizei height, GLint border,
                   GLenum format, GLenum type, const void* pixels) {
     MITHRIL_ENSURE_INIT();
+    if(level==0) 
     if (border != 0) { mithril::state_set_error(GL_INVALID_VALUE); return; }
 
     // GL_PROXY_TEXTURE_2D: no real texture is created. Just record the
@@ -250,11 +253,17 @@ void glTexImage2D(GLenum target, GLint level, GLint internalFormat,
 
     mithril::Texture* t = bound_texture_for_target(target);
     if (!t) return;
+    if (level==0) 
     if (level == 0) {
+        
         t->internalFormat = internalFormat;
         t->width  = width;
         t->height = height;
         t->depth  = 1;
+        if (std::getenv("MITHRIL_DUMP_BLIT") && target==GL_TEXTURE_2D) {
+            MITHRIL_LOG_WARN("vk-diag","texImage name=%u size=%dx%d internal=0x%x fmt=0x%x type=0x%x",
+                t->id,width,height,(unsigned)internalFormat,(unsigned)format,(unsigned)type);
+        }
     }
     if (t->levels < level + 1) t->levels = level + 1;
 
@@ -354,8 +363,10 @@ void glTexImage3D(GLenum target, GLint level, GLint internalFormat,
 void glTexStorage2D(GLenum target, GLsizei levels, GLenum internalFormat,
                     GLsizei width, GLsizei height) {
     MITHRIL_ENSURE_INIT();
+    fprintf(stderr,"[STOR2] tex=%s ifmt=0x%x %dx%d lvl=%d\n","?",(unsigned)internalFormat,width,height,levels);
     mithril::Texture* t = bound_texture_for_target(target);
     if (!t || levels <= 0) return;
+    fprintf(stderr,"[STOR2] tex=%u ifmt=0x%x %dx%d lvl=%d\n",t->id,(unsigned)internalFormat,width,height,levels);
     t->internalFormat = internalFormat;
     t->width  = width;
     t->height = height;
@@ -364,6 +375,7 @@ void glTexStorage2D(GLenum target, GLsizei levels, GLenum internalFormat,
     t->immutable = true;
     t->immutableLevels = levels;
 
+    if(internalFormat==0x8229) fprintf(stderr,"[STORAGE-R8] tex=%u %dx%d levels=%d\n",t->id,width,height,levels);
     backend_get_or_create_texture(t->id, width, height, 1, levels,
                                   internalFormat, target, 1);
     // Transition UNDEFINED -> SHADER_READ_ONLY_OPTIMAL so the texture is in a
@@ -395,9 +407,10 @@ void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset,
     MITHRIL_ENSURE_INIT();
     mithril::Texture* t = bound_texture_for_target(target);
     if (!t) return;
+    if(format==0x1903) fprintf(stderr,"[SUB-RED] tex=%u %dx%d off=(%d,%d) pix=%p\n",t->id,width,height,xoffset,yoffset,pixels);
     const void* uploadPixels = resolve_unpack_pixels(pixels, width, height, 1,
                                                      format, type);
-    if (!uploadPixels) return;
+    if (!uploadPixels) { if(format==0x1903) fprintf(stderr,"[SUB-RED] tex=%u resolve NULL\n",t->id); return; }
     MGUnpackParams unpack{
         g_state->pixelStore.unpackAlignment,
         g_state->pixelStore.unpackRowLength,
@@ -412,6 +425,50 @@ void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset,
     if (target >= GL_TEXTURE_CUBE_MAP_POSITIVE_X &&
         target <= GL_TEXTURE_CUBE_MAP_NEGATIVE_Z) {
         subZ = (GLint)(target - GL_TEXTURE_CUBE_MAP_POSITIVE_X);
+    }
+    // DIAG: dump resolved source for ALL font atlas uploads.
+    if (t->id == 1532) {
+        static int gdump = 0;
+        GLuint pboN = g_state->bufferBindings[(int)mithril::BufferTarget::PixelUnpack].name;
+        
+        if (pboN==42) {
+            static int p42=0;
+            if(p42<3){
+                unsigned long long poff=(unsigned long long)(uintptr_t)pixels;
+                unsigned char pb[256];
+                int got=backend_read_buffer_host(42,poff,256,pb);
+                int wcnt=0; for(int z=0;z<256;++z) if(pb[z]>200)++wcnt;
+                char pn[64]; snprintf(pn,sizeof(pn),"/tmp/pbo42_%d_got%d_w%d.rgba",p42,got,wcnt);
+                FILE* pf=fopen(pn,"wb"); if(pf){fwrite(pb,1,256,pf);fclose(pf);}
+                {
+                    void* live = backend_get_buffer_mapped_pointer(42);
+                    fprintf(stderr,"[PBO42 idx=%d] off=0x%llx got=%d whiteBytes=%d livePtr=%p\n",p42,poff,got,wcnt,live);
+                    if(p42==0){
+                        static unsigned char* full=(unsigned char*)malloc(65536);
+                        if(backend_read_buffer_host(42,0,65536,full)){
+                            FILE* bf=fopen("/tmp/pbo42_full.rgba","wb");
+                            if(bf){fwrite(full,1,65536,bf);fclose(bf);}
+                        }
+                    }
+                }
+                ++p42;
+            }
+        }
+        if (gdump < 80) {
+            int ch = (format == 0x1903 /*GL_RED*/) ? 1 : 4;
+            int rowLen = g_state->pixelStore.unpackRowLength>0 ? g_state->pixelStore.unpackRowLength : width;
+            char gn[80]; snprintf(gn,sizeof(gn),"/tmp/gall_%02d_%dx%d_tw%d_fmt0x%x.rgba",gdump,width,height,t->width,format);
+            FILE* gf=fopen(gn,"wb");
+            if(gf){
+                const unsigned char* up=(const unsigned char*)uploadPixels;
+                for(int r=0;r<height;++r){
+                    fwrite(up+(size_t)r*rowLen*ch,1,(size_t)width*ch,gf);
+                }
+                fclose(gf);
+            }
+            fprintf(stderr,"[GALLMETA idx=%d] w=%d h=%d ch=%d rowLen=%d\n",gdump,width,height,ch,rowLen);
+            ++gdump;
+        }
     }
     backend_texture_upload(t->id, level, xoffset, yoffset, subZ,
                            width, height, 1, format, type, uploadPixels, &unpack,
