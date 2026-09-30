@@ -777,3 +777,8 @@ int backend_render_pass_active(void);
 extern "C"
 #endif
 int backend_yflip_enabled(void);
+
+#ifdef __cplusplus
+extern "C"
+#endif
+VkSurfaceTransformFlagBitsKHR backend_active_swapchain_pre_transform(void);

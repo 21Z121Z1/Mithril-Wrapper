@@ -2075,25 +2075,31 @@ void backend_set_fbo_attachment_tex_ids(GLuint* color_tex_ids, int color_count,
 void backend_end_render_pass(void) { mithril::vk::end_render_pass(); }
 int backend_render_pass_active(void) { return mithril::vk::render_pass_active()?1:0; }
 
+int backend_active_swapchain_pre_transform(void) {
+    mithril::vk::Swapchain* sc = mithril::vk::active_swapchain();
+    return sc ? sc->preTransform : VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+}
+
+static int is_quarter_turn_pre_transform(VkSurfaceTransformFlagBitsKHR t) {
+    return t == VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR ||
+           t == VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR;
+}
+
 int backend_yflip_enabled(void) {
     static int v = -1;
     if (v < 0) {
-        // Default: MoltenVK's own flip is disabled, so Mithril must flip.
-        v = 1;
-#if defined(__APPLE__) && defined(TARGET_OS_IOS) && TARGET_OS_IOS
-        // On iOS the host launcher very often owns a Vulkan instance already,
-        // so our MVK_CONFIG_SHADER_CONVERSION_FLIP_VERTEX_Y=0 never took
-        // effect and MoltenVK is still flipping. Do not add a second flip.
-        v = 0;
-#endif
+        // Orientation is derived from the SURFACE TRANSFORM, mirroring
+        // MobileGL: a quarter-turn preTransform already reorients the image on
+        // presentation, so flipping gl_Position.y on top of it mirrors the
+        // frame (menu text and logo upside down). Identity/180 keep the flip.
+        v = is_quarter_turn_pre_transform(backend_active_swapchain_pre_transform()) ? 0 : 1;
         if (const char* e = std::getenv("MITHRIL_YFLIP")) {
             if (e[0] == '0') v = 0;
             else if (e[0] == '1') v = 1;
         }
     }
     return v;
-}
-void backend_commit(void)          { mithril::vk::commit_frame(); }
+}void backend_commit(void)          { mithril::vk::commit_frame(); }
 void backend_mark_commands(void){ mithril::vk::encoder().hasCommands = true; }
 
 void backend_set_active_swapchain(void* swapchain_state) {
