@@ -2075,37 +2075,26 @@ void backend_set_fbo_attachment_tex_ids(GLuint* color_tex_ids, int color_count,
 void backend_end_render_pass(void) { mithril::vk::end_render_pass(); }
 int backend_render_pass_active(void) { return mithril::vk::render_pass_active()?1:0; }
 
-int backend_active_swapchain_pre_transform(void) {
-    mithril::vk::Swapchain* sc = mithril::vk::active_swapchain();
-    return sc ? sc->preTransform : VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
-}
-
-static int is_quarter_turn_pre_transform(VkSurfaceTransformFlagBitsKHR t) {
-    return t == VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR ||
-           t == VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR;
-}
-
 int backend_yflip_enabled(void) {
     static int v = -1;
     if (v < 0) {
         // Orientation is derived from the SURFACE TRANSFORM, mirroring
-        // MobileGL: a quarter-turn preTransform already reorients the image on
-        // presentation, so flipping gl_Position.y on top of it mirrors the
-        // frame (menu text and logo upside down). Identity/180 keep the flip.
-        v = is_quarter_turn_pre_transform(backend_active_swapchain_pre_transform()) ? 0 : 1;
+        // MobileGL: a quarter-turn preTransform (ROTATE_90/270) already
+        // reorients the image on presentation, so flipping gl_Position.y on
+        // top of it mirrors the frame (menu text and logo upside down).
+        // Identity and 180 keep the flip. Deep reference: MobileGL
+        // IsQuarterTurnPreTransform / GetDefaultFramebufferRectMapping.
+        VkSurfaceTransformFlagBitsKHR t = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+        if (mithril::vk::Swapchain* sc = mithril::vk::active_swapchain()) t = sc->preTransform;
+        v = (t == VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR ||
+             t == VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR) ? 0 : 1;
         if (const char* e = std::getenv("MITHRIL_YFLIP")) {
             if (e[0] == '0') v = 0;
             else if (e[0] == '1') v = 1;
         }
     }
     return v;
-}void backend_commit(void)          { mithril::vk::commit_frame(); }
-void backend_mark_commands(void){ mithril::vk::encoder().hasCommands = true; }
-
-void backend_set_active_swapchain(void* swapchain_state) {
-    mithril::vk::set_active_swapchain((mithril::vk::Swapchain*)swapchain_state);
 }
-
 VkImageLayout backend_active_swapchain_color_layout(void) {
     mithril::vk::Swapchain* sc = mithril::vk::active_swapchain();
     return sc ? sc->currentColorLayout : VK_IMAGE_LAYOUT_UNDEFINED;
