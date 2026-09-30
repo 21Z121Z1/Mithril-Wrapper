@@ -26,6 +26,7 @@
  * 通过条件：退出码 0 且 stdout 含 "RENDER SMOKE ALL PASSED"。
  */
 #include <dlfcn.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
