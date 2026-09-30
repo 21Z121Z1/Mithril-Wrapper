@@ -98,6 +98,9 @@ typedef void      (*clearDepth_fn)(GLdouble);
 typedef void      (*enable_fn)(GLenum);
 typedef void      (*disable_fn)(GLenum);
 typedef void      (*drawArrays_fn)(GLenum, GLint, GLsizei);
+typedef void      (*multiDrawElementsBaseVertex_fn)(GLenum, const GLsizei*, GLenum,
+                                                    const void* const*, GLsizei,
+                                                    const GLint*);
 typedef void      (*finish_fn)(void);
 typedef void      (*readPixels_fn)(GLint, GLint, GLsizei, GLsizei,
                                    GLenum, GLenum, void*);
@@ -192,6 +195,7 @@ int main(int argc, char** argv) {
     enable_fn             enable             = NULL;
     disable_fn            disable            = NULL;
     drawArrays_fn         drawArrays         = NULL;
+    multiDrawElementsBaseVertex_fn multiDrawElementsBaseVertex = NULL;
     finish_fn             finish             = NULL;
     readPixels_fn         readPixels         = NULL;
     getError_fn           getError           = NULL;
@@ -245,6 +249,7 @@ int main(int argc, char** argv) {
     RESOLVE(enable, "glEnable");
     RESOLVE(disable, "glDisable");
     RESOLVE(drawArrays, "glDrawArrays");
+    RESOLVE(multiDrawElementsBaseVertex, "glMultiDrawElementsBaseVertex");
     RESOLVE(finish, "glFinish");
     RESOLVE(readPixels, "glReadPixels");
     RESOLVE(getError, "glGetError");
@@ -989,6 +994,99 @@ int main(int argc, char** argv) {
         CHECK(getError() == GL_NO_ERROR, "multi-frame test leaves no error");
 
         /* =====================================================================
+         * 4h) multi-draw baseVertex / gl_VertexID 语义回归
+         * =====================================================================
+         * 两个 sub-draw 复用同一套索引 0..3，但 baseVertex 分别为 0 / 4。
+         * 顶点 shader 用 gl_VertexID>=4 决定颜色：
+         *   左半 quad 应为红色；右半 quad 应为绿色。
+         *
+         * prepare_draw() 只执行一次，因此若 backend 只在 prepare_draw 时 push
+         * _MithrilBaseVertex，第二个 sub-draw 的 Vulkan vertexOffset 虽然为 4，
+         * shader-visible gl_VertexID 仍会看到 0..3，右半也会错误地变红。
+         * 本测试直接在 GPU 读回中锁住 per-subdraw push-constant 语义。 */
+        {
+            const char* mdVsSrc = "#version 330 core\n"
+                                  "layout(location=0) in vec2 aPos;\n"
+                                  "out float vGroup;\n"
+                                  "void main(){\n"
+                                  "  gl_Position = vec4(aPos, 0.0, 1.0);\n"
+                                  "  vGroup = (gl_VertexID >= 4) ? 1.0 : 0.0;\n"
+                                  "}\n";
+            const char* mdFsSrc = "#version 330 core\n"
+                                  "in float vGroup;\n"
+                                  "out vec4 fragColor;\n"
+                                  "void main(){ fragColor = mix(vec4(1,0,0,1), vec4(0,1,0,1), vGroup); }\n";
+            GLuint mdVs = createShader(GL_VERTEX_SHADER);
+            GLuint mdFs = createShader(GL_FRAGMENT_SHADER);
+            shaderSource(mdVs, 1, &mdVsSrc, NULL);
+            shaderSource(mdFs, 1, &mdFsSrc, NULL);
+            compileShader(mdVs);
+            compileShader(mdFs);
+            GLint mdVsOk = 0, mdFsOk = 0;
+            getShaderiv(mdVs, GL_COMPILE_STATUS, &mdVsOk);
+            getShaderiv(mdFs, GL_COMPILE_STATUS, &mdFsOk);
+            CHECK(mdVsOk == GL_TRUE && mdFsOk == GL_TRUE,
+                  "multi-draw gl_VertexID shaders compiled (vs=%d fs=%d)", mdVsOk, mdFsOk);
+
+            GLuint mdProg = createProgram();
+            attachShader(mdProg, mdVs);
+            attachShader(mdProg, mdFs);
+            linkProgram(mdProg);
+            GLint mdLink = 0;
+            getProgramiv(mdProg, GL_LINK_STATUS, &mdLink);
+            CHECK(mdLink == GL_TRUE, "multi-draw baseVertex program linked");
+            deleteShader(mdVs);
+            deleteShader(mdFs);
+
+            const GLfloat mdVerts[16] = {
+                -0.90f,-0.60f,  -0.10f,-0.60f,  -0.10f, 0.60f,  -0.90f, 0.60f,
+                 0.10f,-0.60f,   0.90f,-0.60f,   0.90f, 0.60f,   0.10f, 0.60f,
+            };
+            const GLushort mdIndices[12] = {
+                0,1,2, 0,2,3,
+                0,1,2, 0,2,3,
+            };
+            GLuint mdVao=0, mdVbo=0, mdEbo=0;
+            genVertexArrays(1, &mdVao);
+            bindVertexArray(mdVao);
+            genBuffers(1, &mdVbo);
+            bindBuffer(GL_ARRAY_BUFFER, mdVbo);
+            bufferData(GL_ARRAY_BUFFER, sizeof(mdVerts), mdVerts, GL_STATIC_DRAW);
+            vertexAttribPtr(0, 2, GL_FLOAT, GL_FALSE, 2*sizeof(GLfloat), (const void*)0);
+            enableAttrib(0);
+            genBuffers(1, &mdEbo);
+            bindBuffer(GL_ELEMENT_ARRAY_BUFFER, mdEbo);
+            bufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(mdIndices), mdIndices, GL_STATIC_DRAW);
+
+            const GLsizei mdCounts[2] = {6,6};
+            const void* mdOffsets[2] = {
+                (const void*)(uintptr_t)0,
+                (const void*)(uintptr_t)(6*sizeof(GLushort)),
+            };
+            const GLint mdBases[2] = {0,4};
+
+            useProgram(mdProg);
+            viewport(0,0,R,C);
+            clearColor(0,0,0,1);
+            clear(GL_COLOR_BUFFER_BIT);
+            multiDrawElementsBaseVertex(GL_TRIANGLES, mdCounts, GL_UNSIGNED_SHORT,
+                                        mdOffsets, 2, mdBases);
+            finish();
+
+            unsigned char mdLeft[4]={0,0,0,0}, mdRight[4]={0,0,0,0};
+            readPixels(R/4, C/2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, mdLeft);
+            readPixels((3*R)/4, C/2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, mdRight);
+            CHECK(mdLeft[0] > 180 && mdLeft[1] < 60 && mdLeft[3] > 128,
+                  "multi-draw first baseVertex=0 is red (%d,%d,%d,%d)",
+                  mdLeft[0],mdLeft[1],mdLeft[2],mdLeft[3]);
+            CHECK(mdRight[1] > 180 && mdRight[0] < 60 && mdRight[3] > 128,
+                  "multi-draw second baseVertex=4 updates gl_VertexID (green %d,%d,%d,%d)",
+                  mdRight[0],mdRight[1],mdRight[2],mdRight[3]);
+            CHECK(getError() == GL_NO_ERROR, "multi-draw baseVertex regression leaves no error");
+            deleteProgram(mdProg);
+        }
+
+        /* =====================================================================
          * 4k) cubemap 判别测试：6 face 各色上传 + samplerCube 采样
          * =====================================================================
          * 目标：验证 panorama（主菜单背景）cubemap 全链路的 4 个修复点——
@@ -1028,11 +1126,16 @@ int main(int argc, char** argv) {
                                            faceColors[f][0],faceColors[f][1],faceColors[f][2],faceColors[f][3] };
                 texImage2D(faces[f], 0, GL_RGBA8, 2, 2, 0, GL_RGBA, GL_UNSIGNED_BYTE, quad);
             }
-            texParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            // Force the cubemap through generate_mipmaps()'s image-rebuild path.
+            // The rebuilt VkImage must retain VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT
+            // or its VK_IMAGE_VIEW_TYPE_CUBE creation is invalid on strict MoltenVK.
+            generateMipmap(GL_TEXTURE_CUBE_MAP);
+            texParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST);
             texParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
             texParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
             texParameteri(GL_TEXTURE_CUBE_MAP, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-            CHECK(getError() == GL_NO_ERROR, "cubemap 6-face upload + params leaves no error");
+            CHECK(getError() == GL_NO_ERROR,
+                  "cubemap 6-face upload + mipmap rebuild + params leaves no error");
 
             /* 三个 program 分别采样 +X、-X、+Z 方向（attrib0Vs 已验证能画）。 */
             static const struct { const char* tag; const char* dir; } dirs[3] = {
