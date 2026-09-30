@@ -109,6 +109,14 @@ struct Swapchain {
     // COLOR_ATTACHMENT_OPTIMAL and MoltenVK behaviour is undefined -> black screen.
     VkImageLayout   currentColorLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
+    // Surface transform the swapchain was created with
+    // (VkSurfaceCapabilitiesKHR::currentTransform -> preTransform). MobileGL
+    // derives every orientation decision from this instead of from the
+    // platform: IsQuarterTurnPreTransform() identifies ROTATE_90/270, and those
+    // are excluded from the Y flip because the presentation engine already
+    // reorients the image.
+    VkSurfaceTransformFlagBitsKHR preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+
     // One-shot flag: depth image transitions UNDEFINED ->
     // DEPTH_STENCIL_ATTACHMENT_OPTIMAL on first use, then stays there for the
     // swapchain's lifetime (the depth image is never presented).

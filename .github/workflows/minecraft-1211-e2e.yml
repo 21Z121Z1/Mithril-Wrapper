@@ -97,14 +97,23 @@ jobs:
         shell: bash
         run: |
           set +e
+          mkdir -p "$E2E_ROOT"
+          : > "$E2E_ROOT/native-build.log"
           cmake -S . -B build-minecraft-e2e-native -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_FLAGS="-Wno-error" \
-            -DCMAKE_CXX_FLAGS="-Wno-error"
+            -DCMAKE_CXX_FLAGS="-Wno-error" >> "$E2E_ROOT/native-build.log" 2>&1
           rc=$?
           if [[ $rc -eq 0 ]]; then
-            cmake --build build-minecraft-e2e-native --target mithril --parallel
+            cmake --build build-minecraft-e2e-native --target mithril --parallel >> "$E2E_ROOT/native-build.log" 2>&1
             rc=$?
+          fi
+          # Always surface the compiler output: the diagnostics publisher picks
+          # up *.log from E2E_ROOT, and without it a native build failure is a
+          # black box (GitHub's own log endpoint is not reachable from CI
+          # tooling, so the only way to see the error is to publish it here).
+          if [[ $rc -ne 0 ]]; then
+            tail -n 120 "$E2E_ROOT/native-build.log"
           fi
           if [[ $rc -ne 0 ]]; then
             python3 ci/minecraft-e2e/evidence.py --root "$E2E_ROOT" fail \
