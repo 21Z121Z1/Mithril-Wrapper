@@ -976,6 +976,12 @@ void glMultiDrawElementsBaseVertex(GLenum mode, const GLsizei* count, GLenum typ
         for (GLsizei i = 0; i < drawcount; ++i) {
             if (count[i] > 0) {
                 g_state->currentBaseVertex = basevertex[i];
+                // prepare_draw() pushed the baseVertex that was current before
+                // entering this multi-draw.  Each sub-draw can carry a different
+                // baseVertex, and the injected gl_VertexID macro reads it from a
+                // push constant, so refresh that value before every draw.
+                backend_push_constants(g_state->currentProgram, 0, 4,
+                                       &g_state->currentBaseVertex);
                 backend_draw_indexed((int)mode, (int)count[i], idx_type, ib,
                                      (VkDeviceSize)(intptr_t)indices[i]);
             }
@@ -985,6 +991,8 @@ void glMultiDrawElementsBaseVertex(GLenum mode, const GLsizei* count, GLenum typ
         for (GLsizei i = 0; i < drawcount; ++i) {
             if (count[i] > 0 && indices[i]) {
                 g_state->currentBaseVertex = basevertex[i];
+                backend_push_constants(g_state->currentProgram, 0, 4,
+                                       &g_state->currentBaseVertex);
                 GLuint transient = (GLuint)(uintptr_t)indices[i];
                 VkBuffer staged = backend_get_or_create_buffer(transient | 0x80000000u,
                                                                indices[i], (size_t)count[i] * elem);
