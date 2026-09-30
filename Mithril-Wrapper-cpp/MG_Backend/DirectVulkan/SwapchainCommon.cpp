@@ -148,7 +148,6 @@ pm_done:
     }
     scci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
     scci.preTransform = caps.currentTransform;
-    sc->preTransform = caps.currentTransform;
     scci.compositeAlpha = compAlpha;
     scci.presentMode = presentMode;
     scci.clipped = VK_TRUE;
