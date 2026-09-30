@@ -773,4 +773,7 @@ int backend_render_pass_active(void);
  * Returns 1 (flip) or 0 (don't). Overridable with MITHRIL_YFLIP=0/1 so the
  * orientation can be corrected without a rebuild.
  */
+#ifdef __cplusplus
+extern "C"
+#endif
 int backend_yflip_enabled(void);
