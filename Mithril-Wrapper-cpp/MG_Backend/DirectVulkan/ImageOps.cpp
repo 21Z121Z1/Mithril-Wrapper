@@ -188,6 +188,12 @@ void generate_mipmaps(GLuint name) {
 
         VkImageCreateInfo ici{};
         ici.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        // A VK_IMAGE_VIEW_TYPE_CUBE view is only legal when the backing 2D
+        // image was created with CUBE_COMPATIBLE_BIT.  The ordinary allocation
+        // path in Resources.cpp follows the same rule; keep the mipmap-rebuild
+        // path identical or glGenerateMipmap can replace a valid cubemap with
+        // an image that MoltenVK cannot expose as a cube view.
+        ici.flags = isCube ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0;
         ici.imageType = imgType;
         ici.format = fmt;
         ici.extent = { (uint32_t)tex.width, (uint32_t)tex.height,
@@ -1747,7 +1753,10 @@ void blit_to_default_quad(VkImage src_image, VkFormat src_format,
     auto U = [&](float qx) -> float { return qx / (float)src_w; };
     auto VV = [&](float qy) -> float { return 1.0f - qy / (float)src_h; };
     auto NX = [&](float px) -> float { return 2.0f * px / (float)DW - 1.0f; };
-    auto NY = [&](float py) -> float { return 2.0f * py / (float)DH - 1.0f; };
+    // glBlitFramebuffer destination coordinates use GL's bottom-left origin.
+    // This raw Vulkan helper bypasses Shader.cpp's default-FBO Y fixup, so map
+    // the destination Y into Vulkan's top-left viewport explicitly.
+    auto NY = [&](float py) -> float { return 1.0f - 2.0f * py / (float)DH; };
     BqVert corner[4] = {
         {NX(dx0), NY(dy0), U(sx0), VV(sy0)},
         {NX(dx1), NY(dy0), U(sx1), VV(sy0)},
@@ -2008,7 +2017,12 @@ void blit_to_default_in_frame(VkImage src_image, VkFormat src_format, int src_w,
     float DWf=(float)DW, DHf=(float)DH, swf=(float)src_w, shf=(float)src_h;
     float u0=qx0/swf, u1=qx1/swf, v0=1.0f-qy1/shf, v1=1.0f-qy0/shf;
     float nx0=2.0f*px0/DWf-1.0f, nx1=2.0f*px1/DWf-1.0f;
-    float ny0=2.0f*py0/DHf-1.0f, ny1=2.0f*py1/DHf-1.0f;
+    // The in-frame present quad is raw Vulkan and therefore does not pass
+    // through the default-FBO vertex shader variant that negates gl_Position.y.
+    // Convert the GL bottom-left destination rectangle to Vulkan top-left NDC
+    // here; otherwise the entire Minecraft surface is vertically reflected on
+    // physical iOS devices while launcher/UIKit overlays remain upright.
+    float ny0=1.0f-2.0f*py0/DHf, ny1=1.0f-2.0f*py1/DHf;
     float verts[6][4] = {
         {nx0,ny0,u0,v0},{nx0,ny1,u0,v1},{nx1,ny1,u1,v1},
         {nx0,ny0,u0,v0},{nx1,ny1,u1,v1},{nx1,ny0,u1,v0},
