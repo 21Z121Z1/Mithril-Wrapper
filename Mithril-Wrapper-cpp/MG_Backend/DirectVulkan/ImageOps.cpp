@@ -2006,7 +2006,13 @@ void blit_to_default_in_frame(VkImage src_image, VkFormat src_format, int src_w,
     float qx0=(float)sx0, qy0=(float)sy0, qx1=(float)sx1, qy1=(float)sy1;
     float px0=(float)dx0, py0=(float)dy0, px1=(float)dx1, py1=(float)dy1;
     float DWf=(float)DW, DHf=(float)DH, swf=(float)src_w, shf=(float)src_h;
-    float u0=qx0/swf, u1=qx1/swf, v0=1.0f-qy1/shf, v1=1.0f-qy0/shf;
+    float u0=qx0/swf, u1=qx1/swf;
+    // Same single-flip rule as the draw path: flip the source V only when
+    // MoltenVK is not already flipping vertex Y, otherwise the blitted
+    // frame comes out vertically mirrored.
+    const bool flip_v = (backend_yflip_enabled() != 0);
+    float v0 = flip_v ? (1.0f - qy1/shf) : (qy0/shf);
+    float v1 = flip_v ? (1.0f - qy0/shf) : (qy1/shf);
     float nx0=2.0f*px0/DWf-1.0f, nx1=2.0f*px1/DWf-1.0f;
     float ny0=2.0f*py0/DHf-1.0f, ny1=2.0f*py1/DHf-1.0f;
     float verts[6][4] = {

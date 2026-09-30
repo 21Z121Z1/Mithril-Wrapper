@@ -178,7 +178,12 @@ static bool prepare_draw(GLenum mode) {
     // render into textures sampled by GL shaders (GL Y-up), so they use the
     // non-flipped variant. Deep reference: MobileGL GetShaderTransformFlags.
     bool is_default_fbo = (g_state->currentDrawFBO == 0);
-    const std::vector<uint32_t>& vs_spirv = is_default_fbo
+    // Y-flip selection. The frame must be flipped exactly once overall: if
+    // MoltenVK is already flipping vertex Y (backend_yflip_enabled()==0, e.g.
+    // on iOS where the host owned a VkInstance before our config was set),
+    // adding our own flip would render the whole frame vertically mirrored.
+    const bool want_yflip = is_default_fbo && (backend_yflip_enabled() != 0);
+    const std::vector<uint32_t>& vs_spirv = want_yflip
         ? prog->vertexSpirvYFlipped : prog->vertexSpirv;
 
     // Defensive: skip draws whose shader translation produced no SPIR-V
@@ -190,7 +195,7 @@ static bool prepare_draw(GLenum mode) {
     // Fallback: if Y-flipped variant is empty but non-flipped exists, use it
     // (wrong Y orientation but won't skip draws / leave only clear color).
     const std::vector<uint32_t>* vs_spirv_ptr = &vs_spirv;
-    if (is_default_fbo && vs_spirv.empty() && !prog->vertexSpirv.empty()) {
+    if (want_yflip && vs_spirv.empty() && !prog->vertexSpirv.empty()) {
         MITHRIL_LOG_WARN("gl", "prepare_draw: program %u Y-flipped SPIR-V empty, "
                           "falling back to non-flipped variant (%zu words)",
                           prog->id, prog->vertexSpirv.size());

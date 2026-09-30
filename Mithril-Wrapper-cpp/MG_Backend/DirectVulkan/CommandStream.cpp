@@ -1,6 +1,9 @@
 // Mithril-Wrapper - MG_Backend/DirectVulkan/CommandStream.cpp
 // Render-pass orchestration via VK_KHR_dynamic_rendering (vkCmdBeginRendering)
 // + encoder dynamic-state setters + draw recording + per-frame submit.
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
 #include "CommandStream.h"
 #include "Device.h"
 #include "Swapchain.h"
@@ -2071,6 +2074,25 @@ void backend_set_fbo_attachment_tex_ids(GLuint* color_tex_ids, int color_count,
 
 void backend_end_render_pass(void) { mithril::vk::end_render_pass(); }
 int backend_render_pass_active(void) { return mithril::vk::render_pass_active()?1:0; }
+
+int backend_yflip_enabled(void) {
+    static int v = -1;
+    if (v < 0) {
+        // Default: MoltenVK's own flip is disabled, so Mithril must flip.
+        v = 1;
+#if defined(__APPLE__) && defined(TARGET_OS_IOS) && TARGET_OS_IOS
+        // On iOS the host launcher very often owns a Vulkan instance already,
+        // so our MVK_CONFIG_SHADER_CONVERSION_FLIP_VERTEX_Y=0 never took
+        // effect and MoltenVK is still flipping. Do not add a second flip.
+        v = 0;
+#endif
+        if (const char* e = std::getenv("MITHRIL_YFLIP")) {
+            if (e[0] == '0') v = 0;
+            else if (e[0] == '1') v = 1;
+        }
+    }
+    return v;
+}
 void backend_commit(void)          { mithril::vk::commit_frame(); }
 void backend_mark_commands(void){ mithril::vk::encoder().hasCommands = true; }
 

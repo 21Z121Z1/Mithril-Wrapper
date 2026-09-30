@@ -756,3 +756,21 @@ void backend_queue_wait_idle(void);
 extern "C"
 #endif
 int backend_render_pass_active(void);
+
+/*
+ * Whether Mithril should apply its OWN vertex-Y flip for default-framebuffer
+ * content.
+ *
+ * Mithril flips gl_Position.y in the shader for draws to FBO 0 so GL's
+ * bottom-left NDC maps onto Vulkan/Metal's top-left framebuffer. That is
+ * correct ONLY when MoltenVK is not doing the same flip. MoltenVK's
+ * shaderConversionFlipVertexY is read once at vkCreateInstance, so the
+ * MVK_CONFIG_SHADER_CONVERSION_FLIP_VERTEX_Y=0 we set in init_device() is
+ * ignored whenever the host process already created a Vulkan instance before
+ * Mithril started (common on iOS launchers). Two flips cancel out: the content
+ * stays in GL orientation and Metal displays it mirrored, i.e. upside down.
+ *
+ * Returns 1 (flip) or 0 (don't). Overridable with MITHRIL_YFLIP=0/1 so the
+ * orientation can be corrected without a rebuild.
+ */
+int backend_yflip_enabled(void);
