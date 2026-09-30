@@ -1747,11 +1747,13 @@ void blit_to_default_quad(VkImage src_image, VkFormat src_format,
                          VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0,
                          0, nullptr, 0, nullptr, 1, &db);
 
-    // Fullscreen quad geometry. NDC maps the GL dst rect directly; the source
-    // user texture is in GL orientation so V is flipped.
+    // Fullscreen quad geometry. User-FBO textures deliberately retain GL
+    // texture-coordinate semantics (the regular user-FBO draw path is not
+    // Y-flipped), so source coordinates map directly to normalized UV.  Only
+    // the destination needs GL-bottom-left -> Vulkan-top-left conversion.
     struct BqVert { float x, y, u, v; };
     auto U = [&](float qx) -> float { return qx / (float)src_w; };
-    auto VV = [&](float qy) -> float { return 1.0f - qy / (float)src_h; };
+    auto VV = [&](float qy) -> float { return qy / (float)src_h; };
     auto NX = [&](float px) -> float { return 2.0f * px / (float)DW - 1.0f; };
     // glBlitFramebuffer destination coordinates use GL's bottom-left origin.
     // This raw Vulkan helper bypasses Shader.cpp's default-FBO Y fixup, so map
@@ -2011,11 +2013,14 @@ void blit_to_default_in_frame(VkImage src_image, VkFormat src_format, int src_w,
     w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; w.pImageInfo = &dii;
     vkUpdateDescriptorSets(b->device, 1, &w, 0, nullptr);
 
-    // Fill the shared VBO with this rect (NDC; flip source V for GL orientation).
+    // Fill the shared VBO with this rect.  The source is a user-FBO texture
+    // whose normalized coordinates already follow the GL contract, so preserve
+    // the caller's source rectangle directly.  Destination Y is converted
+    // separately below for the raw Vulkan viewport.
     float qx0=(float)sx0, qy0=(float)sy0, qx1=(float)sx1, qy1=(float)sy1;
     float px0=(float)dx0, py0=(float)dy0, px1=(float)dx1, py1=(float)dy1;
     float DWf=(float)DW, DHf=(float)DH, swf=(float)src_w, shf=(float)src_h;
-    float u0=qx0/swf, u1=qx1/swf, v0=1.0f-qy1/shf, v1=1.0f-qy0/shf;
+    float u0=qx0/swf, u1=qx1/swf, v0=qy0/shf, v1=qy1/shf;
     float nx0=2.0f*px0/DWf-1.0f, nx1=2.0f*px1/DWf-1.0f;
     // The in-frame present quad is raw Vulkan and therefore does not pass
     // through the default-FBO vertex shader variant that negates gl_Position.y.
