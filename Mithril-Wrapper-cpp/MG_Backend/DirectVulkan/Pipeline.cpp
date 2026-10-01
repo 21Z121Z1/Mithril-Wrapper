@@ -75,52 +75,34 @@ VkPrimitiveTopology gl_prim_to_vk(GLenum m) {
 
 // ---- GL attribute type -> VkFormat ----
 //
-// FIX (根因 V - 3 分量顶点属性格式映射):
-// Metal MTLVertexFormat 枚举对**非 float** 类型不含 3 分量变体
-// （无 UChar3/Char3/UShort3/Short3/Half3，仅有 1/2/4 分量及 Float3）。
-// MoltenVK 无法将 VK_FORMAT_R8G8B8_UNORM / R16G16B16_SFLOAT 等 3 分量顶点
-// 格式映射到任何 MTLVertexFormat → vkCreateGraphicsPipelines 失败 → draw
-// 被跳过 → 屏幕只剩 clear color（红屏）。
+// Apple/MoltenVK vertex-format rule:
+// Metal has native UChar3/Char3/UShort3/Short3/Half3 vertex formats, and
+// MoltenVK maps VK_FORMAT_R8G8B8_* / R16G16B16_* directly to them.  Do NOT
+// widen a 3-component attribute to a 4-component VkFormat: for tightly packed
+// GL strides (3 or 6 bytes) that makes the native vertex fetch read beyond the
+// final vertex and can make Metal validation reject the entire draw.  This is
+// especially relevant to Minecraft chunk streams on A11.
 //
-// 修复策略（最小影响域）：对 size==3 的**非 float** 类型，统一映射到对应的
-// 4 分量 VkFormat（如 R8G8B8_UNORM→R8G8B8A8_UNORM）。shader 中 vec3 属性
-// 仅取前 3 分量，第 4 分量从 stride 内的 padding 字节读取（Metal vertex
-// fetch 对 padding 容忍）。不引入数据流重打包，仅改格式枚举。
-//
-// 保留不变：
-//   - GL_FLOAT size==3 → R32G32B32_SFLOAT（Metal 支持 MTLVertexFormatFloat3）
-//   - GL_DOUBLE size==3 → R64G64B64_SFLOAT（不动）
-//   - GL_INT / GL_UNSIGNED_INT size==3 → R32G32B32_SINT/_UINT（Metal 支持
-//     32-bit Int3/Uint3）
-//   - GL_INT_2_10_10_10_REV / GL_UNSIGNED_INT_2_10_10_10_REV：A2B10G10R10
-//     本身是 4 分量打包格式，无需转换
-//
-// 深度对照 MobileGL ConvertIntegerVertexStreamToFloat32 /
-// RepackVertexStream (VulkanRenderer.cpp:602-666)：MobileGL 在 pipeline 创建
-// 前将不支持格式的顶点数据流整体重打包。本修复采用更小影响域：仅改格式枚举，
-// 不动顶点缓冲数据。
+// Keep the VkFormat component count identical to the GL attribute declaration.
+// Unsupported formats are still checked against VK_FORMAT_FEATURE_VERTEX_BUFFER_BIT
+// later during pipeline creation.
 VkFormat attrib_type_to_vk_format(GLenum type, int size, bool normalized, bool integer) {
     if (integer) {
         switch (type) {
-            // FIX (根因 V): UChar3 不存在于 MTLVertexFormat → 用 UChar4，
-            // shader 取前 3 分量，第 4 分量读 stride 内 padding
-            case GL_UNSIGNED_BYTE:  switch (size) { case 1: return VK_FORMAT_R8_UINT;   case 2: return VK_FORMAT_R8G8_UINT;   case 3: return VK_FORMAT_R8G8B8A8_UINT;   case 4: return VK_FORMAT_R8G8B8A8_UINT; }
+            case GL_UNSIGNED_BYTE:  switch (size) { case 1: return VK_FORMAT_R8_UINT;   case 2: return VK_FORMAT_R8G8_UINT;   case 3: return VK_FORMAT_R8G8B8_UINT;   case 4: return VK_FORMAT_R8G8B8A8_UINT; }
             // GL_INT 32-bit：Metal 支持 Int3，保持不变
             case GL_INT:            switch (size) { case 1: return VK_FORMAT_R32_SINT;  case 2: return VK_FORMAT_R32G32_SINT; case 3: return VK_FORMAT_R32G32B32_SINT; case 4: return VK_FORMAT_R32G32B32A32_SINT; }
             // GL_UNSIGNED_INT 32-bit：Metal 支持 Uint3，保持不变
             case GL_UNSIGNED_INT:   switch (size) { case 1: return VK_FORMAT_R32_UINT;  case 2: return VK_FORMAT_R32G32_UINT; case 3: return VK_FORMAT_R32G32B32_UINT; case 4: return VK_FORMAT_R32G32B32A32_UINT; }
-            // FIX (根因 V): Short3 不存在于 MTLVertexFormat → 用 Short4
-            case GL_SHORT:          switch (size) { case 1: return VK_FORMAT_R16_SINT;  case 2: return VK_FORMAT_R16G16_SINT; case 3: return VK_FORMAT_R16G16B16A16_SINT; case 4: return VK_FORMAT_R16G16B16A16_SINT; }
-            // FIX (根因 V): UShort3 不存在于 MTLVertexFormat → 用 UShort4
-            case GL_UNSIGNED_SHORT: switch (size) { case 1: return VK_FORMAT_R16_UINT;  case 2: return VK_FORMAT_R16G16_UINT; case 3: return VK_FORMAT_R16G16B16A16_UINT; case 4: return VK_FORMAT_R16G16B16A16_UINT; }
+            case GL_SHORT:          switch (size) { case 1: return VK_FORMAT_R16_SINT;  case 2: return VK_FORMAT_R16G16_SINT; case 3: return VK_FORMAT_R16G16B16_SINT; case 4: return VK_FORMAT_R16G16B16A16_SINT; }
+            case GL_UNSIGNED_SHORT: switch (size) { case 1: return VK_FORMAT_R16_UINT;  case 2: return VK_FORMAT_R16G16_UINT; case 3: return VK_FORMAT_R16G16B16_UINT; case 4: return VK_FORMAT_R16G16B16A16_UINT; }
             default: break;
         }
     }
     switch (type) {
         // GL_FLOAT：Metal 支持 MTLVertexFormatFloat3，保持 R32G32B32_SFLOAT
         case GL_FLOAT:          switch (size) { case 1: return VK_FORMAT_R32_SFLOAT;   case 2: return VK_FORMAT_R32G32_SFLOAT;   case 3: return VK_FORMAT_R32G32B32_SFLOAT;   case 4: return VK_FORMAT_R32G32B32A32_SFLOAT; }
-        // FIX (根因 V): Half3 不存在于 MTLVertexFormat → 用 Half4
-        case GL_HALF_FLOAT:     switch (size) { case 1: return VK_FORMAT_R16_SFLOAT;   case 2: return VK_FORMAT_R16G16_SFLOAT;   case 3: return VK_FORMAT_R16G16B16A16_SFLOAT;   case 4: return VK_FORMAT_R16G16B16A16_SFLOAT; }
+        case GL_HALF_FLOAT:     switch (size) { case 1: return VK_FORMAT_R16_SFLOAT;   case 2: return VK_FORMAT_R16G16_SFLOAT;   case 3: return VK_FORMAT_R16G16B16_SFLOAT;   case 4: return VK_FORMAT_R16G16B16A16_SFLOAT; }
         // ---- 已知限制 (P1)：GL_DOUBLE 顶点属性在 Apple 平台无法真正支持 ----
         //
         // Metal **完全没有** 64 位顶点格式：MTLVertexFormat 里没有 Double，
@@ -147,21 +129,17 @@ VkFormat attrib_type_to_vk_format(GLenum type, int size, bool normalized, bool i
             switch (size) { case 1: return VK_FORMAT_R64_SFLOAT;   case 2: return VK_FORMAT_R64G64_SFLOAT;  case 3: return VK_FORMAT_R64G64B64_SFLOAT;  case 4: return VK_FORMAT_R64G64B64A64_SFLOAT; }
             break;
         case GL_UNSIGNED_BYTE:
-            // FIX (根因 V): UChar3 normalized/unnormalized 均不存在 → 用 UChar4
-            if (normalized) switch (size) { case 1: return VK_FORMAT_R8_UNORM;  case 2: return VK_FORMAT_R8G8_UNORM;  case 3: return VK_FORMAT_R8G8B8A8_UNORM;  case 4: return VK_FORMAT_R8G8B8A8_UNORM; }
-            else            switch (size) { case 1: return VK_FORMAT_R8_UINT;   case 2: return VK_FORMAT_R8G8_UINT;   case 3: return VK_FORMAT_R8G8B8A8_UINT;   case 4: return VK_FORMAT_R8G8B8A8_UINT; }
+            if (normalized) switch (size) { case 1: return VK_FORMAT_R8_UNORM;  case 2: return VK_FORMAT_R8G8_UNORM;  case 3: return VK_FORMAT_R8G8B8_UNORM;  case 4: return VK_FORMAT_R8G8B8A8_UNORM; }
+            else            switch (size) { case 1: return VK_FORMAT_R8_UINT;   case 2: return VK_FORMAT_R8G8_UINT;   case 3: return VK_FORMAT_R8G8B8_UINT;   case 4: return VK_FORMAT_R8G8B8A8_UINT; }
         case GL_BYTE:
-            // FIX (根因 V): Char3 normalized/unnormalized 均不存在 → 用 Char4
-            if (normalized) switch (size) { case 1: return VK_FORMAT_R8_SNORM;  case 2: return VK_FORMAT_R8G8_SNORM;  case 3: return VK_FORMAT_R8G8B8A8_SNORM;  case 4: return VK_FORMAT_R8G8B8A8_SNORM; }
-            else            switch (size) { case 1: return VK_FORMAT_R8_SINT;   case 2: return VK_FORMAT_R8G8_SINT;   case 3: return VK_FORMAT_R8G8B8A8_SINT;   case 4: return VK_FORMAT_R8G8B8A8_SINT; }
+            if (normalized) switch (size) { case 1: return VK_FORMAT_R8_SNORM;  case 2: return VK_FORMAT_R8G8_SNORM;  case 3: return VK_FORMAT_R8G8B8_SNORM;  case 4: return VK_FORMAT_R8G8B8A8_SNORM; }
+            else            switch (size) { case 1: return VK_FORMAT_R8_SINT;   case 2: return VK_FORMAT_R8G8_SINT;   case 3: return VK_FORMAT_R8G8B8_SINT;   case 4: return VK_FORMAT_R8G8B8A8_SINT; }
         case GL_UNSIGNED_SHORT:
-            // FIX (根因 V): UShort3 normalized/unnormalized 均不存在 → 用 UShort4
-            if (normalized) switch (size) { case 1: return VK_FORMAT_R16_UNORM; case 2: return VK_FORMAT_R16G16_UNORM; case 3: return VK_FORMAT_R16G16B16A16_UNORM; case 4: return VK_FORMAT_R16G16B16A16_UNORM; }
-            else            switch (size) { case 1: return VK_FORMAT_R16_UINT;  case 2: return VK_FORMAT_R16G16_UINT;  case 3: return VK_FORMAT_R16G16B16A16_UINT;  case 4: return VK_FORMAT_R16G16B16A16_UINT; }
+            if (normalized) switch (size) { case 1: return VK_FORMAT_R16_UNORM; case 2: return VK_FORMAT_R16G16_UNORM; case 3: return VK_FORMAT_R16G16B16_UNORM; case 4: return VK_FORMAT_R16G16B16A16_UNORM; }
+            else            switch (size) { case 1: return VK_FORMAT_R16_UINT;  case 2: return VK_FORMAT_R16G16_UINT;  case 3: return VK_FORMAT_R16G16B16_UINT;  case 4: return VK_FORMAT_R16G16B16A16_UINT; }
         case GL_SHORT:
-            // FIX (根因 V): Short3 normalized/unnormalized 均不存在 → 用 Short4
-            if (normalized) switch (size) { case 1: return VK_FORMAT_R16_SNORM; case 2: return VK_FORMAT_R16G16_SNORM; case 3: return VK_FORMAT_R16G16B16A16_SNORM; case 4: return VK_FORMAT_R16G16B16A16_SNORM; }
-            else            switch (size) { case 1: return VK_FORMAT_R16_SINT;  case 2: return VK_FORMAT_R16G16_SINT;  case 3: return VK_FORMAT_R16G16B16A16_SINT;  case 4: return VK_FORMAT_R16G16B16A16_SINT; }
+            if (normalized) switch (size) { case 1: return VK_FORMAT_R16_SNORM; case 2: return VK_FORMAT_R16G16_SNORM; case 3: return VK_FORMAT_R16G16B16_SNORM; case 4: return VK_FORMAT_R16G16B16A16_SNORM; }
+            else            switch (size) { case 1: return VK_FORMAT_R16_SINT;  case 2: return VK_FORMAT_R16G16_SINT;  case 3: return VK_FORMAT_R16G16B16_SINT;  case 4: return VK_FORMAT_R16G16B16A16_SINT; }
         // 打包格式 A2B10G10R10 本身是 4 分量，无需转换。
         //
         // FIX (根因 AM — 打包法线符号丢失):

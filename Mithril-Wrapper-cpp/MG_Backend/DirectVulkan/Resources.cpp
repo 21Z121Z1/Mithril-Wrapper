@@ -2302,6 +2302,22 @@ VkSampler backend_get_or_create_sampler(GLuint name, GLint min_filter, GLint mag
         }
     }
 
+    // A11/Apple4 does not support native sampler mip LOD bias. MoltenVK
+    // exposes this through VK_KHR_portability_subset::samplerMipLodBias.
+    // Clamp before hashing as well as creation so the cache key describes the
+    // state the GPU will actually execute.
+    const GLfloat effectiveLodBias =
+        b->samplerMipLodBiasSupported ? lod_bias : 0.0f;
+    if (!b->samplerMipLodBiasSupported && lod_bias != 0.0f) {
+        static bool warnedLodBias = false;
+        if (!warnedLodBias) {
+            warnedLodBias = true;
+            MITHRIL_LOG_WARN("vk",
+                "sampler LOD bias %.3f requested on a portability device "
+                "without samplerMipLodBias; clamping to 0", lod_bias);
+        }
+    }
+
     // 参数哈希：仅纳入会影响 VkSamplerCreateInfo 的字段。
     uint64_t pkey = 0xcbf29ce484222325ull;  // FNV-1a 64 起点
     auto mix = [&pkey](uint64_t v) {
@@ -2342,7 +2358,7 @@ VkSampler backend_get_or_create_sampler(GLuint name, GLint min_filter, GLint mag
     mix((uint64_t)(uint32_t)compare_enable);
     mix(compare_enable ? (uint64_t)(uint32_t)compare_op : 0ull);
     mix((uint64_t)(uint32_t)(min_lod  * 1000.0f));
-    mix((uint64_t)(uint32_t)(lod_bias * 1000.0f));
+    mix((uint64_t)(uint32_t)(effectiveLodBias * 1000.0f));
     // GL_TEXTURE_MAX_LEVEL is texture state and changes the accessible mip
     // window even when the VkImage still owns a larger physical chain.
     mix((uint64_t)(uint32_t)std::max(0, texture_max_level));
@@ -2397,7 +2413,7 @@ VkSampler backend_get_or_create_sampler(GLuint name, GLint min_filter, GLint mag
         auto tit = tex_tbl.find(name);
         if (tit != tex_tbl.end()) actualLevels = tit->second.levels;
     }
-    sci.mipLodBias = lod_bias;
+    sci.mipLodBias = effectiveLodBias;
     const int accessibleMaxLevel = std::max(
         0, std::min(std::max(0, actualLevels - 1), std::max(0, texture_max_level)));
     if (!mipmapped) {

@@ -1088,6 +1088,72 @@ int main(int argc, char** argv) {
         }
 
         /* =====================================================================
+         * 4j) Apple/MoltenVK tightly-packed 3-component vertex formats
+         * =====================================================================
+         * MoltenVK maps R8G8B8_UNORM -> MTLVertexFormatUChar3Normalized and
+         * R16G16B16_SFLOAT -> MTLVertexFormatHalf3.  The backing buffers below
+         * are EXACTLY 3 vertices * 3 components: 9 and 18 bytes respectively.
+         * Widening either attribute to a *4 VkFormat forces the last native
+         * fetch past the end of the buffer and can make Metal reject the draw. */
+        {
+            const char* v3VsSrc =
+                "#version 330 core\n"
+                "layout(location=0) in vec3 aColor;\n"
+                "out vec3 vColor;\n"
+                "void main(){\n"
+                "  vec2 p = gl_VertexID == 0 ? vec2(-0.8,-0.8) :\n"
+                "           (gl_VertexID == 1 ? vec2(0.8,-0.8) : vec2(0.0,0.8));\n"
+                "  gl_Position = vec4(p,0.0,1.0);\n"
+                "  vColor = aColor;\n"
+                "}\n";
+            const char* v3FsSrc =
+                "#version 330 core\n"
+                "in vec3 vColor;\n"
+                "out vec4 fragColor;\n"
+                "void main(){ fragColor = vec4(vColor,1.0); }\n";
+            GLuint v3Vs=createShader(GL_VERTEX_SHADER), v3Fs=createShader(GL_FRAGMENT_SHADER);
+            shaderSource(v3Vs,1,&v3VsSrc,NULL); shaderSource(v3Fs,1,&v3FsSrc,NULL);
+            compileShader(v3Vs); compileShader(v3Fs);
+            GLint v3v=0,v3f=0; getShaderiv(v3Vs,GL_COMPILE_STATUS,&v3v); getShaderiv(v3Fs,GL_COMPILE_STATUS,&v3f);
+            CHECK(v3v==GL_TRUE && v3f==GL_TRUE, "vec3 format shaders compile");
+            GLuint v3Prog=createProgram(); attachShader(v3Prog,v3Vs); attachShader(v3Prog,v3Fs);
+            linkProgram(v3Prog); deleteShader(v3Vs); deleteShader(v3Fs);
+            GLint v3link=0; getProgramiv(v3Prog,GL_LINK_STATUS,&v3link);
+            CHECK(v3link==GL_TRUE, "vec3 format program links");
+
+            GLuint v3Vao=0,v3Vbo=0;
+            genVertexArrays(1,&v3Vao); bindVertexArray(v3Vao);
+            genBuffers(1,&v3Vbo); bindBuffer(GL_ARRAY_BUFFER,v3Vbo);
+
+            const GLubyte rgb8[9]={255,0,0, 255,0,0, 255,0,0};
+            bufferData(GL_ARRAY_BUFFER,sizeof(rgb8),rgb8,GL_STATIC_DRAW);
+            vertexAttribPtr(0,3,GL_UNSIGNED_BYTE,GL_TRUE,3,(const void*)0);
+            enableAttrib(0);
+            useProgram(v3Prog); viewport(0,0,R,C); clearColor(0,0,0,1); clear(GL_COLOR_BUFFER_BIT);
+            drawArrays(GL_TRIANGLES,0,3); finish();
+            unsigned char v3p[4]={0,0,0,0};
+            readPixels(R/2,C/2,1,1,GL_RGBA,GL_UNSIGNED_BYTE,v3p);
+            CHECK(v3p[0]>200 && v3p[1]<40 && v3p[2]<40 && v3p[3]>128,
+                  "tightly-packed UByte3 (9-byte VBO) renders red (%d,%d,%d,%d)",
+                  v3p[0],v3p[1],v3p[2],v3p[3]);
+
+            const GLushort half3[9]={
+                0x3c00,0,0, 0x3c00,0,0, 0x3c00,0,0
+            };
+            bufferData(GL_ARRAY_BUFFER,sizeof(half3),half3,GL_STATIC_DRAW);
+            vertexAttribPtr(0,3,GL_HALF_FLOAT,GL_FALSE,3*sizeof(GLushort),(const void*)0);
+            clearColor(0,0,0,1); clear(GL_COLOR_BUFFER_BIT);
+            drawArrays(GL_TRIANGLES,0,3); finish();
+            memset(v3p,0,sizeof(v3p));
+            readPixels(R/2,C/2,1,1,GL_RGBA,GL_UNSIGNED_BYTE,v3p);
+            CHECK(v3p[0]>200 && v3p[1]<40 && v3p[2]<40 && v3p[3]>128,
+                  "tightly-packed Half3 (18-byte VBO) renders red (%d,%d,%d,%d)",
+                  v3p[0],v3p[1],v3p[2],v3p[3]);
+            CHECK(getError()==GL_NO_ERROR, "3-component vertex format regression leaves no GL error");
+            deleteProgram(v3Prog);
+        }
+
+        /* =====================================================================
          * 4k) cubemap 判别测试：6 face 各色上传 + samplerCube 采样
          * =====================================================================
          * 目标：验证 panorama（主菜单背景）cubemap 全链路的 4 个修复点——

@@ -235,6 +235,12 @@ struct Backend {
      * sampleShadingEnable (GL 4.0 ARB_sample_shading). */
     bool             sampleRateShadingSupported = false;
 
+    /* VK_KHR_portability_subset::samplerMipLodBias.
+     * Apple4/A11 does not expose native sampler LOD bias. MoltenVK reports
+     * that restriction through the portability subset, so VkSampler creation
+     * must clamp a requested GL LOD bias to zero on those devices. */
+    bool             samplerMipLodBiasSupported = true;
+
     /* VK_KHR_dynamic_rendering — 决定录制期走 vkCmdBeginRendering 还是传统
      * VkRenderPass/VkFramebuffer。MoltenVK 1.2.x 之前不暴露该扩展，iOS 上
      * 常见缺席，因此必须运行时判定，不能假定为真。 */
