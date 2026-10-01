@@ -13,7 +13,6 @@
 #include "UniformArena.h"   // ubo_arena_rewind (per-frame transient UBO storage)
 #include "../Backend.h"
 #include "../../MG_Impl/Log.h"
-#include "../../MG_State/Config.h"
 #include "../../MG_State/State.h"  // g_state (for scissorTest in clear_attachments +
                                   //  root cause AG: currentBaseVertex/currentBaseInstance +
                                   //  root cause Z: viewportH fallback)
@@ -2079,10 +2078,6 @@ void backend_end_render_pass(void) { mithril::vk::end_render_pass(); }
 int backend_render_pass_active(void) { return mithril::vk::render_pass_active()?1:0; }
 
 int backend_yflip_enabled(void) {
-    // Explicit override wins, from the config file first and then the
-    // environment, because neither the surface transform nor the platform is a
-    // reliable predictor across launchers.
-    if (const char* c = mithril::config_get("yflip")) return c[0] == '0' ? 0 : 1;
     if (const char* e = std::getenv("MITHRIL_YFLIP")) return e[0] == '0' ? 0 : 1;
 
     // MobileGL parity: orientation comes from the SURFACE TRANSFORM, not from
@@ -2092,11 +2087,12 @@ int backend_yflip_enabled(void) {
     // Ref: MobileGL IsQuarterTurnPreTransform /
     // GetDefaultFramebufferRectMapping / GetShaderTransformFlags.
     //
-    // Deliberately NOT cached until a swapchain actually exists. Caching on the
-    // first call locked in IDENTITY - and therefore "flip" - for the whole
-    // session whenever the first query happened before the surface was created,
-    // which is exactly what the shader-compile path did. The transform-based
-    // decision therefore never took effect.
+    // Deliberately NOT cached until a swapchain actually exists. The old code
+    // cached on the first call, and the first call comes from the
+    // shader-compile path, which runs before any surface exists: no swapchain
+    // meant the transform read as IDENTITY, so the session locked in "flip"
+    // regardless of the real orientation and the transform-based decision never
+    // took effect.
     static int cached = 1;
     static bool have_transform = false;
     if (mithril::vk::Swapchain* sc = mithril::vk::active_swapchain()) {
@@ -2107,13 +2103,6 @@ int backend_yflip_enabled(void) {
     }
     return have_transform ? cached : 1;
 }
-
-// Restored: these two were dropped by the previous commit's edit, which ended
-// the replaced region at the wrong brace. Both are declared in Backend.h and
-// called from other translation units, so their loss surfaced as a link
-// failure when building the dylib.
-void backend_commit(void)          { mithril::vk::commit_frame(); }
-void backend_mark_commands(void)   { mithril::vk::encoder().hasCommands = true; }
 
 VkImageLayout backend_active_swapchain_color_layout(void) {
     mithril::vk::Swapchain* sc = mithril::vk::active_swapchain();

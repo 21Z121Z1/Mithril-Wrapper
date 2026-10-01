@@ -19,7 +19,6 @@
 
 #include <cstdio>
 #include "Device.h"
-#include "../../MG_State/Config.h"
 #include "Resources.h"
 #include "CommandStream.h"  // end_render_pass, ensure_command_buffer_recording, render_pass_active
 #include "Swapchain.h"      // acquire semaphore edge for out-of-band submits
@@ -911,16 +910,6 @@ bool init_device() {
     // MITHRIL_VRAM_BUDGET_MB forces the budget in MB so the hypothesis can be
     // confirmed or ruled out in one run without a rebuild, and gives a real
     // workaround if it is confirmed.
-    // Same override from the config file, for launchers that cannot set
-    // environment variables (see MG_State/Config.cpp).
-    if (const char* c = mithril::config_get("vram_budget_mb")) {
-        const long long mb = std::strtoll(c, nullptr, 10);
-        if (mb > 0) {
-            MITHRIL_LOG_WARN("vram", "config vram_budget_mb=%lld MB (auto was %llu MB)",
-                             mb, (unsigned long long)(gpuBudget / (1024 * 1024)));
-            return (VkDeviceSize)mb * 1024 * 1024;
-        }
-    }
     if (const char* e = std::getenv("MITHRIL_VRAM_BUDGET_MB")) {
         const long long mb = std::strtoll(e, nullptr, 10);
         if (mb > 0) {

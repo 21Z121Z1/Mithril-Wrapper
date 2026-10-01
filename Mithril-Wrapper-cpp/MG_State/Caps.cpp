@@ -1,6 +1,5 @@
 // Mithril-Wrapper - MG_State/Caps.cpp
 #include "Caps.h"
-#include "Config.h"
 
 // Build-stamped commit id (injected by CMake as -DMITHRIL_COMMIT_ID="sha").
 // Falls back to "unknown" for local builds, matching MG_Impl/Getter.cpp.
@@ -88,11 +87,7 @@ static bool is_unsupported(const char* n) {
 const Caps& caps() {
     static Caps c = [] {
         Caps v;   // defaults to GL 4.6 / GLSL 460 (see Caps.h)
-        const char* cfg = mithril::config_get("gl_version");
-        if (cfg) {
-            if (cfg[0] == '3') v = Caps{3, 3, 3, 30};
-            else if (cfg[0] == '4') v = Caps{4, 6, 4, 60};
-        } else if (const char* e = std::getenv("MITHRIL_GL_VERSION")) {
+        if (const char* e = std::getenv("MITHRIL_GL_VERSION")) {
             // Accept "4.6", "46", "3.3" - anything malformed keeps the default
             // rather than advertising a nonsense level.
             int maj = 0, min = 0;
