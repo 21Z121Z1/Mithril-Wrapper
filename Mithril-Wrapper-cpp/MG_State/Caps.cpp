@@ -151,8 +151,14 @@ const std::vector<const char*>& extensions() {
                 !backend_device_supports_bptc()) {
                 continue;
             }
-            if (std::string(e) == "GL_ARB_shader_image_load_store" &&
+            if ((std::string(e) == "GL_ARB_shader_image_load_store" ||
+                 std::string(e) == "GL_ARB_shader_image_size") &&
                 !backend_device_supports_storage_image_atomics()) {
+                // ARB_shader_image_size extends the image-uniform model from
+                // ARB_shader_image_load_store. Keep the pair coherent: on
+                // Apple4/A11 we intentionally hide image load/store because
+                // texture atomics are unavailable, so advertising image_size
+                // alone would still steer hosts into an unusable image path.
                 continue;
             }
             out.push_back(e);
