@@ -72,7 +72,7 @@ static const char* kUnsupported[] = {
     "GL_ARB_texture_mirror_clamp_to_edge",  // MoltenVK requires Apple7; backend has no emulation.
     "GL_ARB_gpu_shader5",                   // program linker only consumes VS/FS and lacks full GPU5 builtins.
     "GL_ARB_shader_draw_parameters",        // gl_DrawID/BaseInstance semantics are not complete on iOS.
-    "GL_ARB_compute_shader",                // no glDispatchCompute/backend compute pipeline exists.
+    "GL_ARB_compute_shader",                // dispatch backend exists, but glLinkProgram still rejects compute-only programs.
     "GL_ARB_texture_cube_map_array",        // state enum exists, but VkImage/view creation is not cube-array capable.
     "GL_ARB_texture_buffer_object",         // glTexBuffer is currently a no-op.
     "GL_ARB_texture_buffer_range",          // glTexBufferRange is currently a no-op.
@@ -93,6 +93,8 @@ static const char* kUnsupported[] = {
     "GL_ARB_depth_clamp",                  // Pipeline.cpp hardcodes depthClampEnable = VK_FALSE.
     "GL_ARB_clip_control",                 // state is recorded but position fixup ignores it.
     "GL_ARB_draw_buffers_blend",           // one blend state is currently replicated to all MRTs.
+    "GL_ARB_shader_atomic_counters",       // Vulkan path has no atomic-counter descriptor/reflection binding.
+    "GL_ARB_shader_atomic_counter_ops",    // depends on the missing atomic-counter buffer semantics.
 };
 
 static bool is_unsupported(const char* n) {
@@ -139,6 +141,10 @@ const std::vector<const char*>& extensions() {
             // device reports every required BPTC format as sampleable.
             if (std::string(e) == "GL_ARB_texture_compression_bptc" &&
                 !backend_device_supports_bptc()) {
+                continue;
+            }
+            if (std::string(e) == "GL_ARB_shader_image_load_store" &&
+                !backend_device_supports_storage_image_atomics()) {
                 continue;
             }
             out.push_back(e);
