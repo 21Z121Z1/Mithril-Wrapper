@@ -214,6 +214,15 @@ void glCopyBufferSubData(GLenum readTarget, GLenum writeTarget,
         mithril::state_set_error(GL_INVALID_VALUE);
         return;
     }
+    // OpenGL explicitly forbids overlapping copies within the same buffer.
+    // vkCmdCopyBuffer has the same non-overlap requirement for regions that
+    // alias one VkBuffer. Reject before updating either the CPU shadow or GPU.
+    if (src->id == dst->id &&
+        readOffset < writeOffset + size &&
+        writeOffset < readOffset + size) {
+        mithril::state_set_error(GL_INVALID_VALUE);
+        return;
+    }
     // FIX (root cause: glCopyBufferSubData vs persistent source): the source may
     // be a persistently-mapped buffer the app wrote through the LIVE backend
     // pointer (not the CPU shadow). Refresh the source shadow from the live

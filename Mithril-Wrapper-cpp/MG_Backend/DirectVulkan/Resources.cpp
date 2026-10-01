@@ -1503,6 +1503,10 @@ int backend_copy_buffer_gpu(GLuint srcName, GLuint dstName,
         VK_PIPELINE_STAGE_ALL_GRAPHICS_BIT | VK_PIPELINE_STAGE_HOST_BIT,
         0, 0, nullptr, 1, &post, 0, nullptr);
     mithril::vk::stamp_buffer_write(di->second);
+    // A server-side copy may be the only GPU operation between two flush/present
+    // points. Without this flag commit_frame can treat the command buffer as
+    // empty and skip submission, leaving chunk/indirect buffers stale on A11.
+    backend_mark_commands();
     return 1;
 }
 

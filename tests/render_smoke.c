@@ -86,6 +86,7 @@ typedef void      (*bindVertexArray_fn)(GLuint);
 typedef void      (*genBuffers_fn)(GLsizei, GLuint*);
 typedef void      (*bindBuffer_fn)(GLenum, GLuint);
 typedef void      (*bufferData_fn)(GLenum, GLsizeiptr, const void*, GLenum);
+typedef void      (*copyBufferSubData_fn)(GLenum, GLenum, GLintptr, GLintptr, GLsizeiptr);
 typedef void      (*vertexAttribPtr_fn)(GLuint, GLint, GLenum, GLboolean,
                                         GLsizei, const void*);
 typedef void      (*bindVertexBuffer_fn)(GLuint, GLuint, GLintptr, GLsizei);
@@ -191,6 +192,7 @@ int main(int argc, char** argv) {
     genBuffers_fn         genBuffers         = NULL;
     bindBuffer_fn         bindBuffer         = NULL;
     bufferData_fn         bufferData         = NULL;
+    copyBufferSubData_fn   copyBufferSubData  = NULL;
     vertexAttribPtr_fn vertexAttribPtr   = NULL;
     bindVertexBuffer_fn bindVertexBuffer = NULL;
     vertexAttribFormat_fn vertexAttribFormat = NULL;
@@ -251,6 +253,7 @@ int main(int argc, char** argv) {
     RESOLVE(genBuffers, "glGenBuffers");
     RESOLVE(bindBuffer, "glBindBuffer");
     RESOLVE(bufferData, "glBufferData");
+    RESOLVE(copyBufferSubData, "glCopyBufferSubData");
     RESOLVE(vertexAttribPtr, "glVertexAttribPointer");
     RESOLVE(bindVertexBuffer, "glBindVertexBuffer");
     RESOLVE(vertexAttribFormat, "glVertexAttribFormat");
@@ -336,6 +339,25 @@ int main(int argc, char** argv) {
     clearColor(0.0f, 0.0f, 0.0f, 0.0f);
     clear(GL_COLOR_BUFFER_BIT);
     CHECK(getError() == GL_NO_ERROR, "clear on offscreen FBO leaves no error");
+
+    /* ---- server-side buffer copy contract ------------------------------- */
+    {
+        GLuint copyBuf=0;
+        genBuffers(1,&copyBuf);
+        bindBuffer(GL_COPY_READ_BUFFER,copyBuf);
+        bindBuffer(GL_COPY_WRITE_BUFFER,copyBuf);
+        const unsigned char bytes[16]={0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15};
+        bufferData(GL_COPY_WRITE_BUFFER,sizeof(bytes),bytes,GL_STATIC_DRAW);
+
+        copyBufferSubData(GL_COPY_READ_BUFFER,GL_COPY_WRITE_BUFFER,0,4,8);
+        CHECK(getError()==GL_INVALID_VALUE,
+              "overlapping same-buffer glCopyBufferSubData is rejected");
+
+        copyBufferSubData(GL_COPY_READ_BUFFER,GL_COPY_WRITE_BUFFER,0,12,4);
+        CHECK(getError()==GL_NO_ERROR,
+              "non-overlapping same-buffer glCopyBufferSubData is accepted");
+        finish(); /* proves a copy-only command stream can be submitted safely */
+    }
 
     /* ---- 控制组诊断：clear 到已知非零颜色并读回，隔离 readback/clear 路径 ----
      * 若此读回返回 (25,51,76,255)（=0.1/0.2/0.3*255），说明 glClear+glReadPixels
