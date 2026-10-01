@@ -746,6 +746,12 @@ int backend_device_limit(int which, int fallback);
  * this is false there; newer Apple GPUs are decided from VkFormatProperties. */
 int backend_device_supports_bptc(void);
 
+/* Full ARB_shader_image_load_store includes imageAtomic* on r32i/r32ui.
+ * Apple4/A11 has read/write textures but no texture atomics; gate the GL
+ * extension on the Vulkan format feature rather than the broader R/W-texture
+ * capability. */
+int backend_device_supports_storage_image_atomics(void);
+
 void backend_debug_frame_fbo_log(void);
 
 extern "C" void mithril_dump_draw_ring(const char* path);
