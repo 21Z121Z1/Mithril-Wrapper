@@ -78,6 +78,11 @@ static const char* kUnsupported[] = {
     "GL_ARB_texture_buffer_range",          // glTexBufferRange is currently a no-op.
     "GL_ARB_texture_storage_multisample",   // glTexStorage*Multisample is currently a no-op.
     "GL_ARB_framebuffer_no_attachments",    // glFramebufferParameteri is currently a no-op.
+    "GL_ARB_shader_clock",                  // no clockARB lowering/runtime support exists.
+    "GL_ARB_pipeline_statistics_query",     // no pipeline-statistics query backend exists.
+    "GL_ARB_query_buffer_object",           // query-buffer result path is not implemented.
+    "GL_ARB_conditional_render_inverted",   // inverted conditional rendering is not implemented.
+    "GL_ARB_ES3_1_compatibility",           // implies compute/image paths beyond this GL 3.3 profile.
 };
 
 static bool is_unsupported(const char* n) {
