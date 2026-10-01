@@ -345,7 +345,9 @@ void glGetIntegerv(GLenum pname, GLint* params) {
         case GL_MAX_VERTEX_UNIFORM_BLOCKS:    *params = 14; break;
         case GL_MAX_FRAGMENT_UNIFORM_BLOCKS:  *params = 14; break;
         case GL_MAX_GEOMETRY_UNIFORM_BLOCKS:  *params = 14; break;
-        case GL_MAX_COMBINED_UNIFORM_BLOCKS:  *params = 40; break;
+        case GL_MAX_COMBINED_UNIFORM_BLOCKS:
+            *params = backend_device_limit(MITHRIL_LIMIT_MAX_UNIFORM_BUFFER_BINDINGS,
+                                           mithril::kMaxIndexedBindings); break;
         case GL_MAX_VERTEX_OUTPUT_COMPONENTS: *params = 64; break;
         case GL_MAX_FRAGMENT_INPUT_COMPONENTS: *params = 64; break;
         case GL_MAX_SERVER_WAIT_TIMEOUT:      *params = 0x0000FFFF; break;
@@ -369,7 +371,9 @@ void glGetIntegerv(GLenum pname, GLint* params) {
         case GL_MAX_SHADER_STORAGE_BUFFER_BINDINGS:
             *params = backend_device_limit(MITHRIL_LIMIT_MAX_SSBO_BINDINGS,
                                            mithril::kMaxIndexedBindings); break;
-        case GL_MAX_COMBINED_SHADER_STORAGE_BLOCKS: *params = 96; break;
+        case GL_MAX_COMBINED_SHADER_STORAGE_BLOCKS:
+            *params = backend_device_limit(MITHRIL_LIMIT_MAX_SSBO_BINDINGS,
+                                           mithril::kMaxIndexedBindings); break;
         case GL_MAX_VERTEX_SHADER_STORAGE_BLOCKS: *params = 16; break;
         case GL_MAX_FRAGMENT_SHADER_STORAGE_BLOCKS: *params = 16; break;
         case GL_MAX_COMPUTE_SHADER_STORAGE_BLOCKS: *params = 16; break;
