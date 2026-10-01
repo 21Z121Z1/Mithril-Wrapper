@@ -513,9 +513,20 @@ void glGetQueryObjectiv(GLuint id, GLenum pname, GLint* params) {
     mithril::Query* q = mithril::state_get_query(id);
     if (!q || !q->ended) { *params = 0; return; }
     switch (pname) {
-        case GL_QUERY_RESULT_AVAILABLE: *params = q->resultCached ? GL_TRUE : GL_FALSE; break;
-        case GL_QUERY_RESULT:           *params = (GLint)q->cachedResult; break;
-        default:                         *params = 0; break;
+        case GL_QUERY_RESULT_AVAILABLE:
+            *params = backend_query_result_available(id) ? GL_TRUE : GL_FALSE;
+            break;
+        case GL_QUERY_RESULT: {
+            int ok = 0;
+            uint64_t v = backend_query_result_u64(id, &ok);
+            // Fall back only when the backend reports no trustworthy result
+            // (query never armed). Never substitute a value of our own when a
+            // real measurement exists - a wrong zero here is what makes Iris
+            // cull visible geometry.
+            *params = (GLint)(ok ? v : q->cachedResult);
+            break;
+        }
+        default: *params = 0; break;
     }
 }
 
@@ -525,9 +536,16 @@ void glGetQueryObjectuiv(GLuint id, GLenum pname, GLuint* params) {
     mithril::Query* q = mithril::state_get_query(id);
     if (!q || !q->ended) { *params = 0; return; }
     switch (pname) {
-        case GL_QUERY_RESULT_AVAILABLE: *params = q->resultCached ? GL_TRUE : GL_FALSE; break;
-        case GL_QUERY_RESULT:           *params = (GLuint)q->cachedResult; break;
-        default:                         *params = 0; break;
+        case GL_QUERY_RESULT_AVAILABLE:
+            *params = backend_query_result_available(id) ? GL_TRUE : GL_FALSE;
+            break;
+        case GL_QUERY_RESULT: {
+            int ok = 0;
+            uint64_t v = backend_query_result_u64(id, &ok);
+            *params = (GLuint)(ok ? v : q->cachedResult);
+            break;
+        }
+        default: *params = 0; break;
     }
 }
 
@@ -541,7 +559,9 @@ void glQueryCounter(GLuint id, GLenum target) {
     if (!q) { mithril::state_set_error(GL_INVALID_OPERATION); return; }
     q->target = mithril::QueryTarget::Timestamp;
     q->ended = true;
-    // 保守 stub：时间戳查询立即可用，返回非零（见 glEndQuery 同类修复）。
+    backend_query_counter(id);
+    // cachedResult stays as the fallback for when the timestamp is not
+    // readable yet (see glGetQueryObject* above).
     q->resultCached = true;
     q->cachedResult = 1;
 }
