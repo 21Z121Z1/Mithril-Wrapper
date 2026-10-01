@@ -349,14 +349,18 @@ void glGetIntegerv(GLenum pname, GLint* params) {
         case GL_MAX_VERTEX_OUTPUT_COMPONENTS: *params = 64; break;
         case GL_MAX_FRAGMENT_INPUT_COMPONENTS: *params = 64; break;
         case GL_MAX_SERVER_WAIT_TIMEOUT:      *params = 0x0000FFFF; break;
-        /* MSAA 上限来自 framebufferColorSampleCounts & framebufferDepthSampleCounts
-         * 的交集。写死 4x 在只支持 2x 的低端 iOS GPU 上会让 MC 的抗锯齿选项
-         * 建出无法创建的 multisample 附件。 */
+        /* Apple4/A11 can expose up to 4x MSAA, but Mithril's current
+         * graphics pipeline still fixes VkPipelineMultisampleStateCreateInfo::
+         * rasterizationSamples to VK_SAMPLE_COUNT_1_BIT and renderbuffer storage
+         * has no native multisample backing. Advertising the hardware limit
+         * therefore creates an attachment/pipeline sample-count mismatch and
+         * drops draws. Report the wrapper's executable limit, not the silicon's
+         * theoretical limit, until the full MSAA path is wired. */
         case GL_MAX_SAMPLES:
         case GL_MAX_COLOR_TEXTURE_SAMPLES:
         case GL_MAX_DEPTH_TEXTURE_SAMPLES:
         case GL_MAX_INTEGER_SAMPLES:
-            *params = backend_device_limit(MITHRIL_LIMIT_MAX_SAMPLES, 4); break;
+            *params = 1; break;
         case GL_MAX_ATOMIC_COUNTER_BUFFER_BINDINGS: *params = 8; break;
         case GL_MAX_COMBINED_ATOMIC_COUNTERS: *params = 8; break;
         case GL_MAX_VERTEX_ATOMIC_COUNTERS:   *params = 8; break;
