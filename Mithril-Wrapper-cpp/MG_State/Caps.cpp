@@ -50,6 +50,20 @@ static const char* kAllExtensions[] = {
     "GL_ARB_explicit_uniform_location", "GL_ARB_program_interface_query",
     "GL_ARB_shading_language_packing", "GL_ARB_texture_mirror_clamp_to_edge",
     "GL_ARB_ES3_1_compatibility", "GL_ARB_compute_shader",
+    // Extensions whose entry points are real implementations (GL46_Compat.cpp,
+    // Drawing.cpp, gl.cpp, Debug.cpp) but were never advertised. Hosts gate
+    // the entry points on the string, not on the version number, so a missing
+    // string means the function pointer resolves to null even though the
+    // implementation exists. Sodium in particular resolves its whole
+    // direct-state-access path this way.
+    "GL_ARB_direct_state_access", "GL_ARB_clear_buffer_object",
+    "GL_ARB_multi_bind", "GL_KHR_debug", "GL_EXT_framebuffer_object",
+    // Storage images / SSBO / compute: glBindImageTexture and
+    // glShaderStorageBlockBinding record into g_state->imageTextureUnits and
+    // prog->storageBlockBindings, which DescriptorSet.cpp reads when it writes
+    // STORAGE_IMAGE / STORAGE_BUFFER descriptors - so these are backed, not
+    // placeholders.
+    "GL_ARB_shader_image_load_store", "GL_ARB_shader_storage_buffer_object",
 };
 
 // Extensions whose core entry points are still STUBS in this build. Claiming
@@ -71,7 +85,20 @@ static bool is_unsupported(const char* n) {
 }
 
 const Caps& caps() {
-    static Caps c;   // GL 3.3 / GLSL 330 — raise only when implemented.
+    static Caps c = [] {
+        Caps v;   // defaults to GL 4.6 / GLSL 460 (see Caps.h)
+        if (const char* e = std::getenv("MITHRIL_GL_VERSION")) {
+            // Accept "4.6", "46", "3.3" - anything malformed keeps the default
+            // rather than advertising a nonsense level.
+            int maj = 0, min = 0;
+            if (sscanf(e, "%d.%d", &maj, &min) == 2 && maj == 4 && min == 6) {
+                v = Caps{4, 6, 4, 60};
+            } else if (sscanf(e, "%d.%d", &maj, &min) == 2 && maj == 3 && min == 3) {
+                v = Caps{3, 3, 3, 30};
+            }
+        }
+        return v;
+    }();
     return c;
 }
 

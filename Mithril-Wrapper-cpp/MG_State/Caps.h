@@ -11,11 +11,19 @@
 
 namespace mithril {
 
+// Advertised level. 4.6 matches MobileGL's RendererGLInfo::TargetGLVersion,
+// which is the configuration verified on device with Sodium + Iris + BSL.
+//
+// The level is only as honest as the entry points behind it, so it is
+// overridable: MITHRIL_GL_VERSION=3.3 (or 4.6) switches the advertisement
+// without a rebuild. That matters because a wrong level in either direction is
+// a failure - too high and hosts take paths with no implementation behind them
+// (the original solid-red frame), too low and Sodium refuses to load at all.
 struct Caps {
-    int gl_major   = 3;
-    int gl_minor   = 3;
-    int glsl_major = 3;
-    int glsl_minor = 30;   // GLSL 330 (matches GL 3.3)
+    int gl_major   = 4;
+    int gl_minor   = 6;
+    int glsl_major = 4;
+    int glsl_minor = 60;   // GLSL 460 (matches GL 4.6)
 };
 
 // Process-wide capability set. Safe to call from any thread after init.
