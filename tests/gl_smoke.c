@@ -45,6 +45,12 @@
 #ifndef GL_MAX_COMBINED_SHADER_STORAGE_BLOCKS
 #define GL_MAX_COMBINED_SHADER_STORAGE_BLOCKS 0x90DC
 #endif
+#ifndef GL_MAX_SAMPLES
+#define GL_MAX_SAMPLES 0x8D57
+#endif
+#ifndef GL_MAX_COMBINED_UNIFORM_BLOCKS
+#define GL_MAX_COMBINED_UNIFORM_BLOCKS 0x8A2E
+#endif
 
 /* ---- 依赖的 GL 函数指针 typedef（与 glcorearb.h 签名一致） -------------- */
 typedef void    (*glGetIntegerv_fn)(GLenum, GLint*);
