@@ -1161,6 +1161,77 @@ bool format_is_depth_stencil(VkFormat fmt) {
     }
 }
 
+/*
+ * Block-compressed formats must never be silently substituted with an
+ * uncompressed VkFormat. glCompressedTexImage* supplies a block stream whose
+ * byte layout is defined by the requested compression format; copying those
+ * bytes verbatim into an RGBA8 image is not a "quality fallback" — it is an
+ * invalid buffer-to-image copy contract and can corrupt textures or fault the
+ * GPU. This matters in particular on Apple4/A11, which supports ASTC/ETC2/EAC
+ * but has no BC texture formats.
+ */
+bool format_is_block_compressed(VkFormat fmt) {
+    switch (fmt) {
+        case VK_FORMAT_BC1_RGB_UNORM_BLOCK:
+        case VK_FORMAT_BC1_RGB_SRGB_BLOCK:
+        case VK_FORMAT_BC1_RGBA_UNORM_BLOCK:
+        case VK_FORMAT_BC1_RGBA_SRGB_BLOCK:
+        case VK_FORMAT_BC2_UNORM_BLOCK:
+        case VK_FORMAT_BC2_SRGB_BLOCK:
+        case VK_FORMAT_BC3_UNORM_BLOCK:
+        case VK_FORMAT_BC3_SRGB_BLOCK:
+        case VK_FORMAT_BC4_UNORM_BLOCK:
+        case VK_FORMAT_BC4_SNORM_BLOCK:
+        case VK_FORMAT_BC5_UNORM_BLOCK:
+        case VK_FORMAT_BC5_SNORM_BLOCK:
+        case VK_FORMAT_BC6H_UFLOAT_BLOCK:
+        case VK_FORMAT_BC6H_SFLOAT_BLOCK:
+        case VK_FORMAT_BC7_UNORM_BLOCK:
+        case VK_FORMAT_BC7_SRGB_BLOCK:
+        case VK_FORMAT_ETC2_R8G8B8_UNORM_BLOCK:
+        case VK_FORMAT_ETC2_R8G8B8_SRGB_BLOCK:
+        case VK_FORMAT_ETC2_R8G8B8A1_UNORM_BLOCK:
+        case VK_FORMAT_ETC2_R8G8B8A1_SRGB_BLOCK:
+        case VK_FORMAT_ETC2_R8G8B8A8_UNORM_BLOCK:
+        case VK_FORMAT_ETC2_R8G8B8A8_SRGB_BLOCK:
+        case VK_FORMAT_EAC_R11_UNORM_BLOCK:
+        case VK_FORMAT_EAC_R11_SNORM_BLOCK:
+        case VK_FORMAT_EAC_R11G11_UNORM_BLOCK:
+        case VK_FORMAT_EAC_R11G11_SNORM_BLOCK:
+        case VK_FORMAT_ASTC_4x4_UNORM_BLOCK:
+        case VK_FORMAT_ASTC_4x4_SRGB_BLOCK:
+        case VK_FORMAT_ASTC_5x4_UNORM_BLOCK:
+        case VK_FORMAT_ASTC_5x4_SRGB_BLOCK:
+        case VK_FORMAT_ASTC_5x5_UNORM_BLOCK:
+        case VK_FORMAT_ASTC_5x5_SRGB_BLOCK:
+        case VK_FORMAT_ASTC_6x5_UNORM_BLOCK:
+        case VK_FORMAT_ASTC_6x5_SRGB_BLOCK:
+        case VK_FORMAT_ASTC_6x6_UNORM_BLOCK:
+        case VK_FORMAT_ASTC_6x6_SRGB_BLOCK:
+        case VK_FORMAT_ASTC_8x5_UNORM_BLOCK:
+        case VK_FORMAT_ASTC_8x5_SRGB_BLOCK:
+        case VK_FORMAT_ASTC_8x6_UNORM_BLOCK:
+        case VK_FORMAT_ASTC_8x6_SRGB_BLOCK:
+        case VK_FORMAT_ASTC_8x8_UNORM_BLOCK:
+        case VK_FORMAT_ASTC_8x8_SRGB_BLOCK:
+        case VK_FORMAT_ASTC_10x5_UNORM_BLOCK:
+        case VK_FORMAT_ASTC_10x5_SRGB_BLOCK:
+        case VK_FORMAT_ASTC_10x6_UNORM_BLOCK:
+        case VK_FORMAT_ASTC_10x6_SRGB_BLOCK:
+        case VK_FORMAT_ASTC_10x8_UNORM_BLOCK:
+        case VK_FORMAT_ASTC_10x8_SRGB_BLOCK:
+        case VK_FORMAT_ASTC_10x10_UNORM_BLOCK:
+        case VK_FORMAT_ASTC_10x10_SRGB_BLOCK:
+        case VK_FORMAT_ASTC_12x10_UNORM_BLOCK:
+        case VK_FORMAT_ASTC_12x10_SRGB_BLOCK:
+        case VK_FORMAT_ASTC_12x12_UNORM_BLOCK:
+        case VK_FORMAT_ASTC_12x12_SRGB_BLOCK:
+            return true;
+        default:
+            return false;
+    }
+}
+
 } // namespace vk
 } // namespace mithril
 
@@ -1688,15 +1759,28 @@ VkImage backend_get_or_create_texture(GLuint name, int width, int height, int de
                     : VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
         VkFormat resolved = mithril::vk::resolve_supported_format(fmt, need);
         if (resolved == VK_FORMAT_UNDEFINED) {
-            // 无替代格式。压缩格式（BC1/2/3 在 iOS 上全不可用）会走到这里。
-            // 退回 RGBA8：画面会丢失压缩纹理的内容，但至少资源能建出来、
-            // 管线不会整条失败。真正的解法是在上层把 BCn 转码成 ASTC，
-            // 那属于纹理转码器的范畴，不在本函数职责内。
             static std::unordered_set<uint32_t> warnedNoAlt;
+            if (mithril::vk::format_is_block_compressed(fmt)) {
+                // A compressed payload cannot be reinterpreted as uncompressed
+                // RGBA8. Apple4/A11 has no BC texture formats, so fail closed
+                // and let glCompressedTexImage* surface GL_INVALID_OPERATION.
+                // ASTC/ETC2/EAC continue normally when the device reports them.
+                if (warnedNoAlt.insert((uint32_t)fmt).second) {
+                    MITHRIL_LOG_WARN("vk", "compressed internalFormat 0x%x -> "
+                                     "VkFormat %d is not sampleable on this device; "
+                                     "refusing unsafe RGBA8 reinterpretation",
+                                     internal_format, (int)fmt);
+                }
+                return VK_NULL_HANDLE;
+            }
+
+            // For an uncompressed colour format with no direct representation,
+            // RGBA8 remains a safe semantic fallback because the ordinary upload
+            // path expands/converts host pixels according to format/type.
             if (warnedNoAlt.insert((uint32_t)fmt).second) {
-                MITHRIL_LOG_WARN("vk", "internalFormat 0x%x → VkFormat %d 在本设备"
-                                 "完全不受支持且无替代（iOS 无 BC 压缩纹理支持），"
-                                 "退回 RGBA8", internal_format, (int)fmt);
+                MITHRIL_LOG_WARN("vk", "internalFormat 0x%x -> VkFormat %d is "
+                                 "unsupported; falling back to RGBA8",
+                                 internal_format, (int)fmt);
             }
             fmt = VK_FORMAT_R8G8B8A8_UNORM;
         } else {
