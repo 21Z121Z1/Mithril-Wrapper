@@ -1671,6 +1671,26 @@ int backend_device_supports_bptc(void) {
     return 1;
 }
 
+int backend_device_supports_storage_image_atomics(void) {
+    mithril::vk::Backend* b = mithril::vk::backend();
+    if (!b || !b->initialized) return 0;
+
+    // ARB_shader_image_load_store guarantees atomic operations for r32i/r32ui.
+    // Require both signed and unsigned 32-bit storage-image atomics. Apple4
+    // exposes read/write textures but not texture atomics, so MoltenVK reports
+    // these feature bits absent on A11.
+    const VkFormat required[] = { VK_FORMAT_R32_SINT, VK_FORMAT_R32_UINT };
+    for (VkFormat fmt : required) {
+        VkFormatProperties fp{};
+        vkGetPhysicalDeviceFormatProperties(b->physicalDevice, fmt, &fp);
+        const VkFormatFeatureFlags need =
+            VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT |
+            VK_FORMAT_FEATURE_STORAGE_IMAGE_ATOMIC_BIT;
+        if ((fp.optimalTilingFeatures & need) != need) return 0;
+    }
+    return 1;
+}
+
 float backend_device_max_sampler_anisotropy(float fallback) {
     mithril::vk::Backend* b = mithril::vk::backend();
     if (!b || !b->initialized) return fallback;
