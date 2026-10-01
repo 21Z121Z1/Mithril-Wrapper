@@ -284,9 +284,12 @@ int main(int argc, char** argv) {
     GLint maxCombinedUbo = 0, maxCombinedSsbo = 0;
     getIntegerv(GL_MAX_COMBINED_UNIFORM_BLOCKS, &maxCombinedUbo);
     getIntegerv(GL_MAX_COMBINED_SHADER_STORAGE_BLOCKS, &maxCombinedSsbo);
-    CHECK(maxCombinedUbo > 0 && maxCombinedUbo <= 32,
+    // kMaxIndexedBindings is 36 for UBO/SSBO categories. These bindings
+    // are a different namespace from kMaxTextureUnits (32); using the texture
+    // limit here incorrectly rejected the backend's own valid cap on macOS.
+    CHECK(maxCombinedUbo > 0 && maxCombinedUbo <= 36,
           "combined UBO blocks fit internal/device descriptor namespace (%d)", maxCombinedUbo);
-    CHECK(maxCombinedSsbo > 0 && maxCombinedSsbo <= 32,
+    CHECK(maxCombinedSsbo > 0 && maxCombinedSsbo <= 36,
           "combined SSBO blocks fit internal/device descriptor namespace (%d)", maxCombinedSsbo);
 
     GLint maxCullDistances = -1;
