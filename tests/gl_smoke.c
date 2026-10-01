@@ -227,6 +227,9 @@ int main(int argc, char** argv) {
         "GL_ARB_draw_buffers_blend",
         "GL_ARB_shader_atomic_counters",
         "GL_ARB_shader_atomic_counter_ops",
+        "GL_ARB_texture_query_lod",
+        "GL_ARB_shader_group_vote",
+        "GL_ARB_cull_distance",
     };
     for (size_t fi = 0; fi < sizeof(forbiddenExts) / sizeof(forbiddenExts[0]); ++fi) {
         int found = 0;
