@@ -90,6 +90,7 @@ static const char* kUnsupported[] = {
     // Mithril silently collapses or ignores.
     "GL_ARB_texture_multisample",          // graphics pipeline is currently fixed to 1 sample.
     "GL_ARB_sample_shading",               // cannot take effect while rasterizationSamples == 1.
+    "GL_ARB_shader_texture_image_samples",  // textureSamples() needs multisample textures we do not expose.
     "GL_ARB_depth_clamp",                  // Pipeline.cpp hardcodes depthClampEnable = VK_FALSE.
     "GL_ARB_clip_control",                 // state is recorded but position fixup ignores it.
     "GL_ARB_draw_buffers_blend",           // one blend state is currently replicated to all MRTs.
