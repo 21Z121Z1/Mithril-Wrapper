@@ -205,6 +205,7 @@ set(MITHRIL_SOURCES
     # MG_State: GL state machine
     Mithril-Wrapper-cpp/MG_State/State.cpp
     Mithril-Wrapper-cpp/MG_State/Caps.cpp
+    Mithril-Wrapper-cpp/MG_State/Config.cpp
 
     # MG_Backend: Vulkan 1.2 + MoltenVK direct backend (platform-agnostic core)
     Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/Device.cpp
