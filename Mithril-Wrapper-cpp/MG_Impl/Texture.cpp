@@ -518,9 +518,9 @@ void glTexImage2DMultisample(GLenum target, GLsizei samples, GLenum internalform
 // Compressed texture upload (GL 3.1+ / ARB_texture_compression).
 //
 // 压缩纹理数据直接 memcpy 到 staging buffer，vkCmdCopyBufferToImage 按块
-// 拷贝。iOS/Metal 原生支持 ASTC/ETC2/EAC（Apple GPU），BC1-BC7 需要
-// MoltenVK 1.2.9+ 的 emulate-default-* 选项（或硬件解码）。FormatMap.cpp
-// 已映射所有这些格式到对应的 VkFormat。
+// 拷贝。Apple GPU 原生支持 ASTC/ETC2/EAC；BCn 仅在底层 Vulkan 设备实际
+// 报告对应 VkFormat 可采样时才允许上传。尤其 Apple4/A11 没有 BC 硬件支持，
+// 因而必须 fail closed，不能把 BC block stream 误当成 RGBA8 像素数据。
 //
 // 深度参考 MobileGL VkTextureManager::UploadCompressedTexture：数据直接
 // 拷贝到 staging，VkBufferImageCopy.bufferRowLength=0（紧密排列），不
@@ -556,8 +556,17 @@ void glCompressedTexImage2D(GLenum target, GLint level, GLenum internalformat,
         t->isCompressed = true;
     }
     if (t->levels < level + 1) t->levels = level + 1;
-    backend_get_or_create_texture(t->id, t->width, t->height, 1, t->levels,
-                                  internalformat, target, 1);
+    VkImage compressedImage =
+        backend_get_or_create_texture(t->id, t->width, t->height, 1, t->levels,
+                                      internalformat, target, 1);
+    if (compressedImage == VK_NULL_HANDLE) {
+        // The format is known to GL but is not executable by this Vulkan/Metal
+        // device (BCn on Apple4/A11 is the common case). Do not issue a
+        // vkCmdCopyBufferToImage with a compressed payload against a fallback
+        // uncompressed image.
+        mithril::state_set_error(GL_INVALID_OPERATION);
+        return;
+    }
     // FIX (cubemap face upload, same as glTexImage2D): face target -> z = face
     // index (the backend maps it to baseArrayLayer).
     GLint cz = 0;
@@ -586,8 +595,13 @@ void glCompressedTexImage3D(GLenum target, GLint level, GLenum internalformat,
         t->isCompressed = true;
     }
     if (t->levels < level + 1) t->levels = level + 1;
-    backend_get_or_create_texture(t->id, width, height, depth, t->levels,
-                                  internalformat, target, 1);
+    VkImage compressedImage =
+        backend_get_or_create_texture(t->id, width, height, depth, t->levels,
+                                      internalformat, target, 1);
+    if (compressedImage == VK_NULL_HANDLE) {
+        mithril::state_set_error(GL_INVALID_OPERATION);
+        return;
+    }
     backend_texture_upload_compressed(t->id, level, 0, 0, 0, width, height, depth,
                                       internalformat, imageSize, data,
                                       /*is_full_upload=*/1);
@@ -601,6 +615,10 @@ void glCompressedTexSubImage2D(GLenum target, GLint level,
     if (imageSize <= 0 || !data) { mithril::state_set_error(GL_INVALID_VALUE); return; }
     mithril::Texture* t = bound_texture_for_target(target);
     if (!t) return;
+    if (backend_get_texture_image(t->id) == VK_NULL_HANDLE) {
+        mithril::state_set_error(GL_INVALID_OPERATION);
+        return;
+    }
     // format parameter is the compressed format; pass as internalFormat to backend.
     backend_texture_upload_compressed(t->id, level, xoffset, yoffset, 0,
                                       width, height, 1, format, imageSize, data,
@@ -615,6 +633,10 @@ void glCompressedTexSubImage3D(GLenum target, GLint level,
     if (imageSize <= 0 || !data) { mithril::state_set_error(GL_INVALID_VALUE); return; }
     mithril::Texture* t = bound_texture_for_target(target);
     if (!t) return;
+    if (backend_get_texture_image(t->id) == VK_NULL_HANDLE) {
+        mithril::state_set_error(GL_INVALID_OPERATION);
+        return;
+    }
     backend_texture_upload_compressed(t->id, level, xoffset, yoffset, zoffset,
                                       width, height, depth, format, imageSize, data,
                                       /*is_full_upload=*/0);
