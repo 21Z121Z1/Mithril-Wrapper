@@ -51,6 +51,9 @@
 #ifndef GL_MAX_COMBINED_UNIFORM_BLOCKS
 #define GL_MAX_COMBINED_UNIFORM_BLOCKS 0x8A2E
 #endif
+#ifndef GL_MAX_CULL_DISTANCES
+#define GL_MAX_CULL_DISTANCES 0x82F9
+#endif
 
 /* ---- 依赖的 GL 函数指针 typedef（与 glcorearb.h 签名一致） -------------- */
 typedef void    (*glGetIntegerv_fn)(GLenum, GLint*);
@@ -222,6 +225,7 @@ int main(int argc, char** argv) {
         "GL_ARB_ES3_1_compatibility",
         "GL_ARB_texture_multisample",
         "GL_ARB_sample_shading",
+        "GL_ARB_shader_texture_image_samples",
         "GL_ARB_depth_clamp",
         "GL_ARB_clip_control",
         "GL_ARB_draw_buffers_blend",
@@ -274,6 +278,11 @@ int main(int argc, char** argv) {
           "combined UBO blocks fit internal/device descriptor namespace (%d)", maxCombinedUbo);
     CHECK(maxCombinedSsbo > 0 && maxCombinedSsbo <= 32,
           "combined SSBO blocks fit internal/device descriptor namespace (%d)", maxCombinedSsbo);
+
+    GLint maxCullDistances = -1;
+    getIntegerv(GL_MAX_CULL_DISTANCES, &maxCullDistances);
+    CHECK(maxCullDistances == 0,
+          "cull-distance slots are not advertised on Apple/MoltenVK (%d)", maxCullDistances);
 
     /* ---- 错误语义 ------------------------------------------------------------
      * 修复后契约：glGetError 返回真实的延迟错误。
