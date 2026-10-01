@@ -2170,14 +2170,62 @@ VkSampler backend_get_or_create_sampler(GLuint name, GLint min_filter, GLint mag
         borderWhite = border_color[0] >= 1.0f && border_color[1] >= 1.0f &&
                       border_color[2] >= 1.0f && border_color[3] >= 1.0f;
     }
+
+    // Apple4/A11 does not support linear filtering for 32-bit float pixel
+    // formats. More generally, Vulkan requires
+    // SAMPLED_IMAGE_FILTER_LINEAR_BIT whenever min/mag uses linear texel
+    // filtering. Resolve this from the *actual* VkFormat instead of assuming
+    // desktop GL capabilities. This also protects integer/other unfilterable
+    // formats on every GPU.
+    GLint effectiveMinFilter = min_filter;
+    GLint effectiveMagFilter = mag_filter;
+    VkFormat samplerFormat = VK_FORMAT_UNDEFINED;
+    {
+        auto& tex_tbl = mithril::vk::texture_table();
+        auto tit = tex_tbl.find(name);
+        if (tit != tex_tbl.end()) samplerFormat = tit->second.format;
+    }
+    if (samplerFormat != VK_FORMAT_UNDEFINED) {
+        VkFormatProperties fp{};
+        vkGetPhysicalDeviceFormatProperties(b->physicalDevice, samplerFormat, &fp);
+        const bool canLinear =
+            (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) != 0;
+        if (!canLinear) {
+            if (effectiveMagFilter == GL_LINEAR)
+                effectiveMagFilter = GL_NEAREST;
+            switch (effectiveMinFilter) {
+                case GL_LINEAR:
+                    effectiveMinFilter = GL_NEAREST;
+                    break;
+                case GL_LINEAR_MIPMAP_NEAREST:
+                    effectiveMinFilter = GL_NEAREST_MIPMAP_NEAREST;
+                    break;
+                case GL_LINEAR_MIPMAP_LINEAR:
+                    // Preserve trilinear interpolation between mip levels, but
+                    // use nearest texel filtering within each level.
+                    effectiveMinFilter = GL_NEAREST_MIPMAP_LINEAR;
+                    break;
+                default:
+                    break;
+            }
+            static std::unordered_set<uint32_t> warnedNoLinear;
+            if (warnedNoLinear.insert((uint32_t)samplerFormat).second) {
+                MITHRIL_LOG_WARN("vk",
+                    "VkFormat %d lacks SAMPLED_IMAGE_FILTER_LINEAR_BIT; "
+                    "downgrading GL linear texel filtering to nearest",
+                    (int)samplerFormat);
+            }
+        }
+    }
+
     // 参数哈希：仅纳入会影响 VkSamplerCreateInfo 的字段。
     uint64_t pkey = 0xcbf29ce484222325ull;  // FNV-1a 64 起点
     auto mix = [&pkey](uint64_t v) {
         pkey ^= v;
         pkey *= 0x100000001b3ull;
     };
-    mix((uint64_t)(uint32_t)min_filter);
-    mix((uint64_t)(uint32_t)mag_filter);
+    mix((uint64_t)(uint32_t)effectiveMinFilter);
+    mix((uint64_t)(uint32_t)effectiveMagFilter);
     mix((uint64_t)(uint32_t)wrap_s);
     mix((uint64_t)(uint32_t)wrap_t);
     mix((uint64_t)(uint32_t)wrap_r);
@@ -2226,9 +2274,9 @@ VkSampler backend_get_or_create_sampler(GLuint name, GLint min_filter, GLint mag
 
     VkSamplerCreateInfo sci{};
     sci.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-    sci.magFilter = mithril::vk::to_vk_filter(mag_filter);
-    sci.minFilter = mithril::vk::to_vk_filter(min_filter);
-    sci.mipmapMode = mithril::vk::to_vk_mipmap(min_filter);
+    sci.magFilter = mithril::vk::to_vk_filter(effectiveMagFilter);
+    sci.minFilter = mithril::vk::to_vk_filter(effectiveMinFilter);
+    sci.mipmapMode = mithril::vk::to_vk_mipmap(effectiveMinFilter);
     sci.addressModeU = mithril::vk::to_vk_wrap(wrap_s);
     sci.addressModeV = mithril::vk::to_vk_wrap(wrap_t);
     sci.addressModeW = mithril::vk::to_vk_wrap(wrap_r);
@@ -2253,8 +2301,10 @@ VkSampler backend_get_or_create_sampler(GLuint name, GLint min_filter, GLint mag
     // → 纯红 / GPU page fault。非 mipmap filter 把 LOD 范围收束到 0，保证只采
     // 第 0 层，与 GL 语义一致。mipmap filter 仍放开到 12。
     const bool mipmapped =
-        min_filter == GL_NEAREST_MIPMAP_NEAREST || min_filter == GL_NEAREST_MIPMAP_LINEAR ||
-        min_filter == GL_LINEAR_MIPMAP_NEAREST || min_filter == GL_LINEAR_MIPMAP_LINEAR;
+        effectiveMinFilter == GL_NEAREST_MIPMAP_NEAREST ||
+        effectiveMinFilter == GL_NEAREST_MIPMAP_LINEAR ||
+        effectiveMinFilter == GL_LINEAR_MIPMAP_NEAREST ||
+        effectiveMinFilter == GL_LINEAR_MIPMAP_LINEAR;
     // 读取该纹理当前实际拥有的 mip 层数（glTexImage2D 只传 level0 时=1，
     // glGenerateMipmap 重建后才到完整层数）。
     int actualLevels = 1;
