@@ -1585,14 +1585,21 @@ int backend_device_limit(int which, int fallback) {
         case MITHRIL_LIMIT_MAX_VIEWPORT_WIDTH:        return clamp_i(L.maxViewportDimensions[0]);
         case MITHRIL_LIMIT_MAX_VIEWPORT_HEIGHT:       return clamp_i(L.maxViewportDimensions[1]);
 
-        // 每级着色器可见的采样器数量。必须同时受内部 kMaxTextureUnits 数组
-        // 容量约束 —— 报得比数组大，超出的绑定会被静默丢弃。
+        // Mithril uses COMBINED_IMAGE_SAMPLER descriptors, so the safe GL
+        // texture-unit limit is the smaller of Vulkan's sampled-image and
+        // sampler limits.  This matters on Apple4/A11: Metal exposes up to 96
+        // textures per stage but only 16 samplers. Advertising 32 here let
+        // Minecraft/Sodium build descriptor layouts that MoltenVK cannot map.
         case MITHRIL_LIMIT_MAX_TEXTURE_IMAGE_UNITS: {
-            int v = clamp_i(L.maxPerStageDescriptorSampledImages);
+            int images = clamp_i(L.maxPerStageDescriptorSampledImages);
+            int samplers = clamp_i(L.maxPerStageDescriptorSamplers);
+            int v = images < samplers ? images : samplers;
             return v < mithril::kMaxTextureUnits ? v : mithril::kMaxTextureUnits;
         }
         case MITHRIL_LIMIT_MAX_COMBINED_TEX_UNITS: {
-            int v = clamp_i(L.maxDescriptorSetSampledImages);
+            int images = clamp_i(L.maxDescriptorSetSampledImages);
+            int samplers = clamp_i(L.maxDescriptorSetSamplers);
+            int v = images < samplers ? images : samplers;
             return v < mithril::kMaxTextureUnits ? v : mithril::kMaxTextureUnits;
         }
 
@@ -1633,8 +1640,35 @@ int backend_device_limit(int which, int fallback) {
             return clamp_i(L.maxComputeWorkGroupInvocations);
         case MITHRIL_LIMIT_MAX_COMPUTE_WG_COUNT_X:    return clamp_i(L.maxComputeWorkGroupCount[0]);
         case MITHRIL_LIMIT_MAX_COMPUTE_WG_SIZE_X:     return clamp_i(L.maxComputeWorkGroupSize[0]);
+        case MITHRIL_LIMIT_MAX_IMAGE_UNITS: {
+            int v = clamp_i(L.maxPerStageDescriptorStorageImages);
+            return v < mithril::kMaxTextureUnits ? v : mithril::kMaxTextureUnits;
+        }
+        case MITHRIL_LIMIT_MAX_COMBINED_IMAGE_UNITS: {
+            int v = clamp_i(L.maxDescriptorSetStorageImages);
+            return v < mithril::kMaxTextureUnits ? v : mithril::kMaxTextureUnits;
+        }
         default:                                      return fallback;
     }
+}
+
+int backend_device_supports_bptc(void) {
+    mithril::vk::Backend* b = mithril::vk::backend();
+    if (!b || !b->initialized) return 0;
+
+    const VkFormat required[] = {
+        VK_FORMAT_BC6H_UFLOAT_BLOCK,
+        VK_FORMAT_BC6H_SFLOAT_BLOCK,
+        VK_FORMAT_BC7_UNORM_BLOCK,
+        VK_FORMAT_BC7_SRGB_BLOCK,
+    };
+    for (VkFormat fmt : required) {
+        VkFormatProperties fp{};
+        vkGetPhysicalDeviceFormatProperties(b->physicalDevice, fmt, &fp);
+        if ((fp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) == 0)
+            return 0;
+    }
+    return 1;
 }
 
 float backend_device_max_sampler_anisotropy(float fallback) {
