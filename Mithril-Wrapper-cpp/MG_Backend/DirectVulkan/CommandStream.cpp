@@ -2108,6 +2108,13 @@ int backend_yflip_enabled(void) {
     return have_transform ? cached : 1;
 }
 
+// Restored: these two were dropped by the previous commit's edit, which ended
+// the replaced region at the wrong brace. Both are declared in Backend.h and
+// called from other translation units, so their loss surfaced as a link
+// failure when building the dylib.
+void backend_commit(void)          { mithril::vk::commit_frame(); }
+void backend_mark_commands(void)   { mithril::vk::encoder().hasCommands = true; }
+
 VkImageLayout backend_active_swapchain_color_layout(void) {
     mithril::vk::Swapchain* sc = mithril::vk::active_swapchain();
     return sc ? sc->currentColorLayout : VK_IMAGE_LAYOUT_UNDEFINED;
