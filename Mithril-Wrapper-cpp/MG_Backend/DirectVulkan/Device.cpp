@@ -896,6 +896,29 @@ bool init_device() {
                          (unsigned long long)(kPlatformMinVramBudget / (1024*1024)));
         gpuBudget = kPlatformMinVramBudget;
     }
+
+    // Diagnostic override (default behaviour unchanged).
+    //
+    // The iOS cap above is 512 MB - one eighth of the macOS cap - because iOS
+    // devices are memory constrained and MoltenVK's reported heap size is the
+    // whole device RAM and therefore useless. But the cap is arbitrary: when
+    // the budget is hit, image allocations fail, textures stay unbacked, and
+    // sampling them is what paints the frame solid red. That matches the
+    // reported symptom exactly - red only on the memory-constrained platform,
+    // and only for the version whose resources are largest.
+    //
+    // MITHRIL_VRAM_BUDGET_MB forces the budget in MB so the hypothesis can be
+    // confirmed or ruled out in one run without a rebuild, and gives a real
+    // workaround if it is confirmed.
+    if (const char* e = std::getenv("MITHRIL_VRAM_BUDGET_MB")) {
+        const long long mb = std::strtoll(e, nullptr, 10);
+        if (mb > 0) {
+            MITHRIL_LOG_INFO("vk", "VRAM budget overridden by "
+                             "MITHRIL_VRAM_BUDGET_MB=%lld MB (auto was %llu MB)",
+                             mb, (unsigned long long)(gpuBudget / (1024*1024)));
+            gpuBudget = static_cast<VkDeviceSize>(mb) * 1024ULL * 1024ULL;
+        }
+    }
     // 不能超过物理 heap size
     if (maxHeapSize > 0 && gpuBudget > maxHeapSize) {
         gpuBudget = maxHeapSize;
