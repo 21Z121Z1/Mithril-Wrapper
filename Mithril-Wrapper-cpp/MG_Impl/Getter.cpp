@@ -371,13 +371,32 @@ void glGetIntegerv(GLenum pname, GLint* params) {
         case GL_MAX_COMPUTE_SHADER_STORAGE_BLOCKS: *params = 16; break;
         case GL_MAX_SHADER_STORAGE_BLOCK_SIZE:
             *params = backend_device_limit(MITHRIL_LIMIT_MAX_SSBO_SIZE, 128 * 1024 * 1024); break;
-        case GL_MAX_COMBINED_IMAGE_UNIFORMS:  *params = 192; break;
-        case GL_MAX_IMAGE_UNITS:              *params = 32; break;
-        case GL_MAX_VERTEX_IMAGE_UNIFORMS:    *params = 32; break;
-        case GL_MAX_FRAGMENT_IMAGE_UNIFORMS:  *params = 32; break;
-        case GL_MAX_COMPUTE_IMAGE_UNIFORMS:   *params = 32; break;
-        case GL_MAX_COMBINED_IMAGE_UNITS_AND_FRAGMENT_OUTPUTS: *params = 192; break;
-        case GL_MAX_IMAGE_SAMPLES:            *params = 4; break;
+        /* Storage-image limits must come from the live VkPhysicalDevice.
+         * MoltenVK reports Apple GPUs at 8 storage images per stage; the old
+         * 32/192 constants made Iris construct descriptor layouts that exceed
+         * A11's Metal resource table. Keep GL_MAX_IMAGE_UNITS conservative at
+         * the per-stage limit because the same image-unit namespace can be
+         * visible to any shader stage. */
+        case GL_MAX_COMBINED_IMAGE_UNIFORMS:
+            *params = backend_device_limit(MITHRIL_LIMIT_MAX_COMBINED_IMAGE_UNITS,
+                                           mithril::kMaxTextureUnits); break;
+        case GL_MAX_IMAGE_UNITS:
+        case GL_MAX_VERTEX_IMAGE_UNIFORMS:
+        case GL_MAX_FRAGMENT_IMAGE_UNIFORMS:
+        case GL_MAX_COMPUTE_IMAGE_UNIFORMS:
+            *params = backend_device_limit(MITHRIL_LIMIT_MAX_IMAGE_UNITS, 8); break;
+        case GL_MAX_COMBINED_IMAGE_UNITS_AND_FRAGMENT_OUTPUTS: {
+            int imgs = backend_device_limit(MITHRIL_LIMIT_MAX_IMAGE_UNITS, 8);
+            int colors = backend_device_limit(MITHRIL_LIMIT_MAX_COLOR_ATTACHMENTS,
+                                              mithril::kMaxColorAttachments);
+            *params = imgs < colors ? imgs : colors;
+            break;
+        }
+        /* shaderStorageImageMultisample is not enabled by the backend.  Report
+         * zero rather than the framebuffer MSAA limit; otherwise a host may
+         * legally generate image2DMS load/store shaders that our device was
+         * never created to execute. */
+        case GL_MAX_IMAGE_SAMPLES:            *params = 0; break;
         /* Compute 上限直接决定 Iris 的 compute shader 能否 dispatch。
          * Metal 的 threadgroup 上限比桌面小得多（常见 512 而非 1024），
          * 报高了 vkCmdDispatch 会静默失败或触发 GPU hang。 */
