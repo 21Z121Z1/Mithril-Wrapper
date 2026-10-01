@@ -247,6 +247,16 @@ int main(int argc, char** argv) {
         CHECK(!found, "unsupported extension is not advertised: %s", forbiddenExts[fi]);
     }
 
+    int hasImageLoadStore = 0, hasImageSize = 0;
+    for (GLint ei = 0; ei < extCount; ++ei) {
+        const char* ext = (const char*)getStringi(GL_EXTENSIONS, (GLuint)ei);
+        if (!ext) continue;
+        if (strcmp(ext, "GL_ARB_shader_image_load_store") == 0) hasImageLoadStore = 1;
+        if (strcmp(ext, "GL_ARB_shader_image_size") == 0) hasImageSize = 1;
+    }
+    CHECK(hasImageLoadStore || !hasImageSize,
+          "shader_image_size is not exposed without shader_image_load_store");
+
     GLint maxTexStage = 0, maxTexCombined = 0;
     getIntegerv(GL_MAX_TEXTURE_IMAGE_UNITS, &maxTexStage);
     getIntegerv(GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS, &maxTexCombined);
