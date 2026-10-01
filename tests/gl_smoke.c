@@ -216,6 +216,8 @@ int main(int argc, char** argv) {
         "GL_ARB_depth_clamp",
         "GL_ARB_clip_control",
         "GL_ARB_draw_buffers_blend",
+        "GL_ARB_shader_atomic_counters",
+        "GL_ARB_shader_atomic_counter_ops",
     };
     for (size_t fi = 0; fi < sizeof(forbiddenExts) / sizeof(forbiddenExts[0]); ++fi) {
         int found = 0;
@@ -252,6 +254,14 @@ int main(int argc, char** argv) {
     getIntegerv(GL_MAX_SAMPLES, &maxSamples);
     CHECK(maxSamples == 1,
           "MSAA limit matches current single-sample Vulkan pipeline (%d)", maxSamples);
+
+    GLint maxCombinedUbo = 0, maxCombinedSsbo = 0;
+    getIntegerv(GL_MAX_COMBINED_UNIFORM_BLOCKS, &maxCombinedUbo);
+    getIntegerv(GL_MAX_COMBINED_SHADER_STORAGE_BLOCKS, &maxCombinedSsbo);
+    CHECK(maxCombinedUbo > 0 && maxCombinedUbo <= 32,
+          "combined UBO blocks fit internal/device descriptor namespace (%d)", maxCombinedUbo);
+    CHECK(maxCombinedSsbo > 0 && maxCombinedSsbo <= 32,
+          "combined SSBO blocks fit internal/device descriptor namespace (%d)", maxCombinedSsbo);
 
     /* ---- 错误语义 ------------------------------------------------------------
      * 修复后契约：glGetError 返回真实的延迟错误。
