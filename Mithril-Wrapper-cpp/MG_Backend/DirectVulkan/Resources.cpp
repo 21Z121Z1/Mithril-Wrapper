@@ -1525,28 +1525,71 @@ int backend_read_buffer_host(GLuint name, VkDeviceSize offset, VkDeviceSize size
 }
 
 static uint32_t vk_format_bpp_bytes(VkFormat f) {
+    // Bytes per uncompressed texel for formats Mithril creates directly.
+    // This is used to size host readback buffers, so over-reporting is not
+    // harmless: backend_read_texture_pixels() memcpy's exactly this many bytes
+    // into the caller's GL buffer.  Keep it aligned with Vulkan format block
+    // sizes, not Metal's internal allocation granularity.
     switch (f) {
-        case VK_FORMAT_R8_UNORM: case VK_FORMAT_R8_SNORM: case VK_FORMAT_R8_USCALED:
-        case VK_FORMAT_R8_SSCALED: case VK_FORMAT_R8_UINT: case VK_FORMAT_R8_SRGB:
+        case VK_FORMAT_R8_UNORM: case VK_FORMAT_R8_SNORM:
+        case VK_FORMAT_R8_USCALED: case VK_FORMAT_R8_SSCALED:
+        case VK_FORMAT_R8_UINT: case VK_FORMAT_R8_SINT:
+        case VK_FORMAT_R8_SRGB: case VK_FORMAT_S8_UINT:
             return 1;
+
         case VK_FORMAT_R8G8_UNORM: case VK_FORMAT_R8G8_SNORM:
+        case VK_FORMAT_R8G8_UINT: case VK_FORMAT_R8G8_SINT:
         case VK_FORMAT_R16_SFLOAT: case VK_FORMAT_R16_UNORM:
-        case VK_FORMAT_D16_UNORM:
+        case VK_FORMAT_R16_SNORM: case VK_FORMAT_D16_UNORM:
+        case VK_FORMAT_R5G6B5_UNORM_PACK16:
+        case VK_FORMAT_R4G4B4A4_UNORM_PACK16:
+        case VK_FORMAT_R5G5B5A1_UNORM_PACK16:
             return 2;
+
         case VK_FORMAT_R8G8B8_UNORM: case VK_FORMAT_R8G8B8_SNORM:
+        case VK_FORMAT_R8G8B8_UINT: case VK_FORMAT_R8G8B8_SINT:
         case VK_FORMAT_D16_UNORM_S8_UINT:
             return 3;
+
         case VK_FORMAT_R8G8B8A8_UNORM: case VK_FORMAT_R8G8B8A8_SNORM:
-        case VK_FORMAT_R8G8B8A8_SRGB: case VK_FORMAT_D24_UNORM_S8_UINT:
-        case VK_FORMAT_R32_SFLOAT: case VK_FORMAT_D32_SFLOAT:
-            return 4;
+        case VK_FORMAT_R8G8B8A8_UINT: case VK_FORMAT_R8G8B8A8_SINT:
+        case VK_FORMAT_R8G8B8A8_SRGB:
+        case VK_FORMAT_B8G8R8A8_UNORM: case VK_FORMAT_B8G8R8A8_SRGB:
         case VK_FORMAT_R16G16_SFLOAT: case VK_FORMAT_R16G16_UNORM:
+        case VK_FORMAT_R16G16_SNORM:
+        case VK_FORMAT_R32_SFLOAT: case VK_FORMAT_R32_UINT: case VK_FORMAT_R32_SINT:
+        case VK_FORMAT_A2B10G10R10_UNORM_PACK32:
+        case VK_FORMAT_A2B10G10R10_UINT_PACK32:
+        case VK_FORMAT_D24_UNORM_S8_UINT: case VK_FORMAT_D32_SFLOAT:
+            return 4;
+
+        case VK_FORMAT_R16G16B16_SFLOAT:
+        case VK_FORMAT_R16G16B16_UNORM:
+        case VK_FORMAT_R16G16B16_SNORM:
+            return 6;
+
+        case VK_FORMAT_R16G16B16A16_SFLOAT:
+        case VK_FORMAT_R16G16B16A16_UNORM:
+        case VK_FORMAT_R16G16B16A16_SNORM:
+        case VK_FORMAT_R32G32_SFLOAT: case VK_FORMAT_R32G32_UINT: case VK_FORMAT_R32G32_SINT:
         case VK_FORMAT_D32_SFLOAT_S8_UINT:
             return 8;
-        case VK_FORMAT_R16G16B16A16_SFLOAT:
+
+        case VK_FORMAT_R32G32B32_SFLOAT:
+        case VK_FORMAT_R32G32B32_UINT:
+        case VK_FORMAT_R32G32B32_SINT:
+            return 12;
+
         case VK_FORMAT_R32G32B32A32_SFLOAT:
+        case VK_FORMAT_R32G32B32A32_UINT:
+        case VK_FORMAT_R32G32B32A32_SINT:
             return 16;
-        default: return 4;
+
+        default:
+            // Compressed formats require block-dimension accounting and are not
+            // consumed by this uncompressed readback helper. Four bytes is a
+            // conservative fallback for allocation-pressure estimation.
+            return 4;
     }
 }
 
@@ -1898,18 +1941,12 @@ VkImage backend_get_or_create_texture(GLuint name, int width, int height, int de
     // 估算图像内存大小，如果会超过 95% 预算，先 GC。
     // 不 reject（避免红屏）：让 vkCreateImage + vkAllocateMemory 自己决定。
     if (b->totalVramBytes > 0) {
-        // 粗略估算每像素字节数
-        int estBpp = 4;  // 大多数格式 4 字节
-        if (fmt == VK_FORMAT_R8_UNORM || fmt == VK_FORMAT_R8_SNORM ||
-            fmt == VK_FORMAT_R8_UINT || fmt == VK_FORMAT_R8_SINT ||
-            fmt == VK_FORMAT_S8_UINT) estBpp = 1;
-        else if (fmt == VK_FORMAT_R8G8_UNORM || fmt == VK_FORMAT_R16_UNORM ||
-                 fmt == VK_FORMAT_R16_SFLOAT || fmt == VK_FORMAT_D16_UNORM) estBpp = 2;
-        else if (fmt == VK_FORMAT_R8G8B8A8_UNORM || fmt == VK_FORMAT_B8G8R8A8_UNORM ||
-                 fmt == VK_FORMAT_R32_SFLOAT || fmt == VK_FORMAT_D32_SFLOAT ||
-                 fmt == VK_FORMAT_R16G16B16A16_SFLOAT) estBpp = 4;
-        else if (fmt == VK_FORMAT_R16G16B16A16_SFLOAT) estBpp = 8;
-        else if (fmt == VK_FORMAT_R32G32B32A32_SFLOAT) estBpp = 16;
+        // Use the same Vulkan texel-size table as host readback. This fixes
+        // the old estimator's unreachable RGBA16F=8 branch (it had already
+        // matched RGBA16F as 4 B/px) and covers RG32/RGBA16 formats that are
+        // common render targets. Under-estimation on a unified-memory A11
+        // delays pressure GC until MoltenVK is already close to OOM.
+        const uint32_t estBpp = vk_format_bpp_bytes(fmt);
 
         // mip 链总大小约 = base_size * 4/3
         VkDeviceSize estSize = (VkDeviceSize)width * height * estBpp;
