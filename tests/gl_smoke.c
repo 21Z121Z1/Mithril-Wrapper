@@ -193,6 +193,11 @@ int main(int argc, char** argv) {
         "GL_ARB_texture_buffer_range",
         "GL_ARB_texture_storage_multisample",
         "GL_ARB_framebuffer_no_attachments",
+        "GL_ARB_shader_clock",
+        "GL_ARB_pipeline_statistics_query",
+        "GL_ARB_query_buffer_object",
+        "GL_ARB_conditional_render_inverted",
+        "GL_ARB_ES3_1_compatibility",
     };
     for (size_t fi = 0; fi < sizeof(forbiddenExts) / sizeof(forbiddenExts[0]); ++fi) {
         int found = 0;
