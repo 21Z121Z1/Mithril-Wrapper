@@ -2104,6 +2104,16 @@ int backend_yflip_enabled(void) {
     return have_transform ? cached : 1;
 }
 
+// These three were swallowed by an edit that located the end of the old
+// backend_yflip_enabled() body with a brace search and ran past the closing
+// brace. All are declared in Backend.h and called from other translation
+// units, so losing them broke the link.
+void backend_commit(void) { mithril::vk::commit_frame(); }
+void backend_mark_commands(void) { mithril::vk::encoder().hasCommands = true; }
+void backend_set_active_swapchain(void* swapchain_state) {
+    mithril::vk::set_active_swapchain((mithril::vk::Swapchain*)swapchain_state);
+}
+
 VkImageLayout backend_active_swapchain_color_layout(void) {
     mithril::vk::Swapchain* sc = mithril::vk::active_swapchain();
     return sc ? sc->currentColorLayout : VK_IMAGE_LAYOUT_UNDEFINED;
