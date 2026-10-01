@@ -1020,6 +1020,93 @@ void normalize_vulkan_incompatible_layouts(std::string& source) {
 }
 
 // ---------------------------------------------------------------------------
+// Legacy (GLSL 1.10 / 1.20) shader-source modernization.
+//
+// OptiFine-format shader packs (BSL, MAKEUP, ITT, ...) are written against
+// GLSL 120: they declare `attribute` / `varying`, sample with `texture2D()`,
+// and write MRT through `gl_FragData[]`. glslang's strict EShClientOpenGL +
+// EShMsgVulkanRules path rejects every one of those, so a pack fails to
+// compile and every draw that uses it is dropped.
+//
+// This is the port of MobileGL's ShaderSourceProcessor::ModernizeLegacyGLSL
+// (MG_Util/ShaderTranspiler/ShaderSourceProcessor.cpp), which performs exactly
+// these rewrites for the same reason. Word-boundary and comment-aware, so a
+// `texture2DLod` call is not mangled into `textureLodLod` and a comment
+// banner mentioning `varying` is left alone.
+//
+//   texture2D/texture2DProj/texture2DLod  -> texture/textureProj/textureLod
+//   textureCube/textureCubeLod/texture3D  -> texture/textureLod/texture
+//   attribute  -> in        (vertex)
+//   varying    -> out       (vertex)   |   in  (fragment)
+//   gl_FragData[N] -> named `out vec4` array (MRT, as used by composite pass)
+//
+// Must run BEFORE apply_attrib_bindings(): that pass only recognises `in`
+// declarations, so a pack's `attribute vec3 Position;` has to already have
+// been rewritten to `in vec3 Position;` or no attribute location is injected
+// and the shader compiles with no Location decoration (the failure mode that
+// produces a solid-red frame).
+// ---------------------------------------------------------------------------
+static void replace_identifier_outside_comments(std::string& source,
+                                                const char* from, const char* to) {
+    if (source.find(from) == std::string::npos) return;
+    std::regex re(std::string("\\b") + from + "\\b", std::regex::optimize);
+    std::string out;
+    out.reserve(source.size());
+    std::string::const_iterator it = source.cbegin();
+    std::smatch m;
+    bool changed = false;
+    while (std::regex_search(it, source.cend(), m, re)) {
+        size_t match_pos = m.position(0) + (it - source.cbegin());
+        out.append(it, m[0].first);
+        if (is_in_comment(source, match_pos)) {
+            out.append(m[0].str());
+        } else {
+            out.append(to);
+            changed = true;
+        }
+        it = m[0].second;
+    }
+    out.append(it, source.cend());
+    if (changed) source.swap(out);
+}
+
+void modernize_legacy_glsl(std::string& source, GLenum gl_stage) {
+    // Sampler builtins first: `\b` boundaries keep the longer names (which
+    // contain the shorter ones as a prefix) from being rewritten twice.
+    replace_identifier_outside_comments(source, "texture2DLod", "textureLod");
+    replace_identifier_outside_comments(source, "texture2DProj", "textureProj");
+    replace_identifier_outside_comments(source, "texture2D", "texture");
+    replace_identifier_outside_comments(source, "textureCubeLod", "textureLod");
+    replace_identifier_outside_comments(source, "textureCube", "texture");
+    replace_identifier_outside_comments(source, "texture3D", "texture");
+    replace_identifier_outside_comments(source, "texture2DGradARB", "textureGrad");
+
+    if (gl_stage == GL_VERTEX_SHADER) {
+        replace_identifier_outside_comments(source, "attribute", "in");
+        replace_identifier_outside_comments(source, "varying", "out");
+        return;
+    }
+    if (gl_stage != GL_FRAGMENT_SHADER) return;
+
+    replace_identifier_outside_comments(source, "varying", "in");
+
+    // gl_FragData[] is the legacy MRT output. Declare a named replacement;
+    // an array declared at location 0 takes consecutive locations 0..7, which
+    // is exactly the gl_FragData[0..7] indexing packs use.
+    if (source.find("gl_FragData") != std::string::npos) {
+        replace_identifier_outside_comments(source, "gl_FragData", "_mithril_FragData");
+        size_t vp = source.find("#version");
+        size_t insert_at = 0;
+        if (vp != std::string::npos) {
+            size_t nl = source.find('\n', vp);
+            insert_at = (nl != std::string::npos) ? nl + 1 : source.size();
+        }
+        source.insert(insert_at,
+                      "layout(location = 0) out vec4 _mithril_FragData[8];\n");
+    }
+}
+
+// ---------------------------------------------------------------------------
 // GL legacy construct normalization.
 //
 // glslang's strict EShClientOpenGL + EShMsgVulkanRules path rejects GL
@@ -1035,8 +1122,8 @@ void normalize_vulkan_incompatible_layouts(std::string& source) {
 //   a no-op and a shader that already declares a location=0 output is
 //   untouched.
 //
-// Out of scope (left as follow-up if a shader pack actually needs them):
-//   gl_FragData[0] — Minecraft core shaders don't use it.
+// gl_FragData[] is handled by modernize_legacy_glsl() above, which runs first
+// because it must convert `attribute` before locations are injected.
 // ---------------------------------------------------------------------------
 void normalize_gl_legacy_constructs(std::string& source, GLenum gl_stage) {
     // Only fragment shaders use gl_FragColor; vertex shaders are unaffected.
@@ -1206,6 +1293,11 @@ bool glsl_to_spirv(GLenum gl_stage, const std::string& src,
     }
     int glsl_version = ensure_glsl_version(source);
     rewrite_desktop_builtins(source, gl_stage);
+    // Legacy shader-pack modernization (GLSL 120 -> core). Deliberately ahead
+    // of apply_attrib_bindings(): that pass only matches `in` declarations, so
+    // a pack's `attribute` must already have become `in` or no location is
+    // injected and the draw is dropped (solid-red frame).
+    modernize_legacy_glsl(source, gl_stage);
     // Root cause: gl_VertexID baseVertex semantics. After ensure_glsl_version
     // (so #version exists) inject the push-constant block + #define that
     // rewrites gl_VertexID -> gl_VertexIndex + _mbv._mithrilBaseVertex. Placed
