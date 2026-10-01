@@ -373,7 +373,7 @@ jobs:
           echo "[mithril-e2e] in-world Minecraft PNG render artifact: $png"
 
 
-      - name: Verify Mithril identity, GL 3.3 caps gate and red-screen gate
+      - name: Verify Mithril identity, GL caps gate and red-screen gate
         shell: bash
         env:
           MITHRIL_DYLIB: ${{ steps.mithril.outputs.dylib }}
@@ -417,8 +417,13 @@ jobs:
           # implement (3.3). Advertising 4.6 while 4.x entry points are stubs is
           # what pushed Minecraft onto undefined 4.6 paths and produced the
           # pure-red screen, so this is enforced, not just recorded.
-          if not identity['gl_version'].strip().startswith('3.3'):
-              raise SystemExit('WRAPPER_GL_VERSION_NOT_3_3: '
+          # The advertised level is 4.6 (MobileGL parity); 3.3 remains valid
+          # while MITHRIL_GL_VERSION pins it there. What must never happen is
+          # advertising a level whose entry points are stubs, so accept either
+          # supported level and let the smoke tests police the self-consistency
+          # of the triple (GL_VERSION vs GL_MAJOR/MINOR vs GLSL).
+          if not identity['gl_version'].strip().startswith(('3.3', '4.6')):
+              raise SystemExit('WRAPPER_GL_VERSION_UNSUPPORTED: '
                                + identity['gl_version'])
 
           # Red-screen gate straight from the in-game framebuffer sample.
@@ -435,7 +440,7 @@ jobs:
           if [[ $rc -ne 0 ]]; then
             python3 ci/minecraft-e2e/evidence.py --root "$E2E_ROOT" fail \
               --failure-id WRAPPER_IDENTITY_OR_RED_SCREEN_FAILED --phase runtime_identity \
-              --message "Mithril identity / GL 3.3 caps / red-screen gate failed"
+              --message "Mithril identity / GL caps / red-screen gate failed"
             exit $rc
           fi
 
