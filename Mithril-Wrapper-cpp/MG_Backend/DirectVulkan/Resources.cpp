@@ -1950,8 +1950,16 @@ VkImage backend_get_or_create_texture(GLuint name, int width, int height, int de
 
         // mip 链总大小约 = base_size * 4/3
         VkDeviceSize estSize = (VkDeviceSize)width * height * estBpp;
-        if (ici.arrayLayers > 0) estSize *= ici.arrayLayers;
-        if (ici.mipLevels > 1) estSize = (estSize * 4) / 3;  // mip 链
+        if (imgType == VK_IMAGE_TYPE_3D) {
+            // arrayLayers is always 1 for 3D images; their storage scales with
+            // extent.depth instead. The previous estimate silently ignored Z,
+            // which can delay pressure GC by an order of magnitude on A11.
+            estSize *= std::max(1u, ici.extent.depth);
+        } else {
+            estSize *= std::max(1u, ici.arrayLayers);
+        }
+        estSize *= std::max(1u, (uint32_t)ici.samples);
+        if (ici.mipLevels > 1) estSize = (estSize * 4) / 3;  // 2D mip chain upper-bound
 
         VkDeviceSize gcThreshold = (b->totalVramBytes * 95) / 100;
         if (b->currentVramBytes + estSize > gcThreshold) {
