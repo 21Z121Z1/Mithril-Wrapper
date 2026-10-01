@@ -861,8 +861,23 @@ bool init_device() {
     constexpr VkDeviceSize kPlatformMinVramBudget = 512ULL * 1024 * 1024;    // 512 MB
     constexpr VkDeviceSize kPlatformFallbackBudget = 1024ULL * 1024 * 1024; // 1 GB
 #else
-    // iOS / 其他平台：保守。
-    constexpr VkDeviceSize kPlatformMaxVramBudget = 512ULL * 1024 * 1024;    // 512 MB
+    // iOS / 其他平台。
+    //
+    // The cap used to be 512 MB - one eighth of the macOS cap. It was a guess,
+    // not a measurement, and it is the only thing here that MobileGL has no
+    // equivalent of: MobileGL sizes its budget from the device and otherwise
+    // lets the 25%-of-available rule be the limit.
+    //
+    // The cap matters because it is a hard ceiling on image allocations, and
+    // an image that cannot be allocated stays unbacked - sampling it paints
+    // the frame solid red. That is the reported symptom: red on device only,
+    // and macOS (4 GB cap) is clean. Raised to 1.5 GB so the 25% rule, which
+    // already keeps three quarters of memory for the JVM, is what actually
+    // limits the GPU instead of an arbitrary constant.
+    //
+    // MITHRIL_VRAM_BUDGET_MB still overrides this outright, for confirming or
+    // ruling the hypothesis out in a single run without a rebuild.
+    constexpr VkDeviceSize kPlatformMaxVramBudget = 1536ULL * 1024 * 1024;   // 1.5 GB
     constexpr VkDeviceSize kPlatformMinVramBudget = 96ULL * 1024 * 1024;     // 96 MB
     constexpr VkDeviceSize kPlatformFallbackBudget = 256ULL * 1024 * 1024;   // 256 MB
 #endif
@@ -899,13 +914,10 @@ bool init_device() {
 
     // Diagnostic override (default behaviour unchanged).
     //
-    // The iOS cap above is 512 MB - one eighth of the macOS cap - because iOS
-    // devices are memory constrained and MoltenVK's reported heap size is the
-    // whole device RAM and therefore useless. But the cap is arbitrary: when
-    // the budget is hit, image allocations fail, textures stay unbacked, and
-    // sampling them is what paints the frame solid red. That matches the
-    // reported symptom exactly - red only on the memory-constrained platform,
-    // and only for the version whose resources are largest.
+    // MobileGL has no equivalent cap, which is the reason to suspect this one:
+    // when the budget is hit, image allocations fail, textures stay unbacked,
+    // and sampling them is what paints the frame solid red. That matches the
+    // reported symptom - red on device only, macOS clean.
     //
     // MITHRIL_VRAM_BUDGET_MB forces the budget in MB so the hypothesis can be
     // confirmed or ruled out in one run without a rebuild, and gives a real
