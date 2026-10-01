@@ -738,6 +738,7 @@ VkFormat    backend_swapchain_depth_format(void* swapchain_state);
 #define MITHRIL_LIMIT_MAX_COMPUTE_WG_SIZE_X       20
 #define MITHRIL_LIMIT_MAX_IMAGE_UNITS              21  /* per-stage storage images */
 #define MITHRIL_LIMIT_MAX_COMBINED_IMAGE_UNITS     22  /* descriptor-set storage images */
+#define MITHRIL_LIMIT_STORAGE_BUFFER_ALIGNMENT      23  /* minStorageBufferOffsetAlignment */
 
 int backend_device_limit(int which, int fallback);
 

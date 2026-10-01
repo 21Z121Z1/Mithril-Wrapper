@@ -377,9 +377,15 @@ void glBindBufferRange(GLenum target, GLuint index, GLuint buffer,
     // (16 on MoltenVK/Metal). A hardcoded 256 wrongly rejected the 16-aligned
     // offsets the host legitimately computes from the reported alignment; the
     // dropped bind left every UBO unbound -> zero recorded draws / black frame.
-    GLintptr needAlign = 16;
+    GLintptr needAlign = 1;
     if (target == GL_UNIFORM_BUFFER) {
         needAlign = backend_device_limit(MITHRIL_LIMIT_UNIFORM_BUFFER_ALIGNMENT, 256);
+    } else if (target == GL_SHADER_STORAGE_BUFFER) {
+        // Do not assume Metal's common 16-byte value. Vulkan exposes a
+        // separate minStorageBufferOffsetAlignment and the GL query must match
+        // the exact validation used here, otherwise Sodium can legally pack an
+        // SSBO at an offset that the native descriptor rejects on a device.
+        needAlign = backend_device_limit(MITHRIL_LIMIT_STORAGE_BUFFER_ALIGNMENT, 16);
     }
     if ((target == GL_UNIFORM_BUFFER || target == GL_SHADER_STORAGE_BUFFER) &&
         needAlign > 0 && (offset % needAlign) != 0) {

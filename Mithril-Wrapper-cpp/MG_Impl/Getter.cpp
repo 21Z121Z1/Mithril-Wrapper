@@ -342,6 +342,8 @@ void glGetIntegerv(GLenum pname, GLint* params) {
          * 的 dynamic offset 触发 VUID 校验失败（offset 未对齐）。 */
         case GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT:
             *params = backend_device_limit(MITHRIL_LIMIT_UNIFORM_BUFFER_ALIGNMENT, 256); break;
+        case GL_SHADER_STORAGE_BUFFER_OFFSET_ALIGNMENT:
+            *params = backend_device_limit(MITHRIL_LIMIT_STORAGE_BUFFER_ALIGNMENT, 16); break;
         case GL_MAX_VERTEX_UNIFORM_BLOCKS:    *params = 14; break;
         case GL_MAX_FRAGMENT_UNIFORM_BLOCKS:  *params = 14; break;
         case GL_MAX_GEOMETRY_UNIFORM_BLOCKS:  *params = 14; break;

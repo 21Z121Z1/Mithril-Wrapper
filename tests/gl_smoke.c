@@ -54,6 +54,9 @@
 #ifndef GL_MAX_CULL_DISTANCES
 #define GL_MAX_CULL_DISTANCES 0x82F9
 #endif
+#ifndef GL_SHADER_STORAGE_BUFFER_OFFSET_ALIGNMENT
+#define GL_SHADER_STORAGE_BUFFER_OFFSET_ALIGNMENT 0x90DF
+#endif
 
 /* ---- 依赖的 GL 函数指针 typedef（与 glcorearb.h 签名一致） -------------- */
 typedef void    (*glGetIntegerv_fn)(GLenum, GLint*);
@@ -291,6 +294,11 @@ int main(int argc, char** argv) {
           "combined UBO blocks fit internal/device descriptor namespace (%d)", maxCombinedUbo);
     CHECK(maxCombinedSsbo > 0 && maxCombinedSsbo <= 36,
           "combined SSBO blocks fit internal/device descriptor namespace (%d)", maxCombinedSsbo);
+
+    GLint ssboAlign = 0;
+    getIntegerv(GL_SHADER_STORAGE_BUFFER_OFFSET_ALIGNMENT, &ssboAlign);
+    CHECK(ssboAlign > 0 && (ssboAlign & (ssboAlign - 1)) == 0,
+          "SSBO offset alignment is a positive device-derived power of two (%d)", ssboAlign);
 
     GLint maxCullDistances = -1;
     getIntegerv(GL_MAX_CULL_DISTANCES, &maxCullDistances);

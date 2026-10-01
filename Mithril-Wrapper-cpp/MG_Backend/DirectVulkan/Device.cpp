@@ -1617,6 +1617,8 @@ int backend_device_limit(int which, int fallback) {
         case MITHRIL_LIMIT_MAX_UNIFORM_BLOCK_SIZE:    return clamp_i(L.maxUniformBufferRange);
         case MITHRIL_LIMIT_UNIFORM_BUFFER_ALIGNMENT:
             return clamp_i((uint32_t)L.minUniformBufferOffsetAlignment);
+        case MITHRIL_LIMIT_STORAGE_BUFFER_ALIGNMENT:
+            return clamp_i((uint32_t)L.minStorageBufferOffsetAlignment);
         case MITHRIL_LIMIT_MAX_UNIFORM_BUFFER_BINDINGS: {
             int v = clamp_i(L.maxDescriptorSetUniformBuffers);
             return v < mithril::kMaxIndexedBindings ? v : mithril::kMaxIndexedBindings;
