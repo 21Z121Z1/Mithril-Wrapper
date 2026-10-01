@@ -2078,30 +2078,47 @@ void backend_end_render_pass(void) { mithril::vk::end_render_pass(); }
 int backend_render_pass_active(void) { return mithril::vk::render_pass_active()?1:0; }
 
 int backend_yflip_enabled(void) {
-    if (const char* e = std::getenv("MITHRIL_YFLIP")) return e[0] == '0' ? 0 : 1;
+    // Report every transition, with the reason. The orientation has been wrong
+    // across several attempts and the two candidate causes are
+    // indistinguishable from the outside: either the flip decision is wrong, or
+    // the override never reaches this process at all (a launcher that takes
+    // JVM -D properties will not set an environment variable). Seeing
+    // "source=env" vs "source=default" in the log settles it in one run.
+    static int last = -1;
+    const char* source = "default(no swapchain yet)";
+    int v = 1;
 
-    // MobileGL parity: orientation comes from the SURFACE TRANSFORM, not from
-    // the platform. A quarter turn (ROTATE_90/270) already reorients the image
-    // on presentation, so flipping gl_Position.y on top of it mirrors the
-    // frame (menu text and logo upside down). Identity and 180 keep the flip.
-    // Ref: MobileGL IsQuarterTurnPreTransform /
-    // GetDefaultFramebufferRectMapping / GetShaderTransformFlags.
-    //
-    // Deliberately NOT cached until a swapchain actually exists. The old code
-    // cached on the first call, and the first call comes from the
-    // shader-compile path, which runs before any surface exists: no swapchain
-    // meant the transform read as IDENTITY, so the session locked in "flip"
-    // regardless of the real orientation and the transform-based decision never
-    // took effect.
-    static int cached = 1;
-    static bool have_transform = false;
-    if (mithril::vk::Swapchain* sc = mithril::vk::active_swapchain()) {
-        const VkSurfaceTransformFlagBitsKHR t = sc->preTransform;
-        cached = (t == VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR ||
-                  t == VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR) ? 0 : 1;
-        have_transform = true;
+    if (const char* e = std::getenv("MITHRIL_YFLIP")) {
+        v = (e[0] == '0') ? 0 : 1;
+        source = "env";
+    } else {
+        // MobileGL parity: orientation comes from the SURFACE TRANSFORM, not
+        // from the platform. A quarter turn (ROTATE_90/270) already reorients
+        // the image on presentation, so flipping gl_Position.y on top of it
+        // mirrors the frame. Identity and 180 keep the flip.
+        // Ref: MobileGL IsQuarterTurnPreTransform / GetShaderTransformFlags.
+        //
+        // Deliberately not cached until a swapchain exists: caching on the
+        // first call locked in IDENTITY - and therefore "flip" - for the whole
+        // session, because the first call comes from the shader-compile path
+        // and runs before any surface exists.
+        static int cached = 1;
+        static bool have_transform = false;
+        if (mithril::vk::Swapchain* sc = mithril::vk::active_swapchain()) {
+            const VkSurfaceTransformFlagBitsKHR t = sc->preTransform;
+            cached = (t == VK_SURFACE_TRANSFORM_ROTATE_90_BIT_KHR ||
+                      t == VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR) ? 0 : 1;
+            have_transform = true;
+        }
+        v = cached;
+        source = have_transform ? "surface-transform" : "default(no swapchain yet)";
     }
-    return have_transform ? cached : 1;
+
+    if (v != last) {
+        last = v;
+        MITHRIL_LOG_WARN("orient", "yflip=%d source=%s", v, source);
+    }
+    return v;
 }
 
 // These three were swallowed by an edit that located the end of the old
