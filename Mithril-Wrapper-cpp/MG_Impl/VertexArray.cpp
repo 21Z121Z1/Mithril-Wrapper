@@ -132,6 +132,18 @@ void glVertexAttribPointer(GLuint index, GLint size, GLenum type,
     a.stride       = (stride > 0) ? stride : (size * attrib_element_bytes(type));
     a.pointer      = pointer;
     a.boundBuffer  = g_state->bufferBindings[(int)mithril::BufferTarget::Array].name;
+
+    // ARB_vertex_attrib_binding defines the legacy pointer API as the same
+    // two-level state model: attribute i uses binding i. Keep that equivalence
+    // literally so 0 is never abused as an "unset" sentinel later.
+    a.bindingIndex = index;
+    mithril::VertexBinding& vb = vao->bindings[index];
+    vb.buffer = a.boundBuffer;
+    vb.offset = 0;              // a.pointer carries the member-relative offset
+    vb.stride = a.stride;
+    // Do not change vb.divisor: glVertexAttribPointer does not reset it.
+    vao->attribVersions[index]++;
+    vao->configVersion++;
 }
 
 void glVertexAttribIPointer(GLuint index, GLint size, GLenum type,
@@ -145,9 +157,16 @@ void glVertexAttribIPointer(GLuint index, GLint size, GLenum type,
     a.type         = type;
     a.normalized   = false;
     a.integer      = true;
-    a.stride       = stride;
+    a.stride       = (stride > 0) ? stride : (size * attrib_element_bytes(type));
     a.pointer      = pointer;
     a.boundBuffer  = g_state->bufferBindings[(int)mithril::BufferTarget::Array].name;
+    a.bindingIndex = index;
+    mithril::VertexBinding& vb = vao->bindings[index];
+    vb.buffer = a.boundBuffer;
+    vb.offset = 0;
+    vb.stride = a.stride;
+    vao->attribVersions[index]++;
+    vao->configVersion++;
 }
 
 void glVertexAttribDivisor(GLuint index, GLuint divisor) {
@@ -337,9 +356,24 @@ void glGetVertexAttribiv(GLuint index, GLenum pname, GLint* params) {
         case GL_VERTEX_ATTRIB_ARRAY_SIZE:           *params = a.size; break;
         case GL_VERTEX_ATTRIB_ARRAY_TYPE:           *params = (GLint)a.type; break;
         case GL_VERTEX_ATTRIB_ARRAY_NORMALIZED:     *params = a.normalized ? GL_TRUE : GL_FALSE; break;
-        case GL_VERTEX_ATTRIB_ARRAY_STRIDE:         *params = a.stride; break;
-        case GL_VERTEX_ATTRIB_ARRAY_BUFFER_BINDING: *params = (GLint)a.boundBuffer; break;
-        case GL_VERTEX_ATTRIB_ARRAY_DIVISOR:        *params = (GLint)a.divisor; break;
+        case GL_VERTEX_ATTRIB_ARRAY_STRIDE: {
+            const GLuint bi = a.bindingIndex;
+            *params = (bi < (GLuint)mithril::kMaxVertexBindings)
+                ? vao->bindings[bi].stride : 0;
+            break;
+        }
+        case GL_VERTEX_ATTRIB_ARRAY_BUFFER_BINDING: {
+            const GLuint bi = a.bindingIndex;
+            *params = (bi < (GLuint)mithril::kMaxVertexBindings)
+                ? (GLint)vao->bindings[bi].buffer : 0;
+            break;
+        }
+        case GL_VERTEX_ATTRIB_ARRAY_DIVISOR: {
+            const GLuint bi = a.bindingIndex;
+            *params = (bi < (GLuint)mithril::kMaxVertexBindings)
+                ? (GLint)vao->bindings[bi].divisor : 0;
+            break;
+        }
         case GL_VERTEX_ATTRIB_ARRAY_INTEGER:        *params = a.integer ? GL_TRUE : GL_FALSE; break;
         default:                                    *params = 0; break;
     }

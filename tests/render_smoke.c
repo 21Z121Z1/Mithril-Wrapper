@@ -62,6 +62,15 @@
 #ifndef GL_SYNC_STATUS
 #define GL_SYNC_STATUS 0x9114
 #endif
+#ifndef GL_VERTEX_ATTRIB_ARRAY_STRIDE
+#define GL_VERTEX_ATTRIB_ARRAY_STRIDE 0x8624
+#endif
+#ifndef GL_VERTEX_ATTRIB_ARRAY_BUFFER_BINDING
+#define GL_VERTEX_ATTRIB_ARRAY_BUFFER_BINDING 0x889F
+#endif
+#ifndef GL_VERTEX_ATTRIB_ARRAY_DIVISOR
+#define GL_VERTEX_ATTRIB_ARRAY_DIVISOR 0x88FE
+#endif
 
 /* ---- 依赖的 GL 函数指针 typedef（与 glcorearb.h 签名一致） -------------- */
 typedef void      (*genTextures_fn)(GLsizei, GLuint*);
@@ -79,6 +88,12 @@ typedef void      (*bindBuffer_fn)(GLenum, GLuint);
 typedef void      (*bufferData_fn)(GLenum, GLsizeiptr, const void*, GLenum);
 typedef void      (*vertexAttribPtr_fn)(GLuint, GLint, GLenum, GLboolean,
                                         GLsizei, const void*);
+typedef void      (*bindVertexBuffer_fn)(GLuint, GLuint, GLintptr, GLsizei);
+typedef void      (*vertexAttribFormat_fn)(GLuint, GLint, GLenum, GLboolean, GLuint);
+typedef void      (*vertexAttribBinding_fn)(GLuint, GLuint);
+typedef void      (*vertexBindingDivisor_fn)(GLuint, GLuint);
+typedef void      (*vertexAttribDivisor_fn)(GLuint, GLuint);
+typedef void      (*getVertexAttribiv_fn)(GLuint, GLenum, GLint*);
 typedef void      (*enableAttrib_fn)(GLuint);
 typedef GLuint    (*createShader_fn)(GLenum);
 typedef void      (*shaderSource_fn)(GLuint, GLsizei, const GLchar* const*,
@@ -177,6 +192,12 @@ int main(int argc, char** argv) {
     bindBuffer_fn         bindBuffer         = NULL;
     bufferData_fn         bufferData         = NULL;
     vertexAttribPtr_fn vertexAttribPtr   = NULL;
+    bindVertexBuffer_fn bindVertexBuffer = NULL;
+    vertexAttribFormat_fn vertexAttribFormat = NULL;
+    vertexAttribBinding_fn vertexAttribBinding = NULL;
+    vertexBindingDivisor_fn vertexBindingDivisor = NULL;
+    vertexAttribDivisor_fn vertexAttribDivisor = NULL;
+    getVertexAttribiv_fn getVertexAttribiv = NULL;
     enableAttrib_fn enableAttrib  = NULL;
     createShader_fn       createShader       = NULL;
     shaderSource_fn       shaderSource       = NULL;
@@ -231,6 +252,12 @@ int main(int argc, char** argv) {
     RESOLVE(bindBuffer, "glBindBuffer");
     RESOLVE(bufferData, "glBufferData");
     RESOLVE(vertexAttribPtr, "glVertexAttribPointer");
+    RESOLVE(bindVertexBuffer, "glBindVertexBuffer");
+    RESOLVE(vertexAttribFormat, "glVertexAttribFormat");
+    RESOLVE(vertexAttribBinding, "glVertexAttribBinding");
+    RESOLVE(vertexBindingDivisor, "glVertexBindingDivisor");
+    RESOLVE(vertexAttribDivisor, "glVertexAttribDivisor");
+    RESOLVE(getVertexAttribiv, "glGetVertexAttribiv");
     RESOLVE(enableAttrib, "glEnableVertexAttribArray");
     RESOLVE(createShader, "glCreateShader");
     RESOLVE(shaderSource, "glShaderSource");
@@ -1149,7 +1176,52 @@ int main(int argc, char** argv) {
             CHECK(v3p[0]>200 && v3p[1]<40 && v3p[2]<40 && v3p[3]>128,
                   "tightly-packed Half3 (18-byte VBO) renders red (%d,%d,%d,%d)",
                   v3p[0],v3p[1],v3p[2],v3p[3]);
-            CHECK(getError()==GL_NO_ERROR, "3-component vertex format regression leaves no GL error");
+
+            /* GL 4.3 zero values must not resurrect stale legacy state.
+             * Seed red legacy state + divisor=1, switch the same attribute to
+             * binding 2/green, reset divisor to zero, then explicitly unbind. */
+            GLuint liveGreen=0;
+            bindBuffer(GL_ARRAY_BUFFER,v3Vbo);
+            vertexAttribPtr(0,3,GL_UNSIGNED_BYTE,GL_TRUE,3,(const void*)0);
+            vertexAttribDivisor(0,1);
+            genBuffers(1,&liveGreen); bindBuffer(GL_ARRAY_BUFFER,liveGreen);
+            const GLubyte green3[9]={0,255,0,0,255,0,0,255,0};
+            bufferData(GL_ARRAY_BUFFER,sizeof(green3),green3,GL_STATIC_DRAW);
+            vertexAttribFormat(0,3,GL_UNSIGNED_BYTE,GL_TRUE,0);
+            vertexAttribBinding(0,2);
+            bindVertexBuffer(2,liveGreen,0,3);
+            vertexBindingDivisor(2,1);
+            vertexBindingDivisor(2,0);
+
+            GLint qDiv=-1,qBuf=-1,qStride=-1;
+            getVertexAttribiv(0,GL_VERTEX_ATTRIB_ARRAY_DIVISOR,&qDiv);
+            getVertexAttribiv(0,GL_VERTEX_ATTRIB_ARRAY_BUFFER_BINDING,&qBuf);
+            getVertexAttribiv(0,GL_VERTEX_ATTRIB_ARRAY_STRIDE,&qStride);
+            CHECK(qDiv==0 && qBuf==(GLint)liveGreen && qStride==3,
+                  "GL4.3 binding keeps explicit zero divisor (div=%d buf=%d stride=%d)",
+                  qDiv,qBuf,qStride);
+
+            clearColor(0,0,0,1); clear(GL_COLOR_BUFFER_BIT);
+            drawArrays(GL_TRIANGLES,0,3); finish();
+            memset(v3p,0,sizeof(v3p));
+            readPixels(R/2,C/2,1,1,GL_RGBA,GL_UNSIGNED_BYTE,v3p);
+            CHECK(v3p[1]>200 && v3p[0]<40 && v3p[2]<40,
+                  "GL4.3 binding source renders green (%d,%d,%d,%d)",
+                  v3p[0],v3p[1],v3p[2],v3p[3]);
+
+            bindVertexBuffer(2,0,0,0);
+            getVertexAttribiv(0,GL_VERTEX_ATTRIB_ARRAY_BUFFER_BINDING,&qBuf);
+            getVertexAttribiv(0,GL_VERTEX_ATTRIB_ARRAY_STRIDE,&qStride);
+            CHECK(qBuf==0 && qStride==0,
+                  "explicit GL4.3 unbind remains zero (buf=%d stride=%d)",qBuf,qStride);
+            clearColor(0,0,0,1); clear(GL_COLOR_BUFFER_BIT);
+            drawArrays(GL_TRIANGLES,0,3); finish();
+            memset(v3p,0,sizeof(v3p));
+            readPixels(R/2,C/2,1,1,GL_RGBA,GL_UNSIGNED_BYTE,v3p);
+            CHECK(v3p[0]<30 && v3p[1]<30 && v3p[2]<30 && v3p[3]>128,
+                  "explicit unbind does not resurrect stale red VBO (%d,%d,%d,%d)",
+                  v3p[0],v3p[1],v3p[2],v3p[3]);
+            CHECK(getError()==GL_NO_ERROR, "3-component/binding regression leaves no GL error");
             deleteProgram(v3Prog);
         }
 

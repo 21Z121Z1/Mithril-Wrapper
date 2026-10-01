@@ -265,7 +265,7 @@ uint64_t hash_signature(GLuint program, const MGVertexAttrib* attribs, int attri
         // divisor 决定 inputRate，同样被烘焙进管线，必须进缓存键 —— 否则
         // 同一份格式在实例化与非实例化之间切换会复用旧管线（与 root cause L
         // 的 offset 同理）。
-        const uint32_t div = attrib_divisor(attribs[i].location);
+        const uint32_t div = (uint32_t)attribs[i].divisor;
         mix(&div, sizeof(div));
     }
     mix(&color_count, sizeof(color_count));
@@ -479,7 +479,7 @@ VkPipeline get_or_create_pipeline(GLuint program,
          * VK_EXT_vertex_attribute_divisor，Device.cpp 目前没启用，只能按 1 处
          * 理并报警 —— 静默画错比慢一点糟糕得多。实测 Sodium / Iris 用的都是
          * divisor == 1，走的是下面这条无需扩展的路径。 */
-        const uint32_t divisor = attrib_divisor(a.location);
+        const uint32_t divisor = (uint32_t)a.divisor;
         bd.inputRate = divisor ? VK_VERTEX_INPUT_RATE_INSTANCE
                                : VK_VERTEX_INPUT_RATE_VERTEX;
         if (divisor > 1) {

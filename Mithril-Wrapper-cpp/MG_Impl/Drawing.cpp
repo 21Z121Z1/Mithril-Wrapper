@@ -319,11 +319,15 @@ static bool prepare_draw(GLenum mode) {
         m.type         = a.type;
         m.normalized   = a.normalized ? 1 : 0;
         m.integer      = a.integer ? 1 : 0;
-        m.stride       = vbn.stride > 0 ? vbn.stride : a.stride;
+        // VertexBinding is authoritative for both the legacy and GL 4.3 APIs.
+        // Legacy glVertexAttribPointer/IPointer synchronise binding i above,
+        // so buffer=0, stride=0 and divisor=0 remain real values rather than
+        // "fall back to stale attribute state" sentinels.
+        m.stride       = vbn.stride;
         m.offset       = (int)(intptr_t)a.pointer;
         m.enabled      = 1;
-        m.buffer_name  = vbn.buffer ? vbn.buffer : a.boundBuffer;
-        m.divisor      = vbn.divisor ? vbn.divisor : a.divisor;
+        m.buffer_name  = vbn.buffer;
+        m.divisor      = vbn.divisor;
     }
 
     // Get-or-create the VkGraphicsPipeline. Blend state + colorWriteMask are
@@ -589,9 +593,10 @@ static bool prepare_draw(GLenum mode) {
         MGVertexAttrib& m = attribs[i];
         VkBuffer buf = backend_get_buffer(m.buffer_name);
         if (buf != VK_NULL_HANDLE) {
-            // pOffsets = the binding base offset (glBindVertexBuffer offset);
-            // 0 for the legacy path (bindings untouched). The member/relative
-            // offset is handled separately by ad.offset (Root Cause H).
+            // pOffsets = the binding base offset (glBindVertexBuffer offset).
+            // Legacy pointer calls synchronise this binding with offset=0;
+            // separate-format calls may use a non-zero binding base offset.
+            // The member/relative offset remains ad.offset (Root Cause H).
             const GLuint mbi = vao->attribs[m.location].bindingIndex;
             VkDeviceSize binding_off = vao->bindings[mbi].offset;
 // FIX (Root Cause H - 顶点属性偏移双重应用):
