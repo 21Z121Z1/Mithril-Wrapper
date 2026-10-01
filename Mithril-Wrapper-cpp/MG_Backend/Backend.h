@@ -777,3 +777,35 @@ int backend_render_pass_active(void);
 extern "C"
 #endif
 int backend_yflip_enabled(void);
+
+/*
+ * Real GPU query objects (VkQueryPool); see CommandStream.cpp. Safe to call
+ * even when a query could not be armed: the getters report "no trustworthy
+ * result" and the GL layer falls back to the conservative answer (occlusion
+ * visible), which never culls geometry that should be drawn.
+ */
+#ifdef __cplusplus
+extern "C"
+#endif
+int backend_query_begin(GLuint id, GLenum target);
+#ifdef __cplusplus
+extern "C"
+#endif
+int backend_query_end(GLuint id, GLenum target);
+#ifdef __cplusplus
+extern "C"
+#endif
+void backend_query_delete(GLuint id);
+#ifdef __cplusplus
+extern "C"
+#endif
+int backend_query_result_available(GLuint id);
+#ifdef __cplusplus
+extern "C"
+#endif
+uint64_t backend_query_result_u64(GLuint id, int* ok);
+#ifdef __cplusplus
+extern "C"
+#endif
+int backend_query_counter(GLuint id);
+

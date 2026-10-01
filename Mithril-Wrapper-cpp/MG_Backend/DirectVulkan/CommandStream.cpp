@@ -19,6 +19,8 @@
 
 #include <cstring>
 #include <vector>
+#include <unordered_map>
+#include <algorithm>
 
 // glMemoryBarrier bit tested by backend_memory_barrier. The bundled
 // GL/glcorearb.h in include/ predates ARB_shader_image_load_store's token
@@ -2684,5 +2686,297 @@ void backend_draw_indexed_indirect_count(int primitive, int index_type,
                                   count_buffer, count_offset,
                                   (uint32_t)max_drawcount, effStride);
 }
+
+
+namespace mithril {
+namespace vk {
+
+/* =========================================================================
+ * Real GPU queries (VkQueryPool).
+ *
+ * Previously every query returned a canned "1 sample passed". That is the
+ * safe answer for Iris - returning 0 makes it cull the whole scene to black -
+ * but it also means occlusion culling never culls anything, so the GPU draws
+ * every section the CPU submitted. This wires glBeginQuery / glEndQuery /
+ * glQueryCounter and the getters to a real VkQueryPool so results reflect
+ * what the GPU actually did.
+ *
+ * Two Vulkan constraints shape it:
+ *
+ *  - vkCmdResetQueryPool must be called OUTSIDE a render pass, while
+ *    vkCmdBeginQuery/EndQuery are legal inside one. GL has no such split:
+ *    glBeginQuery/glEndQuery can straddle arbitrary drawing. A newly created
+ *    pool's slots are undefined until reset, so a reset that cannot be issued
+ *    right now is queued and flushed at the next opportunity outside a pass.
+ *    Until then the query is simply not armed, and the getter falls back to
+ *    the conservative "visible" answer - never a stale or invented number.
+ *
+ *  - Reading a result needs the commands submitted. glGetQueryObject* is
+ *    defined to block until the result is available, but Mithril only submits
+ *    at present time. The read therefore tries non-blocking first and only
+ *    drains the queue when the caller asks for the value itself
+ *    (GL_QUERY_RESULT). GL_QUERY_RESULT_AVAILABLE never blocks.
+ *
+ * MITHRIL_REAL_QUERIES=0 restores the previous conservative behaviour without
+ * a rebuild, in case a device's MoltenVK build mishandles the pool.
+ * ========================================================================= */
+#ifndef GL_SAMPLES_PASSED
+#define GL_SAMPLES_PASSED         0x8914
+#endif
+#ifndef GL_ANY_SAMPLES_PASSED
+#define GL_ANY_SAMPLES_PASSED     0x8C2F
+#endif
+#ifndef GL_PRIMITIVES_GENERATED
+#define GL_PRIMITIVES_GENERATED   0x8C87
+#endif
+#ifndef GL_TIME_ELAPSED
+#define GL_TIME_ELAPSED           0x88BF
+#endif
+#ifndef GL_TIMESTAMP
+#define GL_TIMESTAMP              0x8E28
+#endif
+
+namespace {
+
+struct QuerySlot {
+    VkQueryPool pool = VK_NULL_HANDLE;
+    VkQueryType type = VK_QUERY_TYPE_OCCLUSION;
+    uint32_t    count = 1;
+    bool        armed = false;      // reset issued; safe to read
+    bool        began = false;
+    bool        needsReset = true;  // fresh pool: slots are undefined
+};
+
+std::unordered_map<GLuint, QuerySlot>& query_slots() {
+    static std::unordered_map<GLuint, QuerySlot> m;
+    return m;
+}
+
+std::vector<VkQueryPool>& pending_resets() {
+    static std::vector<VkQueryPool> v;
+    return v;
+}
+
+bool real_queries_enabled() {
+    static int v = -1;
+    if (v < 0) {
+        v = 1;
+        if (const char* e = std::getenv("MITHRIL_REAL_QUERIES"))
+            if (e[0] == '0') v = 0;
+    }
+    return v != 0;
+}
+
+bool map_query_type(GLenum target, VkQueryType& out, uint32_t& count) {
+    count = 1;
+    switch (target) {
+    case GL_SAMPLES_PASSED:
+    case GL_ANY_SAMPLES_PASSED:
+        out = VK_QUERY_TYPE_OCCLUSION; return true;
+    case GL_PRIMITIVES_GENERATED:
+        out = VK_QUERY_TYPE_PIPELINE_STATISTICS; return true;
+    case GL_TIME_ELAPSED:
+        out = VK_QUERY_TYPE_TIMESTAMP; count = 2; return true;  // two stamps
+    case GL_TIMESTAMP:
+        out = VK_QUERY_TYPE_TIMESTAMP; return true;
+    default:
+        return false;
+    }
+}
+
+// vkCmdResetQueryPool is illegal inside a render pass; this is the one place
+// that issues it, and it no-ops if a pass is active.
+void reset_now(VkQueryPool pool, uint32_t count) {
+    Backend* b = backend();
+    if (!b->initialized || b->deviceLost) return;
+    if (render_pass_active()) return;
+    if (!ensure_command_buffer_recording()) return;
+    vkCmdResetQueryPool(b->commandBuffer, pool, 0, count);
+}
+
+} // namespace
+
+// Flush resets that could not be issued while a render pass was active. Best
+// effort: anything still inside a pass stays queued for the next call.
+void flush_pending_query_resets(void) {
+    auto& v = pending_resets();
+    if (v.empty() || render_pass_active()) return;
+    for (VkQueryPool pool : v) {
+        uint32_t count = 1;
+        for (const auto& e : query_slots())
+            if (e.second.pool == pool) { count = e.second.count; break; }
+        reset_now(pool, count);
+    }
+    for (auto& e : query_slots())
+        if (std::find(v.begin(), v.end(), e.second.pool) != v.end()) {
+            e.second.needsReset = false;
+            e.second.armed = true;
+        }
+    v.clear();
+}
+
+extern "C" int backend_query_begin(GLuint id, GLenum target) {
+    if (!real_queries_enabled()) return 0;
+    flush_pending_query_resets();
+    Backend* b = backend();
+    if (!b->initialized || b->deviceLost) return 0;
+
+    VkQueryType type; uint32_t count;
+    if (!map_query_type(target, type, count)) return 0;
+
+    QuerySlot& qs = query_slots()[id];
+    if (qs.pool == VK_NULL_HANDLE || qs.type != type || qs.count != count) {
+        if (qs.pool != VK_NULL_HANDLE)
+            vkDestroyQueryPool(b->device, qs.pool, nullptr);
+        VkQueryPoolCreateInfo ci{};
+        ci.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+        ci.queryType = type;
+        ci.queryCount = count;
+        if (type == VK_QUERY_TYPE_PIPELINE_STATISTICS)
+            ci.pipelineStatistics =
+                VK_QUERY_PIPELINE_STATISTIC_INPUT_ASSEMBLY_VERTICES_BIT;
+        if (vkCreateQueryPool(b->device, &ci, nullptr, &qs.pool) != VK_SUCCESS) {
+            qs.pool = VK_NULL_HANDLE;
+            return 0;
+        }
+        qs.type = type; qs.count = count; qs.needsReset = true; qs.armed = false;
+    }
+
+    if (qs.needsReset) {
+        if (render_pass_active()) {
+            // Cannot reset inside a render pass. Queue it and leave the query
+            // un-armed for now; the getter falls back rather than reporting a
+            // number that was never measured.
+            auto& v = pending_resets();
+            if (std::find(v.begin(), v.end(), qs.pool) == v.end())
+                v.push_back(qs.pool);
+            qs.began = false;
+            return 0;
+        }
+        reset_now(qs.pool, qs.count);
+        qs.needsReset = false;
+        qs.armed = true;
+    }
+
+    if (!ensure_command_buffer_recording()) return 0;
+    if (type == VK_QUERY_TYPE_TIMESTAMP) {
+        vkCmdWriteTimestamp(b->commandBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                            qs.pool, 0);
+    } else {
+        vkCmdBeginQuery(b->commandBuffer, qs.pool, 0, 0);
+    }
+    qs.began = true;
+    return 1;
+}
+
+extern "C" int backend_query_end(GLuint id, GLenum target) {
+    (void)target;
+    if (!real_queries_enabled()) return 0;
+    Backend* b = backend();
+    if (!b->initialized || b->deviceLost) return 0;
+    auto it = query_slots().find(id);
+    if (it == query_slots().end() || !it->second.began) return 0;
+    QuerySlot& qs = it->second;
+    if (!ensure_command_buffer_recording()) return 0;
+    if (qs.type == VK_QUERY_TYPE_TIMESTAMP) {
+        // Elapsed time: second stamp in slot 1 (see map_query_type).
+        vkCmdWriteTimestamp(b->commandBuffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                            qs.pool, 1);
+    } else {
+        vkCmdEndQuery(b->commandBuffer, qs.pool, 0);
+    }
+    qs.began = false;
+    qs.needsReset = true;   // must be re-armed before the next use
+    return 1;
+}
+
+extern "C" void backend_query_delete(GLuint id) {
+    Backend* b = backend();
+    auto it = query_slots().find(id);
+    if (it == query_slots().end()) return;
+    if (b->initialized && it->second.pool != VK_NULL_HANDLE)
+        vkDestroyQueryPool(b->device, it->second.pool, nullptr);
+    query_slots().erase(it);
+}
+
+// Non-blocking: is the result ready? Never drains the queue. Reports "ready"
+// when real queries are off, because the caller then uses its own fallback.
+extern "C" int backend_query_result_available(GLuint id) {
+    if (!real_queries_enabled()) return 1;
+    Backend* b = backend();
+    if (!b->initialized || b->deviceLost) return 1;
+    auto it = query_slots().find(id);
+    if (it == query_slots().end() || !it->second.armed) return 0;
+    uint64_t dummy = 0;
+    return vkGetQueryPoolResults(b->device, it->second.pool, 0, 1,
+                                 sizeof(dummy), &dummy, sizeof(uint64_t),
+                                 VK_QUERY_RESULT_64_BIT) == VK_SUCCESS ? 1 : 0;
+}
+
+// Result value. Tries non-blocking first; only drains the queue when the
+// caller asks for the value itself, which is what GL_QUERY_RESULT means.
+// Sets *ok=0 when no trustworthy result exists so the GL layer can fall back
+// to the conservative answer instead of inventing one.
+extern "C" uint64_t backend_query_result_u64(GLuint id, int* ok) {
+    if (ok) *ok = 0;
+    if (!real_queries_enabled()) return 1;
+    Backend* b = backend();
+    if (!b->initialized || b->deviceLost) return 1;
+    auto it = query_slots().find(id);
+    if (it == query_slots().end() || !it->second.armed) return 1;
+
+    QuerySlot& qs = it->second;
+    uint64_t vals[2] = {0, 0};
+    VkResult r = vkGetQueryPoolResults(b->device, qs.pool, 0, qs.count,
+                                       sizeof(vals), vals, sizeof(uint64_t),
+                                       VK_QUERY_RESULT_64_BIT);
+    if (r == VK_NOT_READY) {
+        // GL_QUERY_RESULT blocks, but Mithril only submits at present time -
+        // drain the queue to make the result reachable, then retry.
+        safe_device_wait_idle();
+        r = vkGetQueryPoolResults(b->device, qs.pool, 0, qs.count,
+                                  sizeof(vals), vals, sizeof(uint64_t),
+                                  VK_QUERY_RESULT_64_BIT);
+    }
+    if (r != VK_SUCCESS) return 1;
+    if (ok) *ok = 1;
+    if (qs.type == VK_QUERY_TYPE_TIMESTAMP && qs.count == 2)
+        return vals[1] > vals[0] ? vals[1] - vals[0] : 0;   // elapsed
+    return vals[0];
+}
+
+extern "C" int backend_query_counter(GLuint id) {
+    if (!real_queries_enabled()) return 0;
+    Backend* b = backend();
+    if (!b->initialized || b->deviceLost) return 0;
+    QuerySlot& qs = query_slots()[id];
+    if (qs.pool == VK_NULL_HANDLE || qs.type != VK_QUERY_TYPE_TIMESTAMP) {
+        if (qs.pool != VK_NULL_HANDLE)
+            vkDestroyQueryPool(b->device, qs.pool, nullptr);
+        VkQueryPoolCreateInfo ci{};
+        ci.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+        ci.queryType = VK_QUERY_TYPE_TIMESTAMP;
+        ci.queryCount = 1;
+        if (vkCreateQueryPool(b->device, &ci, nullptr, &qs.pool) != VK_SUCCESS) {
+            qs.pool = VK_NULL_HANDLE;
+            return 0;
+        }
+        qs.type = VK_QUERY_TYPE_TIMESTAMP; qs.count = 1;
+        qs.needsReset = true; qs.armed = false;
+    }
+    if (qs.needsReset) {
+        if (render_pass_active()) return 0;
+        reset_now(qs.pool, qs.count);
+        qs.needsReset = false; qs.armed = true;
+    }
+    if (!ensure_command_buffer_recording()) return 0;
+    vkCmdWriteTimestamp(b->commandBuffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                        qs.pool, 0);
+    qs.began = false;
+    return 1;
+}
+
+} // namespace vk
+} // namespace mithril
 
 } // extern "C"

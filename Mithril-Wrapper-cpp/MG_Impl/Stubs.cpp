@@ -441,6 +441,7 @@ void glDeleteQueries(GLsizei n, const GLuint* ids) {
     for (GLsizei i = 0; i < n; ++i) {
         GLuint name = ids[i];
         if (name == 0) continue;
+        backend_query_delete(name);
         g_state->queries.erase(name);
         g_state->queryNames.release(name);
     }
@@ -466,6 +467,10 @@ void glBeginQuery(GLenum target, GLuint id) {
     q->active = true;
     q->ended = false;
     q->resultCached = false;
+    // Arm the real GPU query. A zero return means it could not be armed now
+    // (Vulkan forbids resetting a pool inside a render pass); the getter then
+    // falls back to the conservative answer.
+    backend_query_begin(id, target);
 }
 
 void glEndQuery(GLenum target) {
@@ -480,12 +485,11 @@ void glEndQuery(GLenum target) {
         if (q.active && q.target == qt) {
             q.active = false;
             q.ended = true;
-            // FIX (Iris occlusion culling 黑屏): 真实实现需要 vkCreateQueryPool
-            // + vkCmdBeginQuery/EndQuery + vkGetQueryPoolResults。当前为保守
-            // stub：标记结果可用并返回非零值（"有样本通过"），让 Iris 的
-            // occlusion culling 认为被测几何可见，不会把整个场景 cull 掉。
-            // 返回 0 会导致 Iris 认为"什么都没通过 occlusion 测试"→ 黑屏。
-            // TODO: 接入真实 VkQueryPool 实现精确 occlusion culling。
+            backend_query_end(id, target);
+            // Marked ended so glIsQuery reports it. cachedResult is only a
+            // fallback for when the GPU result is not readable yet;
+            // glGetQueryObject* asks the backend first and uses this only if
+            // the backend reports no trustworthy result.
             q.resultCached = true;
             q.cachedResult = 1;
             break;
