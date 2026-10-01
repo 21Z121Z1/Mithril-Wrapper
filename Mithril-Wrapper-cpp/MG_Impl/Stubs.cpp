@@ -766,4 +766,325 @@ void glSpecializeShader(GLuint shader, const GLchar* pEntryPoint, GLuint numSpec
     // No-op: Mithril uses the GLSL -> SPIR-V path via glslang, not ARB_gl_spirv.
 }
 
+/* ---------------------------------------------------------------------------
+ * Packed vertex-attribute entry points (glVertexP* / glColorP* / glTexCoordP* /
+ * glMultiTexCoordP* / glNormalP* / glSecondaryColorP*).
+ *
+ * Declared by the GL 4.6 core command set but belonging to the fixed-function
+ * vertex pipeline, which core profile removes: there is no current vertex
+ * state, no colour/texture-coordinate registers and no glBegin/glEnd for them
+ * to feed. The conforming core-profile behaviour is to exist as entry points
+ * and raise GL_INVALID_OPERATION when called - not to silently no-op.
+ *
+ * Exported because a host probing GL 4.6 completeness with dlsym resolves
+ * them; a missing symbol fails the probe. MobileGL exports the same names as
+ * logged stubs; raising the error in addition is the strict-core behaviour and
+ * costs nothing, since no core-profile caller can legally reach these.
+ * --------------------------------------------------------------------------- */
+void glVertexP2ui(GLenum type, GLuint value) {
+    MITHRIL_ENSURE_INIT();
+    (void)type;
+    (void)value;
+    mithril::state_set_error(GL_INVALID_OPERATION);
+}
+
+void glVertexP2uiv(GLenum type, const GLuint* value) {
+    MITHRIL_ENSURE_INIT();
+    (void)type;
+    (void)value;
+    mithril::state_set_error(GL_INVALID_OPERATION);
+}
+
+void glVertexP3ui(GLenum type, GLuint value) {
+    MITHRIL_ENSURE_INIT();
+    (void)type;
+    (void)value;
+    mithril::state_set_error(GL_INVALID_OPERATION);
+}
+
+void glVertexP3uiv(GLenum type, const GLuint* value) {
+    MITHRIL_ENSURE_INIT();
+    (void)type;
+    (void)value;
+    mithril::state_set_error(GL_INVALID_OPERATION);
+}
+
+void glVertexP4ui(GLenum type, GLuint value) {
+    MITHRIL_ENSURE_INIT();
+    (void)type;
+    (void)value;
+    mithril::state_set_error(GL_INVALID_OPERATION);
+}
+
+void glVertexP4uiv(GLenum type, const GLuint* value) {
+    MITHRIL_ENSURE_INIT();
+    (void)type;
+    (void)value;
+    mithril::state_set_error(GL_INVALID_OPERATION);
+}
+
+void glColorP3ui(GLenum type, GLuint color) {
+    MITHRIL_ENSURE_INIT();
+    (void)type;
+    (void)color;
+    mithril::state_set_error(GL_INVALID_OPERATION);
+}
+
+void glColorP3uiv(GLenum type, const GLuint* color) {
+    MITHRIL_ENSURE_INIT();
+    (void)type;
+    (void)color;
+    mithril::state_set_error(GL_INVALID_OPERATION);
+}
+
+void glColorP4ui(GLenum type, GLuint color) {
+    MITHRIL_ENSURE_INIT();
+    (void)type;
+    (void)color;
+    mithril::state_set_error(GL_INVALID_OPERATION);
+}
+
+void glColorP4uiv(GLenum type, const GLuint* color) {
+    MITHRIL_ENSURE_INIT();
+    (void)type;
+    (void)color;
+    mithril::state_set_error(GL_INVALID_OPERATION);
+}
+
+void glTexCoordP1ui(GLenum type, GLuint coords) {
+    MITHRIL_ENSURE_INIT();
+    (void)type;
+    (void)coords;
+    mithril::state_set_error(GL_INVALID_OPERATION);
+}
+
+void glTexCoordP1uiv(GLenum type, const GLuint* coords) {
+    MITHRIL_ENSURE_INIT();
+    (void)type;
+    (void)coords;
+    mithril::state_set_error(GL_INVALID_OPERATION);
+}
+
+void glMultiTexCoordP1ui(GLenum texture, GLenum type, GLuint coords) {
+    MITHRIL_ENSURE_INIT();
+    (void)texture;
+    (void)type;
+    (void)coords;
+    mithril::state_set_error(GL_INVALID_OPERATION);
+}
+
+void glMultiTexCoordP1uiv(GLenum texture, GLenum type, const GLuint* coords) {
+    MITHRIL_ENSURE_INIT();
+    (void)texture;
+    (void)type;
+    (void)coords;
+    mithril::state_set_error(GL_INVALID_OPERATION);
+}
+
+void glTexCoordP2ui(GLenum type, GLuint coords) {
+    MITHRIL_ENSURE_INIT();
+    (void)type;
+    (void)coords;
+    mithril::state_set_error(GL_INVALID_OPERATION);
+}
+
+void glTexCoordP2uiv(GLenum type, const GLuint* coords) {
+    MITHRIL_ENSURE_INIT();
+    (void)type;
+    (void)coords;
+    mithril::state_set_error(GL_INVALID_OPERATION);
+}
+
+void glMultiTexCoordP2ui(GLenum texture, GLenum type, GLuint coords) {
+    MITHRIL_ENSURE_INIT();
+    (void)texture;
+    (void)type;
+    (void)coords;
+    mithril::state_set_error(GL_INVALID_OPERATION);
+}
+
+void glMultiTexCoordP2uiv(GLenum texture, GLenum type, const GLuint* coords) {
+    MITHRIL_ENSURE_INIT();
+    (void)texture;
+    (void)type;
+    (void)coords;
+    mithril::state_set_error(GL_INVALID_OPERATION);
+}
+
+void glTexCoordP3ui(GLenum type, GLuint coords) {
+    MITHRIL_ENSURE_INIT();
+    (void)type;
+    (void)coords;
+    mithril::state_set_error(GL_INVALID_OPERATION);
+}
+
+void glTexCoordP3uiv(GLenum type, const GLuint* coords) {
+    MITHRIL_ENSURE_INIT();
+    (void)type;
+    (void)coords;
+    mithril::state_set_error(GL_INVALID_OPERATION);
+}
+
+void glMultiTexCoordP3ui(GLenum texture, GLenum type, GLuint coords) {
+    MITHRIL_ENSURE_INIT();
+    (void)texture;
+    (void)type;
+    (void)coords;
+    mithril::state_set_error(GL_INVALID_OPERATION);
+}
+
+void glMultiTexCoordP3uiv(GLenum texture, GLenum type, const GLuint* coords) {
+    MITHRIL_ENSURE_INIT();
+    (void)texture;
+    (void)type;
+    (void)coords;
+    mithril::state_set_error(GL_INVALID_OPERATION);
+}
+
+void glTexCoordP4ui(GLenum type, GLuint coords) {
+    MITHRIL_ENSURE_INIT();
+    (void)type;
+    (void)coords;
+    mithril::state_set_error(GL_INVALID_OPERATION);
+}
+
+void glTexCoordP4uiv(GLenum type, const GLuint* coords) {
+    MITHRIL_ENSURE_INIT();
+    (void)type;
+    (void)coords;
+    mithril::state_set_error(GL_INVALID_OPERATION);
+}
+
+void glMultiTexCoordP4ui(GLenum texture, GLenum type, GLuint coords) {
+    MITHRIL_ENSURE_INIT();
+    (void)texture;
+    (void)type;
+    (void)coords;
+    mithril::state_set_error(GL_INVALID_OPERATION);
+}
+
+void glMultiTexCoordP4uiv(GLenum texture, GLenum type, const GLuint* coords) {
+    MITHRIL_ENSURE_INIT();
+    (void)texture;
+    (void)type;
+    (void)coords;
+    mithril::state_set_error(GL_INVALID_OPERATION);
+}
+
+void glNormalP3ui(GLenum type, GLuint coords) {
+    MITHRIL_ENSURE_INIT();
+    (void)type;
+    (void)coords;
+    mithril::state_set_error(GL_INVALID_OPERATION);
+}
+
+void glNormalP3uiv(GLenum type, const GLuint* coords) {
+    MITHRIL_ENSURE_INIT();
+    (void)type;
+    (void)coords;
+    mithril::state_set_error(GL_INVALID_OPERATION);
+}
+
+void glSecondaryColorP3ui(GLenum type, GLuint color) {
+    MITHRIL_ENSURE_INIT();
+    (void)type;
+    (void)color;
+    mithril::state_set_error(GL_INVALID_OPERATION);
+}
+
+void glSecondaryColorP3uiv(GLenum type, const GLuint* color) {
+    MITHRIL_ENSURE_INIT();
+    (void)type;
+    (void)color;
+    mithril::state_set_error(GL_INVALID_OPERATION);
+}
+
+/* ---------------------------------------------------------------------------
+ * Imaging-subset read-backs (glGetn*).
+ *
+ * GL 4.5 added these so the legacy imaging queries could be given a buffer
+ * size. The imaging subset itself (colour tables, convolution, histogram,
+ * minmax, pixel maps, polygon stipple, separable filters) is not part of core
+ * profile, so nothing can have been set and there is nothing to return. Same
+ * contract: present as entry points, raise GL_INVALID_OPERATION, and zero the
+ * caller's buffer when one is supplied, so a caller that ignores the error
+ * cannot read back uninitialised memory.
+ * --------------------------------------------------------------------------- */
+void glGetnColorTable(GLenum target, GLenum format, GLenum type, GLsizei bufSize, void* table) {
+    MITHRIL_ENSURE_INIT();
+    if (table && bufSize > 0) std::memset(table, 0, (size_t)bufSize);
+    mithril::state_set_error(GL_INVALID_OPERATION);
+}
+
+void glGetnConvolutionFilter(GLenum target, GLenum format, GLenum type, GLsizei bufSize, void* image) {
+    MITHRIL_ENSURE_INIT();
+    if (image && bufSize > 0) std::memset(image, 0, (size_t)bufSize);
+    mithril::state_set_error(GL_INVALID_OPERATION);
+}
+
+void glGetnHistogram(GLenum target, GLboolean reset, GLenum format, GLenum type, GLsizei bufSize, void* values) {
+    MITHRIL_ENSURE_INIT();
+    if (values && bufSize > 0) std::memset(values, 0, (size_t)bufSize);
+    mithril::state_set_error(GL_INVALID_OPERATION);
+}
+
+void glGetnMinmax(GLenum target, GLboolean reset, GLenum format, GLenum type, GLsizei bufSize, void* values) {
+    MITHRIL_ENSURE_INIT();
+    if (values && bufSize > 0) std::memset(values, 0, (size_t)bufSize);
+    mithril::state_set_error(GL_INVALID_OPERATION);
+}
+
+void glGetnPixelMapfv(GLenum map, GLsizei bufSize, GLfloat* values) {
+    MITHRIL_ENSURE_INIT();
+    if (values && bufSize > 0) std::memset(values, 0, (size_t)bufSize);
+    mithril::state_set_error(GL_INVALID_OPERATION);
+}
+
+void glGetnPixelMapuiv(GLenum map, GLsizei bufSize, GLuint* values) {
+    MITHRIL_ENSURE_INIT();
+    if (values && bufSize > 0) std::memset(values, 0, (size_t)bufSize);
+    mithril::state_set_error(GL_INVALID_OPERATION);
+}
+
+void glGetnPixelMapusv(GLenum map, GLsizei bufSize, GLushort* values) {
+    MITHRIL_ENSURE_INIT();
+    if (values && bufSize > 0) std::memset(values, 0, (size_t)bufSize);
+    mithril::state_set_error(GL_INVALID_OPERATION);
+}
+
+void glGetnPolygonStipple(GLsizei bufSize, GLubyte* pattern) {
+    MITHRIL_ENSURE_INIT();
+    if (pattern && bufSize > 0) std::memset(pattern, 0, (size_t)bufSize);
+    mithril::state_set_error(GL_INVALID_OPERATION);
+}
+
+void glGetnSeparableFilter(GLenum target, GLenum format, GLenum type, GLsizei rowBufSize, void* row, GLsizei columnBufSize, void* column, void* span) {
+    MITHRIL_ENSURE_INIT();
+    if (row && rowBufSize > 0) std::memset(row, 0, (size_t)rowBufSize);
+    if (column && columnBufSize > 0) std::memset(column, 0, (size_t)columnBufSize);
+    if (span) std::memset(span, 0, 1);
+    mithril::state_set_error(GL_INVALID_OPERATION);
+}
+
+void glGetnMapdv(GLenum target, GLenum query, GLsizei bufSize, GLdouble* v) {
+    MITHRIL_ENSURE_INIT();
+    (void)target; (void)query;
+    if (v && bufSize > 0) std::memset(v, 0, (size_t)bufSize * sizeof(GLdouble));
+    mithril::state_set_error(GL_INVALID_OPERATION);
+}
+
+void glGetnMapfv(GLenum target, GLenum query, GLsizei bufSize, GLfloat* v) {
+    MITHRIL_ENSURE_INIT();
+    (void)target; (void)query;
+    if (v && bufSize > 0) std::memset(v, 0, (size_t)bufSize * sizeof(GLfloat));
+    mithril::state_set_error(GL_INVALID_OPERATION);
+}
+
+void glGetnMapiv(GLenum target, GLenum query, GLsizei bufSize, GLint* v) {
+    MITHRIL_ENSURE_INIT();
+    (void)target; (void)query;
+    if (v && bufSize > 0) std::memset(v, 0, (size_t)bufSize * sizeof(GLint));
+    mithril::state_set_error(GL_INVALID_OPERATION);
+}
+
 } // extern "C"
