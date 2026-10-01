@@ -429,7 +429,10 @@ void glGetIntegerv(GLenum pname, GLint* params) {
         case GL_MAX_TRANSFORM_FEEDBACK_SEPARATE_ATTRIBS: *params = 4; break;
         case GL_MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS: *params = 64; break;
         case GL_MAX_TRANSFORM_FEEDBACK_SEPARATE_COMPONENTS: *params = 16; break;
-        case GL_MAX_CULL_DISTANCES:           *params = 8; break;
+        // MoltenVK exposes maxCullDistances=0 on Apple GPUs. The
+        // GL_ARB_cull_distance extension is intentionally not advertised;
+        // keep the query consistent instead of reporting eight unusable slots.
+        case GL_MAX_CULL_DISTANCES:           *params = 0; break;
         case GL_MAX_COMBINED_CLIP_AND_CULL_DISTANCES: *params = 8; break;
         case GL_FRAGMENT_INTERPOLATION_OFFSET_BITS: *params = 4; break;
         case GL_ACTIVE_TEXTURE:               *params = (GLint)(GL_TEXTURE0 + g_state->activeTextureUnit); break;
