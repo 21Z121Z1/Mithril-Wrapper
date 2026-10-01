@@ -1477,9 +1477,11 @@ struct BqGpu {
     VkSampler           sampNearest = VK_NULL_HANDLE;
     VkSampler           sampLinear = VK_NULL_HANDLE;
     VkDescriptorPool    pool = VK_NULL_HANDLE;
-    VkBuffer            vbo = VK_NULL_HANDLE;
-    VkDeviceMemory      vboMem = VK_NULL_HANDLE;
-    void*               vboMap = nullptr;
+    // Rewritten every present. Ring by the backend's in-flight frame slot so
+    // the CPU never overwrites vertex data still being fetched by A11's TBDR.
+    VkBuffer            vbo[Backend::kMaxFramesInFlight] = {};
+    VkDeviceMemory      vboMem[Backend::kMaxFramesInFlight] = {};
+    void*               vboMap[Backend::kMaxFramesInFlight] = {};
     std::unordered_map<uint32_t, VkRenderPass> rpByFmt;
     std::unordered_map<uint32_t, VkPipeline>   pipeByFmt;
     // Dynamic-rendering (VK_KHR_dynamic_rendering) blit pipelines, keyed by dst
@@ -1538,22 +1540,28 @@ bool bq_ensure_gpu() {
 
     VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
     bci.size = 6 * 16; bci.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
-    if (vkCreateBuffer(b->device, &bci, nullptr, &g.vbo) != VK_SUCCESS) return false;
-    VkMemoryRequirements mr; vkGetBufferMemoryRequirements(b->device, g.vbo, &mr);
     VkPhysicalDeviceMemoryProperties mp;
     vkGetPhysicalDeviceMemoryProperties(b->physicalDevice, &mp);
-    uint32_t mi = UINT32_MAX;
-    for (uint32_t i = 0; i < mp.memoryTypeCount; ++i) {
-        if ((mr.memoryTypeBits & (1u << i)) &&
-            (mp.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) &&
-            (mp.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) { mi = i; break; }
+    for (uint32_t slot = 0; slot < Backend::kMaxFramesInFlight; ++slot) {
+        if (vkCreateBuffer(b->device, &bci, nullptr, &g.vbo[slot]) != VK_SUCCESS) return false;
+        VkMemoryRequirements mr{};
+        vkGetBufferMemoryRequirements(b->device, g.vbo[slot], &mr);
+        uint32_t mi = UINT32_MAX;
+        for (uint32_t i = 0; i < mp.memoryTypeCount; ++i) {
+            if ((mr.memoryTypeBits & (1u << i)) &&
+                (mp.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) &&
+                (mp.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
+                mi = i; break;
+            }
+        }
+        if (mi == UINT32_MAX) return false;
+        VkMemoryAllocateInfo mal{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        mal.allocationSize = mr.size; mal.memoryTypeIndex = mi;
+        if (vkAllocateMemory(b->device, &mal, nullptr, &g.vboMem[slot]) != VK_SUCCESS) return false;
+        if (vkBindBufferMemory(b->device, g.vbo[slot], g.vboMem[slot], 0) != VK_SUCCESS) return false;
+        if (vkMapMemory(b->device, g.vboMem[slot], 0, mr.size, 0, &g.vboMap[slot]) != VK_SUCCESS ||
+            g.vboMap[slot] == nullptr) return false;
     }
-    if (mi == UINT32_MAX) return false;
-    VkMemoryAllocateInfo mal{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-    mal.allocationSize = mr.size; mal.memoryTypeIndex = mi;
-    if (vkAllocateMemory(b->device, &mal, nullptr, &g.vboMem) != VK_SUCCESS) return false;
-    vkBindBufferMemory(b->device, g.vbo, g.vboMem, 0);
-    vkMapMemory(b->device, g.vboMem, 0, mr.size, 0, &g.vboMap);
 
     g.ready = true;
     return true;
@@ -1767,7 +1775,8 @@ void blit_to_default_quad(VkImage src_image, VkFormat src_format,
     BqVert verts[6] = {
         corner[0], corner[1], corner[2],
         corner[0], corner[2], corner[3]};
-    std::memcpy(g.vboMap, verts, sizeof(verts));
+    const uint32_t vboSlot = (uint32_t)b->currentFrame % Backend::kMaxFramesInFlight;
+    std::memcpy(g.vboMap[vboSlot], verts, sizeof(verts));
 
     // Descriptor set (source combined image sampler).
     VkDescriptorSet set = VK_NULL_HANDLE;
@@ -1821,7 +1830,7 @@ void blit_to_default_quad(VkImage src_image, VkFormat src_format,
     vkCmdSetScissor(c.cmd, 0, 1, &sr);
     vkCmdBindPipeline(c.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
     VkDeviceSize voff = 0;
-    vkCmdBindVertexBuffers(c.cmd, 0, 1, &g.vbo, &voff);
+    vkCmdBindVertexBuffers(c.cmd, 0, 1, &g.vbo[vboSlot], &voff);
     vkCmdBindDescriptorSets(c.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                             g.pipeLayout, 0, 1, &set, 0, nullptr);
     vkCmdDraw(c.cmd, 6, 1, 0, 0);
@@ -2032,7 +2041,8 @@ void blit_to_default_in_frame(VkImage src_image, VkFormat src_format, int src_w,
         {nx0,ny0,u0,v0},{nx0,ny1,u0,v1},{nx1,ny1,u1,v1},
         {nx0,ny0,u0,v0},{nx1,ny1,u1,v1},{nx1,ny0,u1,v0},
     };
-    std::memcpy(g.vboMap, verts, sizeof(verts));
+    const uint32_t vboSlot = (uint32_t)b->currentFrame % Backend::kMaxFramesInFlight;
+    std::memcpy(g.vboMap[vboSlot], verts, sizeof(verts));
 
     // Clear stale user-FBO attachment registration, then begin the swapchain
     // dynamic-rendering pass (PRESENT/UNDEFINED -> COLOR_ATTACHMENT barrier).
@@ -2045,7 +2055,7 @@ void blit_to_default_in_frame(VkImage src_image, VkFormat src_format, int src_w,
     vkCmdSetScissor(cmd,0,1,&sr);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
     VkDeviceSize voff = 0;
-    vkCmdBindVertexBuffers(cmd, 0, 1, &g.vbo, &voff);
+    vkCmdBindVertexBuffers(cmd, 0, 1, &g.vbo[vboSlot], &voff);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, g.pipeLayout,
                             0, 1, &set, 0, nullptr);
     vkCmdDraw(cmd, 6, 1, 0, 0);
