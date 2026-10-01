@@ -1,5 +1,6 @@
 // Mithril-Wrapper - MG_State/Caps.cpp
 #include "Caps.h"
+#include "../MG_Backend/Backend.h"
 
 // Build-stamped commit id (injected by CMake as -DMITHRIL_COMMIT_ID="sha").
 // Falls back to "unknown" for local builds, matching MG_Impl/Getter.cpp.
@@ -63,6 +64,20 @@ static const char* kUnsupported[] = {
     "GL_ARB_transform_feedback3",
     "GL_ARB_shader_image_load_formats",
     "GL_ARB_shader_subroutine",
+
+    // A11/Apple4 + current Mithril contract: never advertise an extension that
+    // selects a path we cannot faithfully execute.
+    "GL_ARB_viewport_array",               // Apple4 has one viewport; wrapper collapses arrays to one.
+    "GL_ARB_fragment_layer_viewport",       // Metal layered rendering starts at Apple5.
+    "GL_ARB_texture_mirror_clamp_to_edge",  // MoltenVK requires Apple7; backend has no emulation.
+    "GL_ARB_gpu_shader5",                   // program linker only consumes VS/FS and lacks full GPU5 builtins.
+    "GL_ARB_shader_draw_parameters",        // gl_DrawID/BaseInstance semantics are not complete on iOS.
+    "GL_ARB_compute_shader",                // no glDispatchCompute/backend compute pipeline exists.
+    "GL_ARB_texture_cube_map_array",        // state enum exists, but VkImage/view creation is not cube-array capable.
+    "GL_ARB_texture_buffer_object",         // glTexBuffer is currently a no-op.
+    "GL_ARB_texture_buffer_range",          // glTexBufferRange is currently a no-op.
+    "GL_ARB_texture_storage_multisample",   // glTexStorage*Multisample is currently a no-op.
+    "GL_ARB_framebuffer_no_attachments",    // glFramebufferParameteri is currently a no-op.
 };
 
 static bool is_unsupported(const char* n) {
@@ -101,8 +116,18 @@ const std::string& glsl_version_string() {
 const std::vector<const char*>& extensions() {
     static const std::vector<const char*> v = [] {
         std::vector<const char*> out;
-        for (const char* e : kAllExtensions)
-            if (!is_unsupported(e)) out.push_back(e);
+        for (const char* e : kAllExtensions) {
+            if (is_unsupported(e)) continue;
+
+            // BPTC == BC6H/BC7. Apple4/A11 has no BC texture formats at all.
+            // Keep the extension on newer GPUs only when the live Vulkan
+            // device reports every required BPTC format as sampleable.
+            if (std::string(e) == "GL_ARB_texture_compression_bptc" &&
+                !backend_device_supports_bptc()) {
+                continue;
+            }
+            out.push_back(e);
+        }
         return out;
     }();
     return v;
