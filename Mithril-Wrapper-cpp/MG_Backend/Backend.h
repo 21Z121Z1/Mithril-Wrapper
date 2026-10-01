@@ -736,8 +736,16 @@ VkFormat    backend_swapchain_depth_format(void* swapchain_state);
 #define MITHRIL_LIMIT_MAX_COMPUTE_WG_INVOCATIONS  18
 #define MITHRIL_LIMIT_MAX_COMPUTE_WG_COUNT_X      19
 #define MITHRIL_LIMIT_MAX_COMPUTE_WG_SIZE_X       20
+#define MITHRIL_LIMIT_MAX_IMAGE_UNITS              21  /* per-stage storage images */
+#define MITHRIL_LIMIT_MAX_COMBINED_IMAGE_UNITS     22  /* descriptor-set storage images */
 
 int backend_device_limit(int which, int fallback);
+
+/* True only when every BPTC format required by GL_ARB_texture_compression_bptc
+ * is sampleable on the live Vulkan device. Apple4/A11 has no BC hardware, so
+ * this is false there; newer Apple GPUs are decided from VkFormatProperties. */
+int backend_device_supports_bptc(void);
+
 void backend_debug_frame_fbo_log(void);
 
 extern "C" void mithril_dump_draw_ring(const char* path);
