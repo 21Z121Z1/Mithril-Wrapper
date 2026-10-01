@@ -30,6 +30,19 @@
 /* 项目自带的 GL Core Profile 头：常量 + 入口声明与 libmithril 导出契约一致。 */
 #include <GL/glcorearb.h>
 
+/* The repository's intentionally small glcorearb.h stops before the GL 4.2
+ * image-load/store block. These are Khronos registry values used only to
+ * query Mithril's extension-facing limits in this regression test. */
+#ifndef GL_MAX_IMAGE_UNITS
+#define GL_MAX_IMAGE_UNITS 0x8F38
+#endif
+#ifndef GL_MAX_COMBINED_IMAGE_UNIFORMS
+#define GL_MAX_COMBINED_IMAGE_UNIFORMS 0x90CF
+#endif
+#ifndef GL_MAX_IMAGE_SAMPLES
+#define GL_MAX_IMAGE_SAMPLES 0x906D
+#endif
+
 /* ---- 依赖的 GL 函数指针 typedef（与 glcorearb.h 签名一致） -------------- */
 typedef void    (*glGetIntegerv_fn)(GLenum, GLint*);
 typedef void    (*glGetFloatv_fn)(GLenum, GLfloat*);
