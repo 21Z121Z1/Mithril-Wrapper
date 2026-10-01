@@ -174,6 +174,57 @@ int main(int argc, char** argv) {
           "GL_SHADING_LANGUAGE_VERSION starts with %s (got \"%s\")",
           wantGlsl, glslVer ? glslVer : "(null)");
 
+    /* ---- Capability truthfulness -----------------------------------------
+     * These extensions previously selected code paths that either exceed
+     * Apple4/A11 Metal capabilities or are still semantic stubs in Mithril.
+     * Advertising them is worse than omitting them: Minecraft/Sodium/Iris can
+     * legally choose the extension path and then render missing geometry. */
+    GLint extCount = 0;
+    getIntegerv(GL_NUM_EXTENSIONS, &extCount);
+    const char* forbiddenExts[] = {
+        "GL_ARB_viewport_array",
+        "GL_ARB_fragment_layer_viewport",
+        "GL_ARB_texture_mirror_clamp_to_edge",
+        "GL_ARB_gpu_shader5",
+        "GL_ARB_shader_draw_parameters",
+        "GL_ARB_compute_shader",
+        "GL_ARB_texture_cube_map_array",
+        "GL_ARB_texture_buffer_object",
+        "GL_ARB_texture_buffer_range",
+        "GL_ARB_texture_storage_multisample",
+        "GL_ARB_framebuffer_no_attachments",
+    };
+    for (size_t fi = 0; fi < sizeof(forbiddenExts) / sizeof(forbiddenExts[0]); ++fi) {
+        int found = 0;
+        for (GLint ei = 0; ei < extCount; ++ei) {
+            const char* ext = (const char*)getStringi(GL_EXTENSIONS, (GLuint)ei);
+            if (ext && strcmp(ext, forbiddenExts[fi]) == 0) {
+                found = 1;
+                break;
+            }
+        }
+        CHECK(!found, "unsupported extension is not advertised: %s", forbiddenExts[fi]);
+    }
+
+    GLint maxTexStage = 0, maxTexCombined = 0;
+    getIntegerv(GL_MAX_TEXTURE_IMAGE_UNITS, &maxTexStage);
+    getIntegerv(GL_MAX_COMBINED_TEXTURE_IMAGE_UNITS, &maxTexCombined);
+    CHECK(maxTexStage > 0 && maxTexStage <= 32,
+          "sampled texture units respect backend/internal limit (%d)", maxTexStage);
+    CHECK(maxTexCombined > 0 && maxTexCombined <= 32,
+          "combined sampled texture units respect backend/internal limit (%d)", maxTexCombined);
+
+    GLint maxImages = 0, maxCombinedImages = 0, maxImageSamples = -1;
+    getIntegerv(GL_MAX_IMAGE_UNITS, &maxImages);
+    getIntegerv(GL_MAX_COMBINED_IMAGE_UNIFORMS, &maxCombinedImages);
+    getIntegerv(GL_MAX_IMAGE_SAMPLES, &maxImageSamples);
+    CHECK(maxImages >= 0 && maxImages <= 32,
+          "storage image units are device bounded (%d)", maxImages);
+    CHECK(maxCombinedImages >= maxImages && maxCombinedImages <= 32,
+          "combined storage images are device/internal bounded (%d)", maxCombinedImages);
+    CHECK(maxImageSamples == 0,
+          "multisample storage images are not over-advertised (%d)", maxImageSamples);
+
     /* ---- 错误语义 ------------------------------------------------------------
      * 修复后契约：glGetError 返回真实的延迟错误。
      *
