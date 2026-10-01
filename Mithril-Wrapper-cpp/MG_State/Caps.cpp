@@ -95,6 +95,13 @@ static const char* kUnsupported[] = {
     "GL_ARB_draw_buffers_blend",           // one blend state is currently replicated to all MRTs.
     "GL_ARB_shader_atomic_counters",       // Vulkan path has no atomic-counter descriptor/reflection binding.
     "GL_ARB_shader_atomic_counter_ops",    // depends on the missing atomic-counter buffer semantics.
+
+    // Apple4/A11 shader-feature boundaries.  These extensions are optional on
+    // GL 3.3, so failing closed is preferable to letting a host compile shaders
+    // that MoltenVK must lower to Metal operations unavailable on this family.
+    "GL_ARB_texture_query_lod",            // Metal Query texture LOD starts at Apple8.
+    "GL_ARB_shader_group_vote",            // Metal ballot/group-vote support starts after Apple4.
+    "GL_ARB_cull_distance",                // MoltenVK reports maxCullDistances=0 on Apple GPUs.
 };
 
 static bool is_unsupported(const char* n) {
