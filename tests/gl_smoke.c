@@ -211,6 +211,11 @@ int main(int argc, char** argv) {
         "GL_ARB_query_buffer_object",
         "GL_ARB_conditional_render_inverted",
         "GL_ARB_ES3_1_compatibility",
+        "GL_ARB_texture_multisample",
+        "GL_ARB_sample_shading",
+        "GL_ARB_depth_clamp",
+        "GL_ARB_clip_control",
+        "GL_ARB_draw_buffers_blend",
     };
     for (size_t fi = 0; fi < sizeof(forbiddenExts) / sizeof(forbiddenExts[0]); ++fi) {
         int found = 0;
@@ -242,6 +247,11 @@ int main(int argc, char** argv) {
           "combined storage images are device/internal bounded (%d)", maxCombinedImages);
     CHECK(maxImageSamples == 0,
           "multisample storage images are not over-advertised (%d)", maxImageSamples);
+
+    GLint maxSamples = 0;
+    getIntegerv(GL_MAX_SAMPLES, &maxSamples);
+    CHECK(maxSamples == 1,
+          "MSAA limit matches current single-sample Vulkan pipeline (%d)", maxSamples);
 
     /* ---- 错误语义 ------------------------------------------------------------
      * 修复后契约：glGetError 返回真实的延迟错误。
