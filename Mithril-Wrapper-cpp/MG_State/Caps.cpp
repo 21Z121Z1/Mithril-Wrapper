@@ -83,6 +83,16 @@ static const char* kUnsupported[] = {
     "GL_ARB_query_buffer_object",           // query-buffer result path is not implemented.
     "GL_ARB_conditional_render_inverted",   // inverted conditional rendering is not implemented.
     "GL_ARB_ES3_1_compatibility",           // implies compute/image paths beyond this GL 3.3 profile.
+
+    // Graphics capabilities the hardware can provide on A11, but this Vulkan
+    // backend does not yet wire through correctly. Hide them until the whole
+    // state path is real; otherwise apps select legal extension paths that
+    // Mithril silently collapses or ignores.
+    "GL_ARB_texture_multisample",          // graphics pipeline is currently fixed to 1 sample.
+    "GL_ARB_sample_shading",               // cannot take effect while rasterizationSamples == 1.
+    "GL_ARB_depth_clamp",                  // Pipeline.cpp hardcodes depthClampEnable = VK_FALSE.
+    "GL_ARB_clip_control",                 // state is recorded but position fixup ignores it.
+    "GL_ARB_draw_buffers_blend",           // one blend state is currently replicated to all MRTs.
 };
 
 static bool is_unsupported(const char* n) {
