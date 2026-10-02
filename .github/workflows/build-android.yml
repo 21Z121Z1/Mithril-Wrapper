@@ -1,0 +1,108 @@
+name: Android build
+
+on:
+  push:
+    branches-ignore:
+      - 'l10n_main'
+  pull_request:
+    branches-ignore:
+      - 'l10n_main'
+  workflow_dispatch:
+
+concurrency:
+  group: android-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build libmithril.so (${{ matrix.abi }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        abi:
+          - arm64-v8a
+          - armeabi-v7a
+          - x86_64
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Checkout submodules
+        # glslang + SPIRV-Cross + SPIRV-Headers are submodules; the Android
+        # build needs them just as the Apple one does.
+        run: git submodule update --init --recursive
+
+      - name: Setup Android NDK
+        id: ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27c
+
+      - name: Configure
+        run: |
+          cmake -S . -B "build-${{ matrix.abi }}" \
+            -DCMAKE_TOOLCHAIN_FILE="${{ steps.ndk.outputs.ndk-path }}/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI="${{ matrix.abi }}" \
+            -DANDROID_PLATFORM=android-29 \
+            -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build "build-${{ matrix.abi }}" --target mithril -j"$(nproc)"
+
+      - name: Verify exported EGL/GL symbols
+        # A .so that links but exports nothing is useless to a launcher that
+        # dlsyms the GL entry points, so check the dynamic symbol table rather
+        # than trusting the link step.
+        run: |
+          set -e
+          SO="build-${{ matrix.abi }}/libmithril.so"
+          test -f "$SO"
+          for sym in eglGetDisplay eglInitialize eglCreateContext eglMakeCurrent \
+                     eglSwapBuffers glDrawArrays glDrawElements glTexImage2D \
+                     glCreateShader glGetString; do
+            if ! nm -D --defined-only "$SO" | grep -q " T $sym\$"; then
+              echo "MISSING exported symbol: $sym"
+              exit 1
+            fi
+          done
+          echo "all required symbols exported"
+
+      - name: Upload .so
+        uses: actions/upload-artifact@v4
+        with:
+          name: libmithril-${{ matrix.abi }}
+          path: build-${{ matrix.abi }}/libmithril.so
+          if-no-files-found: error
+
+  package:
+    name: Package jniLibs bundle
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download ABI artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: libmithril-*
+          merge-multiple: false
+
+      - name: Assemble jniLibs layout
+        # Laid out exactly as an Android project's src/main/jniLibs directory,
+        # so it can be dropped into a launcher module unmodified.
+        run: |
+          set -e
+          mkdir -p bundled/jniLibs
+          for d in libmithril-*; do
+            abi="${d#libmithril-}"
+            mkdir -p "bundled/jniLibs/$abi"
+            cp "$d/libmithril.so" "bundled/jniLibs/$abi/libmithril.so"
+          done
+          find bundled -type f | sort
+
+      - name: Upload bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: mithril-android-jniLibs
+          path: bundled
+          if-no-files-found: error

@@ -722,6 +722,16 @@ bool init_device() {
     if (has_extension(instExtProps, VK_KHR_SURFACE_EXTENSION_NAME)) {
         instExts.push_back(VK_KHR_SURFACE_EXTENSION_NAME);
     }
+    // Android presentation surface. The name macro lives in vulkan_android.h,
+    // which requires VK_USE_PLATFORM_ANDROID_KHR before <vulkan/vulkan.h>;
+    // defining the string here keeps this TU platform-header-free, the same way
+    // VK_EXT_METAL_SURFACE_EXTENSION_NAME is handled above.
+#ifndef VK_KHR_ANDROID_SURFACE_EXTENSION_NAME
+#define VK_KHR_ANDROID_SURFACE_EXTENSION_NAME "VK_KHR_android_surface"
+#endif
+    if (has_extension(instExtProps, VK_KHR_ANDROID_SURFACE_EXTENSION_NAME)) {
+        instExts.push_back(VK_KHR_ANDROID_SURFACE_EXTENSION_NAME);
+    }
     // Debug utils optional.
     bool wantDebugUtils = has_extension(instExtProps, VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
     if (wantDebugUtils) instExts.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);

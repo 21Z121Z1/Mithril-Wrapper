@@ -270,6 +270,22 @@ if(APPLE)
     )
 endif()
 
+if(ANDROID)
+    # Android contributes the same three roles as the Apple block above, but as
+    # plain C++: there is no ObjC runtime in the NDK, so nothing here can be
+    # compiled as .mm, and there is no MoltenVK - the platform Vulkan loader
+    # (libvulkan.so) is used directly.
+    list(APPEND MITHRIL_SOURCES
+        # EGL surface: ANativeWindow reference-count handling + size query.
+        Mithril-Wrapper-cpp/egl/SurfaceAndroid.cpp
+        # GPU info strings. The Apple version is .mm only because it includes
+        # <Foundation/Foundation.h>, which does not exist here.
+        Mithril-Wrapper-cpp/MG_Impl/Getter_gpu_android.cpp
+        # Vulkan swapchain: VkSurfaceKHR via VK_KHR_android_surface.
+        Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/SwapchainAndroid.cpp
+    )
+endif()
+
 add_library(${PROJECT_NAME} SHARED ${MITHRIL_SOURCES})
 
 target_include_directories(${PROJECT_NAME}
@@ -297,6 +313,12 @@ target_include_directories(${PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Mithril-Wrapper-cpp/3rdparty/SPIRV-Cross
     ${CMAKE_CURRENT_SOURCE_DIR}/Mithril-Wrapper-cpp/3rdparty/SPIRV-Headers/include
 )
+
+if(ANDROID)
+    # Native Vulkan loader shipped with the platform (API 24+), plus libandroid
+    # for ANativeWindow_* and liblog for stderr routing.
+    target_link_libraries(${PROJECT_NAME} PRIVATE vulkan android log)
+endif()
 
 if(APPLE)
     # Keep MoltenVK as a runtime dependency, matching MobileGL's Amethyst
