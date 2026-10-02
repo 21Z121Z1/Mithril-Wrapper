@@ -49,7 +49,29 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release
 
       - name: Build
-        run: cmake --build "build-${{ matrix.abi }}" --target mithril -j"$(nproc)"
+        # tee so the log can be published below: job logs and artifacts both go
+        # to blob storage that is not reachable from everywhere, while a file
+        # committed to the branch is readable via the API.
+        run: |
+          cmake --build "build-${{ matrix.abi }}" --target mithril -j"$(nproc)" 2>&1 | tee "build-${{ matrix.abi }}.log"
+          exit "${PIPESTATUS[0]}"
+
+      - name: Publish build log (diagnosis)
+        if: failure()
+        continue-on-error: true
+        run: |
+          set -e
+          mkdir -p ci-logs
+          tail -400 "build-${{ matrix.abi }}.log" > "ci-logs/android-${{ matrix.abi }}.log"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "ci-logs/android-${{ matrix.abi }}.log"
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m "ci(android): publish ${{ matrix.abi }} build log [skip ci]"
+          git push origin HEAD:"${GITHUB_REF#refs/heads/}" || {
+            git pull --rebase origin "${GITHUB_REF#refs/heads/}"
+            git push origin HEAD:"${GITHUB_REF#refs/heads/}"
+          }
 
       - name: Verify exported EGL/GL symbols
         # A .so that links but exports nothing is useless to a launcher that
