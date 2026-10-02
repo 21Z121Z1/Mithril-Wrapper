@@ -48,6 +48,8 @@
 #include <os/proc.h>
 #elif defined(__APPLE__)
 #include <sys/sysctl.h>
+#else
+#include <unistd.h>
 #endif
 
 namespace mithril {
@@ -844,6 +846,22 @@ bool init_device() {
     VkDeviceSize availableBytes = 0;
 #if defined(__APPLE__) && TARGET_OS_IPHONE
     availableBytes = os_proc_available_memory();
+#elif !defined(__APPLE__)
+    // Android / Linux: no Jetsam and no sysctl hw.memsize, so the old code left
+    // availableBytes at 0 and took the 256 MB fallback regardless of the
+    // device. That is the same failure shape as the iOS 512 MB cap raised
+    // earlier: when the budget is hit, image allocations fail, textures stay
+    // unbacked, and sampling them paints the frame solid red. POSIX is enough
+    // here - total physical pages times page size - and the existing
+    // 25%-of-available rule then sizes the budget as it does on Apple.
+    {
+        const long pages = sysconf(_SC_PHYS_PAGES);
+        const long pageSize = sysconf(_SC_PAGESIZE);
+        if (pages > 0 && pageSize > 0) {
+            availableBytes = static_cast<VkDeviceSize>(pages) *
+                             static_cast<VkDeviceSize>(pageSize);
+        }
+    }
 #elif defined(__APPLE__)
     {
         int64_t phys = 0;

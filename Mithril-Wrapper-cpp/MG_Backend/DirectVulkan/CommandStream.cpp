@@ -2111,6 +2111,10 @@ int backend_yflip_enabled(void) {
             have_transform = true;
         }
 #if defined(__APPLE__) && TARGET_OS_IPHONE
+        // (Apple only. Android and other native-Vulkan targets fall through to
+        // the branch below: there is no MoltenVK to flip anything, so Mithril
+        // is the only flipper and the surface transform decides.)
+        //
         // On iOS the host process (launcher / LWJGL) has almost always created a
         // VkInstance before Mithril starts, so MoltenVK has already latched its
         // own vertex-Y flip and the MVK_CONFIG_SHADER_CONVERSION_FLIP_VERTEX_Y=0

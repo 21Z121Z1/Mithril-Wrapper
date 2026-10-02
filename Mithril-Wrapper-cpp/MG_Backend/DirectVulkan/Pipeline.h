@@ -154,6 +154,11 @@ struct ProgramResources {
     // UniformManager (UniformManager.cpp:183,1026), which also avoids
     // vkResetDescriptorPool in favor of cursor rewind + set reuse.
     VkDescriptorPool      descriptorPools[kMaxFramesInFlight] = {};
+    // Capacity each pool was created with, in descriptor sets. Starts at
+    // kMaxSetsPerPool and doubles whenever a pool proves too small, so a
+    // program that genuinely needs more sets converges on a size that fits
+    // instead of allocating a fresh pool every frame (see DescriptorSet.cpp).
+    uint32_t              poolSetCapacity[kMaxFramesInFlight] = {};
     std::vector<DescriptorBinding> bindings;  // reflected VS+FS binding set
     bool layoutsBuilt = false;
     // Per-slot cached descriptor sets + rewind cursor. At the start of each

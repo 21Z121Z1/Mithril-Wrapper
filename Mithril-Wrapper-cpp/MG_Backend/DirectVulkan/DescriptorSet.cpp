@@ -295,6 +295,7 @@ void ensure_program_layouts(GLuint program,
     const uint32_t kMaxSets = kMaxSetsPerPool;
     for (int i = 0; i < kMaxFramesInFlight; ++i) {
         pr.descriptorPools[i] = create_program_pool(pr, kMaxSets);
+        pr.poolSetCapacity[i] = kMaxSets;
         if (pr.descriptorPools[i] == VK_NULL_HANDLE) {
             MITHRIL_LOG_WARN("vk", "vkCreateDescriptorPool failed (program %u, slot %d)", program, i);
             // Layout is still valid; bind_program_descriptors skips slots with a null pool.
@@ -1387,7 +1388,17 @@ void bind_program_descriptors(GLuint program, VkPipelineBindPoint bindPoint) {
                                       poolExhaustedLogCount);
                 }
                 VkDescriptorPool oldPool = pr.descriptorPools[slot];
-                VkDescriptorPool newPool = create_program_pool(pr, kMaxSetsPerPool);
+                // Grow geometrically rather than re-creating the same size. A
+                // fixed-size replacement pool re-exhausts every frame, so each
+                // exhaustion costs a pool create plus a deferred destroy and
+                // never converges; doubling reaches a size that fits within a
+                // handful of steps and then stops for the rest of the session.
+                const uint32_t grown = (pr.poolSetCapacity[slot] > 0
+                                            ? pr.poolSetCapacity[slot] * 2
+                                            : kMaxSetsPerPool);
+                constexpr uint32_t kMaxSetsHardCap = 16384;
+                const uint32_t nextCap = grown > kMaxSetsHardCap ? kMaxSetsHardCap : grown;
+                VkDescriptorPool newPool = create_program_pool(pr, nextCap);
                 if (newPool == VK_NULL_HANDLE) {
                     if (std::getenv("MITHRIL_DUMP_BLIT")) { static uint64_t z1=0;++z1; if((z1%20)==1)MITHRIL_LOG_WARN("vk-diag","BIND-DROP secondary-create-fail #%llu prog=%u slot=%d",(unsigned long long)z1,program,slot);}
                     return;  // 次级池创建失败，放弃本次 bind（下次 draw 重试）
@@ -1399,6 +1410,7 @@ void bind_program_descriptors(GLuint program, VkPipelineBindPoint bindPoint) {
                     b->disposalQueue[b->currentFrame].push_back(dd);
                 }
                 pr.descriptorPools[slot] = newPool;
+                pr.poolSetCapacity[slot] = nextCap;
                 // 新池没有任何已分配 set；旧池的缓存集合全部作废（它们属于旧池）。
                 pr.allocatedSets[slot].clear();
                 pr.setCursor[slot] = 0;
