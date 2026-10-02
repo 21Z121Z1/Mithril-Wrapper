@@ -1,0 +1,5 @@
+// Top-level build file. The module below produces an installable APK whose only
+// payload is the native renderer library; there is no application code.
+plugins {
+    id "com.android.application" version "8.5.2" apply false
+}

@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Native-only package: this APK carries libmithril.so and nothing else
+  (android:hasCode="false"). That matches how the MobileGlues release ships its
+  renderer - the launcher loads the library out of the installed package's
+  native library directory, so there is no activity to show and no DEX to run.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.mithril.wrapper"
+    android:versionCode="1"
+    android:versionName="1.0">
+
+    <uses-sdk android:minSdkVersion="29" android:targetSdkVersion="34" />
+
+    <uses-feature android:name="android.hardware.vulkan.level" android:required="false" />
+    <uses-feature android:name="android.hardware.vulkan.version" android:required="false" />
+
+    <application
+        android:hasCode="false"
+        android:label="Mithril-Wrapper"
+        android:allowBackup="false" />
+
+</manifest>

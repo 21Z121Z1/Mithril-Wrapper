@@ -1,0 +1,52 @@
+// Mithril-Wrapper Android package.
+//
+// This module exists to do one thing: ship libmithril.so inside an installable
+// APK, the way MobileGlues ships its renderer. It deliberately contains no
+// application code (android:hasCode="false" in the manifest) - the .so files
+// are dropped into src/main/jniLibs/<abi>/ by CI before this runs, and AGP
+// packages them as lib/<abi>/libmithril.so.
+plugins {
+    id "com.android.application"
+}
+
+android {
+    namespace "com.mithril.wrapper"
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.mithril.wrapper"
+        minSdk 29
+        targetSdk 34
+        versionCode 1
+        versionName "1.0"
+    }
+
+    // Only ship the ABIs we actually build. Anything absent from jniLibs is
+    // simply not packaged.
+    splits {
+        abi {
+            enable false
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+    }
+
+    packagingOptions {
+        // Keep the libraries uncompressed and page-aligned so the launcher can
+        // dlopen them straight from the installed APK path.
+        jniLibs {
+            useLegacyPackaging = false
+        }
+    }
+
+    lint {
+        abortOnError false
+        checkReleaseBuilds false
+    }
+}
+
+dependencies {}

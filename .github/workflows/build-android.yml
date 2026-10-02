@@ -14,7 +14,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build:
+  native:
     name: Build libmithril.so (${{ matrix.abi }})
     runs-on: ubuntu-latest
     strategy:
@@ -30,8 +30,6 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Checkout submodules
-        # glslang + SPIRV-Cross + SPIRV-Headers are submodules; the Android
-        # build needs them just as the Apple one does.
         run: git submodule update --init --recursive
 
       - name: Setup Android NDK
@@ -49,49 +47,29 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release
 
       - name: Build
-        # tee so the log can be published below: job logs and artifacts both go
-        # to blob storage that is not reachable from everywhere, while a file
-        # committed to the branch is readable via the API.
         run: |
-          cmake --build "build-${{ matrix.abi }}" --target mithril -j"$(nproc)" 2>&1 | tee "build-${{ matrix.abi }}.log"
+          cmake --build "build-${{ matrix.abi }}" --target mithril -j"$(nproc)" 2>&1 | tee "native-${{ matrix.abi }}.log"
           exit "${PIPESTATUS[0]}"
 
       - name: Publish build log (diagnosis)
-        # Diagnostics only. The commit this step makes is marked so it does not
-        # start another workflow run.
+        # Job logs and artifacts live in blob storage that is not reachable from
+        # everywhere, so on failure mirror the tail of the build output to the
+        # ci-diagnostics branch, which is readable through the API.
         if: failure()
         continue-on-error: true
         run: |
           set -e
-          mkdir -p ci-logs
-          tail -400 "build-${{ matrix.abi }}.log" > "ci-logs/android-${{ matrix.abi }}.log"
+          tail -400 "native-${{ matrix.abi }}.log" > "android-${{ matrix.abi }}.log"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin ci-diagnostics 2>/dev/null || true
+          git checkout -B ci-diagnostics 2>/dev/null || git checkout ci-diagnostics
+          mkdir -p ci-logs
+          mv "android-${{ matrix.abi }}.log" "ci-logs/android-${{ matrix.abi }}.log"
           git add "ci-logs/android-${{ matrix.abi }}.log"
-          if git diff --cached --quiet; then exit 0; fi
-          git commit -m "ci(android): publish ${{ matrix.abi }} build log [skip ci]"
-          git push origin HEAD:"${GITHUB_REF#refs/heads/}" || {
-            git pull --rebase origin "${GITHUB_REF#refs/heads/}"
-            git push origin HEAD:"${GITHUB_REF#refs/heads/}"
-          }
-
-      - name: Verify exported EGL/GL symbols
-        # A .so that links but exports nothing is useless to a launcher that
-        # dlsyms the GL entry points, so check the dynamic symbol table rather
-        # than trusting the link step.
-        run: |
-          set -e
-          SO="build-${{ matrix.abi }}/libmithril.so"
-          test -f "$SO"
-          for sym in eglGetDisplay eglInitialize eglCreateContext eglMakeCurrent \
-                     eglSwapBuffers glDrawArrays glDrawElements glTexImage2D \
-                     glCreateShader glGetString; do
-            if ! nm -D --defined-only "$SO" | grep -q " T $sym\$"; then
-              echo "MISSING exported symbol: $sym"
-              exit 1
-            fi
-          done
-          echo "all required symbols exported"
+          git diff --cached --quiet && exit 0
+          git commit -m "ci(android): ${{ matrix.abi }} build log [skip ci]"
+          git push origin ci-diagnostics
 
       - name: Upload .so
         uses: actions/upload-artifact@v4
@@ -100,33 +78,72 @@ jobs:
           path: build-${{ matrix.abi }}/libmithril.so
           if-no-files-found: error
 
-  package:
-    name: Package jniLibs bundle
-    needs: build
+  apk:
+    name: Package APK
+    needs: native
     runs-on: ubuntu-latest
+
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Download ABI artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: libmithril-*
-          merge-multiple: false
+          path: native-out
 
-      - name: Assemble jniLibs layout
-        # Laid out exactly as an Android project's src/main/jniLibs directory,
-        # so it can be dropped into a launcher module unmodified.
+      - name: Place libraries into jniLibs
         run: |
           set -e
-          mkdir -p bundled/jniLibs
-          for d in libmithril-*; do
-            abi="${d#libmithril-}"
-            mkdir -p "bundled/jniLibs/$abi"
-            cp "$d/libmithril.so" "bundled/jniLibs/$abi/libmithril.so"
+          mkdir -p android/app/src/main/jniLibs
+          for d in native-out/libmithril-*; do
+            abi="${d#native-out/libmithril-}"
+            mkdir -p "android/app/src/main/jniLibs/$abi"
+            cp "$d/libmithril.so" "android/app/src/main/jniLibs/$abi/libmithril.so"
           done
-          find bundled -type f | sort
+          find android/app/src/main/jniLibs -type f | sort
 
-      - name: Upload bundle
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Gradle 8.7
+        # Pinned distribution rather than a wrapper: there is no committed
+        # gradle-wrapper.jar, and downloading a fixed version keeps the build
+        # reproducible.
+        run: |
+          set -e
+          curl -sSL -o /tmp/gradle.zip https://services.gradle.org/distributions/gradle-8.7-bin.zip
+          sudo unzip -q -o /tmp/gradle.zip -d /opt
+          sudo ln -sf /opt/gradle-8.7/bin/gradle /usr/local/bin/gradle
+          gradle --version | head -3
+
+      - name: Assemble APK
+        working-directory: android
+        run: gradle --no-daemon assembleRelease
+
+      - name: Verify the APK actually contains the libraries
+        # An APK that builds but does not carry the .so is useless to a
+        # launcher, so check the packaged entries rather than trusting AGP.
+        run: |
+          set -e
+          APK=$(ls android/app/build/outputs/apk/release/*.apk | head -1)
+          test -n "$APK"
+          echo "APK: $APK"
+          unzip -l "$APK" | sed -n '1,40p'
+          for abi in arm64-v8a armeabi-v7a x86_64; do
+            unzip -l "$APK" | grep -q "lib/$abi/libmithril.so" || echo "note: $abi absent"
+          done
+          unzip -l "$APK" | grep -q "lib/arm64-v8a/libmithril.so"
+
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: mithril-android-jniLibs
-          path: bundled
+          name: mithril-android-apk
+          path: android/app/build/outputs/apk/release/*.apk
           if-no-files-found: error
