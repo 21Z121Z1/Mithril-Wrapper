@@ -57,6 +57,8 @@ jobs:
           exit "${PIPESTATUS[0]}"
 
       - name: Publish build log (diagnosis)
+        # Diagnostics only. The commit this step makes is marked so it does not
+        # start another workflow run.
         if: failure()
         continue-on-error: true
         run: |
