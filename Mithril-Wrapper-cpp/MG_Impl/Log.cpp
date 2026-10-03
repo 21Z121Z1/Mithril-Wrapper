@@ -56,6 +56,13 @@ void log_write(LogLevel level, const char* tag, const char* fmt, ...) {
 namespace {
 struct LogLevelInit {
     LogLevelInit() {
+        // Unbuffered. stderr is normally line-buffered on a tty and fully
+        // buffered otherwise; the launcher captures it through a pipe, so it
+        // is the latter. A SIGSEGV then discards everything written since the
+        // last flush, which routinely hides the last few hundred lines - the
+        // ones naming the call that actually crashed. Diagnostics that go
+        // missing exactly when they matter are worse than useless.
+        std::setvbuf(stderr, nullptr, _IONBF, 0);
         if (env_flag("MITHRIL_VERBOSE")) log_set_level(LogLevel::Verbose);
         else if (env_flag("MITHRIL_DEBUG")) log_set_level(LogLevel::Debug);
         else if (env_flag("MITHRIL_INFO")) log_set_level(LogLevel::Info);

@@ -763,6 +763,32 @@ bool init_device() {
     bool wantDebugUtils = has_extension(instExtProps, VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
     if (wantDebugUtils) instExts.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
 
+    // Android WSI, asked for even when the driver does not admit to it.
+    //
+    // A Mesa HAL module driven directly - Turnip being the case in point -
+    // reports its instance extensions as eight entries with no
+    // VK_KHR_surface and no VK_KHR_android_surface, while still exporting the
+    // WSI query commands (vkGetPhysicalDeviceSurfaceFormatsKHR and
+    // vkGetPhysicalDeviceSurfaceSupportKHR are both present in its dynamic
+    // table). That is not a contradiction: on Android those two instance
+    // extensions are supplied by the loader, which is why Zink and ANGLE only
+    // ever observe them through libvulkan.so. Driving the driver directly
+    // means inheriting the driver's list, and with it no way to make a
+    // presentable surface.
+    //
+    // So request them regardless. If they genuinely are not there,
+    // vkCreateInstance answers VK_ERROR_EXTENSION_NOT_PRESENT and the second
+    // variant below retries without them; nothing is lost by trying.
+    std::vector<const char*> instExtsWsi = instExts;
+#ifdef __ANDROID__
+    if (!has_extension(instExtProps, VK_KHR_SURFACE_EXTENSION_NAME)) {
+        instExtsWsi.push_back(VK_KHR_SURFACE_EXTENSION_NAME);
+    }
+    if (!has_extension(instExtProps, VK_KHR_ANDROID_SURFACE_EXTENSION_NAME)) {
+        instExtsWsi.push_back(VK_KHR_ANDROID_SURFACE_EXTENSION_NAME);
+    }
+#endif
+
     VkApplicationInfo appInfo{};
     appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
     appInfo.pApplicationName = "Mithril-Wrapper";
@@ -786,32 +812,40 @@ bool init_device() {
         VK_API_VERSION_1_1,
     };
     bool instanceCreated = false;
-    for (uint32_t level : kApiLevels) {
-        appInfo.apiVersion = level;
+    const std::vector<const char*>* const variants[] = { &instExtsWsi, &instExts };
+    const int variantCount = (instExtsWsi.size() != instExts.size()) ? 2 : 1;
+    for (int variant = 0; variant < variantCount && !instanceCreated; ++variant) {
+        const std::vector<const char*>& tryExts = *variants[variant];
+        for (uint32_t level : kApiLevels) {
+            appInfo.apiVersion = level;
 
-        VkInstanceCreateInfo instCI{};
-        instCI.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
-        instCI.pApplicationInfo = &appInfo;
-        instCI.enabledExtensionCount = (uint32_t)instExts.size();
-        instCI.ppEnabledExtensionNames = instExts.data();
-        // VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR is REQUIRED so
-        // vkEnumeratePhysicalDevices returns the MoltenVK ICD. It is only legal
-        // together with VK_KHR_portability_enumeration: setting the flag without
-        // the extension is invalid usage, and Android's loader has no such
-        // extension at all, so it must be conditional.
-        if (portabilityEnumeration) {
-            instCI.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
-        }
+            VkInstanceCreateInfo instCI{};
+            instCI.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+            instCI.pApplicationInfo = &appInfo;
+            instCI.enabledExtensionCount = (uint32_t)tryExts.size();
+            instCI.ppEnabledExtensionNames = tryExts.data();
+            // VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR is REQUIRED so
+            // vkEnumeratePhysicalDevices returns the MoltenVK ICD. It is only legal
+            // together with VK_KHR_portability_enumeration: setting the flag without
+            // the extension is invalid usage, and Android's loader has no such
+            // extension at all, so it must be conditional.
+            if (portabilityEnumeration) {
+                instCI.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+            }
 
-        if (vkCreateInstance(&instCI, nullptr, &b->instance) == VK_SUCCESS) {
-            b->instanceApiVersion = level;
-            instanceCreated = true;
-            MITHRIL_LOG_INFO("vk", "VkInstance created at apiVersion %u.%u",
+            if (vkCreateInstance(&instCI, nullptr, &b->instance) == VK_SUCCESS) {
+                b->instanceApiVersion = level;
+                instanceCreated = true;
+                MITHRIL_LOG_INFO("vk", "VkInstance created at apiVersion %u.%u",
+                                 VK_VERSION_MAJOR(level), VK_VERSION_MINOR(level));
+                break;
+            }
+            MITHRIL_LOG_WARN("vk", "vkCreateInstance failed at apiVersion %u.%u; stepping down",
                              VK_VERSION_MAJOR(level), VK_VERSION_MINOR(level));
-            break;
         }
-        MITHRIL_LOG_WARN("vk", "vkCreateInstance failed at apiVersion %u.%u; stepping down",
-                         VK_VERSION_MAJOR(level), VK_VERSION_MINOR(level));
+        if (!instanceCreated && variantCount == 2) {
+            MITHRIL_LOG_WARN("vk", "retrying vkCreateInstance without the WSI extensions");
+        }
     }
     if (!instanceCreated) {
         MITHRIL_LOG_ERROR("vk", "vkCreateInstance failed at every supported apiVersion");
@@ -854,6 +888,16 @@ bool init_device() {
             MITHRIL_LOG_WARN("vk", "  %s", e.extensionName);
         }
     }
+
+#ifdef __ANDROID__
+    // Whether presentation is possible at all is decided here, not at the
+    // first eglCreateWindowSurface: if this entrypoint is absent the swapchain
+    // can never be built, and the failure would otherwise surface much later
+    // as a crash on a null surface handle.
+    MITHRIL_LOG_INFO("vk", "vkCreateAndroidSurfaceKHR %s",
+                     vkGetInstanceProcAddr(b->instance, "vkCreateAndroidSurfaceKHR")
+                         ? "resolvable" : "NOT resolvable");
+#endif
 
     // ---- Physical device ----
     uint32_t gpuCount = 0;
@@ -1058,6 +1102,10 @@ bool init_device() {
     devExtProps.resize(devExtCount);
     vkEnumerateDeviceExtensionProperties(b->physicalDevice, nullptr, &devExtCount, devExtProps.data());
 
+    MITHRIL_LOG_INFO("vk", "device extensions: %u reported; swapchain=%s",
+                     devExtCount,
+                     has_extension(devExtProps, VK_KHR_SWAPCHAIN_EXTENSION_NAME)
+                         ? "yes" : "no");
     std::vector<const char*> devExts;
     if (has_extension(devExtProps, VK_KHR_SWAPCHAIN_EXTENSION_NAME)) {
         devExts.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
