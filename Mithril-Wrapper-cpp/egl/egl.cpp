@@ -416,12 +416,30 @@ EGLSurface eglCreatePbufferSurface(EGLDisplay dpy, EGLConfig config,
     clear_error();
     if (!valid_display(dpy)) { set_error(EGL_BAD_DISPLAY); return EGL_NO_SURFACE; }
     if (!valid_config(config)) { set_error(EGL_BAD_CONFIG); return EGL_NO_SURFACE; }
-    (void)attrib_list;
-    // PBuffers are not actively used by MC Java; return a no-op surface so
-    // EGL probes (LWJGL) succeed. We do not allocate a backing swapchain until
-    // the surface is actually rendered to.
+
+    // FCL deliberately switches to a 1x1 pbuffer while the Android
+    // ANativeWindow is being replaced. Even though Mithril currently treats a
+    // pbuffer as a headless/no-present surface, preserve its requested
+    // dimensions so eglQuerySurface reports the EGL contract instead of 0x0.
+    EGLint width = 0, height = 0;
+    if (attrib_list) {
+        for (const EGLint* a = attrib_list; *a != EGL_NONE; a += 2) {
+            switch (a[0]) {
+                case EGL_WIDTH:  width = a[1]; break;
+                case EGL_HEIGHT: height = a[1]; break;
+                default: break;
+            }
+        }
+    }
+    if (width < 0 || height < 0) {
+        set_error(EGL_BAD_PARAMETER);
+        return EGL_NO_SURFACE;
+    }
+
     EglSurface* s = new EglSurface{};
     s->config = config;
+    s->width = width;
+    s->height = height;
     return (EGLSurface)s;
 }
 
