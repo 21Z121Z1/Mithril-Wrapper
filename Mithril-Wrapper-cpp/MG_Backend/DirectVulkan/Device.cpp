@@ -973,28 +973,6 @@ bool init_device() {
                      (unsigned long long)(b->totalVramBytes / (1024*1024)),
                      (unsigned long long)(b->vramPressureThreshold / (1024*1024)));
 
-    // ---- Vulkan 1.3 command pointers ----
-    // Resolved from the device rather than linked: Android's libvulkan.so does
-    // not export these. Resolution is best-effort - a null pointer means the
-    // device does not have the command, and every call site is already gated on
-    // the matching feature flag, so nothing calls through a null pointer.
-    b->cmdSetCullMode               = vkGetDeviceProcAddr(b->device, "vkCmdSetCullMode");
-    b->cmdSetFrontFace              = vkGetDeviceProcAddr(b->device, "vkCmdSetFrontFace");
-    b->cmdSetDepthTestEnable        = vkGetDeviceProcAddr(b->device, "vkCmdSetDepthTestEnable");
-    b->cmdSetDepthWriteEnable       = vkGetDeviceProcAddr(b->device, "vkCmdSetDepthWriteEnable");
-    b->cmdSetDepthCompareOp         = vkGetDeviceProcAddr(b->device, "vkCmdSetDepthCompareOp");
-    b->cmdDrawIndirectCount         = vkGetDeviceProcAddr(b->device, "vkCmdDrawIndirectCount");
-    b->cmdDrawIndexedIndirectCount  = vkGetDeviceProcAddr(b->device, "vkCmdDrawIndexedIndirectCount");
-    // A device that advertises the feature but does not export the command would
-    // otherwise crash on the first call, so tie the flags to what resolved.
-    if (!b->cmdDrawIndirectCount || !b->cmdDrawIndexedIndirectCount) {
-        b->drawIndirectCountSupported = false;
-    }
-    if (!b->cmdSetCullMode || !b->cmdSetFrontFace || !b->cmdSetDepthTestEnable ||
-        !b->cmdSetDepthWriteEnable || !b->cmdSetDepthCompareOp) {
-        b->extendedDynamicStateSupported = false;
-    }
-
     // ---- Queue family ----
     uint32_t qfCount = 0;
     vkGetPhysicalDeviceQueueFamilyProperties(b->physicalDevice, &qfCount, nullptr);
@@ -1305,6 +1283,29 @@ bool init_device() {
         return false;
     }
     vkGetDeviceQueue(b->device, b->graphicsFamily, 0, &b->graphicsQueue);
+
+    // ---- Vulkan 1.3 command pointers ----
+    // Resolved from the device rather than linked: Android's libvulkan.so does
+    // not export these. Resolution is best-effort - a null pointer means the
+    // device does not have the command, and every call site is already gated on
+    // the matching feature flag, so nothing calls through a null pointer.
+    b->cmdSetCullMode               = vkGetDeviceProcAddr(b->device, "vkCmdSetCullMode");
+    b->cmdSetFrontFace              = vkGetDeviceProcAddr(b->device, "vkCmdSetFrontFace");
+    b->cmdSetDepthTestEnable        = vkGetDeviceProcAddr(b->device, "vkCmdSetDepthTestEnable");
+    b->cmdSetDepthWriteEnable       = vkGetDeviceProcAddr(b->device, "vkCmdSetDepthWriteEnable");
+    b->cmdSetDepthCompareOp         = vkGetDeviceProcAddr(b->device, "vkCmdSetDepthCompareOp");
+    b->cmdDrawIndirectCount         = vkGetDeviceProcAddr(b->device, "vkCmdDrawIndirectCount");
+    b->cmdDrawIndexedIndirectCount  = vkGetDeviceProcAddr(b->device, "vkCmdDrawIndexedIndirectCount");
+    // A device that advertises the feature but does not export the command would
+    // otherwise crash on the first call, so tie the flags to what resolved.
+    if (!b->cmdDrawIndirectCount || !b->cmdDrawIndexedIndirectCount) {
+        b->drawIndirectCountSupported = false;
+    }
+    if (!b->cmdSetCullMode || !b->cmdSetFrontFace || !b->cmdSetDepthTestEnable ||
+        !b->cmdSetDepthWriteEnable || !b->cmdSetDepthCompareOp) {
+        b->extendedDynamicStateSupported = false;
+    }
+
 
     // ---- Command pool + primary command buffer ----
     VkCommandPoolCreateInfo poolCI{};
