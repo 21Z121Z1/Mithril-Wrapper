@@ -275,6 +275,199 @@ struct android_namespace_t* make_escape_ns(const char* driver_dir) {
     return g_escape_ns;
 }
 
+// Dedicated loader namespace used only for the hook-mediated WSI route.
+//
+// FCL deliberately keeps the loader namespace isolated, preloads the global
+// hook into it, and only then links the namespace to the system/default view.
+// That ordering prevents an already-visible libdl/libvndksupport definition
+// from winning symbol lookup before the hook has entered the namespace's
+// global group.
+struct android_namespace_t* make_loader_ns(const char* hook_dir) {
+    if (g_loader_ns) return g_loader_ns;
+    init_namespace_escape();
+    if (!g_create_ns || !hook_dir || !hook_dir[0]) return nullptr;
+
+    static char paths[1024];
+    snprintf(paths, sizeof(paths), "%s:%s:%s:%s:%s",
+             hook_dir, kSystemLibDir, kVendorLibDir,
+             kSystemExtLibDir, kRuntimeBionicDir);
+
+    g_loader_ns = g_create_ns(
+        "mithril-vulkan-loader",
+        paths,
+        paths,
+        MITHRIL_NS_TYPE_SHARED_ISOLATED,
+        paths,
+        nullptr,
+        reinterpret_cast<void*>(&dlopen));
+
+    if (!g_loader_ns) {
+        fprintf(stderr, "[mithril] vk-dispatch: loader namespace creation failed\n");
+        return nullptr;
+    }
+
+    fprintf(stderr,
+            "[mithril] vk-dispatch: isolated loader namespace created (paths=%s)\n",
+            paths);
+    return g_loader_ns;
+}
+
+// Copy the platform loader to a private file and alter the first three bytes
+// of DT_SONAME. Android caches DSOs by identity/SONAME across linked
+// namespaces; a FORCE_LOAD request is not as strong an isolation guarantee as
+// a unique SONAME. FCL and liblinkernsbypass both use this technique before
+// loading libvulkan.so under the hook.
+bool patch_loader_soname(const char* source_path, int target_fd, uint16_t patch_id) {
+    int source_fd = open(source_path, O_RDONLY | O_CLOEXEC);
+    if (source_fd < 0) return false;
+
+    struct stat st{};
+    if (fstat(source_fd, &st) != 0 || st.st_size <= 0 ||
+        ftruncate(target_fd, st.st_size) != 0) {
+        close(source_fd);
+        return false;
+    }
+
+    void* mapped = mmap(nullptr, static_cast<size_t>(st.st_size),
+                        PROT_READ | PROT_WRITE, MAP_SHARED, target_fd, 0);
+    if (mapped == MAP_FAILED) {
+        close(source_fd);
+        return false;
+    }
+
+    char* dst = static_cast<char*>(mapped);
+    ssize_t done = 0;
+    while (done < st.st_size) {
+        const ssize_t rc = read(source_fd, dst + done,
+                                static_cast<size_t>(st.st_size - done));
+        if (rc <= 0) {
+            munmap(mapped, static_cast<size_t>(st.st_size));
+            close(source_fd);
+            return false;
+        }
+        done += rc;
+    }
+    close(source_fd);
+
+    bool patched = false;
+    auto* ehdr = reinterpret_cast<ElfW(Ehdr)*>(mapped);
+    const size_t file_size = static_cast<size_t>(st.st_size);
+    if (file_size >= sizeof(*ehdr) &&
+        std::memcmp(ehdr->e_ident, ELFMAG, SELFMAG) == 0 &&
+        ehdr->e_shentsize == sizeof(ElfW(Shdr)) &&
+        ehdr->e_shoff <= file_size &&
+        static_cast<size_t>(ehdr->e_shnum) <=
+            (file_size - static_cast<size_t>(ehdr->e_shoff)) / sizeof(ElfW(Shdr))) {
+        auto* shdrs = reinterpret_cast<ElfW(Shdr)*>(
+            dst + static_cast<size_t>(ehdr->e_shoff));
+
+        for (ElfW(Half) i = 0; i < ehdr->e_shnum && !patched; ++i) {
+            const auto& dynsec = shdrs[i];
+            if (dynsec.sh_type != SHT_DYNAMIC || dynsec.sh_entsize == 0 ||
+                dynsec.sh_link >= ehdr->e_shnum ||
+                dynsec.sh_offset > file_size ||
+                dynsec.sh_size > file_size - static_cast<size_t>(dynsec.sh_offset)) {
+                continue;
+            }
+
+            const auto& strsec = shdrs[dynsec.sh_link];
+            if (strsec.sh_offset > file_size ||
+                strsec.sh_size > file_size - static_cast<size_t>(strsec.sh_offset)) {
+                continue;
+            }
+
+            char* strtab = dst + static_cast<size_t>(strsec.sh_offset);
+            auto* dyn = reinterpret_cast<ElfW(Dyn)*>(
+                dst + static_cast<size_t>(dynsec.sh_offset));
+            const size_t count =
+                static_cast<size_t>(dynsec.sh_size / dynsec.sh_entsize);
+
+            for (size_t k = 0; k < count; ++k) {
+                if (dyn[k].d_tag != DT_SONAME) continue;
+                const size_t off = static_cast<size_t>(dyn[k].d_un.d_val);
+                if (off >= strsec.sh_size) break;
+                char* soname = strtab + off;
+                const size_t remain = static_cast<size_t>(strsec.sh_size) - off;
+                const size_t len = strnlen(soname, remain);
+                if (len < 3 || len == remain) break;
+
+                char patch[4]{};
+                snprintf(patch, sizeof(patch), "%03x", patch_id & 0x0fff);
+                std::memcpy(soname, patch, 3);
+                patched = true;
+                break;
+            }
+        }
+    }
+
+    if (patched) msync(mapped, file_size, MS_SYNC);
+    munmap(mapped, file_size);
+    return patched;
+}
+
+void* load_unique_platform_loader(struct android_namespace_t* ns,
+                                  const char* source_path) {
+    if (!ns || !source_path || !source_path[0]) return nullptr;
+
+    const char* tmpdir = getenv("TMPDIR");
+    if (!tmpdir || !tmpdir[0]) {
+        fprintf(stderr,
+                "[mithril] vk-dispatch: TMPDIR unavailable; cannot create unique libvulkan copy\n");
+        return nullptr;
+    }
+
+    static uint16_t patch_id = 0;
+    char patched_path[PATH_MAX]{};
+    snprintf(patched_path, sizeof(patched_path),
+             "%s/mithril-vulkan-%d-%03x.so",
+             tmpdir, static_cast<int>(getpid()), patch_id & 0x0fff);
+
+    int fd = open(patched_path,
+                  O_CREAT | O_TRUNC | O_RDWR | O_CLOEXEC,
+                  S_IRUSR | S_IWUSR);
+    if (fd < 0) {
+        fprintf(stderr,
+                "[mithril] vk-dispatch: cannot create patched loader %s: %s\n",
+                patched_path, strerror(errno));
+        return nullptr;
+    }
+
+    const uint16_t this_id = patch_id++;
+    if (!patch_loader_soname(source_path, fd, this_id)) {
+        fprintf(stderr,
+                "[mithril] vk-dispatch: failed to patch loader SONAME: %s\n",
+                source_path);
+        close(fd);
+        unlink(patched_path);
+        return nullptr;
+    }
+
+    android_dlextinfo ext{};
+    ext.flags = ANDROID_DLEXT_USE_NAMESPACE | ANDROID_DLEXT_USE_LIBRARY_FD;
+    ext.library_fd = fd;
+    ext.library_namespace = ns;
+
+    char proc_path[64]{};
+    snprintf(proc_path, sizeof(proc_path), "/proc/self/fd/%d", fd);
+    void* handle = android_dlopen_ext(
+        proc_path, RTLD_LOCAL | RTLD_NOW, &ext);
+
+    const char* err = handle ? nullptr : dlerror();
+    close(fd);
+    unlink(patched_path);
+
+    if (handle) {
+        fprintf(stderr,
+                "[mithril] vk-dispatch: unique platform loader mapped under hook: %s (patch=%03x)\n",
+                source_path, this_id & 0x0fff);
+    } else {
+        fprintf(stderr,
+                "[mithril] vk-dispatch: unique loader map failed for %s: %s\n",
+                source_path, err ? err : "unknown");
+    }
+    return handle;
+}
+
 // The direct-HAL fallback still benefits from having the stock loader's
 // system dependencies registered by SONAME in the escape namespace. This
 // MUST NOT run before try_hook_route(): loading libvulkan.so first resolves
