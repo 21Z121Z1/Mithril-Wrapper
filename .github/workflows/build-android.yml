@@ -115,7 +115,15 @@ jobs:
             echo "::error::libmithril_vkhook.so needs libc++_shared.so, which the APK does not package"
             exit 1
           fi
-          "$READELF" -Ws "$HOOK" | grep -q ' mithril_vkhook_init
+          "$READELF" -Ws "$HOOK" | grep -q "mithril_vkhook_init"
+          "$READELF" -Ws "$HOOK" | grep -q "mithril_vkhook_redirects"
+          "$READELF" -Ws "$HOOK" | grep -q "android_dlopen_ext"
+          "$READELF" -Ws "$HOOK" | grep -q "android_load_sphal_library"
+          if ! grep -Eq "FLAGS_1.*GLOBAL|Flags:.*GLOBAL" "needed-hook-${{ matrix.abi }}.log"; then
+            echo "::error::libmithril_vkhook.so is missing DF_1_GLOBAL (-z global); loader interposition is not reliable"
+            exit 1
+          fi
+
       - name: Upload native diagnostics
         if: always()
         uses: actions/upload-artifact@v4
