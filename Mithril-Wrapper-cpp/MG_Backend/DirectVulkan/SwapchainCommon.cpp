@@ -320,9 +320,11 @@ void destroy_swapchain(Swapchain* sc) {
     vkDeviceWaitIdle(b->device);
 #if defined(__ANDROID__)
     // Offscreen images and staging buffers are ours, not the swapchain's.
+    // swapchain_offscreen_destroy() already destroys every owned VkImage and
+    // frees its bound memory. Do not destroy sc->images a second time here:
+    // those handles alias Offscreen::ownedImages on this path.
     if (sc->offscreen) {
         swapchain_offscreen_destroy(sc);
-        for (auto img : sc->images) if (img) vkDestroyImage(b->device, img, nullptr);
     }
 #endif
     if (sc->depthView)   { vkDestroyImageView(b->device, sc->depthView, nullptr); sc->depthView = VK_NULL_HANDLE; }
