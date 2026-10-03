@@ -63,13 +63,24 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git fetch origin ci-diagnostics 2>/dev/null || true
-          git checkout -B ci-diagnostics 2>/dev/null || git checkout ci-diagnostics
+          # Base the branch on the REMOTE ref, not on the feature HEAD: the
+          # remote branch has unrelated history, so a branch made from HEAD
+          # cannot be pushed without forcing, and an earlier attempt lost the
+          # log silently for exactly that reason.
+          git checkout -B ci-diagnostics origin/ci-diagnostics 2>/dev/null \
+            || git checkout -B ci-diagnostics
           mkdir -p ci-logs
           mv "android-${{ matrix.abi }}.log" "ci-logs/android-${{ matrix.abi }}.log"
           git add "ci-logs/android-${{ matrix.abi }}.log"
           git diff --cached --quiet && exit 0
           git commit -m "ci(android): ${{ matrix.abi }} build log [skip ci]"
-          git push origin ci-diagnostics
+          # The three ABI jobs share this branch and can race; retry rather
+          # than let one of them silently drop its log.
+          for i in 1 2 3; do
+            git pull --rebase origin ci-diagnostics 2>/dev/null || true
+            git push -f origin ci-diagnostics && break
+            sleep 5
+          done
 
       - name: Upload .so
         uses: actions/upload-artifact@v4
