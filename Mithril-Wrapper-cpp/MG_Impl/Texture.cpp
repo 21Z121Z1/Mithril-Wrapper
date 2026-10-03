@@ -13,7 +13,11 @@
 // legacy flat boundTextures[] / boundTextureTargets[] arrays are gone.
 #include "includes.h"
 #include "../MG_Backend/DirectVulkan/FormatMap.h"
+// <execinfo.h> is glibc/Apple-only and this TU never calls backtrace();
+// it was included for a dump that no longer exists.
+#if (defined(__GLIBC__) && defined(__GLIBC_MINOR__)) || defined(__APPLE__)
 #include <execinfo.h>
+#endif
 #include <stdio.h>
 
 #include <cstdint>

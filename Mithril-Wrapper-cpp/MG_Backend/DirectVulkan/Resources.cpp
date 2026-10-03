@@ -1408,9 +1408,14 @@ void* backend_get_buffer_mapped_pointer(GLuint name) {
     return it->second.persistentlyMapped ? it->second.mapped : nullptr;
 }
 
-int backend_copy_buffer_gpu(GLuint srcName, GLuint dstName,
-                             VkDeviceSize srcOff, VkDeviceSize dstOff,
-                             VkDeviceSize size) {
+// Signatures match Backend.h exactly rather than spelling the sizes as
+// VkDeviceSize. On Apple uint64_t IS unsigned long long so the two agreed by
+// accident; on LP64 Linux/Android uint64_t is unsigned long, a distinct type,
+// and the pair became conflicting declarations. Use the declared types and
+// convert once, here.
+int backend_copy_buffer_gpu(unsigned int srcName, unsigned int dstName,
+                             unsigned long long srcOff, unsigned long long dstOff,
+                             unsigned long long size) {
     mithril::vk::Backend* b = mithril::vk::backend();
     if (!b->initialized || size == 0) return 0;
     auto& tbl = mithril::vk::buffer_table();
@@ -1454,8 +1459,8 @@ int backend_copy_buffer_gpu(GLuint srcName, GLuint dstName,
     return 1;
 }
 
-int backend_read_buffer_host(GLuint name, VkDeviceSize offset, VkDeviceSize size,
-                             void* dst) {
+int backend_read_buffer_host(unsigned int name, unsigned long long offset,
+                             unsigned long long size, void* dst) {
     auto& tbl = mithril::vk::buffer_table();
     auto it = tbl.find(name);
     if (it == tbl.end()) return 0;

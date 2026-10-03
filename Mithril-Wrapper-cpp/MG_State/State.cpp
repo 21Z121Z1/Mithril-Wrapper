@@ -3,12 +3,19 @@
 // See State.h header comment and specs/rewrite-gl-state-machine/spec.md
 // for design rationale.
 #include "State.h"
-#include <execinfo.h>
 #include <cstdlib>
 #include <dlfcn.h>
 #include <cstring>
+// <mach-o/dyld.h> is Apple-only: the dyld image walk below uses it to turn a
+// return address into a file offset for objdump. Off Apple there is no dyld, so
+// the walk is compiled out and the diagnostic falls back to dladdr() only.
+#if defined(__APPLE__)
 #include <mach-o/dyld.h>
 #include <mach-o/loader.h>
+#define MITHRIL_HAS_DYLD 1
+#else
+#define MITHRIL_HAS_DYLD 0
+#endif
 
 namespace mithril {
 
@@ -444,6 +451,7 @@ void state_set_error(GLenum err) {
         // caller as a FILE offset (ra - base) usable against `objdump -d`.
         // Find the image whose loaded __TEXT range actually contains the
         // immediate return address (name matching can hit the wrong image).
+#if MITHRIL_HAS_DYLD
         uintptr_t selfBase = 0;
         auto textRange = [](const mach_header* mh, uintptr_t& outSize) -> bool {
             outSize = 0;
@@ -486,6 +494,11 @@ void state_set_error(GLenum err) {
                 selfBase = base; break;
             }
         }
+#else
+        // No dyld off Apple, so no load base to subtract; dladdr() below still reports the symbol name.
+        uintptr_t selfBase = 0;
+#endif
+
         auto reportRa = [&](int i, void* ra) {
             if (!ra) return;
             uintptr_t a = (uintptr_t)ra;
