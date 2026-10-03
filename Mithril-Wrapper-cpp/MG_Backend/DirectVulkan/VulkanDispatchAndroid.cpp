@@ -1246,12 +1246,24 @@ void note_instance(VkInstance inst) {
     fprintf(stderr, "[mithril] vk-dispatch: instance created (gipa=%s gdpa=%s)\n",
             g_gipa ? "yes" : "no", g_gdpa ? "yes" : "no");
     if (g_hook_active) {
+        const int intercepts = g_hook_intercept_count ? g_hook_intercept_count() : -1;
         const int redirects = g_hook_redirect_count ? g_hook_redirect_count() : -1;
         if (redirects > 0) {
-            fprintf(stderr, "[mithril] vk-dispatch: hook verified at runtime (%d Vulkan HAL redirect%s)\n",
-                    redirects, redirects == 1 ? "" : "s");
+            fprintf(stderr,
+                    "[mithril] vk-dispatch: hook verified at runtime "
+                    "(intercepts=%d redirects=%d)\n",
+                    intercepts, redirects);
+        } else if (intercepts > 0) {
+            fprintf(stderr,
+                    "[mithril] vk-dispatch: ERROR hook intercepted Vulkan HAL "
+                    "load but Turnip redirect failed (intercepts=%d redirects=%d)\n",
+                    intercepts, redirects);
         } else {
-            fprintf(stderr, "[mithril] vk-dispatch: WARNING hook loader is active but no Vulkan HAL redirect was observed\n");
+            fprintf(stderr,
+                    "[mithril] vk-dispatch: ERROR hook interposition missed: "
+                    "unique libvulkan never called our HAL hooks "
+                    "(intercepts=%d redirects=%d)\n",
+                    intercepts, redirects);
         }
     }
 }
