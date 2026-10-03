@@ -50,6 +50,12 @@ val pluginRendererConfig = buildJsonValue {
         rendererEGLPath = nativePath("libmithril.so"),
         dlopenLibPaths = emptyList(),
         env = buildEnvs {
+            // FCL's native GL bridge parses LIBGL_ES unconditionally when it
+            // creates the EGL context. Keep this explicit just like MobileGL:
+            // without it getenv("LIBGL_ES") can be null before strtol(), and
+            // the requested EGL_CONTEXT_CLIENT_VERSION is undefined.
+            normal("LIBGL_ES", "3")
+
             // Escape hatch for the GL level: Mithril advertises 4.6, but a
             // device that hits an unimplemented path can be dropped to 3.3
             // without rebuilding.
@@ -108,9 +114,11 @@ android {
             maxMCVer = ""
             boatEnv {
                 put("POJAV_RENDERER", "opengles3")
+                put("LIBGL_ES", "3")
             }
             pojavEnv {
                 put("POJAV_RENDERER", "opengles3")
+                put("LIBGL_ES", "3")
             }
         })
         manifestPlaceholders["appLabel"] = "Mithril-Wrapper"
