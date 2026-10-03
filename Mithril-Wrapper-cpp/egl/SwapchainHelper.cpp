@@ -202,8 +202,13 @@ void install_surface_on_state(EglSurface* s, bool is_current) {
         g_state->eglDefaultColorFormat = VK_FORMAT_UNDEFINED;
         g_state->eglDefaultDepthImage  = VK_NULL_HANDLE;
         g_state->eglDefaultDepthFormat = VK_FORMAT_UNDEFINED;
-        g_state->eglDefaultWidth  = 0;
-        g_state->eglDefaultHeight = 0;
+        // A pbuffer has no native swapchain in Mithril yet, but it still has
+        // EGL geometry. FCL intentionally makes a 1x1 pbuffer current while
+        // the Android window is being replaced; preserve that 1x1 drawable
+        // size instead of collapsing the default framebuffer viewport to 0x0.
+        // A truly surfaceless current state (s == nullptr) remains 0x0.
+        g_state->eglDefaultWidth  = s ? s->width : 0;
+        g_state->eglDefaultHeight = s ? s->height : 0;
         // Detach the swapchain from the encoder so a headless / surfaceless
         // frame (or a frame against a user FBO) does not try to record layout
         // barriers against a destroyed swapchain.
