@@ -794,15 +794,34 @@ EGLBoolean eglWaitGL(void) {
 }
 EGLBoolean eglWaitNative(EGLint) { return EGL_TRUE; }
 
+// Defined at the bottom of this file, after every EGL entry point it names.
+static void* egl_lookup_entry(const char* name);
+
 // ---- Extension function resolution ----
-// eglGetProcAddress delegates to glXGetProcAddress which resolves symbols from
+// eglGetProcAddress resolves EGL names from a static table and GL names through
+// glXGetProcAddress; see the comment in its body.
 // this dylib's export table. LWJGL/GLFW use this to obtain GL function pointers.
 // Any GL Core Profile entry point we export is returned; unknown names return
 // NULL (per EGL spec).
 void (*eglGetProcAddress(const char* procname))(void) {
     clear_error();
     if (!procname) return nullptr;
-    // Delegate to glXGetProcAddress (same symbol resolution mechanism).
+    // EGL names are answered from a static table below, never through dlsym.
+    // MobileGlues' egl.cpp documents exactly why, and the Android launcher hit
+    // it: forwarding everything to glXGetProcAddress meant dlsym(RTLD_DEFAULT,
+    // ...) which is answered by the system libEGL (or by nothing at all) before
+    // it ever reaches this layer. FCL loads the renderer with RTLD_LOCAL, so
+    // RTLD_DEFAULT cannot see our exports either -- dlsym returned NULL for
+    // every egl* name, the launcher stored those NULLs as function pointers and
+    // called one, which is the SIGSEGV at pc=0x0 in pojavInitOpenGL.
+    //
+    // A static table also keeps every EGL call inside this layer, so the
+    // context records, virtual attributes and surface bookkeeping stay
+    // consistent. Letting a system libEGL answer would hand out handles that
+    // belong to a different EGL implementation.
+    void* e = egl_lookup_entry(procname);
+    if (e) return (void(*)(void))e;
+    // GL names still go through glXGetProcAddress (multi-draw name mangling).
     extern void* glXGetProcAddress(const char*);
     return (void(*)(void))glXGetProcAddress(procname);
 }
@@ -1070,6 +1089,64 @@ EGLSurface eglCreatePbufferFromClientBuffer(EGLDisplay dpy, EGLenum buftype,
 
 EGLenum eglQueryAPI(void) {
     return t_boundAPI;  // defaults to EGL_OPENGL_ES_API per EGL 1.5 spec
+}
+
+// Static EGL dispatch table, mirroring MobileGlues egl.cpp's k_egl_entries.
+// eglGetProcAddress consults this instead of dlsym, so every EGL name resolves
+// to this layer even when the host loaded us with RTLD_LOCAL (Android) or when
+// a system libEGL would otherwise win an RTLD_DEFAULT lookup.
+static void* egl_lookup_entry(const char* name) {
+    if (!name) return nullptr;
+    struct egl_entry_t { const char* name; void* fn; };
+    static const egl_entry_t k_entries[] = {
+        {"eglBindAPI", (void*)eglBindAPI},
+        {"eglBindTexImage", (void*)eglBindTexImage},
+        {"eglChooseConfig", (void*)eglChooseConfig},
+        {"eglClientWaitSync", (void*)eglClientWaitSync},
+        {"eglCopyBuffers", (void*)eglCopyBuffers},
+        {"eglCreateContext", (void*)eglCreateContext},
+        {"eglCreateImage", (void*)eglCreateImage},
+        {"eglCreatePbufferFromClientBuffer", (void*)eglCreatePbufferFromClientBuffer},
+        {"eglCreatePbufferSurface", (void*)eglCreatePbufferSurface},
+        {"eglCreatePixmapSurface", (void*)eglCreatePixmapSurface},
+        {"eglCreatePlatformPixmapSurface", (void*)eglCreatePlatformPixmapSurface},
+        {"eglCreatePlatformWindowSurface", (void*)eglCreatePlatformWindowSurface},
+        {"eglCreateSync", (void*)eglCreateSync},
+        {"eglCreateWindowSurface", (void*)eglCreateWindowSurface},
+        {"eglDestroyContext", (void*)eglDestroyContext},
+        {"eglDestroyImage", (void*)eglDestroyImage},
+        {"eglDestroySurface", (void*)eglDestroySurface},
+        {"eglDestroySync", (void*)eglDestroySync},
+        {"eglGetConfigAttrib", (void*)eglGetConfigAttrib},
+        {"eglGetConfigs", (void*)eglGetConfigs},
+        {"eglGetCurrentContext", (void*)eglGetCurrentContext},
+        {"eglGetCurrentDisplay", (void*)eglGetCurrentDisplay},
+        {"eglGetCurrentSurface", (void*)eglGetCurrentSurface},
+        {"eglGetDisplay", (void*)eglGetDisplay},
+        {"eglGetError", (void*)eglGetError},
+        {"eglGetPlatformDisplay", (void*)eglGetPlatformDisplay},
+        {"eglGetProcAddress", (void*)eglGetProcAddress},
+        {"eglGetSyncAttrib", (void*)eglGetSyncAttrib},
+        {"eglInitialize", (void*)eglInitialize},
+        {"eglMakeCurrent", (void*)eglMakeCurrent},
+        {"eglQueryAPI", (void*)eglQueryAPI},
+        {"eglQueryContext", (void*)eglQueryContext},
+        {"eglQueryString", (void*)eglQueryString},
+        {"eglQuerySurface", (void*)eglQuerySurface},
+        {"eglReleaseTexImage", (void*)eglReleaseTexImage},
+        {"eglReleaseThread", (void*)eglReleaseThread},
+        {"eglSurfaceAttrib", (void*)eglSurfaceAttrib},
+        {"eglSwapBuffers", (void*)eglSwapBuffers},
+        {"eglSwapInterval", (void*)eglSwapInterval},
+        {"eglTerminate", (void*)eglTerminate},
+        {"eglWaitClient", (void*)eglWaitClient},
+        {"eglWaitGL", (void*)eglWaitGL},
+        {"eglWaitNative", (void*)eglWaitNative},
+        {"eglWaitSync", (void*)eglWaitSync},
+    };
+    for (const auto& e : k_entries)
+        if (std::strcmp(name, e.name) == 0) return e.fn;
+    return nullptr;
 }
 
 } // extern "C"

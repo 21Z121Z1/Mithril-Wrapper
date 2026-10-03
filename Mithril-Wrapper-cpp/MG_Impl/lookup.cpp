@@ -27,8 +27,23 @@ extern "C" {
  */
 static void* lookup_symbol(const char* name) {
     if (!name) return nullptr;
+    // Resolve against the image that owns this resolver, on every platform.
+    //
+    // The non-Apple branch used to be dlsym(RTLD_DEFAULT, name). RTLD_DEFAULT
+    // only searches the GLOBAL scope, and hosts do not load this library
+    // globally: FCL opens the renderer with RTLD_LOCAL (egl_loader.c's
+    // loader_dlopen(..., RTLD_LOCAL|RTLD_LAZY)), so every lookup returned NULL.
+    // The launcher stored those NULLs and called through one - SIGSEGV at
+    // pc=0x0 inside pojavInitOpenGL.
+    //
+    // RTLD_DEFAULT is also unsafe even when something resolves: a same-named
+    // system symbol (the platform's libEGL/libGLESv2) can win the lookup and
+    // hand the caller an implementation that bypasses this layer entirely.
+    //
+    // dladdr on this function gives the path of the image it lives in; dlopen of
+    // that path returns a handle to the already-loaded image, whose scope does
+    // contain our exports. This is what the Apple branch already did.
     void* p = nullptr;
-#if defined(__APPLE__)
     static void* selfHandle = []() -> void* {
         Dl_info info = {};
         const void* resolver = reinterpret_cast<const void*>(
@@ -36,8 +51,14 @@ static void* lookup_symbol(const char* name) {
         if (!dladdr(resolver, &info) || !info.dli_fname) return nullptr;
         return dlopen(info.dli_fname, RTLD_NOW | RTLD_LOCAL);
     }();
-    if (selfHandle) p = dlsym(selfHandle, name);
-#else
+    if (selfHandle) {
+        p = dlsym(selfHandle, name);
+        if (p) return p;
+    }
+#if !defined(__APPLE__)
+    // Last resort on platforms that already have us in the global scope
+    // (some desktop hosts dlopen with RTLD_GLOBAL). Same hazard as above, so it
+    // stays strictly after the ownership-preserving lookup.
     p = dlsym(RTLD_DEFAULT, name);
 #endif
     if (p) return p;
