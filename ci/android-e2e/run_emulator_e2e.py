@@ -15,22 +15,29 @@ PKG = "com.mithril.wrapper.e2e"
 ACTIVITY = f"{PKG}/.E2EActivity"
 
 
-def run(args, *, check=True, text=True, timeout=None):
-    p = subprocess.run(
-        args,
-        check=False,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=text,
-        timeout=timeout,
-    )
+def run(args, *, check=True, text=True, timeout=20):
+    try:
+        p = subprocess.run(
+            args,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=text,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        out = exc.stdout or ("" if text else b"")
+        if not text and isinstance(out, bytes):
+            out = out.decode("utf-8", "replace")
+        raise RuntimeError(
+            f"command timed out after {timeout}s: {args}\n{out}") from exc
     if check and p.returncode != 0:
         output = p.stdout if text else p.stdout.decode("utf-8", "replace")
         raise RuntimeError(f"command failed rc={p.returncode}: {args}\n{output}")
     return p
 
 
-def adb(*args, check=True, text=True, timeout=None):
+def adb(*args, check=True, text=True, timeout=20):
     return run(["adb", *args], check=check, text=text, timeout=timeout)
 
 
@@ -52,7 +59,7 @@ def capture_binary(name, *args):
 
 def pull_run_as(remote_name, local_name):
     p = adb("exec-out", "run-as", PKG, "cat", f"files/{remote_name}",
-            check=False, text=False)
+            check=False, text=False, timeout=5)
     if p.returncode != 0 or not p.stdout:
         raise RuntimeError(f"unable to read app-private {remote_name}")
     (ROOT / local_name).write_bytes(p.stdout)
@@ -162,6 +169,7 @@ def run_mode(mode):
         "-n", ACTIVITY,
         "--es", "mode", mode,
         check=False,
+        timeout=15,
     )
     write_text(f"am-start-{mode}.txt", start.stdout)
     if start.returncode != 0:
@@ -171,7 +179,7 @@ def run_mode(mode):
     deadline = time.monotonic() + 120
     while time.monotonic() < deadline:
         p = adb("exec-out", "run-as", PKG, "cat",
-                f"files/{result_name}", check=False, text=False)
+                f"files/{result_name}", check=False, text=False, timeout=3)
         if p.returncode == 0 and b'"status"' in p.stdout:
             result_bytes = p.stdout
             break
@@ -181,6 +189,14 @@ def run_mode(mode):
     capture_text(f"gfxinfo-{mode}.txt", "shell", "dumpsys", "gfxinfo", PKG)
     capture_text(f"surface-list-{mode}.txt",
                  "shell", "dumpsys", "SurfaceFlinger", "--list")
+    capture_text(f"process-{mode}.txt",
+                 "shell", "sh", "-c",
+                 f"pidof {PKG} || true; ps -A | grep -E 'mithril|{PKG}' || true")
+    capture_text(f"activity-{mode}.txt",
+                 "shell", "dumpsys", "activity", "activities")
+    capture_text(f"tombstones-{mode}.txt",
+                 "shell", "sh", "-c",
+                 "ls -lt /data/tombstones 2>/dev/null | head -20 || true")
     capture_binary(f"screenshot-{mode}.png", "exec-out", "screencap", "-p")
 
     if result_bytes is None:
