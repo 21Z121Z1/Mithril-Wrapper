@@ -507,30 +507,47 @@ EGLContext eglCreateContext(EGLDisplay dpy, EGLConfig config,
     fprintf(stderr,"[NEWCTX] ctx=%p state=%p share=%p\n",(void*)ctx,(void*)ctx->state,(void*)share_context);
     ctx->config = config;
     ctx->clientAPI = t_boundAPI;
+    // Keep EGL's context-version metadata internally coherent. FCL binds
+    // EGL_OPENGL_ES_API and requests EGL_CONTEXT_CLIENT_VERSION=3; leaving the
+    // generic desktop default minor=3 produced a fictional "ES 3.3" context.
+    // The GL frontend's advertised desktop version is controlled separately by
+    // MITHRIL_GL_VERSION and is not derived from these EGL query fields.
     ctx->majorVer = 3;
-    ctx->minorVer = 3;
+    ctx->minorVer = (ctx->clientAPI == EGL_OPENGL_ES_API) ? 0 : 3;
 
-    // Parse context attributes (EGL_CONTEXT_MAJOR_VERSION / _CLIENT_VERSION /
-    // _MINOR_VERSION / _FLAGS_KHR / _OPENGL_PROFILE_MASK). We are an OpenGL
-    // 3.3 Core Profile implementation, so we honor 3.3 / 4.x requests by
-    // clamping to 3.3 (the highest Core Profile version Mithril speaks).
     if (attrib_list) {
         for (const EGLint* a = attrib_list; *a != EGL_NONE; a += 2) {
             EGLint name = a[0], value = a[1];
-            if (name == EGL_CONTEXT_MAJOR_VERSION || name == EGL_CONTEXT_CLIENT_VERSION) {
+            // EGL_CONTEXT_CLIENT_VERSION is the same numeric token as
+            // EGL_CONTEXT_MAJOR_VERSION. Treat it as the requested major for
+            // whichever API was bound at context creation.
+            if (name == EGL_CONTEXT_MAJOR_VERSION) {
                 ctx->majorVer = value;
+                if (ctx->clientAPI == EGL_OPENGL_ES_API) ctx->minorVer = 0;
             } else if (name == EGL_CONTEXT_MINOR_VERSION) {
                 ctx->minorVer = value;
             } else if (name == EGL_CONTEXT_OPENGL_PROFILE_MASK) {
-                // We always report Core Profile; Compatibility is silently
-                // honoured because our entry points don't differ.
+                // We expose one GL frontend; profile selection does not change
+                // entry-point dispatch today.
             } else if (name == EGL_CONTEXT_FLAGS_KHR) {
-                // No-op: we don't expose debug/robustness yet.
+                // No-op: debug/robustness flags are not implemented yet.
             }
         }
     }
-    if (ctx->majorVer > 3 || (ctx->majorVer == 3 && ctx->minorVer > 3)) {
-        ctx->majorVer = 3; ctx->minorVer = 3;
+
+    if (ctx->clientAPI == EGL_OPENGL_ES_API) {
+        // EGL may request ES 2 or ES 3. Mithril services both through the same
+        // frontend; keep query metadata within real GLES version bounds.
+        if (ctx->majorVer < 2) ctx->majorVer = 2;
+        if (ctx->majorVer > 3) ctx->majorVer = 3;
+        if (ctx->majorVer < 3) ctx->minorVer = 0;
+        if (ctx->majorVer == 3 && ctx->minorVer > 2) ctx->minorVer = 2;
+        if (ctx->minorVer < 0) ctx->minorVer = 0;
+    } else {
+        if (ctx->majorVer > 3 || (ctx->majorVer == 3 && ctx->minorVer > 3)) {
+            ctx->majorVer = 3;
+            ctx->minorVer = 3;
+        }
     }
 
     if (share_context != EGL_NO_CONTEXT) {
