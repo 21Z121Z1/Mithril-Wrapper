@@ -795,7 +795,14 @@ void* resolve(const char* name) {
         void* p = (void*)g_gdpa(g_device, name);
         if (p) return p;
     }
-    if (g_gipa && g_instance) {
+    // Called with g_instance even when it is still null. Global commands -
+    // vkEnumerateInstanceExtensionProperties, vkEnumerateInstanceVersion and
+    // friends - are asked for BEFORE any instance exists, which is exactly the
+    // case a null instance expresses: GetInstanceProcAddr(NULL, name) is the
+    // documented way to reach them. Gating this on g_instance being non-null
+    // made those lookups miss and left the driver unusable even after its
+    // GetInstanceProcAddr had been found.
+    if (g_gipa) {
         void* p = (void*)g_gipa(g_instance, name);
         if (p) return p;
     }
