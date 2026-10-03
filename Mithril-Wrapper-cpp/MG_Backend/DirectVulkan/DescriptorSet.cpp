@@ -667,6 +667,8 @@ void bind_program_descriptors(GLuint program, VkPipelineBindPoint bindPoint) {
     // 已被覆盖 arena 内存的 set。
     if (pr.lastFrameGen[slot] != b->frameGeneration ||
         pr.lastFlushGen[slot] != b->flushGeneration) {
+        const bool frameChanged = (pr.lastFrameGen[slot] != b->frameGeneration);
+        const bool flushChanged = (pr.lastFlushGen[slot] != b->flushGeneration);
         pr.setCursor[slot] = 0;
         pr.lastFrameGen[slot] = b->frameGeneration;
         pr.lastFlushGen[slot] = b->flushGeneration;
@@ -679,16 +681,39 @@ void bind_program_descriptors(GLuint program, VkPipelineBindPoint bindPoint) {
         // it — which is skipped on a bail path (incomplete-set guard, DescriptorSet
         // ~1299). Drop the whole per-slot set cache so the next bind allocates a
         // BRAND-NEW set rewritten from current, still-valid resources.
-        pr.allocatedSets[slot].clear();
+        //
+        // FIX (descriptor pool leak - red-screen root cause): this clear used to
+        // run on EVERY frame change too. That threw away the reusable set cache
+        // each frame while the pool itself was never reset (resetting it is
+        // illegal while a recording command buffer still references its sets), so
+        // every draw of every frame allocated another set from the pool and the
+        // pool only ever grew: ~20 frames to exhaust maxSets=1024, then doubling
+        // to the 16384 cap, after which every allocation failed and every draw was
+        // dropped, leaving only the clear colour - a uniformly red screen.
+        // Minecraft 1.21.1 hit the cap within seconds (3600+ exhaustion warnings);
+        // 26.2 issued fewer draws per frame and so only degraded.
+        //
+        // Rewinding setCursor is the whole point of the cache: rewind + reuse.
+        // Clearing it as well contradicted the reuse comment above and turned the
+        // cache into a per-frame leak. Only a flush can invalidate the cached
+        // sets' contents, so only a flush clears them.
+        if (flushChanged) {
+            pr.allocatedSets[slot].clear();
+        }
         /* The cached sets this slot owns are about to be handed out again and
          * REWRITTEN by this frame's draws, so every memo entry naming one is
          * now a promise we can no longer keep. Dropping the memo here is what
          * makes the reuse below sound: within a frame the cursor only moves
          * forward, so a set already in the memo is never re-taken. */
+        // The memo is keyed on set CONTENT, and a new frame may bind different
+        // resources, so it is dropped every frame. That is what forces each draw
+        // back through the path below, which rewrites the reused set with this
+        // frame's bindings - so keeping allocatedSets (above) is safe.
         for (int i = 0; i < kDescriptorMemoSize; ++i) {
             pr.descMemo[slot][i] = DescriptorMemoEntry{};
         }
         pr.descMemoNext[slot] = 0;
+        (void)frameChanged;
     }
 
     /* Gather descriptor writes.
