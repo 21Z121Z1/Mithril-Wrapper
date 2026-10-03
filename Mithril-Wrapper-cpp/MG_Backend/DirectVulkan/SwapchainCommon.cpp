@@ -316,7 +316,17 @@ pm_done:
 void destroy_swapchain(Swapchain* sc) {
     if (!sc) return;
     Backend* b = backend();
-    if (!b->device) { delete sc; return; }
+    if (!b->device) {
+#if defined(__ANDROID__)
+        // Even after the Vulkan device has gone away, the offscreen path still
+        // owns an ANativeWindow reference and its Offscreen heap object.
+        // swapchain_offscreen_destroy() skips Vulkan destruction when device is
+        // null but still releases the window and deletes the platform state.
+        if (sc->offscreen) swapchain_offscreen_destroy(sc);
+#endif
+        delete sc;
+        return;
+    }
     vkDeviceWaitIdle(b->device);
 #if defined(__ANDROID__)
     // Offscreen images and staging buffers are ours, not the swapchain's.
