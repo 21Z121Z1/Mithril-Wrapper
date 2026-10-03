@@ -2440,22 +2440,33 @@ void backend_set_cull_mode(int mode) {
     if (mode == 1) cull = VK_CULL_MODE_FRONT_BIT;
     else if (mode == 2) cull = VK_CULL_MODE_BACK_BIT;
     else if (mode == 3) cull = VK_CULL_MODE_FRONT_AND_BACK;
-    vkCmdSetCullMode(b->commandBuffer, cull);
+    // Resolved, not linked (see Device.h): absent on Android's libvulkan.so.
+    if (!b->extendedDynamicStateSupported || !b->cmdSetCullMode) return;
+    reinterpret_cast<PFN_vkCmdSetCullMode>(b->cmdSetCullMode)(b->commandBuffer, cull);
 }
 
 void backend_set_front_face(int ccw) {
     mithril::vk::Backend* b = mithril::vk::backend();
     // FIX (VK_NOT_READY storm): guard against non-recording command buffer.
     if (!b->commandBuffer || !b->commandBufferRecording) return;
-    vkCmdSetFrontFace(b->commandBuffer, ccw ? VK_FRONT_FACE_COUNTER_CLOCKWISE : VK_FRONT_FACE_CLOCKWISE);
+    if (!b->extendedDynamicStateSupported || !b->cmdSetFrontFace) return;
+    reinterpret_cast<PFN_vkCmdSetFrontFace>(b->cmdSetFrontFace)(
+        b->commandBuffer, ccw ? VK_FRONT_FACE_COUNTER_CLOCKWISE : VK_FRONT_FACE_CLOCKWISE);
 }
 
 void backend_set_depth_test(int enabled, int write_mask, int compare_func) {
     mithril::vk::Backend* b = mithril::vk::backend();
     // FIX (VK_NOT_READY storm): guard against non-recording command buffer.
     if (!b->commandBuffer || !b->commandBufferRecording) return;
-    vkCmdSetDepthTestEnable(b->commandBuffer, enabled ? VK_TRUE : VK_FALSE);
-    vkCmdSetDepthWriteEnable(b->commandBuffer, write_mask ? VK_TRUE : VK_FALSE);
+    // Resolved, not linked (see Device.h). Without extended dynamic state
+    // these belong to the static pipeline (Drawing.cpp folds them into the
+    // pipeline key), so silently skipping is the correct fallback here.
+    if (!b->extendedDynamicStateSupported || !b->cmdSetDepthTestEnable ||
+        !b->cmdSetDepthWriteEnable || !b->cmdSetDepthCompareOp) return;
+    reinterpret_cast<PFN_vkCmdSetDepthTestEnable>(b->cmdSetDepthTestEnable)(
+        b->commandBuffer, enabled ? VK_TRUE : VK_FALSE);
+    reinterpret_cast<PFN_vkCmdSetDepthWriteEnable>(b->cmdSetDepthWriteEnable)(
+        b->commandBuffer, write_mask ? VK_TRUE : VK_FALSE);
     VkCompareOp op = VK_COMPARE_OP_LESS;
     switch (compare_func) {
         case 0x200: op = VK_COMPARE_OP_NEVER; break;    // GL_NEVER
@@ -2468,7 +2479,8 @@ void backend_set_depth_test(int enabled, int write_mask, int compare_func) {
         case 0x207: op = VK_COMPARE_OP_ALWAYS; break;
         default: op = VK_COMPARE_OP_LESS; break;
     }
-    vkCmdSetDepthCompareOp(b->commandBuffer, op);
+    reinterpret_cast<PFN_vkCmdSetDepthCompareOp>(b->cmdSetDepthCompareOp)(
+        b->commandBuffer, op);
 }
 
 void backend_set_color_write_mask(int r, int g, int b, int a) {
@@ -2706,9 +2718,10 @@ void backend_draw_indirect_count(int primitive, VkBuffer indirect_buffer,
     }
     if (!mithril::vk::draw_recording_allowed("backend_draw_indirect_count")) return;
     const uint32_t effStride = stride > 0 ? (uint32_t)stride : 16u;  // sizeof(VkDrawIndirectCommand)
-    vkCmdDrawIndirectCount(b->commandBuffer, indirect_buffer, indirect_offset,
-                           count_buffer, count_offset,
-                           (uint32_t)max_drawcount, effStride);
+    if (!b->cmdDrawIndirectCount) return;
+    reinterpret_cast<PFN_vkCmdDrawIndirectCount>(b->cmdDrawIndirectCount)(
+        b->commandBuffer, indirect_buffer, indirect_offset,
+        count_buffer, count_offset, (uint32_t)max_drawcount, effStride);
 }
 
 void backend_draw_indexed_indirect_count(int primitive, int index_type,
@@ -2737,9 +2750,10 @@ void backend_draw_indexed_indirect_count(int primitive, int index_type,
     else                      t = VK_INDEX_TYPE_UINT16;
     vkCmdBindIndexBuffer(b->commandBuffer, index_buffer, index_offset, t);
     const uint32_t effStride = stride > 0 ? (uint32_t)stride : 20u;  // sizeof(VkDrawIndexedIndirectCommand)
-    vkCmdDrawIndexedIndirectCount(b->commandBuffer, indirect_buffer, indirect_offset,
-                                  count_buffer, count_offset,
-                                  (uint32_t)max_drawcount, effStride);
+    if (!b->cmdDrawIndexedIndirectCount) return;
+    reinterpret_cast<PFN_vkCmdDrawIndexedIndirectCount>(b->cmdDrawIndexedIndirectCount)(
+        b->commandBuffer, indirect_buffer, indirect_offset,
+        count_buffer, count_offset, (uint32_t)max_drawcount, effStride);
 }
 
 

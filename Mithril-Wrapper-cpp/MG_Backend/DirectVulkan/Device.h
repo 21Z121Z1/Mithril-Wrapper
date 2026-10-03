@@ -112,6 +112,23 @@ struct Backend {
     // at the call site, where the metal platform define is active.
     PFN_vkVoidFunction createMetalSurfaceEXT = nullptr;
 
+    // ---- Vulkan 1.3 core commands, resolved at runtime ----
+    // vkCmdSetCullMode / SetFrontFace / SetDepthTestEnable / SetDepthWriteEnable
+    // / SetDepthCompareOp (extended dynamic state) and vkCmdDraw*IndirectCount
+    // are 1.3 core. MoltenVK exports them so linking works on Apple, but
+    // Android's libvulkan.so does not, which failed the link with
+    // "undefined symbol". Resolving them with vkGetDeviceProcAddr keeps the
+    // library loadable on both, and the matching *Supported flags below already
+    // gate every call site, so a device that lacks them simply never calls in.
+    PFN_vkVoidFunction cmdSetCullMode = nullptr;
+    PFN_vkVoidFunction cmdSetFrontFace = nullptr;
+    PFN_vkVoidFunction cmdSetDepthTestEnable = nullptr;
+    PFN_vkVoidFunction cmdSetDepthWriteEnable = nullptr;
+    PFN_vkVoidFunction cmdSetDepthCompareOp = nullptr;
+    PFN_vkVoidFunction cmdDrawIndirectCount = nullptr;
+    PFN_vkVoidFunction cmdDrawIndexedIndirectCount = nullptr;
+
+
     // Per-frame sync: a fence per in-flight frame so we can wait on the GPU
     // before reusing the command buffer.
     VkFence frameFences[kMaxFramesInFlight] = {};
