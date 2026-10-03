@@ -2110,35 +2110,18 @@ int backend_yflip_enabled(void) {
                       t == VK_SURFACE_TRANSFORM_ROTATE_270_BIT_KHR) ? 0 : 1;
             have_transform = true;
         }
-#if defined(__APPLE__) && TARGET_OS_IPHONE
-        // (Apple only. Android and other native-Vulkan targets fall through to
-        // the branch below: there is no MoltenVK to flip anything, so Mithril
-        // is the only flipper and the surface transform decides.)
+        // No platform special case. MoltenVK's flip is now disabled before any
+        // VkInstance can exist (apply_moltenvk_config in Device.cpp), so
+        // Mithril is the only flipper on every platform and the surface
+        // transform is the only thing that can suppress the flip.
         //
-        // On iOS the host process (launcher / LWJGL) has almost always created a
-        // VkInstance before Mithril starts, so MoltenVK has already latched its
-        // own vertex-Y flip and the MVK_CONFIG_SHADER_CONVERSION_FLIP_VERTEX_Y=0
-        // we set in init_device() is ignored - MoltenVK's configuration is read
-        // once, at the first instance creation in the process. MoltenVK is
-        // therefore flipping, and flipping again here mirrors the frame: menu
-        // text and logo upside down, which is the reported symptom.
-        //
-        // This restores the platform-aware default (iOS -> don't flip) that the
-        // surface-transform refactor replaced with "flip for identity". That
-        // refactor is right in principle - orientation should come from the
-        // transform, not the platform - but it silently reintroduced the double
-        // flip on the one platform where the MoltenVK config cannot be applied,
-        // which is why macOS (Mithril creates the instance itself, so the config
-        // takes effect and Mithril is the only flipper) stayed correct.
-        //
-        // MobileGL has no equivalent guard because it never tries to disable
-        // MoltenVK's flip in the first place.
-        v = 0;
-        source = "ios(moltenvk-already-flips)";
-#else
+        // An iOS-only branch used to force "do not flip" here, on the theory
+        // that MoltenVK was still flipping because the host created an instance
+        // first. On device that produced zero flips - menu text and logo upside
+        // down, the reported symptom. Removing it makes iOS follow the same
+        // path as macOS, which is known-correct in CI.
         v = cached;
         source = have_transform ? "surface-transform" : "default(no swapchain yet)";
-#endif
     }
 
     if (v != last) {

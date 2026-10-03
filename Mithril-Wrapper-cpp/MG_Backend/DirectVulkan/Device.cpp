@@ -609,6 +609,38 @@ VKAPI_ATTR VkBool32 VKAPI_CALL debug_callback(VkDebugUtilsMessageSeverityFlagBit
 
 } // namespace
 
+// MoltenVK reads MVK_CONFIG_* exactly once: at the first vkCreateInstance in
+// the process. Everything after that is latched, so a later setenv() is ignored
+// no matter who calls it.
+//
+// That made calling this from init_device() a gamble. It is fine when Mithril
+// creates the instance itself - which is why macOS always looked correct - but
+// when the host process has already created one, MoltenVK has latched its
+// defaults and our flip settings never apply at all.
+//
+// Running it from a library constructor removes the gamble: the constructor
+// runs while this dylib is being loaded, which necessarily precedes any Vulkan
+// call the host or Mithril can make through it.
+void apply_moltenvk_config() {
+#if defined(__APPLE__)
+    setenv("MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS", "1", 1);
+    setenv("MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS", "0", 1);
+    setenv("MVK_CONFIG_RESUME_LOST_DEVICE", "1", 1);
+    // Mithril flips vertex Y itself for the default framebuffer. MoltenVK must
+    // not flip as well, or the two cancel and the frame comes out mirrored.
+    setenv("MVK_CONFIG_SHADER_CONVERSION_FLIP_VERTEX_Y", "0", 1);
+    setenv("MVK_CONFIG_MAX_ACTIVE_METAL_COMMAND_BUFFERS_PER_QUEUE", "2", 1);
+    setenv("MVK_CONFIG_VK_SEMAPHORE_SUPPORT_STYLE", "2", 1);
+#endif
+}
+
+namespace {
+struct MoltenVKConfigAtLoad {
+    MoltenVKConfigAtLoad() { apply_moltenvk_config(); }
+};
+const MoltenVKConfigAtLoad g_moltenvk_config_at_load;
+}
+
 bool init_device() {
     Backend* b = backend();
     if (b->initialized) return true;
@@ -687,11 +719,7 @@ bool init_device() {
     //   注意：这个值必须 >= kMaxFramesInFlight（2），否则 submit 会被
     //   MoltenVK 阻塞等待前一个 command buffer 完成，可能导致死锁
     //   （若前一个的 fence 还没被 ensure_command_buffer_recording 等待）。
-    setenv("MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS", "1", 1);
-    setenv("MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS", "0", 1);
-    setenv("MVK_CONFIG_RESUME_LOST_DEVICE", "1", 1);
-    setenv("MVK_CONFIG_SHADER_CONVERSION_FLIP_VERTEX_Y", "0", 1);
-    setenv("MVK_CONFIG_MAX_ACTIVE_METAL_COMMAND_BUFFERS_PER_QUEUE", "2", 1);
+    apply_moltenvk_config();
     // MVK_CONFIG_VK_SEMAPHORE_SUPPORT_STYLE=2 (根因 E，深度参考 MoltenVK):
     //   强制使用 Metal 信号量（真实 GPU 侧同步）。Mithril 的同步设计完全
     //   依赖 Vulkan semaphore（imageAvailable: acquire→render；renderFinished:
@@ -702,7 +730,6 @@ bool init_device() {
     //   读取未完成像素 → 黑屏有声音。
     //   显式设为 2（METAL_EVENTS_WHERE_AVAILABLE）优先使用 MTLEvent，
     //   消除跨 MoltenVK 版本/平台的不确定性。参考 MoltenVK MVKDevice.mm:3621-3627。
-    setenv("MVK_CONFIG_VK_SEMAPHORE_SUPPORT_STYLE", "2", 1);
 
     // ---- Instance ----
     std::vector<VkExtensionProperties> instExtProps;
