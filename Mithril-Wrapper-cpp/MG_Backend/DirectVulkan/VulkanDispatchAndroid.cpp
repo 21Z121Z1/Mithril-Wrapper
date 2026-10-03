@@ -32,6 +32,12 @@
 #include <vulkan/vulkan.h>
 #include <vulkan/vulkan_android.h>
 
+#include <android/dlext.h>
+#include <dirent.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <unistd.h>
+
 #include <dlfcn.h>
 #include <cstdlib>
 #include <cstdio>
@@ -48,29 +54,187 @@ namespace {
 void* g_handle = nullptr;
 PFN_vkGetInstanceProcAddr g_gipa = nullptr;
 PFN_vk_icdGetInstanceProcAddr g_icd_gipa = nullptr;
+PFN_vkGetDeviceProcAddr g_gdpa = nullptr;
+VkInstance g_instance = VK_NULL_HANDLE;
+VkDevice g_device = VK_NULL_HANDLE;
 bool g_ready = false;
 int g_failures = 0;
 
-// Candidate driver paths, most specific first. The last slot is reserved for
+// ---------------------------------------------------------------------------
+// Linker namespace escape
+//
+// Android N+ loads an app's native libraries into an isolated linker
+// namespace. android_namespace_t::is_accessible() only allows paths under that
+// namespace's ld_library_paths/default_library_paths/permitted_paths, so a plain
+// dlopen() of another package's native library - which is where a Turnip driver
+// plugin keeps libvulkan_freedreno.so - fails with "not accessible for the
+// namespace". That is why the driver never loaded here.
+//
+// The fix is what libadrenotools/liblinkernsbypass does: call the linker's
+// internal __loader_android_create_namespace() and pass an address inside the
+// linker (here, &dlopen) as the caller. The linker then hands back a namespace
+// it considers unrestricted, and we can load from it.
+//
+// Only the internal entrypoint has a caller parameter; the public
+// android_create_namespace() always passes the real return address, which is
+// inside our own restricted namespace.
+// ---------------------------------------------------------------------------
+
+// Not exposed by the NDK; matches bionic's linker.h.
+enum { MITHRIL_NS_TYPE_SHARED = 2 };
+
+typedef struct android_namespace_t* (*loader_create_ns_t)(
+    const char* name, const char* ld_library_path, const char* default_library_path,
+    uint64_t type, const char* permitted_when_isolated_path,
+    struct android_namespace_t* parent_namespace, const void* caller_addr);
+
+typedef bool (*loader_link_all_t)(struct android_namespace_t* from,
+                                  struct android_namespace_t* to);
+
+loader_create_ns_t g_create_ns = nullptr;
+loader_link_all_t g_link_all = nullptr;
+struct android_namespace_t* g_escape_ns = nullptr;
+bool g_ns_tried = false;
+
+void init_namespace_escape() {
+    if (g_ns_tried) return;
+    g_ns_tried = true;
+
+    // libdl_android.so exports the __loader_* symbols the linker implements.
+    // Try the plain handle first, then the linker itself.
+    void* handles[2] = { dlopen("libdl_android.so", RTLD_LAZY),
+                         dlopen("ld-android.so", RTLD_LAZY) };
+    for (int i = 0; i < 2 && !g_create_ns; ++i) {
+        if (!handles[i]) continue;
+        g_create_ns = (loader_create_ns_t)dlsym(handles[i], "__loader_android_create_namespace");
+        g_link_all = (loader_link_all_t)dlsym(handles[i], "__loader_android_link_namespaces_all_libs");
+    }
+    if (!g_create_ns) {
+        // Last resort: the linker's symbols are visible through the global scope
+        // on some Android versions.
+        g_create_ns = (loader_create_ns_t)dlsym(RTLD_DEFAULT, "__loader_android_create_namespace");
+        if (g_create_ns) g_link_all = (loader_link_all_t)dlsym(RTLD_DEFAULT, "__loader_android_link_namespaces_all_libs");
+    }
+    if (!g_create_ns) {
+        fprintf(stderr, "[mithril] vk-dispatch: could not reach __loader_android_create_namespace"
+                        " (namespace escape unavailable)\n");
+        return;
+    }
+    fprintf(stderr, "[mithril] vk-dispatch: namespace escape available\n");
+}
+
+// Build a namespace that can see the driver directory, the platform library
+// directories, and - because it is shared rather than isolated - anything else.
+struct android_namespace_t* make_escape_ns(const char* driver_dir) {
+    init_namespace_escape();
+    if (!g_create_ns) return nullptr;
+
+    static char paths[1024];
+    if (driver_dir && driver_dir[0]) {
+        snprintf(paths, sizeof(paths), "%s:/system/lib64:/vendor/lib64:/system/lib64/hw:/apex/com.android.runtime/lib64/bionic", driver_dir);
+    } else {
+        snprintf(paths, sizeof(paths), "/system/lib64:/vendor/lib64:/system/lib64/hw");
+    }
+
+    // The final argument is the caller address; &dlopen makes the linker treat
+    // this as an internal call, which is what removes the restrictions.
+    struct android_namespace_t* ns = g_create_ns("mithril-vulkan", paths, paths,
+                                                 MITHRIL_NS_TYPE_SHARED, paths,
+                                                 nullptr, (const void*)&dlopen);
+    if (!ns) {
+        fprintf(stderr, "[mithril] vk-dispatch: namespace creation failed\n");
+        return nullptr;
+    }
+    fprintf(stderr, "[mithril] vk-dispatch: escape namespace created (paths=%s)\n", paths);
+    return ns;
+}
+
+void log_dir(const char* dir) {
+    if (!dir || !dir[0]) return;
+    DIR* d = opendir(dir);
+    if (!d) {
+        fprintf(stderr, "[mithril] vk-dispatch: cannot list driver dir %s: %s\n", dir, strerror(errno));
+        return;
+    }
+    fprintf(stderr, "[mithril] vk-dispatch: driver dir %s contains:\n", dir);
+    int n = 0;
+    struct dirent* e;
+    while ((e = readdir(d)) != nullptr && n < 40) {
+        if (e->d_name[0] == '.') continue;
+        fprintf(stderr, "[mithril] vk-dispatch:   %s\n", e->d_name);
+        ++n;
+    }
+    if (n == 0) fprintf(stderr, "[mithril] vk-dispatch:   (empty)\n");
+    closedir(d);
+}
+
+static void log_dlerror(const char* path, const char* how) {
+    // dlerror() clears its state on read, so it must be captured once -
+    // reading it twice (once in the condition, once for the value) yields NULL
+    // the second time and hides the real reason.
+    const char* err = dlerror();
+    fprintf(stderr, "[mithril] vk-dispatch: %s dlopen(\"%s\") failed: %s\n",
+            how, path, err ? err : "unknown");
+}
+
+void* try_load(const char* path, const char* driver_dir) {
+    // 1) Unrestricted namespace. This is the only route that reliably reaches
+    //    another package's library directory on Android N+.
+    if (!g_escape_ns) g_escape_ns = make_escape_ns(driver_dir);
+    if (g_escape_ns) {
+        android_dlextinfo ext{};
+        ext.flags = ANDROID_DLEXT_USE_NAMESPACE;
+        ext.library_namespace = g_escape_ns;
+        void* h = android_dlopen_ext(path, RTLD_NOW | RTLD_LOCAL, &ext);
+        if (h) {
+            fprintf(stderr, "[mithril] vk-dispatch: loaded \"%s\" via escape namespace\n", path);
+            return h;
+        }
+        log_dlerror(path, "namespace");
+    }
+
+    // 2) From an open descriptor: skips the path-based checks entirely.
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd >= 0) {
+        android_dlextinfo ext{};
+        ext.flags = ANDROID_DLEXT_USE_LIBRARY_FD | ANDROID_DLEXT_FORCE_LOAD;
+        ext.library_fd = fd;
+        void* h = android_dlopen_ext(path, RTLD_NOW | RTLD_LOCAL, &ext);
+        close(fd);
+        if (h) {
+            fprintf(stderr, "[mithril] vk-dispatch: loaded \"%s\" via file descriptor\n", path);
+            return h;
+        }
+        log_dlerror(path, "fd");
+    }
+
+    // 3) Plain dlopen. Works for system libraries, and for anything the
+    //    launcher already put on LD_LIBRARY_PATH.
+    void* h = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+    if (h) {
+        fprintf(stderr, "[mithril] vk-dispatch: loaded \"%s\" via dlopen\n", path);
+        return h;
+    }
+    log_dlerror(path, "plain");
+    return nullptr;
+}
+
+// Candidate driver paths, most specific first. The last slots are reserved for
 // the platform loader, so an over-long driver list can never crowd out the
 // fallback - that is exactly what happened when Turnip's three name variants
 // (joined + bare = six entries) filled the array and libvulkan.so was dropped,
 // leaving the process with no Vulkan driver at all.
 static const int kMaxCandidates = 12;
-static const int kLoaderSlot = kMaxCandidates - 1;
+static const int kLoaderSlot = kMaxCandidates - 3;
 
 void add_candidate(const char* cands[], int& n, const char* dir, const char* name) {
-    if (n >= kMaxCandidates) return;
-    // Keep one slot free for the platform loader.
     if (n >= kLoaderSlot) return;
     if (!name || !name[0]) return;
     if (name[0] == '/') {
-        // Absolute: use as-is.
         cands[n++] = name;
         return;
     }
     if (!dir || !dir[0]) {
-        // No directory to join with; rely on the loader search path.
         cands[n++] = name;
         return;
     }
@@ -78,22 +242,22 @@ void add_candidate(const char* cands[], int& n, const char* dir, const char* nam
     char* buf = (char*)malloc(len);
     if (!buf) return;
     snprintf(buf, len, "%s/%s", dir, name);
-    // Also keep the bare name so the default search path still gets a chance.
     cands[n++] = buf;
-    if (n < kMaxCandidates) cands[n++] = name;
+    if (n < kLoaderSlot) cands[n++] = name;
 }
 
 void ensure_library() {
     if (g_ready) return;
     g_ready = true;
 
-    // DRIVER_PATH is how launchers point at an out-of-tree driver. FCL sets it
-    // to the Turnip plugin's native lib dir. It is NOT on LD_LIBRARY_PATH, so a
-    // bare soname like "libvulkan_freedreno.so" is unresolvable without it -
-    // dlopen of the bare name was the reason Turnip failed to load.
+    // DRIVER_PATH is how the launcher points at an out-of-tree driver; FCL sets
+    // it to the Turnip plugin's native library directory, which is not on
+    // LD_LIBRARY_PATH and not inside our own linker namespace.
     const char* driver_dir = getenv("DRIVER_PATH");
     const char* explicit_path = getenv("MITHRIL_VULKAN_LIBRARY");
     const char* turnip = getenv("MITHRIL_TURNIP");
+
+    log_dir(driver_dir);
 
     const char* cands[kMaxCandidates];
     int n = 0;
@@ -102,29 +266,19 @@ void ensure_library() {
         add_candidate(cands, n, driver_dir, explicit_path);
     } else if (turnip && (turnip[0] == '1' || turnip[0] == 'y' || turnip[0] == 'Y')) {
         add_candidate(cands, n, driver_dir, "libvulkan_freedreno.so");
-        // Some Turnip builds ship under these names.
         add_candidate(cands, n, driver_dir, "libvulkan_adreno.so");
         add_candidate(cands, n, driver_dir, "vulkan.adreno.so");
     }
-    // Fall back to the platform loader. These are added directly rather than
-    // through add_candidate so the reserved slot is always filled.
+    // Platform loader fallbacks, added directly so the reserved slots are
+    // always filled.
     cands[n++] = "libvulkan.so";
-    if (n < kMaxCandidates) cands[n++] = "/system/lib64/libvulkan.so";
-    if (n < kMaxCandidates) cands[n++] = "/vendor/lib64/libvulkan.so";
+    cands[n++] = "/system/lib64/libvulkan.so";
+    cands[n++] = "/vendor/lib64/libvulkan.so";
 
     for (int i = 0; i < n; ++i) {
         if (!cands[i]) continue;
-        g_handle = dlopen(cands[i], RTLD_NOW | RTLD_LOCAL);
-        if (g_handle) {
-            fprintf(stderr, "[mithril] vk-dispatch: loaded \"%s\"\n", cands[i]);
-            break;
-        }
-        // dlerror() clears its state on read, so it must be captured once -
-        // calling it twice (once in the condition, once for the value) reports
-        // NULL the second time and hides the real reason.
-        const char* err = dlerror();
-        fprintf(stderr, "[mithril] vk-dispatch: dlopen(\"%s\") failed: %s\n",
-                cands[i], err ? err : "unknown");
+        g_handle = try_load(cands[i], driver_dir);
+        if (g_handle) break;
     }
 
     if (!g_handle) {
@@ -136,6 +290,8 @@ void ensure_library() {
     // rather than the plain names; a loader exports the plain names.
     g_icd_gipa = (PFN_vk_icdGetInstanceProcAddr)dlsym(g_handle, "vk_icdGetInstanceProcAddr");
     g_gipa = (PFN_vkGetInstanceProcAddr)dlsym(g_handle, "vkGetInstanceProcAddr");
+    fprintf(stderr, "[mithril] vk-dispatch: discovery entrypoints icd=%s gipa=%s\n",
+            g_icd_gipa ? "yes" : "no", g_gipa ? "yes" : "no");
     if (!g_icd_gipa && !g_gipa) {
         fprintf(stderr, "[mithril] vk-dispatch: driver exports no discovery entrypoint\n");
     }
@@ -143,14 +299,22 @@ void ensure_library() {
 
 void* resolve(const char* name) {
     ensure_library();
-    if (g_icd_gipa) {
-        // An ICD answers for every entrypoint, device-level ones included,
-        // because that is how the loader populates its dispatch tables.
-        void* p = (void*)g_icd_gipa(nullptr, name);
+
+    // An ICD only exports vk_icdGetInstanceProcAddr; every other entrypoint has
+    // to be fetched through the instance, and device-level ones through the
+    // device. Resolving only against the library handle works for the platform
+    // loader (which really does export all of them) but silently yields nothing
+    // for Turnip, so the phases are tried most-specific first.
+    if (g_gdpa && g_device) {
+        void* p = (void*)g_gdpa(g_device, name);
         if (p) return p;
     }
-    if (g_gipa) {
-        void* p = (void*)g_gipa(nullptr, name);
+    if (g_gipa && g_instance) {
+        void* p = (void*)g_gipa(g_instance, name);
+        if (p) return p;
+    }
+    if (g_icd_gipa) {
+        void* p = (void*)g_icd_gipa(nullptr, name);
         if (p) return p;
     }
     if (g_handle) {
@@ -161,6 +325,35 @@ void* resolve(const char* name) {
         fprintf(stderr, "[mithril] vk-dispatch: unresolved entrypoint %s\n", name);
     }
     return nullptr;
+}
+
+// Called once the instance exists so instance- and device-level lookups become
+// available. Without this an ICD stays unusable after vkCreateInstance.
+void note_instance(VkInstance inst) {
+    g_instance = inst;
+    void* gipa = nullptr;
+    if (g_icd_gipa) gipa = (void*)g_icd_gipa(inst, "vkGetInstanceProcAddr");
+    if (!gipa && g_handle) gipa = dlsym(g_handle, "vkGetInstanceProcAddr");
+    if (gipa && !g_gipa) g_gipa = (PFN_vkGetInstanceProcAddr)gipa;
+    if (g_gipa && !g_gdpa) {
+        g_gdpa = (PFN_vkGetDeviceProcAddr)g_gipa(inst, "vkGetDeviceProcAddr");
+    }
+    fprintf(stderr, "[mithril] vk-dispatch: instance created (gipa=%s gdpa=%s)\n",
+            g_gipa ? "yes" : "no", g_gdpa ? "yes" : "no");
+}
+
+void note_device(VkDevice dev) {
+    g_device = dev;
+    fprintf(stderr, "[mithril] vk-dispatch: device created\n");
+}
+
+void clear_instance() {
+    g_instance = VK_NULL_HANDLE;
+    g_gdpa = nullptr;
+}
+
+void clear_device() {
+    g_device = VK_NULL_HANDLE;
 }
 
 } // namespace
@@ -531,7 +724,9 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateDevice(VkPhysicalDevice physicalDevice, c
     static PFN_vkCreateDevice fp = nullptr;
     if (!fp) fp = (PFN_vkCreateDevice)resolve("vkCreateDevice");
     if (!fp) { return VK_ERROR_UNKNOWN; }
-    return fp(physicalDevice, pCreateInfo, pAllocator, pDevice);
+    VkResult r = fp(physicalDevice, pCreateInfo, pAllocator, pDevice);
+    if (r == VK_SUCCESS && pDevice && *pDevice) note_device(*pDevice);
+    return r;
 }
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateFence(VkDevice device, const VkFenceCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkFence* pFence) {
     static PFN_vkCreateFence fp = nullptr;
@@ -567,7 +762,9 @@ VKAPI_ATTR VkResult VKAPI_CALL vkCreateInstance(const VkInstanceCreateInfo* pCre
     static PFN_vkCreateInstance fp = nullptr;
     if (!fp) fp = (PFN_vkCreateInstance)resolve("vkCreateInstance");
     if (!fp) { return VK_ERROR_UNKNOWN; }
-    return fp(pCreateInfo, pAllocator, pInstance);
+    VkResult r = fp(pCreateInfo, pAllocator, pInstance);
+    if (r == VK_SUCCESS && pInstance && *pInstance) note_instance(*pInstance);
+    return r;
 }
 VKAPI_ATTR VkResult VKAPI_CALL vkCreatePipelineCache(VkDevice device, const VkPipelineCacheCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkPipelineCache* pPipelineCache) {
     static PFN_vkCreatePipelineCache fp = nullptr;
@@ -644,6 +841,7 @@ VKAPI_ATTR void VKAPI_CALL vkDestroyDescriptorSetLayout(VkDevice device, VkDescr
 VKAPI_ATTR void VKAPI_CALL vkDestroyDevice(VkDevice device, const VkAllocationCallbacks* pAllocator) {
     static PFN_vkDestroyDevice fp = nullptr;
     if (!fp) fp = (PFN_vkDestroyDevice)resolve("vkDestroyDevice");
+    clear_device();
     if (!fp) { return; }
     fp(device, pAllocator);
 }
@@ -674,6 +872,7 @@ VKAPI_ATTR void VKAPI_CALL vkDestroyImageView(VkDevice device, VkImageView image
 VKAPI_ATTR void VKAPI_CALL vkDestroyInstance(VkInstance instance, const VkAllocationCallbacks* pAllocator) {
     static PFN_vkDestroyInstance fp = nullptr;
     if (!fp) fp = (PFN_vkDestroyInstance)resolve("vkDestroyInstance");
+    clear_instance();
     if (!fp) { return; }
     fp(instance, pAllocator);
 }
