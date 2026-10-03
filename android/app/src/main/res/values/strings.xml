@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Mithril-Wrapper</string>
+    <string name="mithril_gl_version_title">OpenGL level</string>
+    <string name="mithril_yflip_title">Flip rendering vertically</string>
+    <string name="mithril_debug_title">Enable debug logging</string>
+    <string name="mithril_vram_budget_title">VRAM budget (MB)</string>
+</resources>

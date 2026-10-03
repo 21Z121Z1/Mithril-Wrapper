@@ -3,6 +3,9 @@ pluginManagement {
         google()
         mavenCentral()
         gradlePluginPortal()
+        // The ZalithLauncher renderer plugin DSL is published on JitPack, not
+        // on Maven Central - MobileGL's own plugin module resolves it from here.
+        maven { url = uri("https://jitpack.io") }
     }
 }
 dependencyResolutionManagement {
@@ -10,7 +13,8 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
+        maven { url = uri("https://jitpack.io") }
     }
 }
 rootProject.name = "MithrilAndroid"
-include ":app"
+include(":app")

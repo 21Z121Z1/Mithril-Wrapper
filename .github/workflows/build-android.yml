@@ -192,14 +192,18 @@ jobs:
           test -n "$APK"
           echo "APK: $APK"
           unzip -l "$APK" | sed -n '1,40p'
-          for abi in arm64-v8a armeabi-v7a x86_64; do
-            unzip -l "$APK" | grep -q "lib/$abi/libmithril.so" || echo "note: $abi absent"
+          # The abiFilters in build.gradle.kts decide which ABIs ship; whichever
+          # are present must contain the library, and arm64-v8a is the one a real
+          # device needs.
+          for abi in $(unzip -l "$APK" | awk '{print $4}' | grep '^lib/' | cut -d/ -f2 | sort -u); do
+            unzip -l "$APK" | grep -q "lib/$abi/libmithril.so" || {
+              echo "APK ships $abi but no libmithril.so in it"; exit 1; }
           done
           unzip -l "$APK" | grep -q "lib/arm64-v8a/libmithril.so"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: mithril-android-apk
+          name: mithril-android-plugin-apk
           path: android/app/build/outputs/apk/release/*.apk
           if-no-files-found: error
