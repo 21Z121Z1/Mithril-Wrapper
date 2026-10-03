@@ -115,6 +115,7 @@ loader_dlopen_t g_loader_dlopen = nullptr;
 struct android_namespace_t* g_default_ns = nullptr;
 struct android_namespace_t* g_escape_ns = nullptr;
 bool g_ns_tried = false;
+bool g_direct_loader_preloaded = false;
 
 static void* align_ptr(void* ptr) {
     return reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(ptr) & ~(getpagesize() - 1));
@@ -241,34 +242,40 @@ struct android_namespace_t* make_escape_ns(const char* driver_dir) {
     }
     fprintf(stderr, "[mithril] vk-dispatch: escape namespace created (paths=%s)\n", paths);
 
-    // Bring the stock loader into the namespace before the driver. Its own
-    // DT_NEEDED entries - libhardware.so, libcutils.so, libutils.so, and on
-    // newer releases the gralloc/nativewindow stack - are precisely the ones
-    // Turnip needs, and they live in /system/lib64 which the app namespace
-    // cannot see. Loading them here registers them by SONAME, so the driver's
-    // later DT_NEEDED lookups hit already-loaded libraries instead of having
-    // to search the namespace path list.
-    //
-    // This is why Turnip has to arrive through libvulkan.so rather than being
-    // dlopened on its own: the stock loader is what drags those system
-    // dependencies into the process, and Turnip's kgsl backend reaches
-    // /dev/kgsl-3d0 through them.
+    return g_escape_ns;
+}
+
+// The direct-HAL fallback still benefits from having the stock loader's
+// system dependencies registered by SONAME in the escape namespace. This
+// MUST NOT run before try_hook_route(): loading libvulkan.so first resolves
+// its relocations before libmithril_vkhook.so exists, making later symbol
+// interposition ineffective even when the hook library itself loads.
+void preload_platform_loader_for_direct_driver() {
+    if (g_direct_loader_preloaded || !g_escape_ns) return;
+    g_direct_loader_preloaded = true;
+
     android_dlextinfo dlext{};
     dlext.flags = ANDROID_DLEXT_USE_NAMESPACE;
     dlext.library_namespace = g_escape_ns;
-    const char* loader_paths[] = {"/system/lib64/libvulkan.so", "/vendor/lib64/libvulkan.so",
-                                  "libvulkan.so"};
+    const char* loader_paths[] = {
+        "/system/lib64/libvulkan.so",
+        "/vendor/lib64/libvulkan.so",
+        "libvulkan.so",
+    };
     for (const char* lp : loader_paths) {
         void* h = android_dlopen_ext(lp, RTLD_LOCAL | RTLD_NOW, &dlext);
         if (h) {
-            fprintf(stderr, "[mithril] vk-dispatch: system loader %s loaded into escape namespace\n",
+            fprintf(stderr,
+                    "[mithril] vk-dispatch: preloaded system loader for direct fallback: %s\n",
                     lp);
-            break;
+            return;
         }
-        fprintf(stderr, "[mithril] vk-dispatch: system loader %s failed: %s\n", lp, dlerror());
+        const char* err = dlerror();
+        fprintf(stderr,
+                "[mithril] vk-dispatch: direct-fallback loader preload %s failed: %s\n",
+                lp, err ? err : "unknown");
     }
 
-    return g_escape_ns;
 }
 
 // The driver's exported names are the ground truth for how to talk to it.
@@ -531,15 +538,16 @@ static void* try_hook_route(const char* driver_dir, const char* driver_name) {
     }
     fprintf(stderr, "[mithril] vk-dispatch: hook object loaded: %s\n", hook.c_str());
 
-    void (*init_fn)(const char*, const char*, int) =
-        (void (*)(const char*, const char*, int))dlsym(h, "mithril_vkhook_init");
+    void (*init_fn)(const char*, const char*, int, struct android_namespace_t*) =
+        (void (*)(const char*, const char*, int, struct android_namespace_t*))
+            dlsym(h, "mithril_vkhook_init");
     if (!init_fn) {
         fprintf(stderr, "[mithril] vk-dispatch: hook has no init entrypoint\n");
         return nullptr;
     }
     const char* trace = getenv("MITHRIL_DEBUG");
     init_fn(driver_dir ? driver_dir : "", driver_name ? driver_name : "",
-            trace && trace[0] ? 1 : 0);
+            trace && trace[0] ? 1 : 0, g_escape_ns);
 
     // Now the loader, into the same namespace, after the hook.
     void* loader = android_dlopen_ext("libvulkan.so", RTLD_NOW | RTLD_LOCAL, &ext);
@@ -619,6 +627,10 @@ void ensure_library() {
 
     void* driver_handle = nullptr;
     if (!hook_loader && (explicit_path || (turnip && turnip[0]))) {
+        // Only now is it safe to preload libvulkan.so. The hook route has
+        // already failed, so there is no longer a requirement that the loader
+        // be first loaded after the hook.
+        preload_platform_loader_for_direct_driver();
         for (int i = 0; i < n && i < kLoaderSlot; ++i) {
             if (!cands[i]) continue;
             driver_handle = try_load(cands[i], driver_dir);
