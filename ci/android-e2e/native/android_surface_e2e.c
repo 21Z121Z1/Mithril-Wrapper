@@ -121,15 +121,18 @@ Java_com_mithril_wrapper_e2e_E2EActivity_nativeRun(
         jstring raw_frame_path,
         jstring result_json_path,
         jboolean turnip_probe,
-        jstring native_lib_dir) {
+        jstring native_lib_dir,
+        jstring cache_dir) {
     (void)clazz;
 
     const char* raw_path = (*env)->GetStringUTFChars(env, raw_frame_path, NULL);
     const char* result_path = (*env)->GetStringUTFChars(env, result_json_path, NULL);
     const char* native_dir = (*env)->GetStringUTFChars(env, native_lib_dir, NULL);
+    const char* cache_path = (*env)->GetStringUTFChars(env, cache_dir, NULL);
 
-    if (!raw_path || !result_path || !native_dir) return 2;
+    if (!raw_path || !result_path || !native_dir || !cache_path) return 2;
 
+    setenv("TMPDIR", cache_path, 1);
     setenv("MITHRIL_DEBUG", "1", 1);
     setenv("MITHRIL_GL_VERSION", "4.6", 1);
     setenv("LIBGL_ES", "3", 1);
@@ -514,5 +517,6 @@ Java_com_mithril_wrapper_e2e_E2EActivity_nativeRun(
     (*env)->ReleaseStringUTFChars(env, raw_frame_path, raw_path);
     (*env)->ReleaseStringUTFChars(env, result_json_path, result_path);
     (*env)->ReleaseStringUTFChars(env, native_lib_dir, native_dir);
+    (*env)->ReleaseStringUTFChars(env, cache_dir, cache_path);
     return 0;
 }
