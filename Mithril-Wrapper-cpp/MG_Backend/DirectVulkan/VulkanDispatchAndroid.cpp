@@ -37,6 +37,8 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <link.h>
+#include <setjmp.h>
+#include <signal.h>
 #include <string>
 #include <vector>
 #include <sys/mman.h>
@@ -60,6 +62,9 @@ PFN_vkGetInstanceProcAddr g_gipa = nullptr;
 PFN_vk_icdGetInstanceProcAddr g_icd_gipa = nullptr;
 const char* g_driver_path = nullptr;
 void* g_hal_device = nullptr;
+sigjmp_buf g_probe_jmp;
+bool g_probe_active = false;
+struct sigaction g_old_segv, g_old_bus, g_old_ill;
 VkResult (*g_hal_create_instance)(const VkInstanceCreateInfo*, const VkAllocationCallbacks*,
                                   VkInstance*) = nullptr;
 PFN_vkGetDeviceProcAddr g_gdpa = nullptr;
@@ -553,6 +558,25 @@ struct mithril_hwvulkan_device_t {
     PFN_vkGetInstanceProcAddr GetInstanceProcAddr;
 };
 
+static void probe_handler(int sig) {
+    if (g_probe_active) siglongjmp(g_probe_jmp, 1);
+    // Not our probe: restore and re-raise so the real crash handler runs.
+    struct sigaction* old = (sig == SIGSEGV) ? &g_old_segv
+                          : (sig == SIGBUS ? &g_old_bus : &g_old_ill);
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
+static void install_probe_handlers() {
+    struct sigaction sa{};
+    sa.sa_handler = probe_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_NODEFER;
+    sigaction(SIGSEGV, &sa, &g_old_segv);
+    sigaction(SIGBUS, &sa, &g_old_bus);
+    sigaction(SIGILL, &sa, &g_old_ill);
+}
+
 static PFN_vkGetInstanceProcAddr try_hal_open() {
     auto* hmi = static_cast<mithril_hw_module_t*>(dlsym(g_handle, "HMI"));
     if (!hmi) return nullptr;
@@ -561,17 +585,67 @@ static PFN_vkGetInstanceProcAddr try_hal_open() {
     if (!hmi->id || strcmp(hmi->id, "vulkan") != 0) return nullptr;
     if (!hmi->methods || !hmi->methods->open) return nullptr;
 
+    install_probe_handlers();
     mithril_hw_device_t* raw = nullptr;
     if (hmi->methods->open(hmi, "vk0", &raw) != 0 || !raw) {
         fprintf(stderr, "[mithril] vk-dispatch: HAL open failed\n");
         return nullptr;
     }
-    auto* dev = reinterpret_cast<mithril_hwvulkan_device_t*>(raw);
     g_hal_device = raw;
-    if (dev->CreateInstance) g_hal_create_instance = dev->CreateInstance;
-    fprintf(stderr, "[mithril] vk-dispatch: HAL device opened (gipa=%s createInstance=%s)\n",
-            dev->GetInstanceProcAddr ? "yes" : "no", dev->CreateInstance ? "yes" : "no");
-    return dev->GetInstanceProcAddr;
+
+    // The device struct's tail is driver-defined - the AOSP header and what a
+    // Mesa build actually fills in have differed before, and reading the wrong
+    // offset yields null pointers with no error. So dump the raw words rather
+    // than trusting a fixed layout, and pick the GetInstanceProcAddr slot by
+    // probing: a genuine one answers vkGetInstanceProcAddr for a null instance.
+    auto* dev = reinterpret_cast<mithril_hwvulkan_device_t*>(raw);
+    fprintf(stderr, "[mithril] vk-dispatch: HAL device opened (tag=%u version=%u)\n",
+            raw->tag, raw->version);
+
+    const void** words = reinterpret_cast<const void**>(raw);
+    const size_t kWords = 24;
+    fprintf(stderr, "[mithril] vk-dispatch: HAL device words");
+    for (size_t i = 0; i < kWords; ++i) fprintf(stderr, " [%zu]=%p", i, const_cast<void*>(words[i]));
+    fprintf(stderr, "\n");
+
+    PFN_vkGetInstanceProcAddr found = nullptr;
+    if (dev->GetInstanceProcAddr) {
+        found = dev->GetInstanceProcAddr;
+        fprintf(stderr, "[mithril] vk-dispatch: GetInstanceProcAddr at declared offset\n");
+    } else {
+        for (size_t i = 0; i < kWords; ++i) {
+            auto* cand = reinterpret_cast<PFN_vkGetInstanceProcAddr>(const_cast<void*>(words[i]));
+            if (!cand) continue;
+            // Only slots that live in the device's function area are plausible;
+            // the first words are integers and pointers we must not call.
+            if (i < 4) continue;
+            void* probe = nullptr;
+            if (sigsetjmp(g_probe_jmp, 1) == 0) {
+                g_probe_active = true;
+                probe = (void*)cand(VK_NULL_HANDLE, "vkGetInstanceProcAddr");
+                g_probe_active = false;
+            } else {
+                g_probe_active = false;
+                fprintf(stderr, "[mithril] vk-dispatch: probe of word [%zu] trapped, skipping\n", i);
+                continue;
+            }
+            if (probe) {
+                found = cand;
+                fprintf(stderr, "[mithril] vk-dispatch: GetInstanceProcAddr found at word [%zu]\n", i);
+                break;
+            }
+        }
+    }
+
+    if (found && !g_hal_create_instance) {
+        // Ask the driver for its own vkCreateInstance through the instance
+        // proc addr we just established; the HAL struct may not carry it.
+        void* ci = (void*)found(VK_NULL_HANDLE, "vkCreateInstance");
+        if (ci) g_hal_create_instance = reinterpret_cast<decltype(g_hal_create_instance)>(ci);
+    }
+    fprintf(stderr, "[mithril] vk-dispatch: HAL gipa=%s createInstance=%s\n",
+            found ? "yes" : "no", g_hal_create_instance ? "yes" : "no");
+    return found;
 }
 
 void* resolve(const char* name) {
