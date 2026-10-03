@@ -283,6 +283,7 @@ EGLBoolean eglGetConfigs(EGLDisplay dpy, EGLConfig* configs,
 EGLBoolean eglChooseConfig(EGLDisplay dpy, const EGLint* attrib_list,
                            EGLConfig* configs, EGLint config_size,
                            EGLint* num_config) {
+    MITHRIL_LOG_WARN("egl", "eglChooseConfig enter");
     clear_error();
     if (!valid_display(dpy)) { set_error(EGL_BAD_DISPLAY); return EGL_FALSE; }
     if (!num_config) { set_error(EGL_BAD_PARAMETER); return EGL_FALSE; }
@@ -318,6 +319,7 @@ EGLBoolean eglGetConfigAttrib(EGLDisplay dpy, EGLConfig config,
 EGLSurface eglCreateWindowSurface(EGLDisplay dpy, EGLConfig config,
                                   EGLNativeWindowType win,
                                   const EGLint* attrib_list) {
+    MITHRIL_LOG_WARN("egl", "eglCreateWindowSurface enter");
     clear_error();
     if (!valid_display(dpy)) { set_error(EGL_BAD_DISPLAY); return EGL_NO_SURFACE; }
     if (!valid_config(config)) { set_error(EGL_BAD_CONFIG); return EGL_NO_SURFACE; }
@@ -345,6 +347,8 @@ EGLSurface eglCreateWindowSurface(EGLDisplay dpy, EGLConfig config,
     // is not yet current on any thread, so pass is_current=false.
     if (!ensure_swapchain(s, false)) {
         MITHRIL_LOG_WARN("egl", "eglCreateWindowSurface: deferred swapchain (window size = %dx%d)", w, h);
+    } else {
+        MITHRIL_LOG_WARN("egl", "eglCreateWindowSurface: swapchain built %dx%d", w, h);
     }
     return (EGLSurface)s;
 }
@@ -411,6 +415,7 @@ EGLBoolean eglQuerySurface(EGLDisplay dpy, EGLSurface surface,
 EGLContext eglCreateContext(EGLDisplay dpy, EGLConfig config,
                             EGLContext share_context,
                             const EGLint* attrib_list) {
+    MITHRIL_LOG_WARN("egl", "eglCreateContext enter");
     clear_error();
     if (!valid_display(dpy)) { set_error(EGL_BAD_DISPLAY); return EGL_NO_CONTEXT; }
     if (!valid_config(config)) { set_error(EGL_BAD_CONFIG); return EGL_NO_CONTEXT; }
@@ -482,6 +487,7 @@ EGLBoolean eglDestroyContext(EGLDisplay dpy, EGLContext ctx) {
 
 EGLBoolean eglMakeCurrent(EGLDisplay dpy, EGLSurface draw, EGLSurface read,
                           EGLContext ctx) {
+    MITHRIL_LOG_WARN("egl", "eglMakeCurrent enter");
     clear_error();
     if (!valid_display(dpy)) { set_error(EGL_BAD_DISPLAY); return EGL_FALSE; }
 
@@ -596,6 +602,7 @@ EGLBoolean eglQueryContext(EGLDisplay dpy, EGLContext ctx,
 
 // ---- Swap ----
 EGLBoolean eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
+    MITHRIL_LOG_WARN("egl", "eglSwapBuffers enter");
     clear_error();
     if (!valid_display(dpy)) { set_error(EGL_BAD_DISPLAY); return EGL_FALSE; }
     EglSurface* s = (EglSurface*)surface;

@@ -298,6 +298,8 @@ Swapchain* create_swapchain_offscreen(ANativeWindow* win, int width, int height,
 Swapchain* create_swapchain(void* native_window, int width, int height,
                             int want_depth_stencil, int platform_hint) {
     Backend* b = backend();
+    MITHRIL_LOG_WARN("vk", "create_swapchain enter %dx%d (init=%d win=%p)",
+                     width, height, (int)b->initialized, native_window);
     if (!b->initialized || !native_window || width <= 0 || height <= 0) return nullptr;
     // Only one surface path is compiled into this TU, so an explicit hint for
     // another platform is simply ignored.

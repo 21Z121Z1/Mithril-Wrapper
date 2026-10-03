@@ -37,6 +37,7 @@ namespace egl {
 // drain, vkDestroySwapchainKHR frees IOSurfaces that the GPU is still
 // accessing, and the next IOSurfaceBindAccel call crashes with SIGSEGV (UAF).
 bool ensure_swapchain(EglSurface* s, bool is_current) {
+    MITHRIL_LOG_WARN("egl", "ensure_swapchain enter");
     if (!s || !s->native_window) return false;
     int w = 0, h = 0;
     if (!surface_get_size(s->native_window, &w, &h)) return false;
