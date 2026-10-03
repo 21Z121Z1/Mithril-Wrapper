@@ -403,6 +403,19 @@ void report_driver_symbols(const char* path) {
     }
 }
 
+bool env_enabled(const char* value) {
+    if (!value || !value[0]) return false;
+    return std::strcmp(value, "1") == 0 ||
+           std::strcmp(value, "true") == 0 ||
+           std::strcmp(value, "TRUE") == 0 ||
+           std::strcmp(value, "yes") == 0 ||
+           std::strcmp(value, "YES") == 0 ||
+           std::strcmp(value, "on") == 0 ||
+           std::strcmp(value, "ON") == 0 ||
+           std::strcmp(value, "y") == 0 ||
+           std::strcmp(value, "Y") == 0;
+}
+
 void log_dir(const char* dir) {
     if (!dir || !dir[0]) return;
     DIR* d = opendir(dir);
@@ -572,7 +585,7 @@ static void* try_hook_route(const char* driver_dir, const char* driver_name) {
     }
     const char* trace = getenv("MITHRIL_DEBUG");
     init_fn(driver_dir ? driver_dir : "", driver_name ? driver_name : "",
-            trace && trace[0] ? 1 : 0, g_escape_ns);
+            env_enabled(trace) ? 1 : 0, g_escape_ns);
 
     // Now load a FRESH copy of the platform loader into the same namespace,
     // after the hook. The process may already contain libvulkan.so (Skia,
@@ -616,15 +629,18 @@ void ensure_library() {
     const char* driver_dir = getenv("DRIVER_PATH");
     const char* explicit_path = getenv("MITHRIL_VULKAN_LIBRARY");
     const char* turnip = getenv("MITHRIL_TURNIP");
+    const bool explicitDriverRequested = explicit_path && explicit_path[0];
+    const bool turnipRequested = env_enabled(turnip);
+    const bool customDriverRequested = explicitDriverRequested || turnipRequested;
 
     log_dir(driver_dir);
 
     const char* cands[kMaxCandidates];
     int n = 0;
 
-    if (explicit_path && explicit_path[0]) {
+    if (explicitDriverRequested) {
         add_candidate(cands, n, driver_dir, explicit_path);
-    } else if (turnip && (turnip[0] == '1' || turnip[0] == 'y' || turnip[0] == 'Y')) {
+    } else if (turnipRequested) {
         add_candidate(cands, n, driver_dir, "libvulkan_freedreno.so");
         add_candidate(cands, n, driver_dir, "libvulkan_adreno.so");
         add_candidate(cands, n, driver_dir, "vulkan.adreno.so");
@@ -663,14 +679,14 @@ void ensure_library() {
     // loader over driving it ourselves: only the loader has WSI. If this works,
     // the driver is not loaded directly at all and g_handle is the loader.
     void* hook_loader = nullptr;
-    if (explicit_path || (turnip && turnip[0])) {
-        const char* name = explicit_path && explicit_path[0] ? explicit_path
-                                                             : "libvulkan_freedreno.so";
+    if (customDriverRequested) {
+        const char* name = explicitDriverRequested ? explicit_path
+                                                   : "libvulkan_freedreno.so";
         hook_loader = try_hook_route(driver_dir, name);
     }
 
     void* driver_handle = nullptr;
-    if (!hook_loader && (explicit_path || (turnip && turnip[0]))) {
+    if (!hook_loader && customDriverRequested) {
         // Only now is it safe to preload libvulkan.so. The hook route has
         // already failed, so there is no longer a requirement that the loader
         // be first loaded after the hook.
