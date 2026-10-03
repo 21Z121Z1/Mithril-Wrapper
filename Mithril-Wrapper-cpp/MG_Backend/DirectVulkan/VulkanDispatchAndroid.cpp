@@ -62,6 +62,7 @@ PFN_vkGetInstanceProcAddr g_gipa = nullptr;
 PFN_vk_icdGetInstanceProcAddr g_icd_gipa = nullptr;
 const char* g_driver_path = nullptr;
 void* g_hal_device = nullptr;
+void* g_fallback_handle = nullptr;
 sigjmp_buf g_probe_jmp;
 bool g_probe_active = false;
 struct sigaction g_old_segv, g_old_bus, g_old_ill;
@@ -509,64 +510,57 @@ void ensure_library() {
     cands[kLoaderSlot + 2] = "/vendor/lib64/libvulkan.so";
     for (int i = kLoaderSlot + 3; i < kMaxCandidates; ++i) cands[i] = nullptr;
 
-    // Two different things are being loaded here, and conflating them is what
-    // made Turnip look unusable.
+    // Two different things can be loaded here and keeping them apart matters.
     //
-    // libvulkan_freedreno.so is a Vulkan HAL module: it exports HMI, not the
-    // vk* entrypoints. It is meant to be opened BY the platform loader -
-    // through hw_get_module() -> dlopen("vulkan.<board>.so") -> walk HMI ->
-    // hwvulkan_device_t. That is the sense in which Turnip has to come in
-    // through libvulkan.so, and it is why libadrenotools hooks the loader's
-    // library-loading calls instead of talking to the driver directly.
+    // A Mesa driver such as Turnip is a Vulkan HAL module: it exports HMI, and
+    // its Vulkan entrypoints live behind hw_module_methods_t::open() rather
+    // than in the dynamic symbol table (Mesa builds with hidden visibility and
+    // exports only the module symbols, which is why dlsym("vkCreateInstance")
+    // on it finds nothing). It is built to be opened by the platform loader.
     //
-    // So: load the driver first, purely to register it in the process, then
-    // load the platform loader and take every entrypoint from there. The
-    // linker de-duplicates loaded libraries by SONAME, so when the loader
-    // later asks for "vulkan.<board>.so" - which is exactly what the
-    // Adrenotools and Magisk packages patchelf Turnip's SONAME to - it is
-    // handed the Turnip that is already resident rather than the stock
-    // driver. The loader then performs the HAL handshake itself, using the
-    // layout it was built against, which sidesteps entirely the problem of
-    // our own struct offsets not matching.
+    // The platform loader, however, cannot reach it: hw_get_module("vulkan")
+    // only searches fixed system directories such as /vendor/lib64/hw, and a
+    // driver plugin lives under /data/app/.../lib/arm64. Loading Turnip first
+    // and then letting the loader take over therefore just yields the stock
+    // driver - which is what the previous attempt did.
     //
-    // Order matters: the driver must be resident before the loader initialises,
-    // because that is when the loader enumerates drivers.
+    // So talk to the driver directly when one was asked for, and only fall
+    // back to the loader if that yields no usable entrypoints. On the driver we
+    // try, in order: its own exported vk* symbols, the ICD discovery entry, and
+    // finally the HAL handshake (HMI -> open -> hwvulkan_device_t), which is
+    // the path a HAL module actually expects.
     void* driver_handle = nullptr;
     if (explicit_path || (turnip && turnip[0])) {
-        for (int i = 0; i < n; ++i) {
+        for (int i = 0; i < n && i < kLoaderSlot; ++i) {
             if (!cands[i]) continue;
-            // Skip the platform loader slots; those are handled below.
-            if (i >= kLoaderSlot) continue;
             driver_handle = try_load(cands[i], driver_dir);
             if (driver_handle) {
-                fprintf(stderr, "[mithril] vk-dispatch: driver registered: %s\n", cands[i]);
+                fprintf(stderr, "[mithril] vk-dispatch: driver loaded: %s\n", cands[i]);
+                g_driver_path = cands[i];
                 break;
             }
         }
     }
 
-    // Load the platform loader into the same namespace, whether or not a
-    // custom driver was found. Its entrypoints are what we call.
+    void* loader_handle = nullptr;
     for (int i = kLoaderSlot; i < kMaxCandidates; ++i) {
         if (!cands[i]) continue;
-        g_handle = try_load(cands[i], driver_dir);
-        if (g_handle) {
-            fprintf(stderr, "[mithril] vk-dispatch: using platform loader: %s\n", cands[i]);
+        loader_handle = try_load(cands[i], driver_dir);
+        if (loader_handle) {
+            fprintf(stderr, "[mithril] vk-dispatch: platform loader available: %s\n", cands[i]);
             break;
         }
     }
 
-    if (!g_handle && driver_handle) {
-        // No loader available. Fall back to talking to the driver directly,
-        // which only works for a driver exporting the vk* entrypoints itself.
-        fprintf(stderr, "[mithril] vk-dispatch: no platform loader; using driver directly\n");
-        g_handle = driver_handle;
-    }
-
+    // Prefer the custom driver; it is only usable if we can actually get
+    // entrypoints out of it, and silently falling back is what lets a device
+    // without Turnip still run.
+    g_handle = driver_handle ? driver_handle : loader_handle;
     if (!g_handle) {
         fprintf(stderr, "[mithril] vk-dispatch: no Vulkan driver could be loaded\n");
         return;
     }
+    g_fallback_handle = (g_handle == driver_handle) ? loader_handle : nullptr;
 
     // An ICD such as Turnip exposes discovery through vk_icdGetInstanceProcAddr
     // rather than the plain names; a loader exports the plain names.
@@ -603,6 +597,20 @@ void ensure_library() {
             g_gipa = (PFN_vkGetInstanceProcAddr)dlsym(g_handle, scan.gipa_name.c_str());
         }
         if (!g_gipa) g_gipa = try_hal_open();
+    }
+    // Nothing usable from the driver. If a platform loader is available, switch
+    // to it rather than leaving the process with no Vulkan at all - on a device
+    // where Turnip cannot be driven this is the difference between running on
+    // the stock driver and crashing.
+    if (!g_icd_gipa && !g_gipa && g_fallback_handle) {
+        fprintf(stderr, "[mithril] vk-dispatch: falling back to platform loader\n");
+        g_handle = g_fallback_handle;
+        g_fallback_handle = nullptr;
+        g_driver_path = nullptr;
+        g_icd_gipa = (PFN_vk_icdGetInstanceProcAddr)dlsym(g_handle, "vk_icdGetInstanceProcAddr");
+        g_gipa = (PFN_vkGetInstanceProcAddr)dlsym(g_handle, "vkGetInstanceProcAddr");
+        fprintf(stderr, "[mithril] vk-dispatch: loader discovery icd=%s gipa=%s\n",
+                g_icd_gipa ? "yes" : "no", g_gipa ? "yes" : "no");
     }
     if (!g_icd_gipa && !g_gipa) {
         fprintf(stderr, "[mithril] vk-dispatch: driver exports no discovery entrypoint\n");
@@ -732,18 +740,25 @@ static PFN_vkGetInstanceProcAddr try_hal_open() {
             if (!cand) continue;
             // Only slots that live in the device's function area are plausible;
             // the first words are integers and pointers we must not call.
-            if (i < 4) continue;
+            // Word 8 of hw_device_t is close(), which returns -1 and would
+            // therefore look like a non-null answer to a single probe. Require
+            // two things: a non-null answer for a name that must exist, and a
+            // null answer for one that cannot. Only a real
+            // GetInstanceProcAddr behaves that way.
+            if (i < 4 || i == 8) continue;
             void* probe = nullptr;
+            void* bogus = nullptr;
             if (sigsetjmp(g_probe_jmp, 1) == 0) {
                 g_probe_active = true;
                 probe = (void*)cand(VK_NULL_HANDLE, "vkGetInstanceProcAddr");
+                bogus = (void*)cand(VK_NULL_HANDLE, "mithril_not_a_real_entrypoint");
                 g_probe_active = false;
             } else {
                 g_probe_active = false;
                 fprintf(stderr, "[mithril] vk-dispatch: probe of word [%zu] trapped, skipping\n", i);
                 continue;
             }
-            if (probe) {
+            if (probe && !bogus) {
                 found = cand;
                 fprintf(stderr, "[mithril] vk-dispatch: GetInstanceProcAddr found at word [%zu]\n", i);
                 break;
