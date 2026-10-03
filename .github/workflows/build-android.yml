@@ -121,7 +121,26 @@ jobs:
           java-version: "17"
 
       - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+        # Use the SDK already on the runner image rather than the
+        # android-actions/setup-android action, which fails here on license
+        # acceptance. Install the exact platform/build-tools the module needs.
+        run: |
+          set -e
+          if [ -z "${ANDROID_HOME:-}" ] && [ -d /usr/local/lib/android/sdk ]; then
+            export ANDROID_HOME=/usr/local/lib/android/sdk
+          fi
+          if [ -z "${ANDROID_HOME:-}" ] && [ -d "${ANDROID_SDK_ROOT:-}" ]; then
+            export ANDROID_HOME="$ANDROID_SDK_ROOT"
+          fi
+          export ANDROID_SDK_ROOT="$ANDROID_HOME"
+          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
+          ls "$ANDROID_HOME"
+          SM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SM" ]; then SM=$(command -v sdkmanager); fi
+          test -n "$SM"
+          yes | "$SM" --licenses > /dev/null || true
+          "$SM" --install "platforms;android-34" "build-tools;34.0.0"
 
       - name: Install Gradle 8.7
         # Pinned distribution rather than a wrapper: there is no committed
@@ -136,7 +155,33 @@ jobs:
 
       - name: Assemble APK
         working-directory: android
-        run: gradle --no-daemon assembleRelease
+        run: |
+          gradle --no-daemon assembleRelease 2>&1 | tee gradle.log
+          exit "${PIPESTATUS[0]}"
+
+      - name: Publish gradle log (diagnosis)
+        # Same reason as the native stage: job logs sit in blob storage that is
+        # not reachable from everywhere, while a file on ci-diagnostics is
+        # readable through the API.
+        if: failure()
+        continue-on-error: true
+        run: |
+          set -e
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin ci-diagnostics 2>/dev/null || true
+          git checkout -B ci-diagnostics origin/ci-diagnostics 2>/dev/null \
+            || git checkout -B ci-diagnostics
+          mkdir -p ci-logs
+          tail -200 android/gradle.log > ci-logs/android-apk-gradle.log
+          git add ci-logs/android-apk-gradle.log
+          git diff --cached --quiet && exit 0
+          git commit -m "ci(android): APK gradle log [skip ci]"
+          for i in 1 2 3; do
+            git pull --rebase origin ci-diagnostics 2>/dev/null || true
+            git push -f origin ci-diagnostics && break
+            sleep 5
+          done
 
       - name: Verify the APK actually contains the libraries
         # An APK that builds but does not carry the .so is useless to a
