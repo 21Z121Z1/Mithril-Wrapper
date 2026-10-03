@@ -179,6 +179,17 @@ jobs:
           gradle --no-daemon assembleRelease 2>&1 | tee gradle.log
           exit "${PIPESTATUS[0]}"
 
+      - name: Upload gradle log
+        # Job logs are unreachable from here, so ship the gradle output as an
+        # artifact - those are always readable through the API.
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-apk-gradle-log
+          path: android/gradle.log
+          if-no-files-found: ignore
+
       - name: Publish gradle log (diagnosis)
         # Same reason as the native stage: job logs sit in blob storage that is
         # not reachable from everywhere, while a file on ci-diagnostics is
