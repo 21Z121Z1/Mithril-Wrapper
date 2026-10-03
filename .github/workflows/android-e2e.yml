@@ -1,0 +1,191 @@
+name: Android Mithril E2E
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'fix/**'
+      - 'feat/**'
+      - main
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mithril-android-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  android-emulator-e2e:
+    name: Real Android Surface / Vulkan / Mithril render E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      E2E_ROOT: ${{ github.workspace }}/build/android-e2e-artifacts
+
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Initialize evidence directory
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$E2E_ROOT"
+          {
+            echo "github_sha=$GITHUB_SHA"
+            echo "github_run_id=$GITHUB_RUN_ID"
+            echo "runner_os=$RUNNER_OS"
+            echo "runner_arch=$RUNNER_ARCH"
+            uname -a
+            lscpu || true
+          } > "$E2E_ROOT/environment-host.txt"
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Gradle 8.7
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: Setup Android NDK r27c
+        id: ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27c
+
+      - name: Ensure Android SDK platform
+        shell: bash
+        run: |
+          set -eo pipefail
+          if [ -z "$ANDROID_HOME" ] && [ -d /usr/local/lib/android/sdk ]; then
+            export ANDROID_HOME=/usr/local/lib/android/sdk
+          fi
+          export ANDROID_SDK_ROOT="$ANDROID_HOME"
+          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$ANDROID_HOME" >> "$GITHUB_ENV"
+          SM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SM" ]; then SM=$(command -v sdkmanager); fi
+          yes | "$SM" --licenses >/dev/null || true
+          "$SM" --install "platforms;android-34" "build-tools;34.0.0" "platform-tools"
+          "$SM" --list_installed > "$E2E_ROOT/sdk-packages.txt"
+
+      - name: Build exact x86_64 Mithril and Vulkan hook
+        shell: bash
+        run: |
+          set -euo pipefail
+          NDK="${{ steps.ndk.outputs.ndk-path }}"
+          cmake -S . -B build-android-e2e-native             -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake"             -DANDROID_ABI=x86_64             -DANDROID_STL=c++_static             -DANDROID_PLATFORM=android-29             -DCMAKE_BUILD_TYPE=Release             2>&1 | tee "$E2E_ROOT/mithril-configure.log"
+          cmake --build build-android-e2e-native             --target mithril mithril_vkhook -j"$(nproc)"             2>&1 | tee "$E2E_ROOT/mithril-build.log"
+
+          test -s build-android-e2e-native/libmithril.so
+          test -s build-android-e2e-native/libmithril_vkhook.so
+
+          READELF="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
+          "$READELF" -Ws build-android-e2e-native/libmithril.so             > "$E2E_ROOT/libmithril-symbols.txt"
+          "$READELF" -d build-android-e2e-native/libmithril_vkhook.so             > "$E2E_ROOT/libmithril-vkhook-dynamic.txt"
+          grep -q "mithrilAndroidVkHookIntercepts" "$E2E_ROOT/libmithril-symbols.txt"
+          grep -q "mithrilAndroidVkHookRedirects" "$E2E_ROOT/libmithril-symbols.txt"
+          grep -Eq "FLAGS_1.*GLOBAL|Flags:.*GLOBAL" "$E2E_ROOT/libmithril-vkhook-dynamic.txt"
+
+      - name: Build JNI Surface harness and stage native libraries
+        shell: bash
+        run: |
+          set -euo pipefail
+          NDK="${{ steps.ndk.outputs.ndk-path }}"
+          CC="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android29-clang"
+          OUT=ci/android-e2e/app/src/main/jniLibs/x86_64
+          mkdir -p "$OUT"
+
+          "$CC" -std=c11 -O2 -fPIC -shared -Wall -Wextra             -I"$PWD/Mithril-Wrapper-cpp/include"             ci/android-e2e/native/android_surface_e2e.c             -landroid -llog -ldl             -o "$OUT/libmithril_e2e.so"             2>&1 | tee "$E2E_ROOT/e2e-native-build.log"
+
+          cp build-android-e2e-native/libmithril.so "$OUT/libmithril.so"
+          cp build-android-e2e-native/libmithril_vkhook.so "$OUT/libmithril_vkhook.so"
+
+          "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" -d             "$OUT/libmithril_e2e.so" > "$E2E_ROOT/e2e-native-dynamic.txt"
+          if grep -q "libc++_shared" "$E2E_ROOT/e2e-native-dynamic.txt"; then
+            echo "::error::CI bridge unexpectedly depends on libc++_shared.so"
+            exit 1
+          fi
+          find "$OUT" -maxdepth 1 -type f -print -exec sha256sum {} \;             | tee "$E2E_ROOT/staged-native-libraries.txt"
+
+      - name: Assemble CI-only E2E APK
+        shell: bash
+        run: |
+          set -o pipefail
+          gradle -p ci/android-e2e --no-daemon :app:assembleDebug             2>&1 | tee "$E2E_ROOT/e2e-gradle.log"
+          APK=ci/android-e2e/app/build/outputs/apk/debug/app-debug.apk
+          test -s "$APK"
+          echo "E2E_APK=$PWD/$APK" >> "$GITHUB_ENV"
+          unzip -l "$APK" | tee "$E2E_ROOT/e2e-apk-contents.txt"
+          for lib in libmithril.so libmithril_vkhook.so libmithril_e2e.so; do
+            unzip -l "$APK" | grep -q "lib/x86_64/$lib"
+          done
+          sha256sum "$APK" | tee "$E2E_ROOT/e2e-apk.sha256"
+
+      - name: Enable KVM
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"'             | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm || true
+          test -e /dev/kvm
+          sudo chmod 666 /dev/kvm
+          ls -l /dev/kvm | tee "$E2E_ROOT/kvm.txt"
+
+      - name: Enable emulator Vulkan path
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.android"
+          printf 'Vulkan = on\nGLDirectMem = on\n'             > "$HOME/.android/advancedFeatures.ini"
+          cat "$HOME/.android/advancedFeatures.ini"             | tee "$E2E_ROOT/advancedFeatures.ini"
+
+      - name: Run real Android Surface E2E
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          profile: pixel_7_pro
+          disable-animations: true
+          emulator-options: >-
+            -no-window -no-snapshot -gpu swiftshader -noaudio -no-boot-anim
+            -camera-back none -camera-front none
+          script: python3 ci/android-e2e/run_emulator_e2e.py
+
+      - name: Print E2E evidence summary
+        if: always()
+        shell: bash
+        run: |
+          echo "::group::Android E2E result"
+          cat "$E2E_ROOT/run-summary.json" 2>/dev/null || true
+          echo "::endgroup::"
+          if [ ! -f "$E2E_ROOT/run-summary.json" ]; then
+            tail -n 300 "$E2E_ROOT"/logcat-*.txt 2>/dev/null || true
+          fi
+
+      - name: Upload Android E2E evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-mithril-e2e-evidence
+          path: build/android-e2e-artifacts/**
+          if-no-files-found: warn
+
+      - name: Upload Android E2E APK
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-mithril-e2e-apk
+          path: ci/android-e2e/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: warn
