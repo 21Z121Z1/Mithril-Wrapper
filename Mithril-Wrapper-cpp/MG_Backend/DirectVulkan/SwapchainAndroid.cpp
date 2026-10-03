@@ -200,11 +200,14 @@ Swapchain* create_swapchain_offscreen(ANativeWindow* win, int width, int height,
             }
         }
         if (!bufOk) {
-            if (bmem) vkFreeMemory(b->device, bmem, nullptr);
+            // A buffer must be destroyed before freeing memory still bound to
+            // it. Doing this in the opposite order is invalid Vulkan usage and
+            // can fault in validation-enabled or stricter drivers.
             if (buf) vkDestroyBuffer(b->device, buf, nullptr);
+            if (bmem) vkFreeMemory(b->device, bmem, nullptr);
             vkDestroyImageView(b->device, view, nullptr);
-            vkFreeMemory(b->device, mem, nullptr);
             vkDestroyImage(b->device, img, nullptr);
+            vkFreeMemory(b->device, mem, nullptr);
             MITHRIL_LOG_ERROR("vk", "offscreen: staging buffer setup failed");
             break;
         }
@@ -565,8 +568,9 @@ void swapchain_offscreen_destroy(mithril::vk::Swapchain* sc) {
     if (b->device) {
         for (size_t i = 0; i < o->buffers.size(); ++i) {
             if (o->mapped[i]) vkUnmapMemory(b->device, o->memories[i]);
-            if (o->memories[i]) vkFreeMemory(b->device, o->memories[i], nullptr);
+            // Destroy the VkBuffer before releasing the memory bound to it.
             if (o->buffers[i]) vkDestroyBuffer(b->device, o->buffers[i], nullptr);
+            if (o->memories[i]) vkFreeMemory(b->device, o->memories[i], nullptr);
         }
         // Unlike swapchain images, which belong to the VkSwapchainKHR, these
         // were allocated here and must be released explicitly.
