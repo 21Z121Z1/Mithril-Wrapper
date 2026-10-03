@@ -5,4 +5,6 @@
     <string name="mithril_yflip_title">Flip rendering vertically</string>
     <string name="mithril_debug_title">Enable debug logging</string>
     <string name="mithril_vram_budget_title">VRAM budget (MB)</string>
+    <string name="mithril_vk_icd_title">Vulkan ICD (VK_ICD_FILENAMES)</string>
+    <string name="mithril_vk_driver_files_title">Vulkan driver files (VK_DRIVER_FILES)</string>
 </resources>

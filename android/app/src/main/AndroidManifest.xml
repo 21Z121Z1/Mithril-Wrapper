@@ -42,6 +42,12 @@
         <meta-data
             android:name="mithril_vram_budget_title"
             android:resource="@string/mithril_vram_budget_title" />
+        <meta-data
+            android:name="mithril_vk_icd_title"
+            android:resource="@string/mithril_vk_icd_title" />
+        <meta-data
+            android:name="mithril_vk_driver_files_title"
+            android:resource="@string/mithril_vk_driver_files_title" />
 
         <!-- Legacy discovery path for FCL / Pojav-style launchers. -->
         <meta-data android:name="fclPlugin" android:value="true" />

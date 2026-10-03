@@ -52,6 +52,15 @@ val pluginRendererConfig = buildJsonValue {
             toggleable("MITHRIL_YFLIP", "1", false, RendererConfig.MetaString("mithril_yflip_title"))
             toggleable("MITHRIL_DEBUG", "1", false, RendererConfig.MetaString("mithril_debug_title"))
             customizable("MITHRIL_VRAM_BUDGET_MB", "1024", RendererConfig.MetaString("mithril_vram_budget_title"))
+            // Custom driver selection. Many Snapdragon devices expose only
+            // Vulkan 1.1 through the system libvulkan.so; Turnip ships as a
+            // separate ICD. Pointing either of these at its json makes the
+            // platform loader pick it up instead of the system driver.
+            // Mithril steps its instance down to 1.1 when 1.2 is refused and
+            // gates every 1.2-only feature on the negotiated version, so a 1.1
+            // driver is usable - it just runs with fewer features enabled.
+            customizable("VK_ICD_FILENAMES", "", RendererConfig.MetaString("mithril_vk_icd_title"))
+            customizable("VK_DRIVER_FILES", "", RendererConfig.MetaString("mithril_vk_driver_files_title"))
         },
         minMCVer = null,
         maxMCVer = null,
@@ -105,9 +114,20 @@ android {
 
     packaging {
         jniLibs {
-            // Keep the libraries uncompressed and page-aligned so they can be
-            // dlopened straight from the installed path.
-            useLegacyPackaging = false
+            // Must be TRUE. With false (extractNativeLibs=false) the .so stays
+            // inside base.apk and is never written to
+            // /data/app/<pkg>/lib/<abi>/, which is exactly the path the launcher
+            // dlopens. Run log:
+            //   DLOPEN: loading /data/app/.../com.mithril.wrapper-.../lib/arm64//libmithril.so
+            //     (error = dlopen failed: library "..." not found)
+            // dlopen then returns NULL, the launcher resolves GL/EGL entrypoints
+            // from it, calls through a NULL pointer and dies with
+            // SIGSEGV at pc=0x0 inside libpojavexec.so.
+            //
+            // MobileGL's plugin sets the same value, for the same reason: the
+            // renderer is consumed as an extracted native library, not read out
+            // of the APK.
+            useLegacyPackaging = true
         }
     }
 
