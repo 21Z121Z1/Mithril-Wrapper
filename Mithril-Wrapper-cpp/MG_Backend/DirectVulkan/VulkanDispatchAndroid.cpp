@@ -42,7 +42,9 @@
 #include <string>
 #include <vector>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <unistd.h>
+#include <limits.h>
 
 #include <dlfcn.h>
 #include <cstdlib>
@@ -95,7 +97,11 @@ int g_failures = 0;
 // ---------------------------------------------------------------------------
 
 // Not exposed by the NDK; matches bionic's linker.h.
-enum { MITHRIL_NS_TYPE_SHARED = 2 };
+enum {
+    MITHRIL_NS_TYPE_ISOLATED = 1,
+    MITHRIL_NS_TYPE_SHARED = 2,
+    MITHRIL_NS_TYPE_SHARED_ISOLATED = 3
+};
 
 typedef struct android_namespace_t* (*loader_create_ns_t)(
     const char* name, const char* ld_library_path, const char* default_library_path,
@@ -104,6 +110,7 @@ typedef struct android_namespace_t* (*loader_create_ns_t)(
 
 typedef bool (*loader_link_all_t)(struct android_namespace_t* from,
                                   struct android_namespace_t* to);
+typedef struct android_namespace_t* (*loader_get_exported_ns_t)(const char* name);
 
 // __loader_dlopen differs from dlopen by taking the caller address, which is
 // what lets us impersonate the linker.
@@ -111,9 +118,11 @@ typedef void* (*loader_dlopen_t)(const char* filename, int flags, const void* ca
 
 loader_create_ns_t g_create_ns = nullptr;
 loader_link_all_t g_link_all = nullptr;
+loader_get_exported_ns_t g_get_exported_ns = nullptr;
 loader_dlopen_t g_loader_dlopen = nullptr;
 struct android_namespace_t* g_default_ns = nullptr;
 struct android_namespace_t* g_escape_ns = nullptr;
+struct android_namespace_t* g_loader_ns = nullptr;
 bool g_ns_tried = false;
 bool g_direct_loader_preloaded = false;
 
@@ -190,9 +199,15 @@ void init_namespace_escape() {
 
     if (ld) {
         g_link_all = (loader_link_all_t)dlsym(ld, "__loader_android_link_namespaces_all_libs");
+        g_get_exported_ns = (loader_get_exported_ns_t)
+            dlsym(ld, "__loader_android_get_exported_namespace");
     }
     if (libdl) {
         g_create_ns = (loader_create_ns_t)dlsym(libdl, "__loader_android_create_namespace");
+        if (!g_get_exported_ns) {
+            g_get_exported_ns = (loader_get_exported_ns_t)
+                dlsym(libdl, "__loader_android_get_exported_namespace");
+        }
     }
     if (!g_create_ns && ld) {
         g_create_ns = (loader_create_ns_t)dlsym(ld, "__loader_android_create_namespace");
@@ -202,6 +217,7 @@ void init_namespace_escape() {
                 ld ? "yes" : "no", libdl ? "yes" : "no");
         g_create_ns = nullptr;
         g_link_all = nullptr;
+        g_get_exported_ns = nullptr;
         return;
     }
     fprintf(stderr, "[mithril] vk-dispatch: linker internals resolved, namespace escape available\n");
