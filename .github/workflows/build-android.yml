@@ -107,6 +107,8 @@ jobs:
           test -n "$HOOK"
           "$READELF" -d "$SO" | tee "needed-${{ matrix.abi }}.log"
           "$READELF" -d "$HOOK" | tee "needed-hook-${{ matrix.abi }}.log"
+          "$READELF" -Ws "$SO" | grep -q "mithrilAndroidVkHookIntercepts"
+          "$READELF" -Ws "$SO" | grep -q "mithrilAndroidVkHookRedirects"
           if grep -q "libc++_shared" "needed-${{ matrix.abi }}.log"; then
             echo "::error::libmithril.so needs libc++_shared.so, which the APK does not package"
             exit 1
