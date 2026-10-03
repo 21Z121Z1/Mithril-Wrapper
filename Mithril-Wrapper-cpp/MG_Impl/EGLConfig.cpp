@@ -28,15 +28,30 @@ namespace egl {
 // spec-compliant and lets the same config satisfy ANGLE-style desktop-GL
 // queries (EGL_OPENGL_BIT) and ES3 queries (EGL_OPENGL_ES3_BIT) from
 // different host bridges without needing two config tables.
+// EGL_OPENGL_BIT | EGL_OPENGL_ES2_BIT | EGL_OPENGL_ES3_BIT.
+//
+// ES2 is not optional. Launchers that drive us through their GL bridge ask for
+// it explicitly: FCL's gl_bridge.c gl_init_context() builds
+//   { ..., EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT, EGL_NONE }
+// and bails out with "eglChooseConfig_p() found no matching config" when
+// nothing matches, which kills context creation before any GL call happens.
+// Advertising only ES3 left that request unsatisfiable even though an ES3
+// config can serve an ES2 client.
+//
+// EGL_RENDERABLE_TYPE is a bitmask (EGL 1.5 3.4.1.2), so advertising all three
+// is spec-compliant and lets one config table satisfy desktop-GL, ES2 and ES3
+// host bridges alike.
+constexpr EGLint kRenderableTypes = EGL_OPENGL_BIT | EGL_OPENGL_ES2_BIT | EGL_OPENGL_ES3_BIT;
+
 EglConfig g_configs[kNumConfigs] = {
     // id=1: RGBA8 + D24S8 (the config Amethyst requests for MC Java)
-    { 8, 8, 8, 8, 24, 8,  EGL_WINDOW_BIT | EGL_PBUFFER_BIT, EGL_OPENGL_BIT | EGL_OPENGL_ES3_BIT, 1 },
+    { 8, 8, 8, 8, 24, 8,  EGL_WINDOW_BIT | EGL_PBUFFER_BIT, kRenderableTypes, 1 },
     // id=2: RGBA8 + D24 (no stencil)
-    { 8, 8, 8, 8, 24, 0,  EGL_WINDOW_BIT | EGL_PBUFFER_BIT, EGL_OPENGL_BIT | EGL_OPENGL_ES3_BIT, 2 },
+    { 8, 8, 8, 8, 24, 0,  EGL_WINDOW_BIT | EGL_PBUFFER_BIT, kRenderableTypes, 2 },
     // id=3: RGBA8 + S8 (no depth)
-    { 8, 8, 8, 8, 0,  8,  EGL_WINDOW_BIT | EGL_PBUFFER_BIT, EGL_OPENGL_BIT | EGL_OPENGL_ES3_BIT, 3 },
+    { 8, 8, 8, 8, 0,  8,  EGL_WINDOW_BIT | EGL_PBUFFER_BIT, kRenderableTypes, 3 },
     // id=4: RGBA8 only
-    { 8, 8, 8, 8, 0,  0,  EGL_WINDOW_BIT | EGL_PBUFFER_BIT, EGL_OPENGL_BIT | EGL_OPENGL_ES3_BIT, 4 },
+    { 8, 8, 8, 8, 0,  0,  EGL_WINDOW_BIT | EGL_PBUFFER_BIT, kRenderableTypes, 4 },
 };
 
 // Match `cfg` against an EGL attribute list (a sequence of {name, value}
