@@ -218,7 +218,7 @@ EGLBoolean eglInitialize(EGLDisplay dpy, EGLint* major, EGLint* minor) {
     // bring-up path. eglMakeCurrent still replaces g_state with the context's
     // own state, so this is inert once a context is bound.
     mithril::state_init();
-    MITHRIL_LOG_WARN("egl", ">> %s", __func__);
+    MITHRIL_LOG_WARN("egl", "eglInitialize: returning EGL 1.5");
     if (major) *major = 1;
     if (minor) *minor = 5;
     return EGL_TRUE;
@@ -237,15 +237,23 @@ EGLBoolean eglTerminate(EGLDisplay dpy) {
 }
 
 const char* eglQueryString(EGLDisplay dpy, EGLint name) {
+    mithril::state_init();
+    MITHRIL_LOG_WARN("egl", ">> %s name=0x%x", __func__, (unsigned)name);
     clear_error();
     if (!valid_display(dpy)) { set_error(EGL_BAD_DISPLAY); return nullptr; }
     switch (name) {
         case EGL_VENDOR:
-            return "Mithril-Wrapper (EGL-on-Vulkan 1.2 / MoltenVK)";
+#if defined(__ANDROID__)
+            return "Mithril-Wrapper (EGL-on-Vulkan / Android)";
+#else
+            return "Mithril-Wrapper (EGL-on-Vulkan / MoltenVK)";
+#endif
         case EGL_VERSION:
-            return "1.5 Mithril-Wrapper (Vulkan 1.2 backend)";
+            return "1.5 Mithril-Wrapper";
         case EGL_CLIENT_APIS:
-            return "OpenGL";   // we expose OpenGL 3.3 Core Profile
+            // eglBindAPI accepts both APIs and the frontend maps either one to
+            // Mithril's GL state machine. Advertise exactly those two.
+            return "OpenGL OpenGL_ES";
         case EGL_EXTENSIONS:
             // Minimal but honest list of what we actually implement.
             return "EGL_EXT_platform_base "
@@ -264,7 +272,8 @@ EGLBoolean eglBindAPI(EGLenum api) {
     mithril::state_init();
     MITHRIL_LOG_WARN("egl", ">> %s", __func__);
     clear_error();
-    if (api != EGL_OPENGL_API && api != EGL_OPENGL_ES_API && api != EGL_OPENVG_API) {
+    if (api != EGL_OPENGL_API && api != EGL_OPENGL_ES_API) {
+        // OpenVG is not implemented and is not advertised by EGL_CLIENT_APIS.
         set_error(EGL_BAD_PARAMETER);
         return EGL_FALSE;
     }
