@@ -1286,6 +1286,21 @@ void clear_device() {
 
 extern "C" {
 
+// Runtime evidence hooks for the Android E2E lane. These expose only counters
+// from the loader-interposition layer; they do not alter Vulkan behavior.
+// -1 means the custom-driver hook route was not active for this process.
+__attribute__((visibility("default")))
+int mithrilAndroidVkHookIntercepts(void) {
+    if (!g_hook_active || !g_hook_intercept_count) return -1;
+    return g_hook_intercept_count();
+}
+
+__attribute__((visibility("default")))
+int mithrilAndroidVkHookRedirects(void) {
+    if (!g_hook_active || !g_hook_redirect_count) return -1;
+    return g_hook_redirect_count();
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL vkAcquireNextImageKHR(VkDevice device, VkSwapchainKHR swapchain, uint64_t timeout, VkSemaphore semaphore, VkFence fence, uint32_t* pImageIndex) {
     static PFN_vkAcquireNextImageKHR fp = nullptr;
     if (!fp) fp = (PFN_vkAcquireNextImageKHR)resolve("vkAcquireNextImageKHR");
