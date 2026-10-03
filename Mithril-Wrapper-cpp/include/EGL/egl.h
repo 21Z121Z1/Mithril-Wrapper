@@ -9,8 +9,9 @@
  * PFNEGL*PROC function-pointer typedefs that consumers (Amethyst-iOS'
  * Natives/ctxbridges/gl_bridge.h, LWJGL's EGL probe, etc.) #include via
  * <EGL/egl.h>. Only the subset of EGL actually exercised by Amethyst's
- * egl_library struct is exposed, but it follows the Khronos layout so it
- * can also serve as a drop-in for code that does `#include <EGL/egl.h>`.
+ * egl_library struct is exposed. All public token values below must remain
+ * bit-for-bit ABI compatible with Khronos EGL 1.5 because callers such as
+ * LWJGL/FCL are compiled against the standard numeric enumerants.
  *
  * The implementation lives in this very dylib: every `egl*` symbol is
  * exported as extern "C" and resolvable via dlsym(RTLD_DEFAULT, ...).
@@ -59,7 +60,7 @@ typedef EGLNativeWindowType  NativeWindowType;
 #define EGL_NO_DISPLAY       ((EGLDisplay)0)
 #define EGL_NO_CONTEXT       ((EGLContext)0)
 #define EGL_NO_SURFACE       ((EGLSurface)0)
-#define EGL_NO_TEXTURE       ((EGLint)0)
+#define EGL_NO_TEXTURE       0x305C
 #define EGL_FALSE            ((EGLBoolean)0)
 #define EGL_TRUE             ((EGLBoolean)1)
 #define EGL_DONT_CARE        ((EGLint)(-1))
@@ -83,22 +84,22 @@ typedef EGLNativeWindowType  NativeWindowType;
 #define EGL_BAD_SYNC_KHR             0x307F
 
 /* ---- Config attributes ---- */
-#define EGL_BUFFER_SIZE              0x3080
+#define EGL_BUFFER_SIZE              0x3020
 #define EGL_ALPHA_SIZE               0x3021
 #define EGL_BLUE_SIZE                0x3022
 #define EGL_GREEN_SIZE               0x3023
 #define EGL_RED_SIZE                 0x3024
 #define EGL_DEPTH_SIZE               0x3025
 #define EGL_STENCIL_SIZE             0x3026
-#define EGL_CONFIG_CAVEAT            0x3051
+#define EGL_CONFIG_CAVEAT            0x3027
 #define EGL_CONFIG_ID                0x3028
 #define EGL_LEVEL                    0x3029
-#define EGL_MAX_PBUFFER_HEIGHT       0x3030
-#define EGL_MAX_PBUFFER_PIXELS       0x302E
+#define EGL_MAX_PBUFFER_HEIGHT       0x302A
+#define EGL_MAX_PBUFFER_PIXELS       0x302B
 #define EGL_MAX_PBUFFER_WIDTH        0x302C
-#define EGL_NATIVE_RENDERABLE        0x302B
-#define EGL_NATIVE_VISUAL_ID         0x3030
-#define EGL_NATIVE_VISUAL_TYPE       0x3031
+#define EGL_NATIVE_RENDERABLE        0x302D
+#define EGL_NATIVE_VISUAL_ID         0x302E
+#define EGL_NATIVE_VISUAL_TYPE       0x302F
 #define EGL_SAMPLES                  0x3031
 #define EGL_SAMPLE_BUFFERS           0x3032
 #define EGL_SURFACE_TYPE             0x3033
@@ -130,7 +131,7 @@ typedef EGLNativeWindowType  NativeWindowType;
 #define EGL_WINDOW_BIT               0x0004
 #define EGL_MULTISAMPLE_RESOLVE_BOX_BIT 0x0200
 #define EGL_SWAP_BEHAVIOR_PRESERVED_BIT 0x0400
-#define EGL_VG_COLORSPACE_LINEAR_BIT    0x0080
+#define EGL_VG_COLORSPACE_LINEAR_BIT    0x0020
 #define EGL_VG_ALPHA_FORMAT_PRE_BIT     0x0040
 
 /* ---- Renderable client API bits ---- */
@@ -202,7 +203,7 @@ typedef EGLNativeWindowType  NativeWindowType;
 #define EGL_READ                     0x305A
 
 /* ---- Core 1.5 sync tokens ---- */
-#define EGL_SYNC_FENCE               0x30B9
+#define EGL_SYNC_FENCE               0x30F9
 #define EGL_SYNC_PRIOR_COMMANDS_COMPLETE 0x30F0
 #define EGL_SYNC_STATUS              0x30F1
 #define EGL_SIGNALED                 0x30F2
