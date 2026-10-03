@@ -51,11 +51,18 @@ PFN_vk_icdGetInstanceProcAddr g_icd_gipa = nullptr;
 bool g_ready = false;
 int g_failures = 0;
 
-// Candidate driver paths, most specific first.
-static const int kMaxCandidates = 6;
+// Candidate driver paths, most specific first. The last slot is reserved for
+// the platform loader, so an over-long driver list can never crowd out the
+// fallback - that is exactly what happened when Turnip's three name variants
+// (joined + bare = six entries) filled the array and libvulkan.so was dropped,
+// leaving the process with no Vulkan driver at all.
+static const int kMaxCandidates = 12;
+static const int kLoaderSlot = kMaxCandidates - 1;
 
 void add_candidate(const char* cands[], int& n, const char* dir, const char* name) {
     if (n >= kMaxCandidates) return;
+    // Keep one slot free for the platform loader.
+    if (n >= kLoaderSlot) return;
     if (!name || !name[0]) return;
     if (name[0] == '/') {
         // Absolute: use as-is.
@@ -99,8 +106,11 @@ void ensure_library() {
         add_candidate(cands, n, driver_dir, "libvulkan_adreno.so");
         add_candidate(cands, n, driver_dir, "vulkan.adreno.so");
     }
-    // Fall back to the platform loader.
-    add_candidate(cands, n, nullptr, "libvulkan.so");
+    // Fall back to the platform loader. These are added directly rather than
+    // through add_candidate so the reserved slot is always filled.
+    cands[n++] = "libvulkan.so";
+    if (n < kMaxCandidates) cands[n++] = "/system/lib64/libvulkan.so";
+    if (n < kMaxCandidates) cands[n++] = "/vendor/lib64/libvulkan.so";
 
     for (int i = 0; i < n; ++i) {
         if (!cands[i]) continue;
@@ -109,8 +119,12 @@ void ensure_library() {
             fprintf(stderr, "[mithril] vk-dispatch: loaded \"%s\"\n", cands[i]);
             break;
         }
+        // dlerror() clears its state on read, so it must be captured once -
+        // calling it twice (once in the condition, once for the value) reports
+        // NULL the second time and hides the real reason.
+        const char* err = dlerror();
         fprintf(stderr, "[mithril] vk-dispatch: dlopen(\"%s\") failed: %s\n",
-                cands[i], dlerror() ? dlerror() : "unknown");
+                cands[i], err ? err : "unknown");
     }
 
     if (!g_handle) {
