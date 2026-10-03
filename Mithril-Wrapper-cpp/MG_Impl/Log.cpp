@@ -76,6 +76,16 @@ void log_write(LogLevel level, const char* tag, const char* fmt, ...) {
 // used; backtrace() itself is documented as unsafe on some implementations,
 // which is an accepted risk for a process that is about to die anyway.
 #if defined(MITHRIL_CRASH_HANDLER)
+// execinfo.h declares backtrace() unconditionally, but bionic has not always
+// shipped an implementation (libunwind was removed from the NDK), and on such
+// a target a strong reference is a link error in a module that exists purely
+// to make failures legible. Re-declare it weak there and probe at run time: a
+// missing implementation degrades to "signal + fault address", which is still
+// enough to locate the fault, instead of taking the whole build down.
+#if defined(__ANDROID__)
+extern "C" int backtrace(void** buffer, int size) __attribute__((weak));
+#endif
+
 namespace crash {
 constexpr int kMaxFrames = 48;
 
@@ -105,7 +115,9 @@ void handler(int sig, siginfo_t* info, void* context) {
     write_str(buf);
 
     void* frames[kMaxFrames];
-    int n = ::backtrace(frames, kMaxFrames);
+    int n = 0;
+    if (backtrace) n = backtrace(frames, kMaxFrames);
+    if (n == 0) write_str("[mithril]   (no backtrace available on this target)\n");
     for (int i = 0; i < n; ++i) {
         Dl_info d{};
         const char* sym = nullptr;
