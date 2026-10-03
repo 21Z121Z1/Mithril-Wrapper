@@ -329,11 +329,16 @@ void destroy_swapchain(Swapchain* sc) {
     }
     vkDeviceWaitIdle(b->device);
 #if defined(__ANDROID__)
-    // Offscreen images and staging buffers are ours, not the swapchain's.
-    // swapchain_offscreen_destroy() already destroys every owned VkImage and
-    // frees its bound memory. Do not destroy sc->images a second time here:
-    // those handles alias Offscreen::ownedImages on this path.
+    // Offscreen color images are owned by Offscreen, while sc->views owns the
+    // VkImageViews that reference those images. Vulkan requires views to die
+    // before their underlying images. Tear the views down first, then let the
+    // platform helper destroy the images/buffers/memory.
     if (sc->offscreen) {
+        for (auto& v : sc->views) {
+            if (v) vkDestroyImageView(b->device, v, nullptr);
+            v = VK_NULL_HANDLE;
+        }
+        sc->views.clear();
         swapchain_offscreen_destroy(sc);
     }
 #endif
