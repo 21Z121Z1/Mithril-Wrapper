@@ -512,10 +512,13 @@ void state_set_error(GLenum err) {
                                  (unsigned long)selfBase);
             }
         };
+        // Only level 0 is guaranteed to be meaningful without a stable frame
+        // chain. Android release builds omit frame pointers aggressively; Clang
+        // explicitly diagnoses __builtin_return_address(N>0) as unsafe, and
+        // this code runs precisely when GL has already reported an error. Do
+        // not let the diagnostic path turn a recoverable GL error into a native
+        // crash while MITHRIL_DEBUG=1.
         reportRa(0, __builtin_return_address(0));
-        reportRa(1, __builtin_return_address(1));
-        reportRa(2, __builtin_return_address(2));
-        reportRa(3, __builtin_return_address(3));
     }
     g_state->errors.recordGL(err);
 }
