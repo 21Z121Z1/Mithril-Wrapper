@@ -246,6 +246,15 @@ struct Backend {
      * GL 4.6 ARB_indirect_parameters (glMultiDraw*IndirectCount). Sodium's
      * chunk render issues these; when unsupported we must fall back rather
      * than record a vkCmd*Count call the device cannot execute. */
+    /* Vulkan level actually granted to this instance. Requesting 1.2 on a
+     * device that only implements 1.1 is fatal - vkCreateInstance returns
+     * VK_ERROR_INCOMPATIBLE_DRIVER - so init_device() steps down until one
+     * level is accepted and records it here. 1.2 feature structs and 1.3
+     * commands are gated on this, so a 1.1 device gets a working instance
+     * instead of none.
+     */
+    uint32_t         instanceApiVersion = VK_API_VERSION_1_1;
+
     bool             drawIndirectCountSupported = false;
 
     /* sampleRateShading core feature — required before a pipeline may set

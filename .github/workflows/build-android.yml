@@ -40,9 +40,14 @@ jobs:
 
       - name: Configure
         run: |
+          # c++_static: Gradle does not package libc++_shared.so for a prebuilt
+          # .so dropped into jniLibs - it only does that for libraries it builds
+          # itself. A c++_shared build therefore dlopen()s with "library not
+          # found" on device. Static linking removes the dependency entirely.
           cmake -S . -B "build-${{ matrix.abi }}" \
             -DCMAKE_TOOLCHAIN_FILE="${{ steps.ndk.outputs.ndk-path }}/build/cmake/android.toolchain.cmake" \
             -DANDROID_ABI="${{ matrix.abi }}" \
+            -DANDROID_STL=c++_static \
             -DANDROID_PLATFORM=android-29 \
             -DCMAKE_BUILD_TYPE=Release
 
@@ -50,6 +55,21 @@ jobs:
         run: |
           cmake --build "build-${{ matrix.abi }}" --target mithril -j"$(nproc)" 2>&1 | tee "native-${{ matrix.abi }}.log"
           exit "${PIPESTATUS[0]}"
+
+      - name: Verify no unpackaged runtime dependencies
+        # dlopen() reports "library not found" when a DT_NEEDED entry is missing
+        # from the APK - and it names OUR library, so the launcher log gives no
+        # hint about the real cause. Fail the build here instead of crashing on
+        # device.
+        run: |
+          READELF="${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
+          SO=$(find "build-${{ matrix.abi }}" -name 'libmithril.so' -type f | head -1)
+          test -n "$SO"
+          "$READELF" -d "$SO" | tee "needed-${{ matrix.abi }}.log"
+          if grep -q "libc++_shared" "needed-${{ matrix.abi }}.log"; then
+            echo "::error::libmithril.so needs libc++_shared.so, which the APK does not package"
+            exit 1
+          fi
 
       - name: Publish build log (diagnosis)
         # Job logs and artifacts live in blob storage that is not reachable from

@@ -769,19 +769,52 @@ bool init_device() {
     appInfo.applicationVersion = VK_MAKE_VERSION(1, 0, 0);
     appInfo.pEngineName = "Mithril-Wrapper";
     appInfo.engineVersion = VK_MAKE_VERSION(1, 0, 0);
-    appInfo.apiVersion = VK_API_VERSION_1_2;
+    // Requesting an apiVersion the platform does not implement is fatal:
+    // vkCreateInstance returns VK_ERROR_INCOMPATIBLE_DRIVER. Android devices
+    // commonly expose only Vulkan 1.1 - the system loader on Snapdragon, even
+    // when a Turnip driver is installed - so asking for 1.2 unconditionally
+    // leaves the renderer unable to start there.
+    //
+    // Step down until a level is accepted and record which one, so the 1.2
+    // feature structs and 1.3 commands below can gate on it.
+    const bool portabilityEnumeration =
+        has_extension(instExtProps, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+    b->instanceApiVersion = VK_API_VERSION_1_1;
 
-    VkInstanceCreateInfo instCI{};
-    instCI.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
-    instCI.pApplicationInfo = &appInfo;
-    instCI.enabledExtensionCount = (uint32_t)instExts.size();
-    instCI.ppEnabledExtensionNames = instExts.data();
-    // VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR is REQUIRED so
-    // vkEnumeratePhysicalDevices returns the MoltenVK ICD.
-    instCI.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+    static const uint32_t kApiLevels[] = {
+        VK_API_VERSION_1_2,
+        VK_API_VERSION_1_1,
+    };
+    bool instanceCreated = false;
+    for (uint32_t level : kApiLevels) {
+        appInfo.apiVersion = level;
 
-    if (vkCreateInstance(&instCI, nullptr, &b->instance) != VK_SUCCESS) {
-        MITHRIL_LOG_ERROR("vk", "vkCreateInstance failed");
+        VkInstanceCreateInfo instCI{};
+        instCI.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+        instCI.pApplicationInfo = &appInfo;
+        instCI.enabledExtensionCount = (uint32_t)instExts.size();
+        instCI.ppEnabledExtensionNames = instExts.data();
+        // VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR is REQUIRED so
+        // vkEnumeratePhysicalDevices returns the MoltenVK ICD. It is only legal
+        // together with VK_KHR_portability_enumeration: setting the flag without
+        // the extension is invalid usage, and Android's loader has no such
+        // extension at all, so it must be conditional.
+        if (portabilityEnumeration) {
+            instCI.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+        }
+
+        if (vkCreateInstance(&instCI, nullptr, &b->instance) == VK_SUCCESS) {
+            b->instanceApiVersion = level;
+            instanceCreated = true;
+            MITHRIL_LOG_INFO("vk", "VkInstance created at apiVersion %u.%u",
+                             VK_VERSION_MAJOR(level), VK_VERSION_MINOR(level));
+            break;
+        }
+        MITHRIL_LOG_WARN("vk", "vkCreateInstance failed at apiVersion %u.%u; stepping down",
+                         VK_VERSION_MAJOR(level), VK_VERSION_MINOR(level));
+    }
+    if (!instanceCreated) {
+        MITHRIL_LOG_ERROR("vk", "vkCreateInstance failed at every supported apiVersion");
         return false;
     }
 
@@ -1275,19 +1308,35 @@ bool init_device() {
     // core 特性，位于 VkPhysicalDeviceVulkan12Features（不在 1.0 的
     // VkPhysicalDeviceFeatures 里）。必须链入 vkGetPhysicalDeviceFeatures2
     // 查询支持值，再链入 VkDeviceCreateInfo 启用。MoltenVK 1.2.x 报告它。
+    // Declared at function scope on purpose: append_feature() stores this
+    // address in the chain handed to vkCreateDevice, so it has to outlive the
+    // gate below.
     VkPhysicalDeviceVulkan12Features vulkan12Feat{};
     vulkan12Feat.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
     vulkan12Feat.pNext = nullptr;
-    {
-        VkPhysicalDeviceFeatures2 feat2{};
-        feat2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
-        feat2.pNext = &vulkan12Feat;
-        vkGetPhysicalDeviceFeatures2(b->physicalDevice, &feat2);
-        b->drawIndirectCountSupported = vulkan12Feat.drawIndirectCount == VK_TRUE;
+    // VkPhysicalDeviceVulkan12Features only exists from Vulkan 1.2. Handing its
+    // sType to a 1.1 device asks the driver to interpret a structure it has
+    // never seen - at best ignored, at worst the whole feature chain is
+    // rejected. Gate on the level actually granted to the instance AND the one
+    // the physical device reports, so a 1.1 device simply reports the feature
+    // unsupported and keeps the existing fallback.
+    if (b->instanceApiVersion >= VK_API_VERSION_1_2 &&
+        b->props.apiVersion >= VK_API_VERSION_1_2) {
+        {
+            VkPhysicalDeviceFeatures2 feat2{};
+            feat2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+            feat2.pNext = &vulkan12Feat;
+            vkGetPhysicalDeviceFeatures2(b->physicalDevice, &feat2);
+            b->drawIndirectCountSupported = vulkan12Feat.drawIndirectCount == VK_TRUE;
+        }
+        // 仅当设备支持时链入启用；不支持则保持默认（spec-safe，启用不支持的特性
+        // 会让 vkCreateDevice 返回 VK_ERROR_FEATURE_NOT_PRESENT）。
+        if (b->drawIndirectCountSupported) append_feature(&vulkan12Feat);
+    } else {
+        b->drawIndirectCountSupported = false;
+        MITHRIL_LOG_INFO("vk", "Vulkan 1.1 device: drawIndirectCount unavailable "
+                         "(GL 4.6 indirect_parameters falls back to a loop)");
     }
-    // 仅当设备支持时链入启用；不支持则保持默认（spec-safe，启用不支持的特性
-    // 会让 vkCreateDevice 返回 VK_ERROR_FEATURE_NOT_PRESENT）。
-    if (b->drawIndirectCountSupported) append_feature(&vulkan12Feat);
 
     b->sampleRateShadingSupported = supported.sampleRateShading == VK_TRUE;
 
