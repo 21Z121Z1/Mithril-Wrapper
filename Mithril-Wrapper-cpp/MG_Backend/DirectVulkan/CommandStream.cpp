@@ -2739,6 +2739,7 @@ void backend_draw_indexed_indirect_count(int primitive, int index_type,
         count_buffer, count_offset, (uint32_t)max_drawcount, effStride);
 }
 
+} // extern "C"
 
 namespace mithril {
 namespace vk {
@@ -3030,5 +3031,3 @@ extern "C" int backend_query_counter(GLuint id) {
 
 } // namespace vk
 } // namespace mithril
-
-} // extern "C"
