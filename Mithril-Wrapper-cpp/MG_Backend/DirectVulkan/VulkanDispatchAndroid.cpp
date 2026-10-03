@@ -285,7 +285,17 @@ static PFN_vkGetInstanceProcAddr try_hal_open();
 static int collect_symbols_cb(struct dl_phdr_info* info, size_t, void* data) {
     auto* scan = static_cast<SymbolScan*>(data);
     if (!info->dlpi_name || !scan->wanted_path) return 0;
-    if (strcmp(info->dlpi_name, scan->wanted_path) != 0) return 0;
+    // dlpi_name is whatever the linker recorded, which is not necessarily the
+    // path we asked for: a library opened by SONAME reports its SONAME, and one
+    // opened by absolute path may report the resolved path. Match on the base
+    // name so either form hits.
+    const char* a = info->dlpi_name;
+    const char* b = scan->wanted_path;
+    const char* ab = strrchr(a, '/');
+    const char* bb = strrchr(b, '/');
+    a = ab ? ab + 1 : a;
+    b = bb ? bb + 1 : b;
+    if (strcmp(a, b) != 0) return 0;
 
     const ElfW(Dyn)* dyn = nullptr;
     for (ElfW(Half) i = 0; i < info->dlpi_phnum; ++i) {
@@ -298,15 +308,51 @@ static int collect_symbols_cb(struct dl_phdr_info* info, size_t, void* data) {
 
     const ElfW(Sym)* symtab = nullptr;
     const char* strtab = nullptr;
-    const uint32_t* hash = nullptr;
+    const uint32_t* hash = nullptr;      // DT_HASH
+    const uint32_t* gnu_hash = nullptr;  // DT_GNU_HASH
     for (const ElfW(Dyn)* d = dyn; d->d_tag != DT_NULL; ++d) {
         if (d->d_tag == DT_SYMTAB) symtab = reinterpret_cast<const ElfW(Sym)*>(info->dlpi_addr + d->d_un.d_ptr);
         else if (d->d_tag == DT_STRTAB) strtab = reinterpret_cast<const char*>(info->dlpi_addr + d->d_un.d_ptr);
         else if (d->d_tag == DT_HASH) hash = reinterpret_cast<const uint32_t*>(info->dlpi_addr + d->d_un.d_ptr);
+        else if (d->d_tag == 0x6ffffef5u) gnu_hash = reinterpret_cast<const uint32_t*>(info->dlpi_addr + d->d_un.d_ptr);
     }
-    if (!symtab || !strtab || !hash) return 0;
+    if (!symtab || !strtab) return 0;
 
-    const uint32_t nsyms = hash[1];  // nchain equals the symbol count
+    // Two hash formats exist and a given library ships only one. DT_GNU_HASH is
+    // the default on modern Android (the NDK passes --hash-style=gnu), while
+    // DT_HASH is the older SysV one. Reading only DT_HASH reported "0 vk*
+    // symbols" for drivers that do export them, because gnu-hash-only images
+    // have no DT_HASH entry at all and the guard above bailed out.
+    uint32_t nsyms = 0;
+    if (hash) {
+        nsyms = hash[1];  // nchain equals the symbol count
+    } else if (gnu_hash) {
+        const uint32_t nbuckets = gnu_hash[0];
+        const uint32_t symoffset = gnu_hash[1];
+        const uint32_t bloom_size = gnu_hash[2];
+        const uint32_t bloom_shift = gnu_hash[3];
+        const unsigned char* bloom = reinterpret_cast<const unsigned char*>(gnu_hash + 4);
+        const uint32_t* buckets = reinterpret_cast<const uint32_t*>(
+            bloom + bloom_size * (sizeof(ElfW(Addr)) == 8 ? 8 : 4));
+        const uint32_t* chain = buckets + nbuckets;
+
+        nsyms = symoffset;
+        uint32_t max_bucket = 0;
+        for (uint32_t i = 0; i < nbuckets; ++i) {
+            if (buckets[i] > max_bucket) max_bucket = buckets[i];
+        }
+        if (max_bucket >= symoffset) {
+            // Walk the chain of the last symbol in the final bucket until the
+            // terminator bit is set; its index plus one is the symbol count.
+            uint32_t i = max_bucket - symoffset;
+            while (!(chain[i] & 1u)) ++i;
+            nsyms = symoffset + i + 1;
+        }
+        (void)bloom_shift;
+    } else {
+        return 0;
+    }
+
     for (uint32_t i = 0; i < nsyms; ++i) {
         const char* name = strtab + symtab[i].st_name;
         if (!name || name[0] == '\0') continue;
@@ -454,16 +500,67 @@ void ensure_library() {
         add_candidate(cands, n, driver_dir, "libvulkan_adreno.so");
         add_candidate(cands, n, driver_dir, "vulkan.adreno.so");
     }
-    // Platform loader fallbacks, added directly so the reserved slots are
-    // always filled.
-    cands[n++] = "libvulkan.so";
-    cands[n++] = "/system/lib64/libvulkan.so";
-    cands[n++] = "/vendor/lib64/libvulkan.so";
+    // Platform loader fallbacks. These go at kLoaderSlot onward rather than at
+    // n: the driver scan iterates 0..kLoaderSlot-1 and the loader scan
+    // iterates kLoaderSlot..kMaxCandidates-1, so the two lists must not
+    // overlap regardless of how many driver names were added above.
+    cands[kLoaderSlot] = "libvulkan.so";
+    cands[kLoaderSlot + 1] = "/system/lib64/libvulkan.so";
+    cands[kLoaderSlot + 2] = "/vendor/lib64/libvulkan.so";
+    for (int i = kLoaderSlot + 3; i < kMaxCandidates; ++i) cands[i] = nullptr;
 
-    for (int i = 0; i < n; ++i) {
+    // Two different things are being loaded here, and conflating them is what
+    // made Turnip look unusable.
+    //
+    // libvulkan_freedreno.so is a Vulkan HAL module: it exports HMI, not the
+    // vk* entrypoints. It is meant to be opened BY the platform loader -
+    // through hw_get_module() -> dlopen("vulkan.<board>.so") -> walk HMI ->
+    // hwvulkan_device_t. That is the sense in which Turnip has to come in
+    // through libvulkan.so, and it is why libadrenotools hooks the loader's
+    // library-loading calls instead of talking to the driver directly.
+    //
+    // So: load the driver first, purely to register it in the process, then
+    // load the platform loader and take every entrypoint from there. The
+    // linker de-duplicates loaded libraries by SONAME, so when the loader
+    // later asks for "vulkan.<board>.so" - which is exactly what the
+    // Adrenotools and Magisk packages patchelf Turnip's SONAME to - it is
+    // handed the Turnip that is already resident rather than the stock
+    // driver. The loader then performs the HAL handshake itself, using the
+    // layout it was built against, which sidesteps entirely the problem of
+    // our own struct offsets not matching.
+    //
+    // Order matters: the driver must be resident before the loader initialises,
+    // because that is when the loader enumerates drivers.
+    void* driver_handle = nullptr;
+    if (explicit_path || (turnip && turnip[0])) {
+        for (int i = 0; i < n; ++i) {
+            if (!cands[i]) continue;
+            // Skip the platform loader slots; those are handled below.
+            if (i >= kLoaderSlot) continue;
+            driver_handle = try_load(cands[i], driver_dir);
+            if (driver_handle) {
+                fprintf(stderr, "[mithril] vk-dispatch: driver registered: %s\n", cands[i]);
+                break;
+            }
+        }
+    }
+
+    // Load the platform loader into the same namespace, whether or not a
+    // custom driver was found. Its entrypoints are what we call.
+    for (int i = kLoaderSlot; i < kMaxCandidates; ++i) {
         if (!cands[i]) continue;
         g_handle = try_load(cands[i], driver_dir);
-        if (g_handle) break;
+        if (g_handle) {
+            fprintf(stderr, "[mithril] vk-dispatch: using platform loader: %s\n", cands[i]);
+            break;
+        }
+    }
+
+    if (!g_handle && driver_handle) {
+        // No loader available. Fall back to talking to the driver directly,
+        // which only works for a driver exporting the vk* entrypoints itself.
+        fprintf(stderr, "[mithril] vk-dispatch: no platform loader; using driver directly\n");
+        g_handle = driver_handle;
     }
 
     if (!g_handle) {
@@ -482,7 +579,17 @@ void ensure_library() {
         // build may ship the discovery entrypoint under any name, and some
         // vendor drivers hide it inside a namespace (Adreno has shipped
         // qglinternal::vkGetInstanceProcAddr).
-        SymbolScan scan{g_driver_path, {}, {}};
+        // Ask dladdr for the path the linker actually recorded rather than
+        // reusing the string we passed to dlopen - they differ whenever the
+        // library was opened by SONAME, and the walk below matches on it.
+        const char* recorded = g_driver_path;
+        Dl_info self{};
+        if (g_handle && dladdr(reinterpret_cast<void*>(g_icd_gipa ? (void*)g_icd_gipa : (void*)g_gipa), &self) == 0) {
+            if (dladdr(g_handle, &self) && self.dli_fname) recorded = self.dli_fname;
+        } else if (self.dli_fname) {
+            recorded = self.dli_fname;
+        }
+        SymbolScan scan{recorded, {}, {}};
         dl_iterate_phdr(collect_symbols_cb, &scan);
         fprintf(stderr, "[mithril] vk-dispatch: driver exports %zu vk* symbols",
                 scan.vk_symbols.size());
@@ -601,6 +708,13 @@ static PFN_vkGetInstanceProcAddr try_hal_open() {
     auto* dev = reinterpret_cast<mithril_hwvulkan_device_t*>(raw);
     fprintf(stderr, "[mithril] vk-dispatch: HAL device opened (tag=%u version=%u)\n",
             raw->tag, raw->version);
+    // Mesa's tu_hal_open() fills GetInstanceProcAddr/CreateInstance right after
+    // hw_device_t, which is what these sizes encode. Print them so a mismatch
+    // between our layout and the one the driver was built against is visible
+    // rather than silent.
+    fprintf(stderr, "[mithril] vk-dispatch: HAL sizes: hw_module_t=%zu hw_device_t=%zu hwvulkan_device_t=%zu\n",
+            sizeof(mithril_hw_module_t), sizeof(mithril_hw_device_t),
+            sizeof(mithril_hwvulkan_device_t));
 
     const void** words = reinterpret_cast<const void**>(raw);
     const size_t kWords = 24;
