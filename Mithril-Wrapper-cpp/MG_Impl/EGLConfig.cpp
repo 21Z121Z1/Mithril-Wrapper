@@ -65,6 +65,10 @@ bool config_matches(const EglConfig* cfg, const EGLint* attribs) {
         EGLint value = a[1];
         if (value == EGL_DONT_CARE) continue;
         switch (name) {
+            case EGL_BUFFER_SIZE:
+                if (cfg->redSize + cfg->greenSize + cfg->blueSize + cfg->alphaSize < value)
+                    return false;
+                break;
             case EGL_RED_SIZE:        if (cfg->redSize       < value) return false; break;
             case EGL_GREEN_SIZE:      if (cfg->greenSize     < value) return false; break;
             case EGL_BLUE_SIZE:       if (cfg->blueSize      < value) return false; break;
@@ -72,27 +76,36 @@ bool config_matches(const EglConfig* cfg, const EGLint* attribs) {
             case EGL_DEPTH_SIZE:      if (cfg->depthSize     < value) return false; break;
             case EGL_STENCIL_SIZE:    if (cfg->stencilSize   < value) return false; break;
             case EGL_SURFACE_TYPE:    if ((cfg->surfaceType & value) != value) return false; break;
-            case EGL_RENDERABLE_TYPE: if ((cfg->renderableType & value) != value) return false; break;
+            case EGL_RENDERABLE_TYPE:
+            case EGL_CONFORMANT:
+                if ((cfg->renderableType & value) != value) return false;
+                break;
             case EGL_COLOR_BUFFER_TYPE: if (value != EGL_RGB_BUFFER) return false; break;
-            // All pre-baked configs are non-transparent RGB buffers, so a
-            // request for EGL_TRANSPARENT_RGB must reject them (config_get_attr
-            // reports EGL_NONE for EGL_TRANSPARENT_TYPE). Without this case
-            // the token fell through to `default` and the constraint was
-            // silently ignored — a semantic mismatch with config_get_attr.
-            case EGL_TRANSPARENT_TYPE: if (value != EGL_NONE) return false; break;
-            // No pre-baked config carries a luminance buffer; only 0 matches.
-            case EGL_LUMINANCE_SIZE:   if (value != 0) return false; break;
-            case EGL_CONFIG_ID:       if (cfg->configId != value) return false; break;
-            case EGL_LEVEL:           break; // ignored
-            case EGL_NATIVE_RENDERABLE: break; // ignored
-            case EGL_NATIVE_VISUAL_ID: break; // ignored
+            case EGL_CONFIG_CAVEAT:     if (value != EGL_NONE) return false; break;
+            case EGL_TRANSPARENT_TYPE:  if (value != EGL_NONE) return false; break;
+            case EGL_LUMINANCE_SIZE:    if (value != 0) return false; break;
+            case EGL_SAMPLE_BUFFERS:    if (value != 0) return false; break;
+            case EGL_SAMPLES:           if (value != 0) return false; break;
+            case EGL_CONFIG_ID:         if (cfg->configId != value) return false; break;
+            case EGL_LEVEL:             if (value != 0) return false; break;
+            case EGL_NATIVE_RENDERABLE: if (value != EGL_FALSE) return false; break;
+            case EGL_NATIVE_VISUAL_ID:  if (value != 0) return false; break;
+            case EGL_NATIVE_VISUAL_TYPE: if (value != 0) return false; break;
+            case EGL_MAX_PBUFFER_WIDTH:  if (value > 16384) return false; break;
+            case EGL_MAX_PBUFFER_HEIGHT: if (value > 16384) return false; break;
+            case EGL_MAX_PBUFFER_PIXELS:
+                if (value > 16384 * 16384) return false;
+                break;
             case EGL_BIND_TO_TEXTURE_RGB:
             case EGL_BIND_TO_TEXTURE_RGBA:
-                // We always permit texturing; ignore the constraint.
+                // Pbuffer texture binding is only a stub today. Report the
+                // capability honestly so clients do not select a config based
+                // on an operation that cannot actually be performed.
+                if (value != EGL_FALSE) return false;
                 break;
             default:
-                // Unknown attribute — EGL says this is EGL_BAD_ATTRIBUTE,
-                // but to be tolerant of extension tokens we ignore it.
+                // Unknown/extension attributes are tolerated for launcher
+                // compatibility. Core attributes above are matched exactly.
                 break;
         }
     }
@@ -112,22 +125,22 @@ EGLint config_get_attr(const EglConfig* cfg, EGLint attr) {
         case EGL_CONFORMANT:      return cfg->renderableType;
         case EGL_CONFIG_ID:       return cfg->configId;
         case EGL_COLOR_BUFFER_TYPE: return EGL_RGB_BUFFER;
-        case EGL_BUFFER_SIZE:     return cfg->redSize + cfg->greenSize + cfg->blueSize;
+        case EGL_BUFFER_SIZE:     return cfg->redSize + cfg->greenSize + cfg->blueSize + cfg->alphaSize;
         case EGL_LUMINANCE_SIZE:  return 0;
         case EGL_ALPHA_MASK_SIZE: return 0;
         case EGL_CONFIG_CAVEAT:   return EGL_NONE;
         case EGL_LEVEL:           return 0;
         case EGL_MAX_PBUFFER_WIDTH:  return 16384;
+        case EGL_MAX_PBUFFER_HEIGHT: return 16384;
         case EGL_MAX_PBUFFER_PIXELS: return 16384 * 16384;
         case EGL_NATIVE_RENDERABLE:  return EGL_FALSE;
-        // EGL_NATIVE_VISUAL_ID and EGL_MAX_PBUFFER_HEIGHT are the same token
-        // (0x3030) in the Khronos EGL spec; EGL_NATIVE_VISUAL_TYPE and
-        // EGL_SAMPLES share 0x3031. A config query at 0x3030 returns the
-        // native visual id (0 — gl_bridge.m tolerates this), and 0x3031
-        // returns the sample count (0 == no MSAA). One case label per value.
         case EGL_NATIVE_VISUAL_ID:   return 0;
+        case EGL_NATIVE_VISUAL_TYPE: return 0;
         case EGL_SAMPLES:            return 0;
         case EGL_SAMPLE_BUFFERS:     return 0;
+        case EGL_BIND_TO_TEXTURE_RGB:
+        case EGL_BIND_TO_TEXTURE_RGBA:
+            return EGL_FALSE;
         case EGL_TRANSPARENT_TYPE:   return EGL_NONE;
         case EGL_MIN_SWAP_INTERVAL:  return 0;
         case EGL_MAX_SWAP_INTERVAL:  return 1;
