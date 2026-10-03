@@ -133,6 +133,34 @@ struct Swapchain {
     // early on !hasCommands, present is skipped) burning CPU forever instead
     // of either recovering or surfacing the error.
     bool            needsRebuild = false;
+
+    // Android offscreen present path.
+    //
+    // Some Vulkan drivers on Android (notably Turnip built as an Android HAL
+    // module) expose no WSI at all: no VK_KHR_surface, no
+    // VK_KHR_android_surface, no VK_KHR_swapchain. Such a driver can still do
+    // everything except hand an image to the presentation engine, which is
+    // exactly how Zink drives it: render offscreen, then present the pixels by
+    // other means.
+    //
+    // So when the surface path is unavailable we render into ordinary
+    // VkImages and blit them to the ANativeWindow ourselves. This needs no
+    // Vulkan WSI extension - only core Vulkan plus libandroid - and therefore
+    // works with any driver, including a 1.1 one.
+    //
+    // Null on every other platform and whenever the surface path succeeded,
+    // so the Apple path is untouched.
+    struct Offscreen {
+        void* window = nullptr;              // ANativeWindow*
+        std::vector<VkImage>        ownedImages; // we allocate these ourselves
+        std::vector<VkDeviceMemory> imageMemories;
+        std::vector<VkBuffer>       buffers;     // one staging buffer per image
+        std::vector<VkDeviceMemory> memories;
+        std::vector<void*>          mapped;  // persistently mapped
+        VkDeviceSize size = 0;
+        int nextIndex = 0;
+    };
+    Offscreen* offscreen = nullptr;
 };
 
 // Create the surface + swapchain (+ optional depth image) for a native window.
@@ -165,6 +193,12 @@ VkImageView swapchain_acquire_depth(Swapchain* sc);
 // Present the current image to the queue and acquire the next one. Called by
 // backend_present_and_acquire().
 void swapchain_present_and_acquire(Swapchain* sc);
+
+// Android-only: copy the acquired offscreen image back to the CPU and post it
+// to the ANativeWindow. Defined in SwapchainAndroid.cpp; only ever called when
+// sc->offscreen != nullptr, which cannot happen off Android.
+void swapchain_offscreen_present(Swapchain* sc);
+void swapchain_offscreen_destroy(Swapchain* sc);
 
 } // namespace vk
 } // namespace mithril

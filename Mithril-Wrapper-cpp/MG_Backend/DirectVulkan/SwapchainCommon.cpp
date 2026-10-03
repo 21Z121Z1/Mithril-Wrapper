@@ -318,6 +318,13 @@ void destroy_swapchain(Swapchain* sc) {
     Backend* b = backend();
     if (!b->device) { delete sc; return; }
     vkDeviceWaitIdle(b->device);
+#if defined(__ANDROID__)
+    // Offscreen images and staging buffers are ours, not the swapchain's.
+    if (sc->offscreen) {
+        swapchain_offscreen_destroy(sc);
+        for (auto img : sc->images) if (img) vkDestroyImage(b->device, img, nullptr);
+    }
+#endif
     if (sc->depthView)   { vkDestroyImageView(b->device, sc->depthView, nullptr); sc->depthView = VK_NULL_HANDLE; }
     if (sc->depthImage)  { vkDestroyImage(b->device, sc->depthImage, nullptr); sc->depthImage = VK_NULL_HANDLE; }
     if (sc->depthMemory) { vkFreeMemory(b->device, sc->depthMemory, nullptr); sc->depthMemory = VK_NULL_HANDLE; }
@@ -340,7 +347,31 @@ void destroy_swapchain(Swapchain* sc) {
 }
 
 VkImageView swapchain_acquire_color(Swapchain* sc) {
-    if (!sc || !sc->swapchain) return VK_NULL_HANDLE;
+    if (!sc) return VK_NULL_HANDLE;
+    // Offscreen path: there is no VkSwapchainKHR and no presentation engine,
+    // so images are handed out round-robin. Everything else (render pass,
+    // layout transitions, depth) is identical.
+    if (sc->offscreen) {
+        if (!sc->offscreen->window || sc->needsRebuild) return VK_NULL_HANDLE;
+        Backend* b = backend();
+        if (b->deviceLost) return VK_NULL_HANDLE;
+        if (sc->currentImage < 0) {
+            if (!ensure_command_buffer_recording()) return VK_NULL_HANDLE;
+            const int n = (int)sc->images.size();
+            if (n <= 0) return VK_NULL_HANDLE;
+            sc->currentImage = sc->offscreen->nextIndex % n;
+            sc->offscreen->nextIndex = (sc->offscreen->nextIndex + 1) % n;
+            sc->currentColorLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            // Nothing signaled the acquire semaphore on this path, so the
+            // frame's submit must not wait on it. Left false, commit_frame
+            // would block forever on a semaphore that is never signaled.
+            sc->imageAvailableConsumed = true;
+            sc->imageAvailableFrameSlot = -1;
+        }
+        return (sc->currentImage >= 0 && sc->currentImage < (int)sc->views.size())
+               ? sc->views[sc->currentImage] : VK_NULL_HANDLE;
+    }
+    if (!sc->swapchain) return VK_NULL_HANDLE;
     // If the swapchain was marked dead by a previous fatal error (OOM,
     // surface lost, device lost), refuse to acquire. EGL will see the null
     // return, detect needsRebuild, and rebuild the swapchain on the next
@@ -474,7 +505,21 @@ VkImageView swapchain_acquire_depth(Swapchain* sc) {
 }
 
 void swapchain_present_and_acquire(Swapchain* sc) {
-    if (!sc || !sc->swapchain) return;
+    if (!sc) return;
+    if (sc->offscreen) {
+        Backend* b = backend();
+        if (b->deviceLost) return;
+        if (sc->currentImage >= 0) {
+            swapchain_offscreen_present(sc);
+            for (size_t i = 0; i < sc->renderFinishedSignaledPerImage.size(); ++i) {
+                sc->renderFinishedSignaledPerImage[i] = false;
+            }
+            sc->currentImage = -1;
+        }
+        swapchain_acquire_color(sc);
+        return;
+    }
+    if (!sc->swapchain) return;
     Backend* b = backend();
     if (b->deviceLost) {
         return;  // 持久性故障已挂起，跳过 present
