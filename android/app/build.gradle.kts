@@ -64,13 +64,20 @@ val pluginRendererConfig = buildJsonValue {
             toggleable("MITHRIL_YFLIP", "1", false, RendererConfig.MetaString("mithril_yflip_title"))
             toggleable("MITHRIL_DEBUG", "1", false, RendererConfig.MetaString("mithril_debug_title"))
             customizable("MITHRIL_VRAM_BUDGET_MB", "1024", RendererConfig.MetaString("mithril_vram_budget_title"))
-            // Custom driver selection. Many Snapdragon devices expose only
-            // Vulkan 1.1 through the system libvulkan.so; Turnip ships as a
-            // separate ICD. Pointing either of these at its json makes the
-            // platform loader pick it up instead of the system driver.
-            // Mithril steps its instance down to 1.1 when 1.2 is refused and
-            // gates every 1.2-only feature on the negotiated version, so a 1.1
-            // driver is usable - it just runs with fewer features enabled.
+            // Driver selection.
+            //
+            // Many Snapdragon devices expose only Vulkan 1.1 through the stock
+            // driver, while Turnip (libvulkan_freedreno.so) offers far more.
+            // The Android loader cannot be redirected with VK_ICD_FILENAMES or
+            // VK_DRIVER_FILES - it discovers drivers through hw_get_module
+            // only - so Mithril dlopens the driver itself
+            // (VulkanDispatchAndroid.cpp) and this is the switch for it.
+            //
+            // VK_ICD_FILENAMES / VK_DRIVER_FILES are kept only because some
+            // drivers read them for their own sub-loading; they do nothing for
+            // the platform loader on Android.
+            toggleable("MITHRIL_TURNIP", "1", false, RendererConfig.MetaString("mithril_turnip_title"))
+            customizable("MITHRIL_VULKAN_LIBRARY", "", RendererConfig.MetaString("mithril_vulkan_library_title"))
             customizable("VK_ICD_FILENAMES", "", RendererConfig.MetaString("mithril_vk_icd_title"))
             customizable("VK_DRIVER_FILES", "", RendererConfig.MetaString("mithril_vk_driver_files_title"))
         },

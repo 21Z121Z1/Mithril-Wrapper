@@ -283,6 +283,10 @@ if(ANDROID)
         Mithril-Wrapper-cpp/MG_Impl/Getter_gpu_android.cpp
         # Vulkan swapchain: VkSurfaceKHR via VK_KHR_android_surface.
         Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/SwapchainAndroid.cpp
+        # Vulkan dispatch shim. Provides every vk* symbol the rest of the
+        # codebase calls, forwarding to a driver chosen at runtime, so we no
+        # longer link the platform loader (see the file header for why).
+        Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/VulkanDispatchAndroid.cpp
     )
 endif()
 
@@ -315,9 +319,15 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 )
 
 if(ANDROID)
-    # Native Vulkan loader shipped with the platform (API 24+), plus libandroid
-    # for ANativeWindow_* and liblog for stderr routing.
-    target_link_libraries(${PROJECT_NAME} PRIVATE vulkan android log)
+    # libandroid for ANativeWindow_*, liblog for stderr routing.
+    #
+    # NOTE: libvulkan is deliberately NOT linked. Linking it hard-binds every
+    # vk* call to whatever driver the platform loader discovers, and the Android
+    # loader only finds drivers through hw_get_module - it ignores
+    # VK_ICD_FILENAMES / VK_DRIVER_FILES. VulkanDispatchAndroid.cpp supplies the
+    # vk* symbols instead and dlopens the driver named by MITHRIL_VULKAN_LIBRARY
+    # or MITHRIL_TURNIP, falling back to libvulkan.so.
+    target_link_libraries(${PROJECT_NAME} PRIVATE android log)
 endif()
 
 if(APPLE)
