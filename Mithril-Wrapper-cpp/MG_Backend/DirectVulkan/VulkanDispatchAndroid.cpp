@@ -36,6 +36,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <sys/mman.h>
 #include <unistd.h>
 
 #include <dlfcn.h>
@@ -91,62 +92,142 @@ typedef struct android_namespace_t* (*loader_create_ns_t)(
 typedef bool (*loader_link_all_t)(struct android_namespace_t* from,
                                   struct android_namespace_t* to);
 
+// __loader_dlopen differs from dlopen by taking the caller address, which is
+// what lets us impersonate the linker.
+typedef void* (*loader_dlopen_t)(const char* filename, int flags, const void* caller_addr);
+
 loader_create_ns_t g_create_ns = nullptr;
 loader_link_all_t g_link_all = nullptr;
+loader_dlopen_t g_loader_dlopen = nullptr;
+struct android_namespace_t* g_default_ns = nullptr;
 struct android_namespace_t* g_escape_ns = nullptr;
 bool g_ns_tried = false;
+
+static void* align_ptr(void* ptr) {
+    return reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(ptr) & ~(getpagesize() - 1));
+}
+
+// dlopen() in libdl is a thin wrapper: it loads the caller's return address and
+// branches to __loader_dlopen, passing that address as the third argument. So
+// the branch target is recoverable by scanning for the first BL instruction.
+//
+// This is how liblinkernsbypass reaches the linker internals. A plain
+// dlopen("libdl_android.so") cannot work: that library is not on the
+// classloader namespace's permitted path list, so it is rejected before the
+// linker ever consults a caller address.
+static loader_dlopen_t find_loader_dlopen() {
+#if defined(__aarch64__)
+    union BranchLinked {
+        uint32_t raw;
+        struct {
+            int32_t offset : 26;
+            uint8_t sig : 6;
+        };
+        bool verify() const { return sig == 0x25; }
+    };
+
+    // Some devices map executables execute-only; scanning needs read access.
+    mprotect(align_ptr(reinterpret_cast<void*>(&dlopen)), getpagesize(),
+             PROT_READ | PROT_WRITE | PROT_EXEC);
+
+    auto* bl = reinterpret_cast<BranchLinked*>(&dlopen);
+    for (int i = 0; i < 16 && !bl->verify(); ++i) ++bl;
+    if (!bl->verify()) return nullptr;
+
+    auto* fn = reinterpret_cast<loader_dlopen_t>(bl + bl->offset);
+    // __loader_dlopen is an internal symbol and may carry BTI landing pads
+    // that reject indirect branches; the linker does not need them here.
+    mprotect(align_ptr(reinterpret_cast<void*>(fn)), getpagesize(),
+             PROT_READ | PROT_WRITE | PROT_EXEC);
+    return fn;
+#else
+    return nullptr;
+#endif
+}
 
 void init_namespace_escape() {
     if (g_ns_tried) return;
     g_ns_tried = true;
 
-    // libdl_android.so exports the __loader_* symbols the linker implements.
-    // Try the plain handle first, then the linker itself.
-    void* handles[2] = { dlopen("libdl_android.so", RTLD_LAZY),
-                         dlopen("ld-android.so", RTLD_LAZY) };
-    for (int i = 0; i < 2 && !g_create_ns; ++i) {
-        if (!handles[i]) continue;
-        g_create_ns = (loader_create_ns_t)dlsym(handles[i], "__loader_android_create_namespace");
-        g_link_all = (loader_link_all_t)dlsym(handles[i], "__loader_android_link_namespaces_all_libs");
-    }
-    if (!g_create_ns) {
-        // Last resort: the linker's symbols are visible through the global scope
-        // on some Android versions.
-        g_create_ns = (loader_create_ns_t)dlsym(RTLD_DEFAULT, "__loader_android_create_namespace");
-        if (g_create_ns) g_link_all = (loader_link_all_t)dlsym(RTLD_DEFAULT, "__loader_android_link_namespaces_all_libs");
-    }
-    if (!g_create_ns) {
-        fprintf(stderr, "[mithril] vk-dispatch: could not reach __loader_android_create_namespace"
-                        " (namespace escape unavailable)\n");
+    g_loader_dlopen = find_loader_dlopen();
+    if (!g_loader_dlopen) {
+        fprintf(stderr, "[mithril] vk-dispatch: could not locate __loader_dlopen"
+                        " (namespace escape unavailable)\\n");
         return;
     }
-    fprintf(stderr, "[mithril] vk-dispatch: namespace escape available\n");
+
+    // Passing &dlopen as the caller address is the whole trick: the linker
+    // treats the call as originating inside itself and serves it from the
+    // unrestricted namespace.
+    void* ld = g_loader_dlopen("ld-android.so", RTLD_LAZY, reinterpret_cast<void*>(&dlopen));
+    void* libdl = g_loader_dlopen("libdl_android.so", RTLD_LAZY, reinterpret_cast<void*>(&dlopen));
+
+    if (ld) {
+        g_link_all = (loader_link_all_t)dlsym(ld, "__loader_android_link_namespaces_all_libs");
+    }
+    if (libdl) {
+        g_create_ns = (loader_create_ns_t)dlsym(libdl, "__loader_android_create_namespace");
+    }
+    if (!g_create_ns && ld) {
+        g_create_ns = (loader_create_ns_t)dlsym(ld, "__loader_android_create_namespace");
+    }
+    if (!g_create_ns || !g_link_all) {
+        fprintf(stderr, "[mithril] vk-dispatch: linker internals unavailable (ld=%s libdl=%s)\\n",
+                ld ? "yes" : "no", libdl ? "yes" : "no");
+        g_create_ns = nullptr;
+        g_link_all = nullptr;
+        return;
+    }
+    fprintf(stderr, "[mithril] vk-dispatch: linker internals resolved, namespace escape available\\n");
 }
 
-// Build a namespace that can see the driver directory, the platform library
-// directories, and - because it is shared rather than isolated - anything else.
+// A shared namespace with no parent is what gives us a handle on the default
+// namespace - it is not exported, so it can only be reached by copying it.
+struct android_namespace_t* make_default_ns() {
+    if (g_default_ns) return g_default_ns;
+    if (!g_create_ns) return nullptr;
+    g_default_ns = g_create_ns("mithril-default-copy", nullptr, nullptr,
+                               MITHRIL_NS_TYPE_SHARED, nullptr, nullptr,
+                               reinterpret_cast<void*>(&dlopen));
+    return g_default_ns;
+}
+
 struct android_namespace_t* make_escape_ns(const char* driver_dir) {
+    if (g_escape_ns) return g_escape_ns;
     init_namespace_escape();
     if (!g_create_ns) return nullptr;
 
     static char paths[1024];
     if (driver_dir && driver_dir[0]) {
-        snprintf(paths, sizeof(paths), "%s:/system/lib64:/vendor/lib64:/system/lib64/hw:/apex/com.android.runtime/lib64/bionic", driver_dir);
+        snprintf(paths, sizeof(paths), "%s:/system/lib64:/vendor/lib64:/system/lib64/hw:"
+                                       "/vendor/lib64/hw:/system_ext/lib64:/apex/com.android.runtime/lib64/bionic",
+                 driver_dir);
     } else {
-        snprintf(paths, sizeof(paths), "/system/lib64:/vendor/lib64:/system/lib64/hw");
+        snprintf(paths, sizeof(paths), "/system/lib64:/vendor/lib64:/system/lib64/hw:"
+                                       "/vendor/lib64/hw:/system_ext/lib64");
     }
 
-    // The final argument is the caller address; &dlopen makes the linker treat
-    // this as an internal call, which is what removes the restrictions.
-    struct android_namespace_t* ns = g_create_ns("mithril-vulkan", paths, paths,
-                                                 MITHRIL_NS_TYPE_SHARED, paths,
-                                                 nullptr, (const void*)&dlopen);
-    if (!ns) {
-        fprintf(stderr, "[mithril] vk-dispatch: namespace creation failed\n");
+    // The caller address is what removes the restrictions; the public
+    // android_create_namespace() always passes our own return address instead,
+    // which is why it cannot escape.
+    g_escape_ns = g_create_ns("mithril-vulkan", paths, paths, MITHRIL_NS_TYPE_SHARED, paths,
+                              nullptr, reinterpret_cast<void*>(&dlopen));
+    if (!g_escape_ns) {
+        fprintf(stderr, "[mithril] vk-dispatch: namespace creation failed\\n");
         return nullptr;
     }
-    fprintf(stderr, "[mithril] vk-dispatch: escape namespace created (paths=%s)\n", paths);
-    return ns;
+
+    // Without this the driver's own DT_NEEDED entries (libhardware.so,
+    // libcutils.so on Turnip) resolve to nothing, because the app namespace
+    // cannot see /system/lib64.
+    struct android_namespace_t* def = make_default_ns();
+    if (def && !g_link_all(g_escape_ns, def)) {
+        fprintf(stderr, "[mithril] vk-dispatch: could not link namespace to default\\n");
+    } else if (def) {
+        fprintf(stderr, "[mithril] vk-dispatch: escape namespace linked to default\\n");
+    }
+    fprintf(stderr, "[mithril] vk-dispatch: escape namespace created (paths=%s)\\n", paths);
+    return g_escape_ns;
 }
 
 void log_dir(const char* dir) {
