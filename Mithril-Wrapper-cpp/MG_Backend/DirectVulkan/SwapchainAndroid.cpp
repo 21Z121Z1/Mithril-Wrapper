@@ -161,8 +161,10 @@ Swapchain* create_swapchain_offscreen(ANativeWindow* win, int width, int height,
         vci.subresourceRange.layerCount = 1;
         VkImageView view = VK_NULL_HANDLE;
         if (vkCreateImageView(b->device, &vci, nullptr, &view) != VK_SUCCESS) {
-            vkFreeMemory(b->device, mem, nullptr);
+            // img is already bound to mem at this point: destroy the image
+            // before releasing the bound allocation.
             vkDestroyImage(b->device, img, nullptr);
+            vkFreeMemory(b->device, mem, nullptr);
             MITHRIL_LOG_ERROR("vk", "offscreen: vkCreateImageView failed");
             break;
         }
