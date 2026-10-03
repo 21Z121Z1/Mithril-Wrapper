@@ -478,6 +478,84 @@ void add_candidate(const char* cands[], int& n, const char* dir, const char* nam
     if (n < kLoaderSlot) cands[n++] = name;
 }
 
+// Route the platform loader at the chosen driver instead of driving the
+// driver ourselves.
+//
+// Everything about the direct approach works - the HAL opens, the device
+// enumerates, it reports Vulkan 1.3 - except presentation. Turnip reports no
+// VK_KHR_surface, no VK_KHR_android_surface and no VK_KHR_swapchain, and
+// vkCreateInstance rejects both of the former outright. Those belong to
+// libvulkan.so on Android, which is why Zink and ANGLE only ever see WSI
+// through it, and why a directly driven HAL can only ever be an offscreen
+// device.
+//
+// So: load the hook object into the namespace first, hand it the driver, then
+// load libvulkan.so into that same namespace. The loader keeps its WSI and its
+// own view of the driver; when it asks for the vendor HAL module the hook
+// answers with Turnip. libmithril.so then takes every entrypoint from the
+// loader exactly as it would with the stock driver.
+//
+// Best effort throughout: on any failure we fall through to the existing
+// paths, so a device without Turnip is unaffected.
+static int g_hook_active = 0;
+
+static void* try_hook_route(const char* driver_dir, const char* driver_name) {
+    if (!g_escape_ns) g_escape_ns = make_escape_ns(driver_dir);
+    if (!g_escape_ns) {
+        fprintf(stderr, "[mithril] vk-dispatch: hook route unavailable (no namespace)\n");
+        return nullptr;
+    }
+
+    // Our own library directory: the hook object ships beside libmithril.so.
+    Dl_info self{};
+    if (!dladdr((void*)&try_hook_route, &self) || !self.dli_fname) return nullptr;
+    std::string self_path(self.dli_fname);
+    size_t slash = self_path.find_last_of('/');
+    if (slash == std::string::npos) return nullptr;
+    std::string hook = self_path.substr(0, slash + 1) + "libmithril_vkhook.so";
+
+    android_dlextinfo ext{};
+    ext.flags = ANDROID_DLEXT_USE_NAMESPACE;
+    ext.library_namespace = g_escape_ns;
+
+    // RTLD_GLOBAL is the whole point: the hook's android_dlopen_ext /
+    // android_load_sphal_library must be visible to libvulkan.so.
+    void* h = android_dlopen_ext(hook.c_str(), RTLD_NOW | RTLD_GLOBAL, &ext);
+    if (!h) {
+        h = dlopen(hook.c_str(), RTLD_NOW | RTLD_GLOBAL);
+    }
+    if (!h) {
+        fprintf(stderr, "[mithril] vk-dispatch: hook object not loaded (%s): %s\n",
+                hook.c_str(), dlerror() ? dlerror() : "unknown");
+        return nullptr;
+    }
+    fprintf(stderr, "[mithril] vk-dispatch: hook object loaded: %s\n", hook.c_str());
+
+    void (*init_fn)(const char*, const char*, int) =
+        (void (*)(const char*, const char*, int))dlsym(h, "mithril_vkhook_init");
+    if (!init_fn) {
+        fprintf(stderr, "[mithril] vk-dispatch: hook has no init entrypoint\n");
+        return nullptr;
+    }
+    const char* trace = getenv("MITHRIL_DEBUG");
+    init_fn(driver_dir ? driver_dir : "", driver_name ? driver_name : "",
+            trace && trace[0] ? 1 : 0);
+
+    // Now the loader, into the same namespace, after the hook.
+    void* loader = android_dlopen_ext("libvulkan.so", RTLD_NOW | RTLD_LOCAL, &ext);
+    if (!loader) {
+        log_dlerror("libvulkan.so", "hook namespace");
+        loader = dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);
+    }
+    if (!loader) {
+        fprintf(stderr, "[mithril] vk-dispatch: loader not loaded under hook\n");
+        return nullptr;
+    }
+    g_hook_active = 1;
+    fprintf(stderr, "[mithril] vk-dispatch: hook route active (loader redirected)\n");
+    return loader;
+}
+
 void ensure_library() {
     if (g_ready) return;
     g_ready = true;
@@ -529,8 +607,18 @@ void ensure_library() {
     // try, in order: its own exported vk* symbols, the ICD discovery entry, and
     // finally the HAL handshake (HMI -> open -> hwvulkan_device_t), which is
     // the path a HAL module actually expects.
-    void* driver_handle = nullptr;
+    // When a specific driver was asked for, prefer handing it to the platform
+    // loader over driving it ourselves: only the loader has WSI. If this works,
+    // the driver is not loaded directly at all and g_handle is the loader.
+    void* hook_loader = nullptr;
     if (explicit_path || (turnip && turnip[0])) {
+        const char* name = explicit_path && explicit_path[0] ? explicit_path
+                                                             : "libvulkan_freedreno.so";
+        hook_loader = try_hook_route(driver_dir, name);
+    }
+
+    void* driver_handle = nullptr;
+    if (!hook_loader && (explicit_path || (turnip && turnip[0]))) {
         for (int i = 0; i < n && i < kLoaderSlot; ++i) {
             if (!cands[i]) continue;
             driver_handle = try_load(cands[i], driver_dir);
@@ -542,8 +630,8 @@ void ensure_library() {
         }
     }
 
-    void* loader_handle = nullptr;
-    for (int i = kLoaderSlot; i < kMaxCandidates; ++i) {
+    void* loader_handle = hook_loader;
+    for (int i = loader_handle ? kMaxCandidates : kLoaderSlot; i < kMaxCandidates; ++i) {
         if (!cands[i]) continue;
         loader_handle = try_load(cands[i], driver_dir);
         if (loader_handle) {
@@ -555,12 +643,14 @@ void ensure_library() {
     // Prefer the custom driver; it is only usable if we can actually get
     // entrypoints out of it, and silently falling back is what lets a device
     // without Turnip still run.
-    g_handle = driver_handle ? driver_handle : loader_handle;
+    // A hook-mediated loader wins over a directly driven driver: the latter has
+    // no way to present.
+    g_handle = hook_loader ? hook_loader : (driver_handle ? driver_handle : loader_handle);
     if (!g_handle) {
         fprintf(stderr, "[mithril] vk-dispatch: no Vulkan driver could be loaded\n");
         return;
     }
-    g_fallback_handle = (g_handle == driver_handle) ? loader_handle : nullptr;
+    g_fallback_handle = (g_handle == driver_handle && !hook_loader) ? loader_handle : nullptr;
 
     // An ICD such as Turnip exposes discovery through vk_icdGetInstanceProcAddr
     // rather than the plain names; a loader exports the plain names.

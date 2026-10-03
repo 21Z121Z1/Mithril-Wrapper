@@ -319,6 +319,27 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 )
 
 if(ANDROID)
+    # The driver-selection hook. A separate shared object, because the whole
+    # technique depends on libvulkan.so binding its android_dlopen_ext /
+    # android_load_sphal_library to us: that needs a distinct mapping inside the
+    # linker namespace we build for the loader, and dlopen of one's own path
+    # would hand back the instance that is already loaded. See the source file
+    # header for what it is for and why the platform loader owns WSI.
+    add_library(mithril_vkhook SHARED
+        Mithril-Wrapper-cpp/MG_Backend/DirectVulkan/AndroidVkHook.cpp
+    )
+    set_target_properties(mithril_vkhook PROPERTIES
+        OUTPUT_NAME mithril_vkhook
+        CXX_STANDARD 20
+    )
+    # -Wl,--exclude-libs and no libdl linkage: this object DEFINES
+    # android_dlopen_ext, so it must not also import it. The real
+    # implementations are fetched explicitly with dlopen("libdl.so") + dlsym.
+    target_link_libraries(mithril_vkhook PRIVATE log)
+
+endif()
+
+if(ANDROID)
     # libandroid for ANativeWindow_*, liblog for stderr routing.
     #
     # NOTE: libvulkan is deliberately NOT linked. Linking it hard-binds every

@@ -56,6 +56,14 @@ jobs:
           cmake --build "build-${{ matrix.abi }}" --target mithril -j"$(nproc)" 2>&1 | tee "native-${{ matrix.abi }}.log"
           exit "${PIPESTATUS[0]}"
 
+      - name: Build driver-selection hook
+        # Separate object: libvulkan.so must bind its android_dlopen_ext /
+        # android_load_sphal_library to it, which requires a distinct mapping in
+        # the namespace built for the loader.
+        run: |
+          cmake --build "build-${{ matrix.abi }}" --target mithril_vkhook -j"$(nproc)" 2>&1 | tee "hook-${{ matrix.abi }}.log"
+          exit "${PIPESTATUS[0]}"
+
       - name: Verify no unpackaged runtime dependencies
         # dlopen() reports "library not found" when a DT_NEEDED entry is missing
         # from the APK - and it names OUR library, so the launcher log gives no
@@ -109,6 +117,13 @@ jobs:
           path: build-${{ matrix.abi }}/libmithril.so
           if-no-files-found: error
 
+      - name: Upload hook .so
+        uses: actions/upload-artifact@v4
+        with:
+          name: libmithril-vkhook-${{ matrix.abi }}
+          path: build-${{ matrix.abi }}/libmithril_vkhook.so
+          if-no-files-found: error
+
   apk:
     name: Package APK
     needs: native
@@ -127,10 +142,20 @@ jobs:
         run: |
           set -e
           mkdir -p android/app/src/main/jniLibs
-          for d in native-out/libmithril-*; do
-            abi="${d#native-out/libmithril-}"
+          # Explicit ABI list: the artifact names are libmithril-<abi> and
+          # libmithril-vkhook-<abi>, and a glob over libmithril-* would read the
+          # hook directory as an ABI called "vkhook-<abi>".
+          for abi in arm64-v8a armeabi-v7a x86_64; do
+            [ -f "native-out/libmithril-$abi/libmithril.so" ] || continue
             mkdir -p "android/app/src/main/jniLibs/$abi"
-            cp "$d/libmithril.so" "android/app/src/main/jniLibs/$abi/libmithril.so"
+            cp "native-out/libmithril-$abi/libmithril.so" \
+               "android/app/src/main/jniLibs/$abi/libmithril.so"
+            # The hook lives beside libmithril.so so it can be found by
+            # dladdr()ing our own mapping; it is dlopen'd, never linked.
+            if [ -f "native-out/libmithril-vkhook-$abi/libmithril_vkhook.so" ]; then
+              cp "native-out/libmithril-vkhook-$abi/libmithril_vkhook.so" \
+                 "android/app/src/main/jniLibs/$abi/libmithril_vkhook.so"
+            fi
           done
           find android/app/src/main/jniLibs -type f | sort
 
