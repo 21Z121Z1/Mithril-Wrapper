@@ -195,6 +195,22 @@ EGLBoolean eglInitialize(EGLDisplay dpy, EGLint* major, EGLint* minor) {
         return EGL_FALSE;
     }
     g_display.initialized = true;
+    // Seed the thread-local GL state before returning.
+    //
+    // Every GL entry point dereferences mithril::g_state unconditionally
+    // (Buffer.cpp:44 and ~hundreds more). That pointer is only assigned by
+    // eglMakeCurrent, so until a context is made current it is null on this
+    // thread. Any GL call made in that window - a launcher probing
+    // glGetString/glGetIntegerv right after eglInitialize, before it creates
+    // and binds a context - dereferences null and takes the process down with
+    // a bare SIGSEGV and no log line at all, which is exactly how the run ends
+    // here: the last thing logged is the tail of backend_init().
+    //
+    // state_init() is the existing idempotent seeding helper ("if (!g_state)
+    // g_state = state_create()"); it was simply never wired into the EGL
+    // bring-up path. eglMakeCurrent still replaces g_state with the context's
+    // own state, so this is inert once a context is bound.
+    mithril::state_init();
     if (major) *major = 1;
     if (minor) *minor = 5;
     return EGL_TRUE;
