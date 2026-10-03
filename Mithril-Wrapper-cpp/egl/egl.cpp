@@ -290,10 +290,17 @@ EGLBoolean eglReleaseThread(void) {
     mithril::state_init();
     MITHRIL_LOG_WARN("egl", ">> %s", __func__);
     clear_error();
-    // Drop the thread-local current context/surface references.
+    // EGL 1.5 releases all thread-bound EGL state. Detach the active surface
+    // from the backend before dropping the handles; otherwise g_state and the
+    // active swapchain remain usable after the thread no longer has a current
+    // context, and a later surface destroy can leave stale framebuffer-0
+    // handles installed in the encoder.
+    install_surface_on_state(nullptr, false);
+    mithril::g_state = nullptr;
     t_currentCtx  = nullptr;
     t_currentDraw = nullptr;
     t_currentRead = nullptr;
+    t_boundAPI    = EGL_OPENGL_ES_API;
     return EGL_TRUE;
 }
 
@@ -656,7 +663,9 @@ EGLBoolean eglQueryContext(EGLDisplay dpy, EGLContext ctx,
         case EGL_CONFIG_ID:
             *value = c->config ? ((EglConfig*)c->config)->configId : 0; break;
         case EGL_CONTEXT_CLIENT_TYPE:
-            *value = (t_boundAPI == EGL_OPENGL_ES_API) ? EGL_OPENGL_ES_API : EGL_OPENGL_API;
+            // Query the context's immutable creation-time API, not the
+            // querying thread's current eglBindAPI state.
+            *value = c->clientAPI;
             break;
         // EGL_CONTEXT_CLIENT_VERSION and EGL_CONTEXT_MAJOR_VERSION are the
         // same token (0x3098) in the Khronos EGL spec (the latter is the EGL
