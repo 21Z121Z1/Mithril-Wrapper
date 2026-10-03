@@ -807,7 +807,14 @@ bool init_device() {
         has_extension(instExtProps, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
     b->instanceApiVersion = VK_API_VERSION_1_1;
 
+    // 1.3 first: on a 1.3 device (Turnip reports api 0x40316b) the features we
+    // hard-depend on - dynamic rendering and extended dynamic state - are CORE,
+    // so the driver is not obliged to advertise them as extensions. Pinning the
+    // instance to 1.2 forces them to come from the extension list, and a driver
+    // that promoted them to core may not report them there. Stepping down is
+    // still safe: an unsupported level just fails and we try the next one.
     static const uint32_t kApiLevels[] = {
+        VK_API_VERSION_1_3,
         VK_API_VERSION_1_2,
         VK_API_VERSION_1_1,
     };
@@ -1130,11 +1137,17 @@ bool init_device() {
     //
     // 与其那样，不如在这里直接失败并说清原因。MoltenVK 从 1.1.0 起支持该
     // 扩展（对应 iOS 14+ / macOS 11+），低于此版本的环境本来也跑不动 MC。
-    const bool hasDynamicRendering =
+    // Present as an extension OR promoted to core. VK_KHR_dynamic_rendering
+    // became core in Vulkan 1.3, so a 1.3 device is not required to list it in
+    // vkEnumerateDeviceExtensionProperties. gating purely on the extension name
+    // rejects such a device outright and the renderer never starts.
+    const bool dynRenderingExt =
         has_extension(devExtProps, VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME);
-    if (hasDynamicRendering) {
+    const bool hasDynamicRendering =
+        dynRenderingExt || b->props.apiVersion >= VK_API_VERSION_1_3;
+    if (dynRenderingExt) {
         devExts.push_back(VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME);
-    } else {
+    } else if (!hasDynamicRendering) {
         MITHRIL_LOG_ERROR("vk",
             "设备不支持 VK_KHR_dynamic_rendering（%s，Vulkan %u.%u.%u）。"
             "本渲染器的命令录制完全依赖该扩展，且当前请求的是 Vulkan 1.2"
@@ -1157,11 +1170,15 @@ bool init_device() {
     // 动态状态，管线里根本没有静态的剔除配置可回退。
     //
     // MoltenVK 从 1.1.0 起支持，与 dynamic_rendering 的门槛一致。
-    const bool hasExtDynState =
+    // Same promotion story as dynamic rendering: VK_EXT_extended_dynamic_state
+    // is core in Vulkan 1.3.
+    const bool extDynStateExt =
         has_extension(devExtProps, VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME);
-    if (hasExtDynState) {
+    const bool hasExtDynState =
+        extDynStateExt || b->props.apiVersion >= VK_API_VERSION_1_3;
+    if (extDynStateExt) {
         devExts.push_back(VK_EXT_EXTENDED_DYNAMIC_STATE_EXTENSION_NAME);
-    } else {
+    } else if (!hasExtDynState) {
         MITHRIL_LOG_ERROR("vk",
             "设备不支持 VK_EXT_extended_dynamic_state（%s）。"
             "剔除模式/正面朝向/深度测试全部通过 vkCmdSet* 动态下发，"
