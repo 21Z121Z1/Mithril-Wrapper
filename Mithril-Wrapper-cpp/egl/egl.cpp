@@ -171,6 +171,7 @@ extern "C" {
 
 EGLDisplay eglGetDisplay(EGLNativeDisplayType display_id) {
     mithril::state_init();
+    MITHRIL_LOG_WARN("egl", ">> %s", __func__);
     clear_error();
     (void)display_id;   // we always return the singleton Vulkan-backed display
     return (EGLDisplay)&g_display;
@@ -179,6 +180,7 @@ EGLDisplay eglGetDisplay(EGLNativeDisplayType display_id) {
 EGLDisplay eglGetPlatformDisplay(EGLenum platform, void* native_display,
                                  const EGLint* attrib_list) {
     mithril::state_init();
+    MITHRIL_LOG_WARN("egl", ">> %s", __func__);
     clear_error();
     (void)platform; (void)native_display; (void)attrib_list;
     // We are a single-display implementation; any platform token resolves to
@@ -189,6 +191,7 @@ EGLDisplay eglGetPlatformDisplay(EGLenum platform, void* native_display,
 
 EGLBoolean eglInitialize(EGLDisplay dpy, EGLint* major, EGLint* minor) {
     mithril::state_init();
+    MITHRIL_LOG_WARN("egl", ">> %s", __func__);
     clear_error();
     if (!valid_display(dpy)) { set_error(EGL_BAD_DISPLAY); return EGL_FALSE; }
     // Bring up the Vulkan backend once. backend_init() is idempotent.
@@ -198,6 +201,7 @@ EGLBoolean eglInitialize(EGLDisplay dpy, EGLint* major, EGLint* minor) {
         return EGL_FALSE;
     }
     g_display.initialized = true;
+    MITHRIL_LOG_WARN("egl", "eglInitialize: backend up");
     // Seed the thread-local GL state before returning.
     //
     // Every GL entry point dereferences mithril::g_state unconditionally
@@ -214,6 +218,7 @@ EGLBoolean eglInitialize(EGLDisplay dpy, EGLint* major, EGLint* minor) {
     // bring-up path. eglMakeCurrent still replaces g_state with the context's
     // own state, so this is inert once a context is bound.
     mithril::state_init();
+    MITHRIL_LOG_WARN("egl", ">> %s", __func__);
     if (major) *major = 1;
     if (minor) *minor = 5;
     return EGL_TRUE;
@@ -221,6 +226,7 @@ EGLBoolean eglInitialize(EGLDisplay dpy, EGLint* major, EGLint* minor) {
 
 EGLBoolean eglTerminate(EGLDisplay dpy) {
     mithril::state_init();
+    MITHRIL_LOG_WARN("egl", ">> %s", __func__);
     clear_error();
     if (!valid_display(dpy)) { set_error(EGL_BAD_DISPLAY); return EGL_FALSE; }
     // We do NOT destroy the Vulkan instance/device — the host process may call
@@ -256,6 +262,7 @@ const char* eglQueryString(EGLDisplay dpy, EGLint name) {
 
 EGLBoolean eglBindAPI(EGLenum api) {
     mithril::state_init();
+    MITHRIL_LOG_WARN("egl", ">> %s", __func__);
     clear_error();
     if (api != EGL_OPENGL_API && api != EGL_OPENGL_ES_API && api != EGL_OPENVG_API) {
         set_error(EGL_BAD_PARAMETER);
@@ -272,6 +279,7 @@ EGLBoolean eglBindAPI(EGLenum api) {
 
 EGLBoolean eglReleaseThread(void) {
     mithril::state_init();
+    MITHRIL_LOG_WARN("egl", ">> %s", __func__);
     clear_error();
     // Drop the thread-local current context/surface references.
     t_currentCtx  = nullptr;
@@ -282,6 +290,7 @@ EGLBoolean eglReleaseThread(void) {
 
 EGLint eglGetError(void) {
     mithril::state_init();
+    MITHRIL_LOG_WARN("egl", ">> %s", __func__);
     EGLint e = t_lastError;
     t_lastError = EGL_SUCCESS;
     return e;
@@ -291,6 +300,7 @@ EGLint eglGetError(void) {
 EGLBoolean eglGetConfigs(EGLDisplay dpy, EGLConfig* configs,
                          EGLint config_size, EGLint* num_config) {
     mithril::state_init();
+    MITHRIL_LOG_WARN("egl", ">> %s", __func__);
     clear_error();
     if (!valid_display(dpy)) { set_error(EGL_BAD_DISPLAY); return EGL_FALSE; }
     if (!num_config) { set_error(EGL_BAD_PARAMETER); return EGL_FALSE; }
@@ -308,6 +318,7 @@ EGLBoolean eglChooseConfig(EGLDisplay dpy, const EGLint* attrib_list,
                            EGLConfig* configs, EGLint config_size,
                            EGLint* num_config) {
     mithril::state_init();
+    MITHRIL_LOG_WARN("egl", ">> %s", __func__);
     MITHRIL_LOG_WARN("egl", "eglChooseConfig enter");
     clear_error();
     if (!valid_display(dpy)) { set_error(EGL_BAD_DISPLAY); return EGL_FALSE; }
@@ -333,6 +344,7 @@ EGLBoolean eglChooseConfig(EGLDisplay dpy, const EGLint* attrib_list,
 EGLBoolean eglGetConfigAttrib(EGLDisplay dpy, EGLConfig config,
                               EGLint attribute, EGLint* value) {
     mithril::state_init();
+    MITHRIL_LOG_WARN("egl", ">> %s", __func__);
     clear_error();
     if (!valid_display(dpy)) { set_error(EGL_BAD_DISPLAY); return EGL_FALSE; }
     if (!valid_config(config)) { set_error(EGL_BAD_CONFIG); return EGL_FALSE; }
@@ -346,6 +358,7 @@ EGLSurface eglCreateWindowSurface(EGLDisplay dpy, EGLConfig config,
                                   EGLNativeWindowType win,
                                   const EGLint* attrib_list) {
     mithril::state_init();
+    MITHRIL_LOG_WARN("egl", ">> %s", __func__);
     MITHRIL_LOG_WARN("egl", "eglCreateWindowSurface enter");
     clear_error();
     if (!valid_display(dpy)) { set_error(EGL_BAD_DISPLAY); return EGL_NO_SURFACE; }
@@ -383,6 +396,7 @@ EGLSurface eglCreateWindowSurface(EGLDisplay dpy, EGLConfig config,
 EGLSurface eglCreatePbufferSurface(EGLDisplay dpy, EGLConfig config,
                                    const EGLint* attrib_list) {
     mithril::state_init();
+    MITHRIL_LOG_WARN("egl", ">> %s", __func__);
     clear_error();
     if (!valid_display(dpy)) { set_error(EGL_BAD_DISPLAY); return EGL_NO_SURFACE; }
     if (!valid_config(config)) { set_error(EGL_BAD_CONFIG); return EGL_NO_SURFACE; }
@@ -397,6 +411,7 @@ EGLSurface eglCreatePbufferSurface(EGLDisplay dpy, EGLConfig config,
 
 EGLBoolean eglDestroySurface(EGLDisplay dpy, EGLSurface surface) {
     mithril::state_init();
+    MITHRIL_LOG_WARN("egl", ">> %s", __func__);
     clear_error();
     if (!valid_display(dpy)) { set_error(EGL_BAD_DISPLAY); return EGL_FALSE; }
     if (surface == EGL_NO_SURFACE) { set_error(EGL_BAD_SURFACE); return EGL_FALSE; }
@@ -423,6 +438,7 @@ EGLBoolean eglDestroySurface(EGLDisplay dpy, EGLSurface surface) {
 EGLBoolean eglQuerySurface(EGLDisplay dpy, EGLSurface surface,
                            EGLint attribute, EGLint* value) {
     mithril::state_init();
+    MITHRIL_LOG_WARN("egl", ">> %s", __func__);
     clear_error();
     if (!valid_display(dpy)) { set_error(EGL_BAD_DISPLAY); return EGL_FALSE; }
     EglSurface* s = (EglSurface*)surface;
@@ -446,6 +462,7 @@ EGLContext eglCreateContext(EGLDisplay dpy, EGLConfig config,
                             EGLContext share_context,
                             const EGLint* attrib_list) {
     mithril::state_init();
+    MITHRIL_LOG_WARN("egl", ">> %s", __func__);
     MITHRIL_LOG_WARN("egl", "eglCreateContext enter");
     clear_error();
     if (!valid_display(dpy)) { set_error(EGL_BAD_DISPLAY); return EGL_NO_CONTEXT; }
@@ -493,6 +510,7 @@ EGLContext eglCreateContext(EGLDisplay dpy, EGLConfig config,
 
 EGLBoolean eglDestroyContext(EGLDisplay dpy, EGLContext ctx) {
     mithril::state_init();
+    MITHRIL_LOG_WARN("egl", ">> %s", __func__);
     clear_error();
     if (!valid_display(dpy)) { set_error(EGL_BAD_DISPLAY); return EGL_FALSE; }
     EglContext* c = (EglContext*)ctx;
@@ -520,6 +538,7 @@ EGLBoolean eglDestroyContext(EGLDisplay dpy, EGLContext ctx) {
 EGLBoolean eglMakeCurrent(EGLDisplay dpy, EGLSurface draw, EGLSurface read,
                           EGLContext ctx) {
     mithril::state_init();
+    MITHRIL_LOG_WARN("egl", ">> %s", __func__);
     MITHRIL_LOG_WARN("egl", "eglMakeCurrent enter");
     clear_error();
     if (!valid_display(dpy)) { set_error(EGL_BAD_DISPLAY); return EGL_FALSE; }
@@ -596,11 +615,13 @@ EGLBoolean eglMakeCurrent(EGLDisplay dpy, EGLSurface draw, EGLSurface read,
 
 EGLContext eglGetCurrentContext(void) {
     mithril::state_init();
+    MITHRIL_LOG_WARN("egl", ">> %s", __func__);
     return (EGLContext)t_currentCtx;
 }
 
 EGLSurface eglGetCurrentSurface(EGLenum readdraw) {
     mithril::state_init();
+    MITHRIL_LOG_WARN("egl", ">> %s", __func__);
     if (readdraw == EGL_READ) return (EGLSurface)t_currentRead;
     if (readdraw == EGL_DRAW) return (EGLSurface)t_currentDraw;
     set_error(EGL_BAD_PARAMETER);
@@ -609,12 +630,14 @@ EGLSurface eglGetCurrentSurface(EGLenum readdraw) {
 
 EGLDisplay eglGetCurrentDisplay(void) {
     mithril::state_init();
+    MITHRIL_LOG_WARN("egl", ">> %s", __func__);
     return t_currentCtx ? (EGLDisplay)&g_display : EGL_NO_DISPLAY;
 }
 
 EGLBoolean eglQueryContext(EGLDisplay dpy, EGLContext ctx,
                            EGLint attribute, EGLint* value) {
     mithril::state_init();
+    MITHRIL_LOG_WARN("egl", ">> %s", __func__);
     clear_error();
     if (!valid_display(dpy)) { set_error(EGL_BAD_DISPLAY); return EGL_FALSE; }
     EglContext* c = (EglContext*)ctx;
@@ -640,6 +663,7 @@ EGLBoolean eglQueryContext(EGLDisplay dpy, EGLContext ctx,
 // ---- Swap ----
 EGLBoolean eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
     mithril::state_init();
+    MITHRIL_LOG_WARN("egl", ">> %s", __func__);
     MITHRIL_LOG_WARN("egl", "eglSwapBuffers enter");
     clear_error();
     if (!valid_display(dpy)) { set_error(EGL_BAD_DISPLAY); return EGL_FALSE; }
@@ -819,6 +843,7 @@ EGLBoolean eglSwapBuffers(EGLDisplay dpy, EGLSurface surface) {
 
 EGLBoolean eglSwapInterval(EGLDisplay dpy, EGLint interval) {
     mithril::state_init();
+    MITHRIL_LOG_WARN("egl", ">> %s", __func__);
     clear_error();
     if (!valid_display(dpy)) { set_error(EGL_BAD_DISPLAY); return EGL_FALSE; }
     if (t_currentDraw) {
@@ -830,12 +855,14 @@ EGLBoolean eglSwapInterval(EGLDisplay dpy, EGLint interval) {
 // ---- Client completion waits -------------------------------------------
 EGLBoolean eglWaitClient(void) {
     mithril::state_init();
+    MITHRIL_LOG_WARN("egl", ">> %s", __func__);
     swapchain_flush_and_commit();
     mithril::vk::safe_device_wait_idle();
     return EGL_TRUE;
 }
 EGLBoolean eglWaitGL(void) {
     mithril::state_init();
+    MITHRIL_LOG_WARN("egl", ">> %s", __func__);
     swapchain_flush_and_commit();
     mithril::vk::safe_device_wait_idle();
     return EGL_TRUE;
@@ -878,6 +905,7 @@ void (*eglGetProcAddress(const char* procname))(void) {
 EGLBoolean eglSurfaceAttrib(EGLDisplay dpy, EGLSurface surface,
                             EGLint attribute, EGLint value) {
     mithril::state_init();
+    MITHRIL_LOG_WARN("egl", ">> %s", __func__);
     clear_error();
     if (!valid_display(dpy)) { set_error(EGL_BAD_DISPLAY); return EGL_FALSE; }
     EglSurface* s = (EglSurface*)surface;
@@ -888,6 +916,7 @@ EGLBoolean eglSurfaceAttrib(EGLDisplay dpy, EGLSurface surface,
 
 EGLBoolean eglBindTexImage(EGLDisplay dpy, EGLSurface surface, EGLint buffer) {
     mithril::state_init();
+    MITHRIL_LOG_WARN("egl", ">> %s", __func__);
     clear_error();
     (void)dpy; (void)surface; (void)buffer;
     return EGL_TRUE;
@@ -895,6 +924,7 @@ EGLBoolean eglBindTexImage(EGLDisplay dpy, EGLSurface surface, EGLint buffer) {
 
 EGLBoolean eglReleaseTexImage(EGLDisplay dpy, EGLSurface surface, EGLint buffer) {
     mithril::state_init();
+    MITHRIL_LOG_WARN("egl", ">> %s", __func__);
     clear_error();
     (void)dpy; (void)surface; (void)buffer;
     return EGL_TRUE;
@@ -902,6 +932,7 @@ EGLBoolean eglReleaseTexImage(EGLDisplay dpy, EGLSurface surface, EGLint buffer)
 
 EGLBoolean eglCopyBuffers(EGLDisplay dpy, EGLSurface surface, EGLNativePixmapType target) {
     mithril::state_init();
+    MITHRIL_LOG_WARN("egl", ">> %s", __func__);
     clear_error();
     (void)dpy; (void)surface; (void)target;
     return EGL_TRUE;
@@ -910,6 +941,7 @@ EGLBoolean eglCopyBuffers(EGLDisplay dpy, EGLSurface surface, EGLNativePixmapTyp
 // ---- EGL 1.5 Sync: backed by DirectVulkan submit serials -----------------
 EGLSync eglCreateSync(EGLDisplay dpy, EGLenum type, const EGLAttrib* attrib_list) {
     mithril::state_init();
+    MITHRIL_LOG_WARN("egl", ">> %s", __func__);
     clear_error();
     if (!valid_display(dpy)) { set_error(EGL_BAD_DISPLAY); return EGL_NO_SYNC; }
     if (type != EGL_SYNC_FENCE) { set_error(EGL_BAD_ATTRIBUTE); return EGL_NO_SYNC; }
@@ -943,6 +975,7 @@ EGLSync eglCreateSync(EGLDisplay dpy, EGLenum type, const EGLAttrib* attrib_list
 
 EGLBoolean eglDestroySync(EGLDisplay dpy, EGLSync sync) {
     mithril::state_init();
+    MITHRIL_LOG_WARN("egl", ">> %s", __func__);
     clear_error();
     if (!valid_display(dpy)) { set_error(EGL_BAD_DISPLAY); return EGL_FALSE; }
     auto it = g_syncs.find(sync);
@@ -956,6 +989,7 @@ EGLBoolean eglDestroySync(EGLDisplay dpy, EGLSync sync) {
 
 EGLint eglClientWaitSync(EGLDisplay dpy, EGLSync sync, EGLint flags, EGLTime timeout) {
     mithril::state_init();
+    MITHRIL_LOG_WARN("egl", ">> %s", __func__);
     clear_error();
     if (!valid_display(dpy)) { set_error(EGL_BAD_DISPLAY); return EGL_FALSE; }
     if (flags & ~EGL_SYNC_FLUSH_COMMANDS_BIT) {
@@ -988,6 +1022,7 @@ EGLint eglClientWaitSync(EGLDisplay dpy, EGLSync sync, EGLint flags, EGLTime tim
 
 EGLBoolean eglWaitSync(EGLDisplay dpy, EGLSync sync, EGLint flags) {
     mithril::state_init();
+    MITHRIL_LOG_WARN("egl", ">> %s", __func__);
     clear_error();
     if (!valid_display(dpy)) { set_error(EGL_BAD_DISPLAY); return EGL_FALSE; }
     if (flags != 0) { set_error(EGL_BAD_PARAMETER); return EGL_FALSE; }
@@ -1008,6 +1043,7 @@ EGLBoolean eglWaitSync(EGLDisplay dpy, EGLSync sync, EGLint flags) {
 
 EGLBoolean eglGetSyncAttrib(EGLDisplay dpy, EGLSync sync, EGLint attribute, EGLAttrib* value) {
     mithril::state_init();
+    MITHRIL_LOG_WARN("egl", ">> %s", __func__);
     clear_error();
     if (!valid_display(dpy)) { set_error(EGL_BAD_DISPLAY); return EGL_FALSE; }
     auto it = g_syncs.find(sync);
@@ -1036,6 +1072,7 @@ EGLBoolean eglGetSyncAttrib(EGLDisplay dpy, EGLSync sync, EGLint attribute, EGLA
 EGLImage eglCreateImage(EGLDisplay dpy, EGLContext ctx, EGLenum target,
                         EGLClientBuffer buffer, const EGLAttrib* attrib_list) {
     mithril::state_init();
+    MITHRIL_LOG_WARN("egl", ">> %s", __func__);
     clear_error();
     (void)ctx; (void)attrib_list;
     if (!valid_display(dpy)) { set_error(EGL_BAD_DISPLAY); return EGL_NO_IMAGE; }
@@ -1063,6 +1100,7 @@ EGLImage eglCreateImage(EGLDisplay dpy, EGLContext ctx, EGLenum target,
 
 EGLBoolean eglDestroyImage(EGLDisplay dpy, EGLImage image) {
     mithril::state_init();
+    MITHRIL_LOG_WARN("egl", ">> %s", __func__);
     clear_error();
     if (!valid_display(dpy)) { set_error(EGL_BAD_DISPLAY); return EGL_FALSE; }
     auto it = g_images.find(image);
@@ -1076,6 +1114,7 @@ EGLSurface eglCreatePlatformWindowSurface(EGLDisplay dpy, EGLConfig config,
                                           void* native_window,
                                           const EGLAttrib* attrib_list) {
     mithril::state_init();
+    MITHRIL_LOG_WARN("egl", ">> %s", __func__);
     clear_error();
     (void)attrib_list;
 
@@ -1103,6 +1142,7 @@ EGLSurface eglCreatePlatformPixmapSurface(EGLDisplay dpy, EGLConfig config,
                                           void* native_pixmap,
                                           const EGLAttrib* attrib_list) {
     mithril::state_init();
+    MITHRIL_LOG_WARN("egl", ">> %s", __func__);
     clear_error();
     (void)native_pixmap; (void)attrib_list;
     if (!valid_display(dpy)) { set_error(EGL_BAD_DISPLAY); return EGL_NO_SURFACE; }
@@ -1122,6 +1162,7 @@ EGLSurface eglCreatePixmapSurface(EGLDisplay dpy, EGLConfig config,
                                   EGLNativePixmapType pixmap,
                                   const EGLint* attrib_list) {
     mithril::state_init();
+    MITHRIL_LOG_WARN("egl", ">> %s", __func__);
     clear_error();
     (void)pixmap; (void)attrib_list;
     if (!valid_display(dpy)) { set_error(EGL_BAD_DISPLAY); return EGL_NO_SURFACE; }
@@ -1141,6 +1182,7 @@ EGLSurface eglCreatePbufferFromClientBuffer(EGLDisplay dpy, EGLenum buftype,
                                             EGLClientBuffer buffer, EGLConfig config,
                                             const EGLint* attrib_list) {
     mithril::state_init();
+    MITHRIL_LOG_WARN("egl", ">> %s", __func__);
     clear_error();
     (void)buffer; (void)config; (void)attrib_list;
     if (!valid_display(dpy)) { set_error(EGL_BAD_DISPLAY); return EGL_NO_SURFACE; }
@@ -1152,6 +1194,7 @@ EGLSurface eglCreatePbufferFromClientBuffer(EGLDisplay dpy, EGLenum buftype,
 
 EGLenum eglQueryAPI(void) {
     mithril::state_init();
+    MITHRIL_LOG_WARN("egl", ">> %s", __func__);
     return t_boundAPI;  // defaults to EGL_OPENGL_ES_API per EGL 1.5 spec
 }
 

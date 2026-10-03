@@ -7,6 +7,15 @@
 #include <cstring>
 #include <ctime>
 
+#if defined(__ANDROID__) || defined(__linux__) || defined(__APPLE__)
+#define MITHRIL_CRASH_HANDLER 1
+#include <signal.h>
+#include <unistd.h>
+#include <dlfcn.h>
+#include <execinfo.h>
+#include <initializer_list>
+#endif
+
 namespace mithril {
 
 namespace {
@@ -51,6 +60,92 @@ void log_write(LogLevel level, const char* tag, const char* fmt, ...) {
 
     std::fputc('\n', stderr);
 }
+
+// ---- Crash location ------------------------------------------------------
+//
+// stdout/stderr is unbuffered (set below), so anything written before the
+// fault is already on the wire. What has been missing is the fault itself:
+// without a handler a SIGSEGV kills the process silently, and the log simply
+// stops at whatever the last line happened to be. Every round of this
+// investigation then had to infer the crash site from that last line, which
+// is guesswork dressed up as diagnosis.
+//
+// Install a handler that names the signal, the faulting address and a symbol
+// resolved backtrace, so the next log says where it died instead of implying
+// it. Async-signal-safety: only write(2) and the execinfo entry points are
+// used; backtrace() itself is documented as unsafe on some implementations,
+// which is an accepted risk for a process that is about to die anyway.
+#if defined(MITHRIL_CRASH_HANDLER)
+namespace crash {
+constexpr int kMaxFrames = 48;
+
+void write_str(const char* s) {
+    if (!s) return;
+    std::size_t n = std::strlen(s);
+    while (n > 0) {
+        ssize_t w = ::write(2, s, n);
+        if (w <= 0) break;
+        s += static_cast<std::size_t>(w);
+        n -= static_cast<std::size_t>(w);
+    }
+}
+
+void handler(int sig, siginfo_t* info, void* context) {
+    (void)context;
+    char buf[256];
+
+    std::snprintf(buf, sizeof(buf),
+                  "\n[mithril] FATAL: signal %d (%s), fault addr %p\n", sig,
+                  sig == SIGSEGV ? "SIGSEGV"
+                  : sig == SIGBUS ? "SIGBUS"
+                  : sig == SIGILL  ? "SIGILL"
+                  : sig == SIGABRT ? "SIGABRT"
+                  : sig == SIGFPE  ? "SIGFPE" : "other",
+                  info ? info->si_addr : nullptr);
+    write_str(buf);
+
+    void* frames[kMaxFrames];
+    int n = ::backtrace(frames, kMaxFrames);
+    for (int i = 0; i < n; ++i) {
+        Dl_info d{};
+        const char* sym = nullptr;
+        void* sym_addr = nullptr;
+        if (::dladdr(frames[i], &d) && d.dli_sname) {
+            sym = d.dli_sname;
+            sym_addr = d.dli_saddr;
+        }
+        std::snprintf(buf, sizeof(buf), "[mithril]   #%02d %p %s", i, frames[i],
+                      d.dli_fname ? d.dli_fname : "??");
+        write_str(buf);
+        if (sym) {
+            std::snprintf(buf, sizeof(buf), " (%s+0x%lx)\n", sym,
+                          static_cast<unsigned long>(
+                              static_cast<const char*>(frames[i]) -
+                              static_cast<const char*>(sym_addr)));
+        } else {
+            std::snprintf(buf, sizeof(buf), " (+0x%lx)\n",
+                          static_cast<unsigned long>(
+                              static_cast<const char*>(frames[i]) -
+                              static_cast<const char*>(d.dli_fbase)));
+        }
+        write_str(buf);
+    }
+    write_str("[mithril] end of backtrace\n");
+    ::_exit(128 + sig);
+}
+
+struct Install {
+    Install() {
+        struct sigaction sa{};
+        sa.sa_sigaction = &handler;
+        sa.sa_flags = SA_SIGINFO;
+        sigemptyset(&sa.sa_mask);
+        for (int s : {SIGSEGV, SIGBUS, SIGILL, SIGABRT, SIGFPE})
+            ::sigaction(s, &sa, nullptr);
+    }
+} g_crash_handler;
+} // namespace crash
+#endif // MITHRIL_CRASH_HANDLER
 
 // Initialise level from environment on first use.
 namespace {
