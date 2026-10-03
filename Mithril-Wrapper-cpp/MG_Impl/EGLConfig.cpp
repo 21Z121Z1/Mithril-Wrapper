@@ -43,6 +43,19 @@ namespace egl {
 // host bridges alike.
 constexpr EGLint kRenderableTypes = EGL_OPENGL_BIT | EGL_OPENGL_ES2_BIT | EGL_OPENGL_ES3_BIT;
 
+// FCL queries EGL_NATIVE_VISUAL_ID and passes it directly to
+// ANativeWindow_setBuffersGeometry(). Android EGL implementations map an
+// RGBA8 config to HAL/AHardwareBuffer RGBA_8888 (numeric value 1). Returning
+// zero asks ANativeWindow to restore its default format, which disconnects the
+// selected EGL config from the actual window format.
+#if defined(__ANDROID__)
+constexpr EGLint kNativeVisualId = 1; // AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM
+constexpr EGLint kNativeVisualType = EGL_NONE;
+#else
+constexpr EGLint kNativeVisualId = 0;
+constexpr EGLint kNativeVisualType = 0;
+#endif
+
 EglConfig g_configs[kNumConfigs] = {
     // id=1: RGBA8 + D24S8 (the config Amethyst requests for MC Java)
     { 8, 8, 8, 8, 24, 8,  EGL_WINDOW_BIT | EGL_PBUFFER_BIT, kRenderableTypes, 1 },
@@ -89,8 +102,8 @@ bool config_matches(const EglConfig* cfg, const EGLint* attribs) {
             case EGL_CONFIG_ID:         if (cfg->configId != value) return false; break;
             case EGL_LEVEL:             if (value != 0) return false; break;
             case EGL_NATIVE_RENDERABLE: if (value != EGL_FALSE) return false; break;
-            case EGL_NATIVE_VISUAL_ID:  if (value != 0) return false; break;
-            case EGL_NATIVE_VISUAL_TYPE: if (value != 0) return false; break;
+            case EGL_NATIVE_VISUAL_ID:  if (value != kNativeVisualId) return false; break;
+            case EGL_NATIVE_VISUAL_TYPE: if (value != kNativeVisualType) return false; break;
             case EGL_MAX_PBUFFER_WIDTH:  if (value > 16384) return false; break;
             case EGL_MAX_PBUFFER_HEIGHT: if (value > 16384) return false; break;
             case EGL_MAX_PBUFFER_PIXELS:
@@ -134,8 +147,8 @@ EGLint config_get_attr(const EglConfig* cfg, EGLint attr) {
         case EGL_MAX_PBUFFER_HEIGHT: return 16384;
         case EGL_MAX_PBUFFER_PIXELS: return 16384 * 16384;
         case EGL_NATIVE_RENDERABLE:  return EGL_FALSE;
-        case EGL_NATIVE_VISUAL_ID:   return 0;
-        case EGL_NATIVE_VISUAL_TYPE: return 0;
+        case EGL_NATIVE_VISUAL_ID:   return kNativeVisualId;
+        case EGL_NATIVE_VISUAL_TYPE: return kNativeVisualType;
         case EGL_SAMPLES:            return 0;
         case EGL_SAMPLE_BUFFERS:     return 0;
         case EGL_BIND_TO_TEXTURE_RGB:
