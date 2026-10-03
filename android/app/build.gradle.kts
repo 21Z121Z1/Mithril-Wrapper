@@ -33,7 +33,19 @@ fun Project.mithrilAbiFilters(): List<String> =
 val pluginRendererConfig = buildJsonValue {
     renderer(
         displayName = "Mithril-Wrapper",
-        rendererId = "mithril",
+        // Must start with "opengles". The launcher does not match on our own
+        // name: FCL's pojavInitOpenGL() dispatches with
+        //   if (!strncmp("opengles", renderer, 8)) { set_gl_bridge_tbl(); ... }
+        // and only that branch assigns br_init. A rendererId it does not
+        // recognise leaves br_init NULL, and the last line
+        //   if (br_init()) br_setup_window();
+        // then calls through a NULL function pointer - SIGSEGV at pc=0x0 in
+        // pojavInitOpenGL (R21 = br_init+0x0), which is exactly what the
+        // launcher log showed.
+        //
+        // MobileGL uses "opengles3" for the same reason: it is recognised by
+        // that prefix check, not because anyone looks for "mobilegl".
+        rendererId = "opengles3",
         rendererGLPath = nativePath("libmithril.so"),
         rendererEGLPath = nativePath("libmithril.so"),
         dlopenLibPaths = emptyList(),
@@ -89,10 +101,10 @@ android {
             minMCVer = ""
             maxMCVer = ""
             boatEnv {
-                put("POJAV_RENDERER", "mithril")
+                put("POJAV_RENDERER", "opengles3")
             }
             pojavEnv {
-                put("POJAV_RENDERER", "mithril")
+                put("POJAV_RENDERER", "opengles3")
             }
         })
         manifestPlaceholders["appLabel"] = "Mithril-Wrapper"
