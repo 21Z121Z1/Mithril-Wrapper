@@ -348,6 +348,7 @@ void destroy_swapchain(Swapchain* sc) {
 
 VkImageView swapchain_acquire_color(Swapchain* sc) {
     if (!sc) return VK_NULL_HANDLE;
+#if defined(__ANDROID__)
     // Offscreen path: there is no VkSwapchainKHR and no presentation engine,
     // so images are handed out round-robin. Everything else (render pass,
     // layout transitions, depth) is identical.
@@ -371,6 +372,7 @@ VkImageView swapchain_acquire_color(Swapchain* sc) {
         return (sc->currentImage >= 0 && sc->currentImage < (int)sc->views.size())
                ? sc->views[sc->currentImage] : VK_NULL_HANDLE;
     }
+#endif // __ANDROID__
     if (!sc->swapchain) return VK_NULL_HANDLE;
     // If the swapchain was marked dead by a previous fatal error (OOM,
     // surface lost, device lost), refuse to acquire. EGL will see the null
@@ -506,6 +508,7 @@ VkImageView swapchain_acquire_depth(Swapchain* sc) {
 
 void swapchain_present_and_acquire(Swapchain* sc) {
     if (!sc) return;
+#if defined(__ANDROID__)
     if (sc->offscreen) {
         Backend* b = backend();
         if (b->deviceLost) return;
@@ -519,6 +522,7 @@ void swapchain_present_and_acquire(Swapchain* sc) {
         swapchain_acquire_color(sc);
         return;
     }
+#endif // __ANDROID__
     if (!sc->swapchain) return;
     Backend* b = backend();
     if (b->deviceLost) {
