@@ -73,13 +73,12 @@ val pluginRendererConfig = buildJsonValue {
             // only - so Mithril dlopens the driver itself
             // (VulkanDispatchAndroid.cpp) and this is the switch for it.
             //
-            // VK_ICD_FILENAMES / VK_DRIVER_FILES are kept only because some
-            // drivers read them for their own sub-loading; they do nothing for
-            // the platform loader on Android.
+            // VK_ICD_FILENAMES / VK_DRIVER_FILES are deliberately NOT offered:
+            // the Android loader ignores them entirely (it discovers drivers
+            // through hw_get_module), so exposing them only invited invalid
+            // values such as "1" that look like they do something.
             toggleable("MITHRIL_TURNIP", "1", false, RendererConfig.MetaString("mithril_turnip_title"))
             customizable("MITHRIL_VULKAN_LIBRARY", "", RendererConfig.MetaString("mithril_vulkan_library_title"))
-            customizable("VK_ICD_FILENAMES", "", RendererConfig.MetaString("mithril_vk_icd_title"))
-            customizable("VK_DRIVER_FILES", "", RendererConfig.MetaString("mithril_vk_driver_files_title"))
         },
         minMCVer = null,
         maxMCVer = null,

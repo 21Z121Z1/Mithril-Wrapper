@@ -35,6 +35,7 @@
 #include <dlfcn.h>
 #include <cstdlib>
 #include <cstdio>
+#include <cstring>
 
 // Declared here rather than including <vulkan/vk_icd.h>: that header is part of
 // the loader's build interface and is not shipped by the NDK, so relying on it
@@ -50,35 +51,79 @@ PFN_vk_icdGetInstanceProcAddr g_icd_gipa = nullptr;
 bool g_ready = false;
 int g_failures = 0;
 
+// Candidate driver paths, most specific first.
+static const int kMaxCandidates = 6;
+
+void add_candidate(const char* cands[], int& n, const char* dir, const char* name) {
+    if (n >= kMaxCandidates) return;
+    if (!name || !name[0]) return;
+    if (name[0] == '/') {
+        // Absolute: use as-is.
+        cands[n++] = name;
+        return;
+    }
+    if (!dir || !dir[0]) {
+        // No directory to join with; rely on the loader search path.
+        cands[n++] = name;
+        return;
+    }
+    size_t len = strlen(dir) + strlen(name) + 2;
+    char* buf = (char*)malloc(len);
+    if (!buf) return;
+    snprintf(buf, len, "%s/%s", dir, name);
+    // Also keep the bare name so the default search path still gets a chance.
+    cands[n++] = buf;
+    if (n < kMaxCandidates) cands[n++] = name;
+}
+
 void ensure_library() {
     if (g_ready) return;
     g_ready = true;
 
+    // DRIVER_PATH is how launchers point at an out-of-tree driver. FCL sets it
+    // to the Turnip plugin's native lib dir. It is NOT on LD_LIBRARY_PATH, so a
+    // bare soname like "libvulkan_freedreno.so" is unresolvable without it -
+    // dlopen of the bare name was the reason Turnip failed to load.
+    const char* driver_dir = getenv("DRIVER_PATH");
     const char* explicit_path = getenv("MITHRIL_VULKAN_LIBRARY");
     const char* turnip = getenv("MITHRIL_TURNIP");
-    const char* path = "libvulkan.so";
-    bool want_turnip = false;
+
+    const char* cands[kMaxCandidates];
+    int n = 0;
 
     if (explicit_path && explicit_path[0]) {
-        path = explicit_path;
+        add_candidate(cands, n, driver_dir, explicit_path);
     } else if (turnip && (turnip[0] == '1' || turnip[0] == 'y' || turnip[0] == 'Y')) {
-        path = "libvulkan_freedreno.so";
-        want_turnip = true;
+        add_candidate(cands, n, driver_dir, "libvulkan_freedreno.so");
+        // Some Turnip builds ship under these names.
+        add_candidate(cands, n, driver_dir, "libvulkan_adreno.so");
+        add_candidate(cands, n, driver_dir, "vulkan.adreno.so");
+    }
+    // Fall back to the platform loader.
+    add_candidate(cands, n, nullptr, "libvulkan.so");
+
+    for (int i = 0; i < n; ++i) {
+        if (!cands[i]) continue;
+        g_handle = dlopen(cands[i], RTLD_NOW | RTLD_LOCAL);
+        if (g_handle) {
+            fprintf(stderr, "[mithril] vk-dispatch: loaded \"%s\"\n", cands[i]);
+            break;
+        }
+        fprintf(stderr, "[mithril] vk-dispatch: dlopen(\"%s\") failed: %s\n",
+                cands[i], dlerror() ? dlerror() : "unknown");
     }
 
-    g_handle = dlopen(path, RTLD_NOW | RTLD_LOCAL);
     if (!g_handle) {
-        fprintf(stderr, "[mithril] vk-dispatch: dlopen(\"%s\") failed: %s\n", path, dlerror());
+        fprintf(stderr, "[mithril] vk-dispatch: no Vulkan driver could be loaded\n");
         return;
     }
-    fprintf(stderr, "[mithril] vk-dispatch: loaded \"%s\"\n", path);
 
     // An ICD such as Turnip exposes discovery through vk_icdGetInstanceProcAddr
     // rather than the plain names; a loader exports the plain names.
     g_icd_gipa = (PFN_vk_icdGetInstanceProcAddr)dlsym(g_handle, "vk_icdGetInstanceProcAddr");
     g_gipa = (PFN_vkGetInstanceProcAddr)dlsym(g_handle, "vkGetInstanceProcAddr");
-    if (want_turnip && !g_icd_gipa && !g_gipa) {
-        fprintf(stderr, "[mithril] vk-dispatch: %s exports no discovery entrypoint\n", path);
+    if (!g_icd_gipa && !g_gipa) {
+        fprintf(stderr, "[mithril] vk-dispatch: driver exports no discovery entrypoint\n");
     }
 }
 
