@@ -117,6 +117,7 @@ jobs:
           fi
           "$READELF" -Ws "$HOOK" | grep -q "mithril_vkhook_init"
           "$READELF" -Ws "$HOOK" | grep -q "mithril_vkhook_redirects"
+          "$READELF" -Ws "$HOOK" | grep -q "mithril_vkhook_intercepts"
           "$READELF" -Ws "$HOOK" | grep -q "android_dlopen_ext"
           "$READELF" -Ws "$HOOK" | grep -q "android_load_sphal_library"
           if ! grep -Eq "FLAGS_1.*GLOBAL|Flags:.*GLOBAL" "needed-hook-${{ matrix.abi }}.log"; then
