@@ -36,6 +36,9 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <link.h>
+#include <string>
+#include <vector>
 #include <sys/mman.h>
 #include <unistd.h>
 
@@ -55,6 +58,10 @@ namespace {
 void* g_handle = nullptr;
 PFN_vkGetInstanceProcAddr g_gipa = nullptr;
 PFN_vk_icdGetInstanceProcAddr g_icd_gipa = nullptr;
+const char* g_driver_path = nullptr;
+void* g_hal_device = nullptr;
+VkResult (*g_hal_create_instance)(const VkInstanceCreateInfo*, const VkAllocationCallbacks*,
+                                  VkInstance*) = nullptr;
 PFN_vkGetDeviceProcAddr g_gdpa = nullptr;
 VkInstance g_instance = VK_NULL_HANDLE;
 VkDevice g_device = VK_NULL_HANDLE;
@@ -152,7 +159,7 @@ void init_namespace_escape() {
     g_loader_dlopen = find_loader_dlopen();
     if (!g_loader_dlopen) {
         fprintf(stderr, "[mithril] vk-dispatch: could not locate __loader_dlopen"
-                        " (namespace escape unavailable)\\n");
+                        " (namespace escape unavailable)\n");
         return;
     }
 
@@ -172,13 +179,13 @@ void init_namespace_escape() {
         g_create_ns = (loader_create_ns_t)dlsym(ld, "__loader_android_create_namespace");
     }
     if (!g_create_ns || !g_link_all) {
-        fprintf(stderr, "[mithril] vk-dispatch: linker internals unavailable (ld=%s libdl=%s)\\n",
+        fprintf(stderr, "[mithril] vk-dispatch: linker internals unavailable (ld=%s libdl=%s)\n",
                 ld ? "yes" : "no", libdl ? "yes" : "no");
         g_create_ns = nullptr;
         g_link_all = nullptr;
         return;
     }
-    fprintf(stderr, "[mithril] vk-dispatch: linker internals resolved, namespace escape available\\n");
+    fprintf(stderr, "[mithril] vk-dispatch: linker internals resolved, namespace escape available\n");
 }
 
 // A shared namespace with no parent is what gives us a handle on the default
@@ -213,7 +220,7 @@ struct android_namespace_t* make_escape_ns(const char* driver_dir) {
     g_escape_ns = g_create_ns("mithril-vulkan", paths, paths, MITHRIL_NS_TYPE_SHARED, paths,
                               nullptr, reinterpret_cast<void*>(&dlopen));
     if (!g_escape_ns) {
-        fprintf(stderr, "[mithril] vk-dispatch: namespace creation failed\\n");
+        fprintf(stderr, "[mithril] vk-dispatch: namespace creation failed\n");
         return nullptr;
     }
 
@@ -222,11 +229,11 @@ struct android_namespace_t* make_escape_ns(const char* driver_dir) {
     // cannot see /system/lib64.
     struct android_namespace_t* def = make_default_ns();
     if (def && !g_link_all(g_escape_ns, def)) {
-        fprintf(stderr, "[mithril] vk-dispatch: could not link namespace to default\\n");
+        fprintf(stderr, "[mithril] vk-dispatch: could not link namespace to default\n");
     } else if (def) {
-        fprintf(stderr, "[mithril] vk-dispatch: escape namespace linked to default\\n");
+        fprintf(stderr, "[mithril] vk-dispatch: escape namespace linked to default\n");
     }
-    fprintf(stderr, "[mithril] vk-dispatch: escape namespace created (paths=%s)\\n", paths);
+    fprintf(stderr, "[mithril] vk-dispatch: escape namespace created (paths=%s)\n", paths);
 
     // Bring the stock loader into the namespace before the driver. Its own
     // DT_NEEDED entries - libhardware.so, libcutils.so, libutils.so, and on
@@ -256,6 +263,69 @@ struct android_namespace_t* make_escape_ns(const char* driver_dir) {
     }
 
     return g_escape_ns;
+}
+
+// The driver's exported names are the ground truth for how to talk to it.
+// Mesa's Android builds are not consistent about which discovery entrypoint
+// they export, and dlsym can only guess, so read the loaded image's own
+// dynamic symbol table and report what is actually there.
+struct SymbolScan {
+    const char* wanted_path;
+    std::vector<std::string> vk_symbols;
+    std::string gipa_name;
+};
+
+static PFN_vkGetInstanceProcAddr try_hal_open();
+
+static int collect_symbols_cb(struct dl_phdr_info* info, size_t, void* data) {
+    auto* scan = static_cast<SymbolScan*>(data);
+    if (!info->dlpi_name || !scan->wanted_path) return 0;
+    if (strcmp(info->dlpi_name, scan->wanted_path) != 0) return 0;
+
+    const ElfW(Dyn)* dyn = nullptr;
+    for (ElfW(Half) i = 0; i < info->dlpi_phnum; ++i) {
+        if (info->dlpi_phdr[i].p_type == PT_DYNAMIC) {
+            dyn = reinterpret_cast<const ElfW(Dyn)*>(info->dlpi_addr + info->dlpi_phdr[i].p_vaddr);
+            break;
+        }
+    }
+    if (!dyn) return 0;
+
+    const ElfW(Sym)* symtab = nullptr;
+    const char* strtab = nullptr;
+    const uint32_t* hash = nullptr;
+    for (const ElfW(Dyn)* d = dyn; d->d_tag != DT_NULL; ++d) {
+        if (d->d_tag == DT_SYMTAB) symtab = reinterpret_cast<const ElfW(Sym)*>(info->dlpi_addr + d->d_un.d_ptr);
+        else if (d->d_tag == DT_STRTAB) strtab = reinterpret_cast<const char*>(info->dlpi_addr + d->d_un.d_ptr);
+        else if (d->d_tag == DT_HASH) hash = reinterpret_cast<const uint32_t*>(info->dlpi_addr + d->d_un.d_ptr);
+    }
+    if (!symtab || !strtab || !hash) return 0;
+
+    const uint32_t nsyms = hash[1];  // nchain equals the symbol count
+    for (uint32_t i = 0; i < nsyms; ++i) {
+        const char* name = strtab + symtab[i].st_name;
+        if (!name || name[0] == '\0') continue;
+        if (strncmp(name, "vk", 2) == 0) {
+            scan->vk_symbols.emplace_back(name);
+        } else if (strstr(name, "GetInstanceProcAddr")) {
+            scan->gipa_name = name;
+        }
+    }
+    return 0;
+}
+
+void report_driver_symbols(const char* path) {
+    SymbolScan scan{path, {}, {}};
+    dl_iterate_phdr(collect_symbols_cb, &scan);
+    fprintf(stderr, "[mithril] vk-dispatch: driver exports %zu vk* symbols", scan.vk_symbols.size());
+    for (size_t i = 0; i < scan.vk_symbols.size() && i < 12; ++i) {
+        fprintf(stderr, " %s", scan.vk_symbols[i].c_str());
+    }
+    fprintf(stderr, "\n");
+    if (!scan.gipa_name.empty()) {
+        fprintf(stderr, "[mithril] vk-dispatch: non-standard discovery symbol \"%s\"\n",
+                scan.gipa_name.c_str());
+    }
 }
 
 void log_dir(const char* dir) {
@@ -297,6 +367,7 @@ void* try_load(const char* path, const char* driver_dir) {
         void* h = android_dlopen_ext(path, RTLD_NOW | RTLD_LOCAL, &ext);
         if (h) {
             fprintf(stderr, "[mithril] vk-dispatch: loaded \"%s\" via escape namespace\n", path);
+            g_driver_path = path;
             return h;
         }
         log_dlerror(path, "namespace");
@@ -402,12 +473,115 @@ void ensure_library() {
     fprintf(stderr, "[mithril] vk-dispatch: discovery entrypoints icd=%s gipa=%s\n",
             g_icd_gipa ? "yes" : "no", g_gipa ? "yes" : "no");
     if (!g_icd_gipa && !g_gipa) {
+        // Ask the image itself what it exports rather than guessing. A Mesa
+        // build may ship the discovery entrypoint under any name, and some
+        // vendor drivers hide it inside a namespace (Adreno has shipped
+        // qglinternal::vkGetInstanceProcAddr).
+        SymbolScan scan{g_driver_path, {}, {}};
+        dl_iterate_phdr(collect_symbols_cb, &scan);
+        fprintf(stderr, "[mithril] vk-dispatch: driver exports %zu vk* symbols",
+                scan.vk_symbols.size());
+        for (size_t i = 0; i < scan.vk_symbols.size() && i < 16; ++i) {
+            fprintf(stderr, " %s", scan.vk_symbols[i].c_str());
+        }
+        fprintf(stderr, "\n");
+        if (!scan.gipa_name.empty()) {
+            fprintf(stderr, "[mithril] vk-dispatch: trying non-standard discovery symbol \"%s\"\n",
+                    scan.gipa_name.c_str());
+            g_gipa = (PFN_vkGetInstanceProcAddr)dlsym(g_handle, scan.gipa_name.c_str());
+        }
+        if (!g_gipa) g_gipa = try_hal_open();
+    }
+    if (!g_icd_gipa && !g_gipa) {
         fprintf(stderr, "[mithril] vk-dispatch: driver exports no discovery entrypoint\n");
     }
 }
 
+// ---------------------------------------------------------------------------
+// HAL path
+//
+// Turnip ships as a Vulkan HAL module, not as an ICD. It is built with
+// -Dandroid-stub=true and the Adrenotools/Magisk packages then run
+// patchelf --set-soname vulkan.<board>.so over it, so what the file exports is
+// the HAL module symbol HMI - the Vulkan entrypoints sit behind
+// hw_module_methods_t::open() rather than being exported directly.
+//
+// That is exactly what the platform loader walks through at
+// frameworks/native/vulkan/libvulkan/driver.cpp: dlsym "HMI", check the module
+// id is "vulkan", open HWVULKAN_DEVICE_0, and take vkGetInstanceProcAddr and
+// vkCreateInstance off the returned hwvulkan_device_t. Nothing here needs
+// inline hooking - the same handshake can be performed directly, which is why
+// libvulkan.so is able to reach a driver that an app cannot dlopen meaningfully
+// on its own.
+//
+// Window system integration is not lost by skipping the loader: Mesa's WSI
+// layer implements VK_KHR_android_surface itself.
+struct mithril_hw_module_t;
+struct mithril_hw_device_t;
+
+struct mithril_hw_module_methods_t {
+    int (*open)(const struct mithril_hw_module_t* module, const char* id,
+                struct mithril_hw_device_t** device);
+};
+
+struct mithril_hw_module_t {
+    uint32_t tag;
+    uint16_t module_api_version;
+    uint16_t hal_api_version;
+    const char* id;
+    const char* name;
+    const char* author;
+    struct mithril_hw_module_methods_t* methods;
+    void* dso;
+    uint32_t reserved[32 - 7];
+};
+
+struct mithril_hw_device_t {
+    uint32_t tag;
+    uint32_t version;
+    struct mithril_hw_module_t* module;
+    uint32_t reserved[12];
+    int (*close)(struct mithril_hw_device_t* device);
+};
+
+struct mithril_hwvulkan_device_t {
+    struct mithril_hw_device_t common;
+    VkResult (*EnumerateInstanceExtensionProperties)(const char* layer_name, uint32_t* count,
+                                                     VkExtensionProperties* properties);
+    VkResult (*CreateInstance)(const VkInstanceCreateInfo* create_info,
+                               const VkAllocationCallbacks* allocator, VkInstance* instance);
+    PFN_vkGetInstanceProcAddr GetInstanceProcAddr;
+};
+
+static PFN_vkGetInstanceProcAddr try_hal_open() {
+    auto* hmi = static_cast<mithril_hw_module_t*>(dlsym(g_handle, "HMI"));
+    if (!hmi) return nullptr;
+    fprintf(stderr, "[mithril] vk-dispatch: HAL module symbol HMI present (id=%s)\n",
+            hmi->id ? hmi->id : "(null)");
+    if (!hmi->id || strcmp(hmi->id, "vulkan") != 0) return nullptr;
+    if (!hmi->methods || !hmi->methods->open) return nullptr;
+
+    mithril_hw_device_t* raw = nullptr;
+    if (hmi->methods->open(hmi, "vk0", &raw) != 0 || !raw) {
+        fprintf(stderr, "[mithril] vk-dispatch: HAL open failed\n");
+        return nullptr;
+    }
+    auto* dev = reinterpret_cast<mithril_hwvulkan_device_t*>(raw);
+    g_hal_device = raw;
+    if (dev->CreateInstance) g_hal_create_instance = dev->CreateInstance;
+    fprintf(stderr, "[mithril] vk-dispatch: HAL device opened (gipa=%s createInstance=%s)\n",
+            dev->GetInstanceProcAddr ? "yes" : "no", dev->CreateInstance ? "yes" : "no");
+    return dev->GetInstanceProcAddr;
+}
+
 void* resolve(const char* name) {
     ensure_library();
+
+    // The HAL device owns vkCreateInstance directly; it has to be served before
+    // any instance exists, which is precisely when it is asked for.
+    if (g_hal_create_instance && strcmp(name, "vkCreateInstance") == 0) {
+        return reinterpret_cast<void*>(g_hal_create_instance);
+    }
 
     // An ICD only exports vk_icdGetInstanceProcAddr; every other entrypoint has
     // to be fetched through the instance, and device-level ones through the
