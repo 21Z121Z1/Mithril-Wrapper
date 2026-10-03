@@ -37,6 +37,7 @@
 #include <dlfcn.h>
 
 #include <cstdarg>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -46,16 +47,19 @@ namespace {
 
 typedef void* (*dlopen_ext_fn)(const char*, int, const android_dlextinfo*);
 typedef void* (*load_sphal_fn)(const char*, int);
-typedef void* (*create_ns_fn)(const char*, const char*, const char*, uint64_t,
-                              const char*, android_namespace_t*, const void*);
-typedef bool (*link_ns_fn)(android_namespace_t*, android_namespace_t*, const char*);
+typedef struct android_namespace_t* (*create_ns_fn)(const char*, const char*,
+                                                     const char*, uint64_t,
+                                                     const char*,
+                                                     struct android_namespace_t*,
+                                                     const void*);
+typedef bool (*link_ns_fn)(struct android_namespace_t*, struct android_namespace_t*, const char*);
 
 dlopen_ext_fn   g_real_dlopen_ext = nullptr;
 load_sphal_fn   g_real_load_sphal = nullptr;
 create_ns_fn    g_real_create_ns  = nullptr;
 link_ns_fn      g_real_link_ns    = nullptr;
 
-android_namespace_t* g_driver_ns = nullptr;
+struct android_namespace_t* g_driver_ns = nullptr;
 const void*          g_caller    = nullptr;
 
 char g_driver_dir[512] = {0};
@@ -125,7 +129,7 @@ bool is_vulkan_hal(const char* name) {
     return len > 3 && std::strcmp(base + len - 3, ".so") == 0;
 }
 
-android_namespace_t* driver_namespace() {
+struct android_namespace_t* driver_namespace() {
     if (g_driver_ns || !g_real_create_ns || !g_caller) return g_driver_ns;
 
     // The driver's own DT_NEEDED entries - libhardware.so, libcutils.so, the
@@ -141,7 +145,7 @@ android_namespace_t* driver_namespace() {
     }
     ld += search;
 
-    g_driver_ns = (android_namespace_t*)g_real_create_ns(
+    g_driver_ns = (struct android_namespace_t*)g_real_create_ns(
         "mithril-driver", ld.c_str(), ld.c_str(),
         ANDROID_NAMESPACE_TYPE_ISOLATED | ANDROID_NAMESPACE_TYPE_SHARED,
         nullptr, nullptr, g_caller);
