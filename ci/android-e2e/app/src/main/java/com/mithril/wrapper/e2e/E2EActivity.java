@@ -31,7 +31,8 @@ public final class E2EActivity extends Activity implements SurfaceHolder.Callbac
             String rawFramePath,
             String resultJsonPath,
             boolean turnipProbe,
-            String nativeLibraryDir);
+            String nativeLibraryDir,
+            String cacheDir);
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -58,11 +59,13 @@ public final class E2EActivity extends Activity implements SurfaceHolder.Callbac
         final String raw = new java.io.File(getFilesDir(), "frame-" + mode + ".rgba").getAbsolutePath();
         final String result = new java.io.File(getFilesDir(), "result-" + mode + ".json").getAbsolutePath();
         final String nativeLibraryDir = getApplicationInfo().nativeLibraryDir;
+        final String cacheDir = getCacheDir().getAbsolutePath();
 
         new Thread(() -> {
             Log.i(TAG, "starting native surface E2E mode=" + mode
-                    + " nativeLibraryDir=" + nativeLibraryDir);
-            int rc = nativeRun(surface, raw, result, turnipProbe, nativeLibraryDir);
+                    + " nativeLibraryDir=" + nativeLibraryDir
+                    + " cacheDir=" + cacheDir);
+            int rc = nativeRun(surface, raw, result, turnipProbe, nativeLibraryDir, cacheDir);
             Log.i(TAG, "native surface E2E completed rc=" + rc
                     + " result=" + result + " raw=" + raw);
         }, "mithril-e2e-render").start();
