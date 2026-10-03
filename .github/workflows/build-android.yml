@@ -10,8 +10,11 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: android-build-${{ github.ref }}
+  group: android-build-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
   native:
@@ -53,83 +56,50 @@ jobs:
 
       - name: Build
         run: |
+          set -o pipefail
           cmake --build "build-${{ matrix.abi }}" --target mithril -j"$(nproc)" 2>&1 | tee "native-${{ matrix.abi }}.log"
-          exit "${PIPESTATUS[0]}"
 
       - name: Build driver-selection hook
-        # Separate object: libvulkan.so must bind its android_dlopen_ext /
-        # android_load_sphal_library to it, which requires a distinct mapping in
-        # the namespace built for the loader.
-        #
-        # Non-fatal on purpose: this only adds driver redirection on top of the
-        # stock path. A failure here must still ship an APK that works with the
-        # platform driver, and the log is mirrored to ci-diagnostics so the
-        # failure can be read rather than inferred. Flip to fatal once it builds.
-        continue-on-error: true
+        # This is a required part of the custom-driver WSI path. Shipping the
+        # APK without it produces a green build that can create a Turnip
+        # VkDevice but cannot obtain Android surface/swapchain support.
         run: |
-          set +e
+          set -o pipefail
           cmake --build "build-${{ matrix.abi }}" --target mithril_vkhook -j"$(nproc)" 2>&1 | tee "hook-${{ matrix.abi }}.log"
-          rc="${PIPESTATUS[0]}"
-          set -e
-          if [ "$rc" -ne 0 ]; then
-            echo "::warning::driver hook build failed (rc=$rc); APK ships without driver redirection"
-          fi
-          exit 0
 
-      - name: Verify no unpackaged runtime dependencies
-        # dlopen() reports "library not found" when a DT_NEEDED entry is missing
-        # from the APK - and it names OUR library, so the launcher log gives no
-        # hint about the real cause. Fail the build here instead of crashing on
-        # device.
+      - name: Verify native outputs and runtime dependencies
         run: |
+          set -e
           READELF="${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"
           SO=$(find "build-${{ matrix.abi }}" -name 'libmithril.so' -type f | head -1)
+          HOOK=$(find "build-${{ matrix.abi }}" -name 'libmithril_vkhook.so' -type f | head -1)
           test -n "$SO"
+          test -n "$HOOK"
           "$READELF" -d "$SO" | tee "needed-${{ matrix.abi }}.log"
+          "$READELF" -d "$HOOK" | tee "needed-hook-${{ matrix.abi }}.log"
           if grep -q "libc++_shared" "needed-${{ matrix.abi }}.log"; then
             echo "::error::libmithril.so needs libc++_shared.so, which the APK does not package"
             exit 1
           fi
-
-      - name: Publish build log (diagnosis)
-        # Job logs and artifacts live in blob storage that is not reachable from
-        # everywhere, so mirror the tail of the build output to the
-        # ci-diagnostics branch, which is readable through the API. Runs
-        # unconditionally as well: a step marked continue-on-error does not make
-        # the job report failure, and that is exactly when the log matters.
-        if: always()
-        continue-on-error: true
-        run: |
-          set -e
-          tail -400 "native-${{ matrix.abi }}.log" > "android-${{ matrix.abi }}.log"
-          # The hook is built by a separate step with its own log; without this
-          # the failure is visible only as a step name and unreadable.
-          if [ -f "hook-${{ matrix.abi }}.log" ]; then
-            tail -400 "hook-${{ matrix.abi }}.log" > "android-hook-${{ matrix.abi }}.log"
+          if grep -q "libc++_shared" "needed-hook-${{ matrix.abi }}.log"; then
+            echo "::error::libmithril_vkhook.so needs libc++_shared.so, which the APK does not package"
+            exit 1
           fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git fetch origin ci-diagnostics 2>/dev/null || true
-          # Base the branch on the REMOTE ref, not on the feature HEAD: the
-          # remote branch has unrelated history, so a branch made from HEAD
-          # cannot be pushed without forcing, and an earlier attempt lost the
-          # log silently for exactly that reason.
-          git checkout -B ci-diagnostics origin/ci-diagnostics 2>/dev/null \
-            || git checkout -B ci-diagnostics
-          mkdir -p ci-logs
-          mv "android-${{ matrix.abi }}.log" "ci-logs/android-${{ matrix.abi }}.log"
-          [ -f "android-hook-${{ matrix.abi }}.log" ] \
-            && mv "android-hook-${{ matrix.abi }}.log" "ci-logs/android-hook-${{ matrix.abi }}.log"
-          git add ci-logs
-          git diff --cached --quiet && exit 0
-          git commit -m "ci(android): ${{ matrix.abi }} build log [skip ci]"
-          # The three ABI jobs share this branch and can race; retry rather
-          # than let one of them silently drop its log.
-          for i in 1 2 3; do
-            git pull --rebase origin ci-diagnostics 2>/dev/null || true
-            git push -f origin ci-diagnostics && break
-            sleep 5
-          done
+          "$READELF" -Ws "$HOOK" | grep -q ' mithril_vkhook_init$'
+          "$READELF" -Ws "$HOOK" | grep -q ' android_dlopen_ext$'
+          "$READELF" -Ws "$HOOK" | grep -q ' android_load_sphal_library$'
+
+      - name: Upload native diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-native-diagnostics-${{ matrix.abi }}
+          path: |
+            native-${{ matrix.abi }}.log
+            hook-${{ matrix.abi }}.log
+            needed-${{ matrix.abi }}.log
+            needed-hook-${{ matrix.abi }}.log
+          if-no-files-found: ignore
 
       - name: Upload .so
         uses: actions/upload-artifact@v4
@@ -143,9 +113,7 @@ jobs:
         with:
           name: libmithril-vkhook-${{ matrix.abi }}
           path: build-${{ matrix.abi }}/libmithril_vkhook.so
-          # Not error: the hook is best-effort, and the APK step already copes
-          # with it being absent.
-          if-no-files-found: warn
+          if-no-files-found: error
 
   apk:
     name: Package APK
@@ -169,16 +137,13 @@ jobs:
           # libmithril-vkhook-<abi>, and a glob over libmithril-* would read the
           # hook directory as an ABI called "vkhook-<abi>".
           for abi in arm64-v8a armeabi-v7a x86_64; do
-            [ -f "native-out/libmithril-$abi/libmithril.so" ] || continue
+            test -f "native-out/libmithril-$abi/libmithril.so"
+            test -f "native-out/libmithril-vkhook-$abi/libmithril_vkhook.so"
             mkdir -p "android/app/src/main/jniLibs/$abi"
             cp "native-out/libmithril-$abi/libmithril.so" \
                "android/app/src/main/jniLibs/$abi/libmithril.so"
-            # The hook lives beside libmithril.so so it can be found by
-            # dladdr()ing our own mapping; it is dlopen'd, never linked.
-            if [ -f "native-out/libmithril-vkhook-$abi/libmithril_vkhook.so" ]; then
-              cp "native-out/libmithril-vkhook-$abi/libmithril_vkhook.so" \
-                 "android/app/src/main/jniLibs/$abi/libmithril_vkhook.so"
-            fi
+            cp "native-out/libmithril-vkhook-$abi/libmithril_vkhook.so" \
+               "android/app/src/main/jniLibs/$abi/libmithril_vkhook.so"
           done
           find android/app/src/main/jniLibs -type f | sort
 
@@ -238,31 +203,6 @@ jobs:
           path: android/gradle.log
           if-no-files-found: ignore
 
-      - name: Publish gradle log (diagnosis)
-        # Same reason as the native stage: job logs sit in blob storage that is
-        # not reachable from everywhere, while a file on ci-diagnostics is
-        # readable through the API.
-        if: failure()
-        continue-on-error: true
-        run: |
-          set -e
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git fetch origin ci-diagnostics 2>/dev/null || true
-          git checkout -B ci-diagnostics origin/ci-diagnostics 2>/dev/null \
-            || git checkout -B ci-diagnostics
-          mkdir -p ci-logs
-          # Prefix with a marker so an empty/failed gradle run is still obvious.
-          { echo "run=${GITHUB_RUN_ID} attempt=${GITHUB_RUN_ATTEMPT}";             echo "--- android/gradle.log ---";             tail -300 android/gradle.log 2>&1 || echo "(no gradle.log)"; } > ci-logs/android-apk-gradle.log
-          git add ci-logs/android-apk-gradle.log
-          if git diff --cached --quiet; then exit 0; fi
-          git commit -m "ci(android): APK gradle log [skip ci]"
-          for i in 1 2 3; do
-            git pull --rebase origin ci-diagnostics 2>/dev/null || true
-            git push -f origin ci-diagnostics && break
-            sleep 5
-          done
-
       - name: Verify the APK actually contains the libraries
         # An APK that builds but does not carry the .so is useless to a
         # launcher, so check the packaged entries rather than trusting AGP.
@@ -278,8 +218,11 @@ jobs:
           for abi in $(unzip -l "$APK" | awk '{print $4}' | grep '^lib/' | cut -d/ -f2 | sort -u); do
             unzip -l "$APK" | grep -q "lib/$abi/libmithril.so" || {
               echo "APK ships $abi but no libmithril.so in it"; exit 1; }
+            unzip -l "$APK" | grep -q "lib/$abi/libmithril_vkhook.so" || {
+              echo "APK ships $abi but no libmithril_vkhook.so in it"; exit 1; }
           done
           unzip -l "$APK" | grep -q "lib/arm64-v8a/libmithril.so"
+          unzip -l "$APK" | grep -q "lib/arm64-v8a/libmithril_vkhook.so"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
