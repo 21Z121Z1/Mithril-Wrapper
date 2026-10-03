@@ -342,7 +342,14 @@ if(ANDROID)
     # the LD_PRELOAD-style interposition used here on all Android linker
     # versions. libadrenotools/liblinkernsbypass use the same -z global +
     # RTLD_GLOBAL pairing for Vulkan-loader hooks.
-    target_link_options(mithril_vkhook PRIVATE "-Wl,-z,global")
+    target_link_options(mithril_vkhook PRIVATE
+        "-Wl,-z,global"
+        # The hook is deliberately namespace-global, but its statically linked
+        # libc++/compiler-runtime implementation details must not become part
+        # of that global symbol group. Keep only symbols defined by the hook's
+        # own object visible for interposition.
+        "-Wl,--exclude-libs,ALL"
+    )
 
 endif()
 
