@@ -743,88 +743,129 @@ void add_candidate(const char* cands[], int& n, const char* dir, const char* nam
 // Best effort throughout: on any failure we fall through to the existing
 // paths, so a device without Turnip is unaffected.
 static int g_hook_active = 0;
-using hook_redirect_count_fn = int (*)();
-static hook_redirect_count_fn g_hook_redirect_count = nullptr;
+using hook_count_fn = int (*)();
+static hook_count_fn g_hook_redirect_count = nullptr;
+static hook_count_fn g_hook_intercept_count = nullptr;
 
 static void* try_hook_route(const char* driver_dir, const char* driver_name) {
-    if (!g_escape_ns) g_escape_ns = make_escape_ns(driver_dir);
-    if (!g_escape_ns) {
-        fprintf(stderr, "[mithril] vk-dispatch: hook route unavailable (no namespace)\n");
-        return nullptr;
-    }
-
-    // Our own library directory: the hook object ships beside libmithril.so.
+    // Our hook ships beside libmithril.so.
     Dl_info self{};
     if (!dladdr((void*)&try_hook_route, &self) || !self.dli_fname) return nullptr;
     std::string self_path(self.dli_fname);
-    size_t slash = self_path.find_last_of('/');
+    const size_t slash = self_path.find_last_of('/');
     if (slash == std::string::npos) return nullptr;
-    std::string hook = self_path.substr(0, slash + 1) + "libmithril_vkhook.so";
+    const std::string hook_dir = self_path.substr(0, slash);
+    const std::string hook = hook_dir + "/libmithril_vkhook.so";
 
-    android_dlextinfo ext{};
-    ext.flags = ANDROID_DLEXT_USE_NAMESPACE;
-    ext.library_namespace = g_escape_ns;
-
-    // RTLD_GLOBAL is the whole point: the hook's android_dlopen_ext /
-    // android_load_sphal_library must be visible to libvulkan.so.
-    void* h = android_dlopen_ext(hook.c_str(), RTLD_NOW | RTLD_GLOBAL, &ext);
-    if (!h) {
-        h = dlopen(hook.c_str(), RTLD_NOW | RTLD_GLOBAL);
+    // Use a dedicated loader namespace, not the broad direct-driver escape
+    // namespace. This mirrors FCL's loadTurnipVulkan()/linkerhook topology.
+    struct android_namespace_t* loader_ns = make_loader_ns(hook_dir.c_str());
+    if (!loader_ns) {
+        fprintf(stderr, "[mithril] vk-dispatch: hook route unavailable (no loader namespace)\n");
+        return nullptr;
     }
+
+    android_dlextinfo hook_ext{};
+    hook_ext.flags = ANDROID_DLEXT_USE_NAMESPACE;
+    hook_ext.library_namespace = loader_ns;
+
+    // Load the DF_1_GLOBAL hook BEFORE linking the namespace to the default
+    // system view. That ordering is important: newly loaded libvulkan must see
+    // our android_dlopen_ext/android_load_sphal_library definitions in its
+    // global lookup group before it resolves those imports.
+    void* h = android_dlopen_ext(
+        hook.c_str(), RTLD_NOW | RTLD_GLOBAL, &hook_ext);
     if (!h) {
         const char* err = dlerror();
-        fprintf(stderr, "[mithril] vk-dispatch: hook object not loaded (%s): %s\n",
+        fprintf(stderr,
+                "[mithril] vk-dispatch: hook object not loaded (%s): %s\n",
                 hook.c_str(), err ? err : "unknown");
         return nullptr;
     }
     fprintf(stderr, "[mithril] vk-dispatch: hook object loaded: %s\n", hook.c_str());
 
-    void (*init_fn)(const char*, const char*, int, struct android_namespace_t*) =
-        (void (*)(const char*, const char*, int, struct android_namespace_t*))
-            dlsym(h, "mithril_vkhook_init");
+    // Now expose the system/default namespace to the loader namespace so
+    // libvulkan and Turnip dependencies can be resolved. This is the same
+    // ordering used by FCL's loadTurnipVulkan().
+    struct android_namespace_t* def = make_default_ns();
+    if (!def || !g_link_all || !g_link_all(loader_ns, def)) {
+        fprintf(stderr,
+                "[mithril] vk-dispatch: could not link loader namespace to default\n");
+        return nullptr;
+    }
+    fprintf(stderr, "[mithril] vk-dispatch: loader namespace linked to default\n");
+
+    using hook_init_fn =
+        void (*)(const char*, const char*, int, void*, void*);
+    auto init_fn = reinterpret_cast<hook_init_fn>(
+        dlsym(h, "mithril_vkhook_init"));
     if (!init_fn) {
         fprintf(stderr, "[mithril] vk-dispatch: hook has no init entrypoint\n");
         return nullptr;
     }
-    g_hook_redirect_count =
-        (hook_redirect_count_fn)dlsym(h, "mithril_vkhook_redirects");
-    if (!g_hook_redirect_count) {
-        fprintf(stderr, "[mithril] vk-dispatch: hook has no redirect counter entrypoint\n");
+
+    g_hook_redirect_count = reinterpret_cast<hook_count_fn>(
+        dlsym(h, "mithril_vkhook_redirects"));
+    g_hook_intercept_count = reinterpret_cast<hook_count_fn>(
+        dlsym(h, "mithril_vkhook_intercepts"));
+    if (!g_hook_redirect_count || !g_hook_intercept_count) {
+        fprintf(stderr,
+                "[mithril] vk-dispatch: hook diagnostic entrypoints missing\n");
         return nullptr;
     }
-    const char* trace = getenv("MITHRIL_DEBUG");
-    init_fn(driver_dir ? driver_dir : "", driver_name ? driver_name : "",
-            env_enabled(trace) ? 1 : 0, g_escape_ns);
 
-    // Now load a FRESH copy of the platform loader into the same namespace,
-    // after the hook. The process may already contain libvulkan.so (Skia,
-    // launcher probes, another renderer); without FORCE_LOAD Android can hand
-    // us that old mapping whose relocations were resolved before the hook
-    // existed. ANDROID_DLEXT_FORCE_LOAD explicitly requests a new ELF mapping.
-    android_dlextinfo loader_ext = ext;
-    loader_ext.flags |= ANDROID_DLEXT_FORCE_LOAD;
+    const char* trace = getenv("MITHRIL_DEBUG");
+    init_fn(driver_dir ? driver_dir : "",
+            driver_name ? driver_name : "",
+            env_enabled(trace) ? 1 : 0,
+            reinterpret_cast<void*>(g_create_ns),
+            reinterpret_cast<void*>(g_get_exported_ns));
+
+    // FCL/liblinkernsbypass do not trust a second dlopen of the same SONAME.
+    // They make a unique libvulkan copy with a patched DT_SONAME, then map it
+    // into the hook namespace. Do the same here. FORCE_LOAD remains only as a
+    // diagnostic fallback for launchers that do not provide TMPDIR.
     std::string system_loader = std::string(kSystemLibDir) + "/libvulkan.so";
     std::string vendor_loader = std::string(kVendorLibDir) + "/libvulkan.so";
-    const char* loader_paths[] = {
-        system_loader.c_str(),
-        vendor_loader.c_str(),
-        "libvulkan.so",
-    };
-    void* loader = nullptr;
-    for (const char* lp : loader_paths) {
-        loader = android_dlopen_ext(lp, RTLD_NOW | RTLD_LOCAL, &loader_ext);
-        if (loader) {
-            fprintf(stderr, "[mithril] vk-dispatch: fresh platform loader mapped under hook: %s\n", lp);
-            break;
-        }
-        log_dlerror(lp, "hook namespace force-load");
-    }
+
+    void* loader = load_unique_platform_loader(loader_ns, system_loader.c_str());
     if (!loader) {
-        fprintf(stderr, "[mithril] vk-dispatch: loader not loaded under hook\n");
+        loader = load_unique_platform_loader(loader_ns, vendor_loader.c_str());
+    }
+
+    if (!loader) {
+        android_dlextinfo loader_ext{};
+        loader_ext.flags =
+            ANDROID_DLEXT_USE_NAMESPACE | ANDROID_DLEXT_FORCE_LOAD;
+        loader_ext.library_namespace = loader_ns;
+        const char* fallback_paths[] = {
+            system_loader.c_str(),
+            vendor_loader.c_str(),
+            "libvulkan.so",
+        };
+        for (const char* lp : fallback_paths) {
+            loader = android_dlopen_ext(
+                lp, RTLD_NOW | RTLD_LOCAL, &loader_ext);
+            if (loader) {
+                fprintf(stderr,
+                        "[mithril] vk-dispatch: WARNING unique loader unavailable; "
+                        "FORCE_LOAD fallback mapped %s\n",
+                        lp);
+                break;
+            }
+            log_dlerror(lp, "hook namespace force-load fallback");
+        }
+    }
+
+    if (!loader) {
+        fprintf(stderr,
+                "[mithril] vk-dispatch: loader not loaded under hook\n");
         return nullptr;
     }
+
     g_hook_active = 1;
-    fprintf(stderr, "[mithril] vk-dispatch: hook route active (loader redirected)\n");
+    fprintf(stderr,
+            "[mithril] vk-dispatch: hook route armed; awaiting Vulkan HAL request\n");
     return loader;
 }
 
