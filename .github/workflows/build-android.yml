@@ -204,9 +204,10 @@ jobs:
           git checkout -B ci-diagnostics origin/ci-diagnostics 2>/dev/null \
             || git checkout -B ci-diagnostics
           mkdir -p ci-logs
-          tail -200 android/gradle.log > ci-logs/android-apk-gradle.log
+          # Prefix with a marker so an empty/failed gradle run is still obvious.
+          { echo "run=${GITHUB_RUN_ID} attempt=${GITHUB_RUN_ATTEMPT}";             echo "--- android/gradle.log ---";             tail -300 android/gradle.log 2>&1 || echo "(no gradle.log)"; } > ci-logs/android-apk-gradle.log
           git add ci-logs/android-apk-gradle.log
-          git diff --cached --quiet && exit 0
+          if git diff --cached --quiet; then exit 0; fi
           git commit -m "ci(android): APK gradle log [skip ci]"
           for i in 1 2 3; do
             git pull --rebase origin ci-diagnostics 2>/dev/null || true
