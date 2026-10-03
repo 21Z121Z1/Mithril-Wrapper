@@ -227,6 +227,34 @@ struct android_namespace_t* make_escape_ns(const char* driver_dir) {
         fprintf(stderr, "[mithril] vk-dispatch: escape namespace linked to default\\n");
     }
     fprintf(stderr, "[mithril] vk-dispatch: escape namespace created (paths=%s)\\n", paths);
+
+    // Bring the stock loader into the namespace before the driver. Its own
+    // DT_NEEDED entries - libhardware.so, libcutils.so, libutils.so, and on
+    // newer releases the gralloc/nativewindow stack - are precisely the ones
+    // Turnip needs, and they live in /system/lib64 which the app namespace
+    // cannot see. Loading them here registers them by SONAME, so the driver's
+    // later DT_NEEDED lookups hit already-loaded libraries instead of having
+    // to search the namespace path list.
+    //
+    // This is why Turnip has to arrive through libvulkan.so rather than being
+    // dlopened on its own: the stock loader is what drags those system
+    // dependencies into the process, and Turnip's kgsl backend reaches
+    // /dev/kgsl-3d0 through them.
+    android_dlextinfo dlext{};
+    dlext.flags = ANDROID_DLEXT_USE_NAMESPACE;
+    dlext.library_namespace = g_escape_ns;
+    const char* loader_paths[] = {"/system/lib64/libvulkan.so", "/vendor/lib64/libvulkan.so",
+                                  "libvulkan.so"};
+    for (const char* lp : loader_paths) {
+        void* h = android_dlopen_ext(lp, RTLD_LOCAL | RTLD_NOW, &dlext);
+        if (h) {
+            fprintf(stderr, "[mithril] vk-dispatch: system loader %s loaded into escape namespace\n",
+                    lp);
+            break;
+        }
+        fprintf(stderr, "[mithril] vk-dispatch: system loader %s failed: %s\n", lp, dlerror());
+    }
+
     return g_escape_ns;
 }
 
