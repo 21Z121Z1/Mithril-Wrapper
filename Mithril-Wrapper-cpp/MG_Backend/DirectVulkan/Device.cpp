@@ -1285,27 +1285,48 @@ bool init_device() {
     vkGetDeviceQueue(b->device, b->graphicsFamily, 0, &b->graphicsQueue);
 
     // ---- Vulkan 1.3 command pointers ----
-    // Resolved from the device rather than linked: Android's libvulkan.so does
-    // not export these. Resolution is best-effort - a null pointer means the
-    // device does not have the command, and every call site is already gated on
-    // the matching feature flag, so nothing calls through a null pointer.
-    b->cmdSetCullMode               = vkGetDeviceProcAddr(b->device, "vkCmdSetCullMode");
-    b->cmdSetFrontFace              = vkGetDeviceProcAddr(b->device, "vkCmdSetFrontFace");
-    b->cmdSetDepthTestEnable        = vkGetDeviceProcAddr(b->device, "vkCmdSetDepthTestEnable");
-    b->cmdSetDepthWriteEnable       = vkGetDeviceProcAddr(b->device, "vkCmdSetDepthWriteEnable");
-    b->cmdSetDepthCompareOp         = vkGetDeviceProcAddr(b->device, "vkCmdSetDepthCompareOp");
-    b->cmdDrawIndirectCount         = vkGetDeviceProcAddr(b->device, "vkCmdDrawIndirectCount");
-    b->cmdDrawIndexedIndirectCount  = vkGetDeviceProcAddr(b->device, "vkCmdDrawIndexedIndirectCount");
-    // A device that advertises the feature but does not export the command would
-    // otherwise crash on the first call, so tie the flags to what resolved.
+    // Resolved rather than linked: Android's libvulkan.so does not export
+    // these, so linking them broke the Android build even though every
+    // translation unit compiled.
+    //
+    // Resolution needs a fallback chain. They are Vulkan 1.3 core, but the
+    // device here is 1.2 (MoltenVK), and vkGetDeviceProcAddr may legitimately
+    // return null for a core command of a version the device does not
+    // implement - even when the implementation exports the symbol, which is
+    // why linking worked on Apple. Querying the plain name and then the EXT
+    // name, through both the device and the instance, covers all three cases:
+    //   - 1.3 device:            core name via device
+    //   - MoltenVK (1.2 + EXT):  EXT name, or core name via instance
+    //   - Android loader:        core name via device dispatch trampoline
+    auto resolve_cmd = [&](const char* coreName, const char* extName) -> PFN_vkVoidFunction {
+        if (PFN_vkVoidFunction p = vkGetDeviceProcAddr(b->device, coreName)) return p;
+        if (PFN_vkVoidFunction p = vkGetInstanceProcAddr(b->instance, coreName)) return p;
+        if (extName) {
+            if (PFN_vkVoidFunction p = vkGetDeviceProcAddr(b->device, extName)) return p;
+            if (PFN_vkVoidFunction p = vkGetInstanceProcAddr(b->instance, extName)) return p;
+        }
+        return nullptr;
+    };
+    b->cmdSetCullMode              = resolve_cmd("vkCmdSetCullMode", "vkCmdSetCullModeEXT");
+    b->cmdSetFrontFace             = resolve_cmd("vkCmdSetFrontFace", "vkCmdSetFrontFaceEXT");
+    b->cmdSetDepthTestEnable       = resolve_cmd("vkCmdSetDepthTestEnable", "vkCmdSetDepthTestEnableEXT");
+    b->cmdSetDepthWriteEnable      = resolve_cmd("vkCmdSetDepthWriteEnable", "vkCmdSetDepthWriteEnableEXT");
+    b->cmdSetDepthCompareOp        = resolve_cmd("vkCmdSetDepthCompareOp", "vkCmdSetDepthCompareOpEXT");
+    b->cmdDrawIndirectCount        = resolve_cmd("vkCmdDrawIndirectCount", "vkCmdDrawIndirectCountKHR");
+    b->cmdDrawIndexedIndirectCount = resolve_cmd("vkCmdDrawIndexedIndirectCount", "vkCmdDrawIndexedIndirectCountKHR");
+
+    // A device that advertises the feature but exports no entrypoint for the
+    // command would crash on the first call, so tie the flags to what actually
+    // resolved. Every call site is already gated on these flags.
     if (!b->cmdDrawIndirectCount || !b->cmdDrawIndexedIndirectCount) {
+        MITHRIL_LOG_INFO("vk", "drawIndirectCount unavailable: entrypoints not resolved");
         b->drawIndirectCountSupported = false;
     }
     if (!b->cmdSetCullMode || !b->cmdSetFrontFace || !b->cmdSetDepthTestEnable ||
         !b->cmdSetDepthWriteEnable || !b->cmdSetDepthCompareOp) {
+        MITHRIL_LOG_INFO("vk", "extended dynamic state unavailable: entrypoints not resolved");
         b->extendedDynamicStateSupported = false;
     }
-
 
     // ---- Command pool + primary command buffer ----
     VkCommandPoolCreateInfo poolCI{};
