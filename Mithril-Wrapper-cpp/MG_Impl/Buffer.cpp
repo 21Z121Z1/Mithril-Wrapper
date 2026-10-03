@@ -8,7 +8,18 @@
 // C API (backend_get_or_create_buffer / backend_buffer_upload / backend_get_buffer
 // / backend_delete_buffer) declared in MG_Backend/Backend.h.
 #include "includes.h"
+// backtrace()/backtrace_symbols() come from <execinfo.h>, which is a glibc /
+// Apple extension. Android's bionic does not provide it, so both debug dumps
+// below compile out there rather than pulling in a dependency for a diagnostic.
+#if (defined(__GLIBC__) && defined(__GLIBC_MINOR__)) || defined(__APPLE__)
+#define MITHRIL_HAS_BACKTRACE 1
+#else
+#define MITHRIL_HAS_BACKTRACE 0
+#endif
+
+#if MITHRIL_HAS_BACKTRACE
 #include <execinfo.h>
+#endif
 
 /* GL buffer parameter / query constants not always present in the minimal
  * glcorearb.h we ship. Standard GL 3.3 Core values. */
@@ -168,12 +179,14 @@ void glBufferStorage(GLenum target, GLsizeiptr size, const void* data, GLbitfiel
     // mapping when persistent=true and data != NULL or data == NULL with persistent.
     bool persistent = (flags & GL_MAP_PERSISTENT_BIT) != 0;
     bool coherent = (flags & GL_MAP_COHERENT_BIT) != 0;
+#if MITHRIL_HAS_BACKTRACE
     if (b->id==42) {
         void* bt[24]; int n=backtrace(bt,24); char** sym=backtrace_symbols(bt,n);
         fprintf(stderr,"[CREATE42] size=%lld flags=0x%x persistent=%d\n",(long long)size,(unsigned)flags,(int)persistent);
         for(int i=0;i<n;++i) fprintf(stderr,"  %s\n",sym[i]);
         free(sym);
     }
+#endif
     if (getenv("MITHRIL_B33")) fprintf(stderr,"[B33] Storage id=%u size=%lld flags=0x%x persistent=%d coherent=%d\n",b->id,(long long)size,(unsigned)flags,persistent,coherent);
     if (persistent) {
         // Use backend_create_buffer_storage for persistent mapping (GL 4.4 path).

@@ -3,7 +3,18 @@
 // -> VkFormat mapping + staging upload. Implements the backend_get_or_create_*
 // family declared in MG_Backend/Backend.h.
 #include "Resources.h"
+// backtrace()/backtrace_symbols() come from <execinfo.h>, which is a glibc /
+// Apple extension. Android's bionic does not provide it, so both debug dumps
+// below compile out there rather than pulling in a dependency for a diagnostic.
+#if (defined(__GLIBC__) && defined(__GLIBC_MINOR__)) || defined(__APPLE__)
+#define MITHRIL_HAS_BACKTRACE 1
+#else
+#define MITHRIL_HAS_BACKTRACE 0
+#endif
+
+#if MITHRIL_HAS_BACKTRACE
 #include <execinfo.h>
+#endif
 #include "Device.h"
 #include "CommandStream.h"  // ensure_command_buffer_recording
 #include "Pipeline.h"       // clear_all_pipeline_caches — OOM 时驱逐 pipeline
@@ -1267,8 +1278,16 @@ VkBuffer backend_create_buffer_storage(GLuint name, VkDeviceSize size,
     auto it = tbl.find(name);
     if (it != tbl.end()) {
         
-        { void* bt[20]; int nn=backtrace(bt,20); char** sy=backtrace_symbols(bt,nn);
-          for(int i=0;i<nn;++i) fprintf(stderr,"   RB%s\n",sy[i]); free(sy); }
+#if MITHRIL_HAS_BACKTRACE
+        // Debug leftover: this ran unconditionally on every buffer re-creation,
+        // and backtrace_symbols() is expensive (it resolves symbols for every
+        // frame). Gate it on the buffer trace flag so the normal path costs
+        // nothing instead of paying for a stack dump nobody reads.
+        if (std::getenv("MITHRIL_BUF_TRACE")) {
+            void* bt[20]; int nn=backtrace(bt,20); char** sy=backtrace_symbols(bt,nn);
+            for(int i=0;i<nn;++i) fprintf(stderr,"   RB%s\n",sy[i]); free(sy);
+        }
+#endif
         mithril::vk::defer_destroy_buffer_entry(it->second);
     }
     mithril::vk::BufferEntry e;
