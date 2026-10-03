@@ -337,6 +337,13 @@ if(ANDROID)
     # implementations are fetched explicitly with dlopen("libdl.so") + dlsym.
     target_link_libraries(mithril_vkhook PRIVATE log)
 
+    # Android's dynamic linker puts DF_1_GLOBAL objects in the namespace-wide
+    # global lookup group. RTLD_GLOBAL at dlopen time alone is not enough for
+    # the LD_PRELOAD-style interposition used here on all Android linker
+    # versions. libadrenotools/liblinkernsbypass use the same -z global +
+    # RTLD_GLOBAL pairing for Vulkan-loader hooks.
+    target_link_options(mithril_vkhook PRIVATE "-Wl,-z,global")
+
 endif()
 
 if(ANDROID)
