@@ -117,6 +117,18 @@ struct android_namespace_t* g_escape_ns = nullptr;
 bool g_ns_tried = false;
 bool g_direct_loader_preloaded = false;
 
+#if defined(__LP64__)
+constexpr const char* kSystemLibDir = "/system/lib64";
+constexpr const char* kVendorLibDir = "/vendor/lib64";
+constexpr const char* kSystemExtLibDir = "/system_ext/lib64";
+constexpr const char* kRuntimeBionicDir = "/apex/com.android.runtime/lib64/bionic";
+#else
+constexpr const char* kSystemLibDir = "/system/lib";
+constexpr const char* kVendorLibDir = "/vendor/lib";
+constexpr const char* kSystemExtLibDir = "/system_ext/lib";
+constexpr const char* kRuntimeBionicDir = "/apex/com.android.runtime/lib/bionic";
+#endif
+
 static void* align_ptr(void* ptr) {
     return reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(ptr) & ~(getpagesize() - 1));
 }
@@ -213,12 +225,14 @@ struct android_namespace_t* make_escape_ns(const char* driver_dir) {
 
     static char paths[1024];
     if (driver_dir && driver_dir[0]) {
-        snprintf(paths, sizeof(paths), "%s:/system/lib64:/vendor/lib64:/system/lib64/hw:"
-                                       "/vendor/lib64/hw:/system_ext/lib64:/apex/com.android.runtime/lib64/bionic",
-                 driver_dir);
+        snprintf(paths, sizeof(paths), "%s:%s:%s:%s/hw:%s/hw:%s:%s",
+                 driver_dir, kSystemLibDir, kVendorLibDir,
+                 kSystemLibDir, kVendorLibDir, kSystemExtLibDir,
+                 kRuntimeBionicDir);
     } else {
-        snprintf(paths, sizeof(paths), "/system/lib64:/vendor/lib64:/system/lib64/hw:"
-                                       "/vendor/lib64/hw:/system_ext/lib64");
+        snprintf(paths, sizeof(paths), "%s:%s:%s/hw:%s/hw:%s:%s",
+                 kSystemLibDir, kVendorLibDir, kSystemLibDir,
+                 kVendorLibDir, kSystemExtLibDir, kRuntimeBionicDir);
     }
 
     // The caller address is what removes the restrictions; the public
@@ -257,9 +271,11 @@ void preload_platform_loader_for_direct_driver() {
     android_dlextinfo dlext{};
     dlext.flags = ANDROID_DLEXT_USE_NAMESPACE;
     dlext.library_namespace = g_escape_ns;
+    std::string system_loader = std::string(kSystemLibDir) + "/libvulkan.so";
+    std::string vendor_loader = std::string(kVendorLibDir) + "/libvulkan.so";
     const char* loader_paths[] = {
-        "/system/lib64/libvulkan.so",
-        "/vendor/lib64/libvulkan.so",
+        system_loader.c_str(),
+        vendor_loader.c_str(),
         "libvulkan.so",
     };
     for (const char* lp : loader_paths) {
@@ -505,6 +521,8 @@ void add_candidate(const char* cands[], int& n, const char* dir, const char* nam
 // Best effort throughout: on any failure we fall through to the existing
 // paths, so a device without Turnip is unaffected.
 static int g_hook_active = 0;
+using hook_redirect_count_fn = int (*)();
+static hook_redirect_count_fn g_hook_redirect_count = nullptr;
 
 static void* try_hook_route(const char* driver_dir, const char* driver_name) {
     if (!g_escape_ns) g_escape_ns = make_escape_ns(driver_dir);
@@ -532,8 +550,9 @@ static void* try_hook_route(const char* driver_dir, const char* driver_name) {
         h = dlopen(hook.c_str(), RTLD_NOW | RTLD_GLOBAL);
     }
     if (!h) {
+        const char* err = dlerror();
         fprintf(stderr, "[mithril] vk-dispatch: hook object not loaded (%s): %s\n",
-                hook.c_str(), dlerror() ? dlerror() : "unknown");
+                hook.c_str(), err ? err : "unknown");
         return nullptr;
     }
     fprintf(stderr, "[mithril] vk-dispatch: hook object loaded: %s\n", hook.c_str());
@@ -545,15 +564,38 @@ static void* try_hook_route(const char* driver_dir, const char* driver_name) {
         fprintf(stderr, "[mithril] vk-dispatch: hook has no init entrypoint\n");
         return nullptr;
     }
+    g_hook_redirect_count =
+        (hook_redirect_count_fn)dlsym(h, "mithril_vkhook_redirects");
+    if (!g_hook_redirect_count) {
+        fprintf(stderr, "[mithril] vk-dispatch: hook has no redirect counter entrypoint\n");
+        return nullptr;
+    }
     const char* trace = getenv("MITHRIL_DEBUG");
     init_fn(driver_dir ? driver_dir : "", driver_name ? driver_name : "",
             trace && trace[0] ? 1 : 0, g_escape_ns);
 
-    // Now the loader, into the same namespace, after the hook.
-    void* loader = android_dlopen_ext("libvulkan.so", RTLD_NOW | RTLD_LOCAL, &ext);
-    if (!loader) {
-        log_dlerror("libvulkan.so", "hook namespace");
-        loader = dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);
+    // Now load a FRESH copy of the platform loader into the same namespace,
+    // after the hook. The process may already contain libvulkan.so (Skia,
+    // launcher probes, another renderer); without FORCE_LOAD Android can hand
+    // us that old mapping whose relocations were resolved before the hook
+    // existed. ANDROID_DLEXT_FORCE_LOAD explicitly requests a new ELF mapping.
+    android_dlextinfo loader_ext = ext;
+    loader_ext.flags |= ANDROID_DLEXT_FORCE_LOAD;
+    std::string system_loader = std::string(kSystemLibDir) + "/libvulkan.so";
+    std::string vendor_loader = std::string(kVendorLibDir) + "/libvulkan.so";
+    const char* loader_paths[] = {
+        system_loader.c_str(),
+        vendor_loader.c_str(),
+        "libvulkan.so",
+    };
+    void* loader = nullptr;
+    for (const char* lp : loader_paths) {
+        loader = android_dlopen_ext(lp, RTLD_NOW | RTLD_LOCAL, &loader_ext);
+        if (loader) {
+            fprintf(stderr, "[mithril] vk-dispatch: fresh platform loader mapped under hook: %s\n", lp);
+            break;
+        }
+        log_dlerror(lp, "hook namespace force-load");
     }
     if (!loader) {
         fprintf(stderr, "[mithril] vk-dispatch: loader not loaded under hook\n");
@@ -591,9 +633,11 @@ void ensure_library() {
     // n: the driver scan iterates 0..kLoaderSlot-1 and the loader scan
     // iterates kLoaderSlot..kMaxCandidates-1, so the two lists must not
     // overlap regardless of how many driver names were added above.
+    static std::string system_loader = std::string(kSystemLibDir) + "/libvulkan.so";
+    static std::string vendor_loader = std::string(kVendorLibDir) + "/libvulkan.so";
     cands[kLoaderSlot] = "libvulkan.so";
-    cands[kLoaderSlot + 1] = "/system/lib64/libvulkan.so";
-    cands[kLoaderSlot + 2] = "/vendor/lib64/libvulkan.so";
+    cands[kLoaderSlot + 1] = system_loader.c_str();
+    cands[kLoaderSlot + 2] = vendor_loader.c_str();
     for (int i = kLoaderSlot + 3; i < kMaxCandidates; ++i) cands[i] = nullptr;
 
     // Two different things can be loaded here and keeping them apart matters.
@@ -935,6 +979,15 @@ void note_instance(VkInstance inst) {
     }
     fprintf(stderr, "[mithril] vk-dispatch: instance created (gipa=%s gdpa=%s)\n",
             g_gipa ? "yes" : "no", g_gdpa ? "yes" : "no");
+    if (g_hook_active) {
+        const int redirects = g_hook_redirect_count ? g_hook_redirect_count() : -1;
+        if (redirects > 0) {
+            fprintf(stderr, "[mithril] vk-dispatch: hook verified at runtime (%d Vulkan HAL redirect%s)\n",
+                    redirects, redirects == 1 ? "" : "s");
+        } else {
+            fprintf(stderr, "[mithril] vk-dispatch: WARNING hook loader is active but no Vulkan HAL redirect was observed\n");
+        }
+    }
 }
 
 void note_device(VkDevice dev) {
