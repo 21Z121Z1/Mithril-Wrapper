@@ -1,0 +1,40 @@
+plugins {
+    id("com.android.application")
+}
+
+android {
+    namespace = "com.mithril.wrapper.e2e"
+    compileSdk = 34
+
+    defaultConfig {
+        applicationId = "com.mithril.wrapper.e2e"
+        minSdk = 29
+        targetSdk = 34
+        versionCode = 1
+        versionName = "1.0"
+
+        ndk {
+            abiFilters += ["x86_64"]
+        }
+    }
+
+    buildTypes {
+        debug {
+            debuggable = true
+        }
+    }
+
+    packaging {
+        jniLibs {
+            // The test process dlopen()s libmithril.so by SONAME, so keep the
+            // native libraries extracted just like the production renderer
+            // plugin consumed by FCL.
+            useLegacyPackaging = true
+        }
+    }
+
+    lint {
+        abortOnError = false
+        checkReleaseBuilds = false
+    }
+}
