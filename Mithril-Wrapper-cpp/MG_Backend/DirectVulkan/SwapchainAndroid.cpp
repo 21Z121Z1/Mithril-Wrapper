@@ -28,6 +28,26 @@ namespace vk {
 
 namespace {
 
+// True when the physical device reports `wanted`. This is the authoritative
+// test for whether the driver can present: Device.cpp only enables
+// VK_KHR_swapchain when it is present, and a driver built as an Android HAL
+// (Turnip) does not report it.
+bool device_has_extension(const char* wanted) {
+    Backend* b = backend();
+    if (!b->physicalDevice) return false;
+    uint32_t n = 0;
+    if (vkEnumerateDeviceExtensionProperties(b->physicalDevice, nullptr, &n, nullptr) != VK_SUCCESS)
+        return false;
+    if (n == 0) return false;
+    std::vector<VkExtensionProperties> props(n);
+    if (vkEnumerateDeviceExtensionProperties(b->physicalDevice, nullptr, &n, props.data()) != VK_SUCCESS)
+        return false;
+    for (const auto& p : props) {
+        if (strncmp(p.extensionName, wanted, sizeof(p.extensionName)) == 0) return true;
+    }
+    return false;
+}
+
 // Blit a tightly packed RGBA8 source into whatever pixel layout the window
 // buffer happens to use. ANativeWindow is free to hand back RGBX_8888 or
 // RGB_565 regardless of what we requested, so the conversion is mandatory
@@ -289,9 +309,24 @@ Swapchain* create_swapchain(void* native_window, int width, int height,
         return nullptr;
     }
 
-    // Resolved on demand rather than cached on Backend: this is the only place
-    // that needs it, and keeping it out of Device.h avoids making every other
-    // TU depend on the Android platform header.
+    // Whether the driver can present at all is decided by the device's own
+    // extension list, NOT by whether vkCreateAndroidSurfaceKHR resolves.
+    //
+    // The dispatcher keeps the platform libvulkan.so loaded as a fallback, so
+    // vkGetInstanceProcAddr happily returns the *system loader's* entry point
+    // even when the instance we are running on belongs to a different driver
+    // (Turnip). Calling that loader entry point with a foreign VkInstance is
+    // undefined behaviour and crashes outright — which is exactly what
+    // happened: the process died here and the offscreen path below never ran.
+    //
+    // VK_KHR_swapchain is what Device.cpp enables when the device supports
+    // presentation; if the device never reported it, there is no WSI to use.
+    if (!device_has_extension(VK_KHR_SWAPCHAIN_EXTENSION_NAME)) {
+        MITHRIL_LOG_WARN("vk", "device lacks VK_KHR_swapchain - "
+                               "using offscreen present path (no Vulkan WSI)");
+        return create_swapchain_offscreen(win, width, height, want_depth_stencil);
+    }
+
     auto createAndroidSurfaceKHR = reinterpret_cast<PFN_vkCreateAndroidSurfaceKHR>(
         vkGetInstanceProcAddr(b->instance, "vkCreateAndroidSurfaceKHR"));
     if (!createAndroidSurfaceKHR) {
