@@ -1,0 +1,12 @@
+{
+  "commit_sha": "24525058c308dbc1bc9312e12541736757f84915",
+  "created_at": "2026-10-04T23:45:18.562434Z",
+  "ref": "refs/heads/fix/android-vkhook-wsi",
+  "repository": "21Z121Z1/Mithril-Wrapper",
+  "run_attempt": 1,
+  "run_id": "37244867190",
+  "runner_arch": "ARM64",
+  "runner_os": "macOS",
+  "schema_version": "1.0",
+  "workflow": "Minecraft 1.21.1 on Mithril (MoltenVK) E2E"
+}
