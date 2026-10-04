@@ -29,8 +29,13 @@ def run(args, *, check=True, text=True, timeout=20):
         out = exc.stdout or ("" if text else b"")
         if not text and isinstance(out, bytes):
             out = out.decode("utf-8", "replace")
-        raise RuntimeError(
-            f"command timed out after {timeout}s: {args}\n{out}") from exc
+        if check:
+            raise RuntimeError(
+                f"command timed out after {timeout}s: {args}\n{out}") from exc
+        # Polling/diagnostic adb calls are intentionally best-effort. A short
+        # timeout must behave like a nonzero probe result, not abort the whole
+        # E2E run before the 120 s application deadline has elapsed.
+        return subprocess.CompletedProcess(args, 124, out)
     if check and p.returncode != 0:
         output = p.stdout if text else p.stdout.decode("utf-8", "replace")
         raise RuntimeError(f"command failed rc={p.returncode}: {args}\n{output}")
